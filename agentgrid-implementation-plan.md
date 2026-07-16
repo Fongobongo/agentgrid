@@ -308,11 +308,11 @@
 
 ### 4.1 Аутентификация пользователя
 
-- [ ] Локальный пользователь: создание при первом запуске (setup-команда или env)
-- [ ] `POST /v1/auth/login` — пароль (argon2) → сессионный токен/JWT
-- [ ] Auth middleware для всех `/v1/*` пользовательских endpoint (кроме health)
-- [ ] Хранение токена CLI в `~/.config/agentgrid/credentials` с правами 0600
-- [ ] Rate limit на login
+- [x] Локальный пользователь: создание при первом запуске (setup-команда `POST /v1/auth/setup` или env `AGENTGRID_BOOTSTRAP_USER`/`_PASSWORD`)
+- [x] `POST /v1/auth/login` — пароль (argon2id) → JWT (HS256, 12h)
+- [x] Auth middleware для всех `/v1/*` пользовательских endpoint (кроме health/metrics и node-endpoint'ов, у которых свой credential-auth); открыто только в bootstrap-окне (пока нет users)
+- [x] Хранение токена CLI в `~/.config/agentgrid/credentials` с правами 0600 (`ag login`)
+- [ ] Rate limit на login — отложен (простой in-memory счётчик при необходимости)
 
 ### 4.2 CLI (полный набор команд спеки)
 

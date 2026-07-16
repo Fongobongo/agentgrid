@@ -175,6 +175,26 @@ pub struct EnrollTokenResponse {
     pub expires_at: String,
 }
 
+/// Stage 4.1: create the first local user (only allowed while no users exist).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Stage 4.1: username + password exchange for a JWT.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Stage 4.1: JWT returned on successful login.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginResponse {
+    pub token: String,
+}
+
 /// Exchange an enrollment token for a permanent node credential.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnrollRequest {

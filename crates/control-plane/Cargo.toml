@@ -26,6 +26,10 @@ anyhow.workspace = true
 sha2.workspace = true
 async-stream.workspace = true
 futures-core.workspace = true
+argon2.workspace = true
+password-hash.workspace = true
+jsonwebtoken.workspace = true
+rand.workspace = true
 agentgrid-common.workspace = true
 
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }

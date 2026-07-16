@@ -12,7 +12,8 @@ use std::time::Instant;
 use agentgrid_common::{
     CancelState, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest, EnrollRequest,
     EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest, IngestEventsRequest,
-    PollRequest, PollResponse, RepositoryView, TaskEligibility, TaskView, UploadArtifactRequest,
+    LoginRequest, LoginResponse, PollRequest, PollResponse, RepositoryView, SetupRequest,
+    TaskEligibility, TaskView, UploadArtifactRequest,
 };
 use axum::{
     body::Body,
@@ -24,24 +25,51 @@ use axum::{
     Json, Router,
 };
 use futures_core::Stream;
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use serde::{Deserialize, Serialize};
 use store::Store;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
 const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
+/// JWT claims for user sessions (Stage 4.1).
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+}
+
 pub struct AppState {
     pub store: Store,
     assignment_notify: Arc<Notify>,
+    jwt_secret: Vec<u8>,
 }
 
 impl AppState {
     /// Open (or create) the SQLite database at `db_path` and return shared state.
     pub async fn open(db_path: &str) -> anyhow::Result<Arc<Self>> {
         let store = Store::open(db_path).await?;
+        let jwt_secret = std::env::var("AGENTGRID_JWT_SECRET")
+            .map(|s| s.into_bytes())
+            .unwrap_or_else(|_| {
+                use rand::Rng;
+                rand::thread_rng().gen::<[u8; 32]>().to_vec()
+            });
+        // Bootstrap the first user from env (one-time) so a fresh install is
+        // not left in its open window.
+        if let (Ok(u), Ok(p)) = (
+            std::env::var("AGENTGRID_BOOTSTRAP_USER"),
+            std::env::var("AGENTGRID_BOOTSTRAP_PASSWORD"),
+        ) {
+            if store.user_count().await? == 0 {
+                store.create_user(&u, &p).await?;
+            }
+        }
         Ok(Arc::new(Self {
             store,
             assignment_notify: Arc::new(Notify::new()),
+            jwt_secret,
         }))
     }
 
@@ -49,6 +77,31 @@ impl AppState {
     pub async fn open_temp() -> anyhow::Result<Arc<Self>> {
         let p = std::env::temp_dir().join(format!("ag-test-{}.db", Uuid::new_v4()));
         Self::open(p.to_str().unwrap()).await
+    }
+
+    /// Issue a 12h JWT for `username` (Stage 4.1).
+    fn issue_token(&self, username: &str) -> anyhow::Result<String> {
+        let exp = (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp() as usize;
+        let claims = Claims {
+            sub: username.to_string(),
+            exp,
+        };
+        Ok(encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(&self.jwt_secret),
+        )?)
+    }
+
+    /// Validate a JWT and return the username, or None.
+    fn verify_token(&self, token: &str) -> Option<String> {
+        decode::<Claims>(
+            token,
+            &DecodingKey::from_secret(&self.jwt_secret),
+            &Validation::default(),
+        )
+        .ok()
+        .map(|d| d.claims.sub)
     }
 }
 
@@ -64,6 +117,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{id}/cancel", post(cancel_task_handler))
         .route("/v1/tasks/{id}/retry", post(retry_task_handler))
         .route("/v1/tasks/{id}/eligibility", get(task_eligibility_handler))
+        .route("/v1/auth/setup", post(auth_setup))
+        .route("/v1/auth/login", post(auth_login))
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/nodes/enrollment-token", post(create_enrollment_token))
         .route("/v1/nodes/{id}", delete(revoke_node))
@@ -79,6 +134,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/node/attempts/{id}/complete", post(complete_attempt))
         .route("/v1/node/attempts/{id}/artifacts", post(upload_artifact))
         .route("/v1/tasks/{id}/artifacts/{name}", get(get_artifact))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_user_auth,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_node_auth,
@@ -122,6 +181,100 @@ async fn require_node_auth(
 
 async fn health_live() -> StatusCode {
     StatusCode::OK
+}
+
+/// Whether a path requires a user JWT (Stage 4.1). Node auth (`/v1/node/*`)
+/// and the auth endpoints themselves are exempt; health/metrics are public.
+fn user_protected(path: &str) -> bool {
+    if path.starts_with("/health") || path == "/metrics" {
+        return false;
+    }
+    if path.starts_with("/v1/node/") {
+        return false;
+    }
+    if path == "/v1/auth/login" || path == "/v1/auth/setup" {
+        return false;
+    }
+    true
+}
+
+/// Require a valid user JWT on user-facing routes, except during the open
+/// bootstrap window (no users yet). Node routes are handled by
+/// [`require_node_auth`] and are skipped here.
+async fn require_user_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let path = req.uri().path().to_string();
+    if user_protected(&path) {
+        let open = state.store.user_count().await.map(|c| c == 0).unwrap_or(true);
+        if !open {
+            let ok = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.strip_prefix("Bearer "))
+                .and_then(|t| state.verify_token(t))
+                .is_some();
+            if !ok {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
+    Ok(next.run(req).await)
+}
+
+async fn auth_setup(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetupRequest>,
+) -> Result<(StatusCode, Json<LoginResponse>), StatusCode> {
+    if req.username.is_empty() || req.password.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // Only allowed while no users exist (closes the open bootstrap window).
+    match state.store.user_count().await {
+        Ok(0) => {}
+        Ok(_) => return Err(StatusCode::CONFLICT),
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+    match state.store.create_user(&req.username, &req.password).await {
+        Ok(true) => {}
+        Ok(false) => return Err(StatusCode::CONFLICT),
+        Err(e) => {
+            tracing::error!("create_user failed: {e}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+    let token = state
+        .issue_token(&req.username)
+        .map_err(|e| {
+            tracing::error!("issue_token failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok((StatusCode::CREATED, Json(LoginResponse { token })))
+}
+
+async fn auth_login(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
+) -> Result<Json<LoginResponse>, StatusCode> {
+    let user = state
+        .store
+        .verify_user(&req.username, &req.password)
+        .await
+        .map_err(|e| {
+            tracing::error!("verify_user failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let Some(_) = user else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let token = state.issue_token(&req.username).map_err(|e| {
+        tracing::error!("issue_token failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(LoginResponse { token }))
 }
 
 async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {

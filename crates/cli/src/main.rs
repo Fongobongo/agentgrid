@@ -3,9 +3,10 @@
 //! Command grouping (`task run`, `node list`) is deferred; this flat form
 //! exercises the same `/v1` surface.
 
-use agentgrid_common::{CreateTaskRequest, TaskEligibility, TaskStatus, TaskView};
+use agentgrid_common::{CreateTaskRequest, LoginRequest, LoginResponse, TaskEligibility, TaskStatus, TaskView};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
 #[command(name = "ag", version, about = "agentgrid CLI")]
@@ -39,6 +40,8 @@ enum AgCommand {
     Token(TokenArgs),
     /// Manage repositories.
     Repo(RepoArgs),
+    /// Log in and store a session token for user-authenticated endpoints.
+    Login(LoginArgs),
 }
 
 #[derive(Args)]
@@ -72,6 +75,12 @@ struct CancelArgs {
 #[derive(Args)]
 struct RetryArgs {
     task_id: String,
+}
+
+#[derive(Args)]
+struct LoginArgs {
+    username: String,
+    password: String,
 }
 
 #[derive(Args)]
@@ -114,7 +123,16 @@ struct RepoAddArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = reqwest::Client::new();
+    let mut client_builder = reqwest::Client::builder();
+    // Attach a stored session token to all user-authenticated requests.
+    if let Some(token) = load_token() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) {
+            headers.insert(reqwest::header::AUTHORIZATION, v);
+        }
+        client_builder = client_builder.default_headers(headers);
+    }
+    let client = client_builder.build()?;
     let base = cli.server.trim_end_matches('/').to_string();
 
     match cli.command {
@@ -126,6 +144,7 @@ async fn main() -> Result<()> {
         AgCommand::Retry(a) => cmd_retry(&client, &base, a).await,
         AgCommand::Token(a) => cmd_token(&client, &base, a).await,
         AgCommand::Repo(a) => cmd_repo(&client, &base, a).await,
+        AgCommand::Login(a) => cmd_login(&client, &base, a).await,
     }
 }
 
@@ -340,4 +359,68 @@ async fn cmd_token(client: &reqwest::Client, base: &str, a: TokenArgs) -> Result
             Ok(())
         }
     }
+}
+
+fn dirs_config() -> std::path::PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(".config"))
+}
+
+fn credential_path() -> std::path::PathBuf {
+    let mut dir = dirs_config();
+    dir.push("agentgrid");
+    dir.push("credentials");
+    dir
+}
+
+/// Load a previously stored session token, if present.
+fn load_token() -> Option<String> {
+    let content = std::fs::read_to_string(credential_path()).ok()?;
+    serde_json::from_str::<LoginResponse>(&content)
+        .ok()
+        .map(|r| r.token)
+}
+
+/// Persist a session token with 0600 perms (Stage 4.1).
+fn save_token(token: &str) -> Result<()> {
+    let path = credential_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string(&LoginResponse {
+            token: token.to_string(),
+        })?,
+    )?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+async fn cmd_login(client: &reqwest::Client, base: &str, a: LoginArgs) -> Result<()> {
+    let req = LoginRequest {
+        username: a.username,
+        password: a.password,
+    };
+    let resp = client
+        .post(format!("{base}/v1/auth/login"))
+        .json(&req)
+        .send()
+        .await
+        .context("login request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("login failed ({})", resp.status());
+    }
+    let lr: LoginResponse = resp.json().await.context("parse login response")?;
+    save_token(&lr.token)?;
+    println!("logged in; token stored at {}", credential_path().display());
+    Ok(())
 }

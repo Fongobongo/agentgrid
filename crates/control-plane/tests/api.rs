@@ -6,8 +6,8 @@
 use agentgrid_common::{
     Assignment, CancelState, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest,
     EnrollRequest, EnrollResponse, EnrollTokenResponse, EventType, HeartbeatRequest, IncomingEvent,
-    IngestEventsRequest, NodeStatus, PollRequest, PollResponse, RepositoryView, TaskEligibility,
-    TaskStatus, TaskView, UploadArtifactRequest,
+    IngestEventsRequest, LoginResponse, NodeStatus, PollRequest, PollResponse, RepositoryView,
+    TaskEligibility, TaskStatus, TaskView, UploadArtifactRequest,
 };
 use agentgrid_control_plane::{build_router, AppState};
 use axum::body::{to_bytes, Body};
@@ -50,6 +50,51 @@ fn delete(uri: &str) -> Request<Body> {
         .uri(uri)
         .body(Body::empty())
         .unwrap()
+}
+
+fn post_json(uri: &str, body: String, token: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder().method("POST").uri(uri);
+    if let Some(t) = token {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    b.header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn auth_setup(app: &Router, user: &str, pass: &str) -> StatusCode {
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/auth/setup",
+            serde_json::to_string(&serde_json::json!({ "username": user, "password": pass }))
+                .unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    resp.status()
+}
+
+async fn auth_login(app: &Router, user: &str, pass: &str) -> Option<String> {
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/auth/login",
+            serde_json::to_string(&serde_json::json!({ "username": user, "password": pass }))
+                .unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    if resp.status().is_success() {
+        let lr: LoginResponse =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        Some(lr.token)
+    } else {
+        None
+    }
 }
 
 /// Create an enrollment token, enroll a node, return (node_id, credential).
@@ -551,6 +596,65 @@ async fn metrics_endpoint_exposes_counts() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("agentgrid_tasks"));
     assert!(text.contains("agentgrid_attempts_total"));
+}
+
+#[tokio::test]
+async fn user_auth_setup_login_and_protects_endpoints() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+
+    // Open bootstrap window: no users yet, so task creation works without a token.
+    let id0 = create_task_only(&app, "demo", "mock", None).await;
+    assert!(!id0.is_empty());
+
+    // Setup the first user, then a second setup is rejected.
+    assert_eq!(auth_setup(&app, "alice", "secret").await, StatusCode::CREATED);
+    assert_eq!(
+        auth_setup(&app, "bob", "secret").await,
+        StatusCode::CONFLICT
+    );
+
+    // Now the bootstrap window is closed: task creation requires a token.
+    let no_token = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/tasks",
+            serde_json::to_string(&CreateTaskRequest {
+                prompt: "x".into(),
+                repository: "demo".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+            })
+            .unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
+
+    // Wrong password is rejected.
+    assert!(auth_login(&app, "alice", "wrong").await.is_none());
+
+    // Correct login yields a token that unlocks the endpoint.
+    let token = auth_login(&app, "alice", "secret").await.unwrap();
+    let authed = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/tasks",
+            serde_json::to_string(&CreateTaskRequest {
+                prompt: "x".into(),
+                repository: "demo".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+            })
+            .unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(authed.status(), StatusCode::CREATED);
 }
 
 async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<String>) -> String {
