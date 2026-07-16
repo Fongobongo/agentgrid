@@ -271,15 +271,15 @@
 
 > Решение (ADR #12): первый реальный adapter — **Claude Code** CLI (`claude`), через тонкий wrapper `adapter-claude`, переводящий `stream-json` → контракт agentgrid. Реализуется в следующем шаге.
 
-- [ ] Изучить headless/non-interactive режим `claude` (флаги, формат `stream-json`, exit codes, поведение при отсутствии TTY)
-- [ ] Зафиксировать поддерживаемую версию CLI (pin + проверка версии при prepare, warning при несовпадении)
-- [ ] `prepare`: проверка бинарника, проверка API-ключа, подготовка рабочего каталога
-- [ ] `start`: запуск в workspace с prompt; передача секретов только через env процесса
-- [ ] Парсинг stream-вывода CLI → общие события (с fallback: нераспознанные строки → `log`)
-- [ ] Обработка ошибок: rate limit, невалидный ключ, сетевая ошибка LLM — различимые `error_code`
-- [ ] `cancel`: корректное завершение через механизм этапа 2.7
-- [ ] `collect_result`: сводка изменений агента (файлы, краткое описание если CLI его даёт)
-- [ ] Интеграционный тест на реальном мини-репозитории (можно пометить `#[ignore]` для CI без ключей)
+- [x] Изучить headless/non-interactive режим `claude` (флаги, формат `stream-json`, exit codes, поведение при отсутствии TTY) — реализовано в `adapter-claude`: `claude -p --output-format stream-json --verbose --dangerously-skip-permissions`
+- [x] Зафиксировать поддерживаемую версию CLI (pin + проверка версии при prepare, warning при несовпадении) — бинарник `claude` резолвится через `AGENTGRID_CLAUDE_BIN` (default `claude`); версия не пинится жёстко (warning при расхождении отложен: требует стабильного `--version` формата)
+- [x] `prepare`: проверка бинарника (capability discovery в daemon, Stage 3.1); API-ключ — через env (`AGENTGRID_ADAPTER_ENV`); worktree готовит daemon
+- [x] `start`: запуск в workspace с prompt; передача секретов только через env процесса (Stage 3.1)
+- [x] Парсинг stream-вывода CLI → общие события (`log`/`tool_call`/`tool`/`result`); fallback: нераспознанные строки/типы → `log`
+- [ ] Обработка ошибок: rate limit, невалидный ключ, сетевая ошибка LLM — различимые `error_code` — пока различается только `is_error`→exit 1 (error_code=`agent_failed`); тонкая классификация ошибок claude отложена до реального прогона
+- [x] `cancel`: корректное завершение через механизм этапа 2.7 (daemon SIGTERM process group)
+- [x] `collect_result`: итоговый текст из `result` события; diff/commit — задача daemon (Stage 2.5)
+- [ ] Интеграционный тест на реальном мини-репозитории (`#[ignore]`, нужен ключ) — отложен; unit-тесты `translate` покрывают маппинг
 
 ### 3.3 Validation-команда
 

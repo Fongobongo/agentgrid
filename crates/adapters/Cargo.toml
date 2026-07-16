@@ -9,6 +9,10 @@ rust-version.workspace = true
 name = "adapter-mock"
 path = "src/bin/adapter-mock.rs"
 
+[[bin]]
+name = "adapter-claude"
+path = "src/bin/adapter-claude.rs"
+
 [lib]
 name = "agentgrid_adapters"
 path = "src/lib.rs"
