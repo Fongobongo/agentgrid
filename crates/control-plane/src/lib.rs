@@ -23,6 +23,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use futures_core::Stream;
 use store::Store;
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -58,6 +59,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks", post(create_task).get(list_tasks))
         .route("/v1/tasks/{id}", get(show_task))
         .route("/v1/tasks/{id}/events", get(get_events))
+        .route("/v1/tasks/{id}/events/stream", get(events_stream))
         .route("/v1/tasks/{id}/cancel", post(cancel_task_handler))
         .route("/v1/tasks/{id}/retry", post(retry_task_handler))
         .route("/v1/nodes", get(list_nodes))
@@ -305,6 +307,39 @@ async fn upload_artifact(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+async fn events_stream(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    Query(q): Query<EventsQuery>,
+) -> axum::response::sse::Sse<
+    impl Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, Sse};
+    use std::time::Duration;
+    let mut after = q.after_sequence;
+    let stream = async_stream::stream! {
+        loop {
+            match state.store.get_events(&task_id, after).await {
+                Ok(events) if !events.is_empty() => {
+                    for e in events {
+                        after = after.max(e.sequence);
+                        if let Ok(data) = serde_json::to_string(&e) {
+                            yield Ok(Event::default().data(data));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 async fn get_events(

@@ -32,6 +32,11 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - End-to-end on one machine: `task run` → mock adapter writes file → `succeeded`, logs stream.
 - Control-plane restart on the same SQLite file preserves queued tasks (WAL).
 
+### Added (Stage 2.6 — events streaming, SSE)
+- `GET /v1/tasks/{id}/events/stream` Server-Sent-Events endpoint: streams existing and
+  new attempt events (polls every 250ms, 15s keep-alive ping) for the web UI.
+- Idempotent event ingest and batching were already in place (Stage 2.1/2.2).
+
 ### Added (Stage 2.8 — artifacts)
 - `POST /v1/node/attempts/{id}/artifacts` (node auth) stores a text artifact on the
   control-plane filesystem under `artifact_root/<attempt_id>/<name>` and records

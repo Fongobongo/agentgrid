@@ -29,5 +29,7 @@ clap = { version = "4", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde"] }
 tower = { version = "0.5", features = ["util"] }
 sha2 = "0.10"
+async-stream = "0.3"
+futures-core = "0.3"
 agentgrid-common = { path = "crates/common" }
 agentgrid-adapters = { path = "crates/adapters" }
