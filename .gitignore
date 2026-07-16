@@ -1,0 +1,51 @@
+node_modules/
+dist/
+.vite/
+.env
+.env.local
+npm-debug.log*
+coverage/
+tmp/
+.claude/
+.openclaude/
+.codex/
+.agents/
+.sisyphus/
+.commandcode/
+.cursor/
+.opencode/
+.claude/
+.qoder/
+.mcp.json
+AGENTS.md
+skills-lock.json
+public/assets/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
+wrangler.toml
+
+# Playwright test artifacts
+playwright-report/
+
+# Git worktrees (local isolation)
+.worktrees/
+worktrees/
+test-results/
+tests/e2e/visual.spec.ts-snapshots/
+supabase/.temp/
+.codegraph/
+.gstack/
+.antigravitycli/
+
+RTK.md
+
+Конфиг*
+
+# Debug scratch and ad-hoc screenshots (formalize as tests/e2e/*.spec.ts instead)
+/scratch/
+screenshot_*.png
+opt/
