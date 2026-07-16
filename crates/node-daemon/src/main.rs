@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
 mod git;
@@ -40,6 +40,8 @@ struct Config {
     repository_root: PathBuf,
     /// Substrings masked to `***` in streamed logs (Stage 3.4).
     secrets: Vec<String>,
+    /// Extra env vars forwarded to the adapter subprocess (e.g. API keys).
+    adapter_env: Vec<(String, String)>,
 }
 
 /// Node identity persisted to disk after enrollment (never re-sent in plaintext).
@@ -99,7 +101,26 @@ fn config_from_env() -> Config {
                 .unwrap_or_else(|_| "./agentgrid-repos".into()),
         ),
         secrets: split_csv("AGENTGRID_SECRETS", ""),
+        adapter_env: parse_env_pairs("AGENTGRID_ADAPTER_ENV"),
     }
+}
+
+/// Parse `KEY=VALUE` pairs from an env var (space/newline/comma separated).
+/// Used to forward secrets/API keys to the adapter subprocess (Stage 3.1).
+fn parse_env_pairs(env: &str) -> Vec<(String, String)> {
+    std::env::var(env)
+        .ok()
+        .map(|v| {
+            v.split([' ', ',', '\n'])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| {
+                    let (k, val) = s.split_once('=')?;
+                    Some((k.trim().to_string(), val.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn hostname() -> Option<String> {
@@ -107,6 +128,51 @@ fn hostname() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Stage 3.1 capability discovery: resolve the adapter binary in `PATH` and
+/// capture its `--version` (best-effort). A missing binary means the node
+/// should report `degraded` so the scheduler excludes it.
+struct AdapterProbe {
+    found: bool,
+    version: Option<String>,
+}
+
+async fn probe_adapter(bin: &str) -> AdapterProbe {
+    let which = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v '{bin}'"))
+        .output()
+        .await;
+    let found = match which {
+        Ok(o) => {
+            let out = String::from_utf8_lossy(&o.stdout);
+            o.status.success() && !out.trim().is_empty()
+        }
+        Err(_) => false,
+    };
+    if !found {
+        return AdapterProbe {
+            found: false,
+            version: None,
+        };
+    }
+    let ver = tokio::process::Command::new(bin).arg("--version").output().await;
+    let version = ver
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        });
+    AdapterProbe {
+        found: true,
+        version,
+    }
 }
 
 /// Shared, bounded-ish event buffer that flushes to the control plane in
@@ -177,10 +243,16 @@ async fn read_stream<R: AsyncRead + Unpin>(
     sink: Arc<EventSink>,
     stream: &str,
     secrets: Vec<String>,
+    raw: Option<Arc<Mutex<tokio::fs::File>>>,
 ) {
     let mut lines = BufReader::new(reader).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let masked = mask_secrets(&line, &secrets);
+        if let Some(f) = &raw {
+            let mut g = f.lock().await;
+            let _ = g.write_all(masked.as_bytes()).await;
+            let _ = g.write_all(b"\n").await;
+        }
         match serde_json::from_str::<AdapterEvent>(&masked) {
             Ok(ae) => sink.push(to_event_type(&ae.r#type), ae.payload).await,
             Err(_) => {
@@ -205,10 +277,26 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     .await??;
     tracing::info!(attempt_id = %assignment.attempt_id, git = ws.is_git, "starting attempt");
 
+    // Raw adapter output is mirrored to disk as a safety net against CLI
+    // output-format changes (Stage 3.1): the structured events may be lossy,
+    // but the raw log is always preserved as an artifact.
+    let raw_path = ws.path.join("agent-raw-output.log");
+    let raw_file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&raw_path)
+        .await
+        .ok()
+        .map(|f| Arc::new(Mutex::new(f)));
+
     let mut cmd = tokio::process::Command::new(&cfg.adapter);
     cmd.arg("--prompt").arg(&assignment.prompt);
     cmd.current_dir(&ws.path);
     cmd.env("AGENTGRID_ATTEMPT_ID", &assignment.attempt_id);
+    // Forward configured env (e.g. API keys) to the adapter subprocess (Stage 3.1).
+    for (k, v) in &cfg.adapter_env {
+        cmd.env(k, v);
+    }
     // Separate process group so a cancel can SIGTERM the whole tree (Stage 2.7).
     cmd.process_group(0);
     cmd.stdout(std::process::Stdio::piped());
@@ -253,12 +341,14 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         sink.clone(),
         "stdout",
         cfg.secrets.clone(),
+        raw_file.clone(),
     ));
     let r2 = tokio::spawn(read_stream(
         stderr,
         sink.clone(),
         "stderr",
         cfg.secrets.clone(),
+        raw_file.clone(),
     ));
 
     enum Outcome {
@@ -311,7 +401,8 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         }
     }
 
-    // Upload produced artifacts (changes.patch for git tasks; validation.log).
+    // Upload produced artifacts (changes.patch for git tasks; validation.log;
+    // raw adapter output as a format-change safety net, Stage 3.1).
     upload_if_exists(
         &client,
         &cfg.server,
@@ -326,6 +417,14 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &assignment.attempt_id,
         "validation.log",
         &validation_log,
+    )
+    .await;
+    upload_if_exists(
+        &client,
+        &cfg.server,
+        &assignment.attempt_id,
+        "agent-raw-output.log",
+        &raw_path,
     )
     .await;
 
@@ -527,17 +626,29 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
         .build()?;
     let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
 
+    // Capability discovery: re-probe the adapter each heartbeat (Stage 3.1).
+    // A missing binary => degraded, so the scheduler excludes this node.
+    let adapter_ok = Arc::new(AtomicBool::new(true));
+
     // Heartbeat loop: publish status/load/capabilities periodically.
     let hb_sem = sem.clone();
     let hb_cfg = cfg.clone();
     let hb_client = client.clone();
     let hb_node_id = cred.node_id.clone();
+    let hb_adapter_ok = adapter_ok.clone();
     tokio::spawn(async move {
         loop {
+            let probe = probe_adapter(&hb_cfg.adapter).await;
+            hb_adapter_ok.store(probe.found, Ordering::Relaxed);
+            let status = if probe.found {
+                NodeStatus::Online
+            } else {
+                NodeStatus::Degraded
+            };
             tokio::time::sleep(Duration::from_secs(hb_cfg.heartbeat_secs)).await;
             let active = hb_cfg.max_concurrency - hb_sem.available_permits() as u32;
             let req = HeartbeatRequest {
-                status: Some(NodeStatus::Online),
+                status: Some(status),
                 name: hb_cfg.node_name.clone(),
                 adapters: hb_cfg.adapters.clone(),
                 repositories: hb_cfg.repositories.clone(),
@@ -622,6 +733,15 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = config_from_env();
+    let probe = probe_adapter(&cfg.adapter).await;
+    if probe.found {
+        tracing::info!(adapter = %cfg.adapter, version = ?probe.version, "adapter detected");
+    } else {
+        tracing::warn!(
+            adapter = %cfg.adapter,
+            "adapter binary not found in PATH; node will report degraded until it is installed"
+        );
+    }
     tokio::fs::create_dir_all(&cfg.workspace_root).await?;
     let cred = load_or_enroll(&cfg).await?;
     tracing::info!(
@@ -661,6 +781,38 @@ mod tests {
         assert_eq!(code, 2);
         let log = std::fs::read_to_string(dir.join("validation.log")).unwrap();
         assert!(log.contains("hi"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn probe_adapter_finds_real_binary_and_reports_missing() {
+        let good = probe_adapter("sh").await;
+        assert!(good.found, "sh must exist on PATH");
+        let bad = probe_adapter("definitely-not-an-agentgrid-adapter-xyz").await;
+        assert!(!bad.found);
+        assert!(bad.version.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_stream_mirrors_raw_output() {
+        let dir = std::env::temp_dir().join(format!("ag-raw-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&dir);
+        let raw_path = std::path::Path::new(&dir).join("raw.log");
+        let f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&raw_path)
+            .await
+            .unwrap();
+        let raw = Arc::new(Mutex::new(f));
+        let input = b"{\"type\":\"log\",\"payload\":{\"text\":\"hello\"}}\nnot json\n".to_vec();
+        let reader = tokio::io::BufReader::new(std::io::Cursor::new(input));
+        let sink = EventSink::new("a1".into(), reqwest::Client::new(), "http://x".into());
+        read_stream(reader, sink, "stdout", vec![], Some(raw.clone())).await;
+        let got = tokio::fs::read_to_string(&raw_path).await.unwrap();
+        assert!(got.contains("hello"), "structured line mirrored: {got}");
+        assert!(got.contains("not json"), "unparsed line mirrored: {got}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

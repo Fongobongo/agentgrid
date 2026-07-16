@@ -261,15 +261,17 @@
 
 ### 3.1 Adapter-контракт (финализация)
 
-- [ ] Зафиксировать контракт в коде и документации: `prepare(task, workspace, config)`, `start(prompt)`, `stream_events()`, `cancel()`, `collect_result()`
-- [ ] Определить общий формат событий adapter → daemon (JSON lines в stdout): `log`, `tool_call`, `file_change`, `progress`, `result`, `error`
-- [ ] Определить конфиг adapter в node YAML: путь к бинарнику, env-переменные (API key), дополнительные аргументы
-- [ ] Capability discovery: daemon проверяет наличие и версию бинарника adapter при старте и в heartbeat
-- [ ] Сохранение raw output агента как артефакт (защита от смены формата CLI — риск №1 спеки)
+- [x] Зафиксировать контракт в коде и документации: `prepare`(worktree)/`start`(`--prompt`)/`stream`(NDJSON stdout)/`cancel`(SIGTERM process group)/`collect`(artifacts) — см. `crates/adapters/src/lib.rs`
+- [x] Определить общий формат событий adapter → daemon (JSON lines в stdout): `log`, `tool_call`, `file_change`, `progress`, `result`, `error` (неизвестные строки → raw `log`)
+- [x] Определить конфиг adapter: бинарник (`AGENTGRID_ADAPTER`), env-переменные (`AGENTGRID_ADAPTER_ENV`, forwarding API key), дополнительные аргументы — пока через env (YAML отложен)
+- [x] Capability discovery: daemon проверяет наличие и версию бинарника adapter при старте и в heartbeat; отсутствует → node `degraded` (scheduler исключает)
+- [x] Сохранение raw output агента как артефакт `agent-raw-output.log` (защита от смены формата CLI — риск №1 спеки)
 
 ### 3.2 Реализация выбранного adapter
 
-- [ ] Изучить headless/non-interactive режим выбранного CLI (флаги, формат вывода, exit codes, поведение при отсутствии TTY)
+> Решение (ADR #12): первый реальный adapter — **Claude Code** CLI (`claude`), через тонкий wrapper `adapter-claude`, переводящий `stream-json` → контракт agentgrid. Реализуется в следующем шаге.
+
+- [ ] Изучить headless/non-interactive режим `claude` (флаги, формат `stream-json`, exit codes, поведение при отсутствии TTY)
 - [ ] Зафиксировать поддерживаемую версию CLI (pin + проверка версии при prepare, warning при несовпадении)
 - [ ] `prepare`: проверка бинарника, проверка API-ключа, подготовка рабочего каталога
 - [ ] `start`: запуск в workspace с prompt; передача секретов только через env процесса

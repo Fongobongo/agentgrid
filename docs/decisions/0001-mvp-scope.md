@@ -23,6 +23,7 @@ decisions unblock the start of implementation (Stage 0.1 of the plan).
 | 9 | Single active control plane | Hard constraint. SQLite only on local disk; no NFS/network shares (Stage 2.1). |
 | 10 | TLS | `rustls`, no system OpenSSL. Reverse proxy (Caddy/nginx) documented; optional native TLS (Stage 5.1). |
 | 11 | SQLite | Bundled into the binary (`sqlx` sqlite, bundled feature), no system SQLite lib. |
+| 12 | First real adapter (Stage 3.2) | **Claude Code** CLI (`claude`). Invoked headless via a thin `adapter-claude` wrapper binary that translates Claude Code's `stream-json` output into the agentgrid event contract (`log`/`tool_call`/`file_change`/`progress`/`result`/`error`); unknown lines fall back to raw `log` (spec 3.1). The wrapper is pinned to a supported CLI version, checked at runtime (warn on mismatch). Raw adapter stdout is always saved as the `agent-raw-output.log` artifact as a format-change safety net. |
 
 ## Consequences
 

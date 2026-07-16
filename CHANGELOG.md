@@ -76,6 +76,13 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - Schema migration `0004`: `repositories`, `node_repositories`.
 - Tests: repo create/list; node-daemon git worktree clone/commit/patch (real git).
 
+### Added (Stage 3.1 — adapter contract finalized + capability discovery)
+- Adapter contract documented (subprocess model: `prepare`=worktree, `start`=`--prompt`, `stream`=NDJSON stdout, `cancel`=SIGTERM process group, `collect`=artifacts). Unknown stdout lines fall back to raw `log` so a future CLI format change cannot break the pipeline.
+- Capability discovery (Stage 3.1): the daemon probes the adapter binary in `PATH` at startup and on every heartbeat; a missing binary makes the node report `degraded` so the scheduler excludes it. Detected version is logged.
+- Adapter config: `AGENTGRID_ADAPTER_ENV` forwards `KEY=VALUE` pairs (e.g. API keys) to the adapter subprocess.
+- Raw adapter output is mirrored to `agent-raw-output.log` in the worktree and uploaded as an artifact on completion (format-change safety net, spec risk #1).
+- Integration tests: `probe_adapter` (found/missing) and `read_stream` raw-log mirroring.
+
 ### Added (Stage 2.4 — scheduler filters + `no_eligible_nodes` visibility)
 - Scheduler filter centralised in `node_ineligibility` (shared by assignment and
   visibility): only `online` nodes, with the task's adapter, the task's
