@@ -49,3 +49,8 @@ RTK.md
 /scratch/
 screenshot_*.png
 opt/
+
+# Rust / agentgrid build + runtime scratch
+/target/
+agentgrid-workspace/
+*.log

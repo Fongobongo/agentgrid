@@ -1,0 +1,19 @@
+[package]
+name = "agentgrid-adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "adapter-mock"
+path = "src/bin/adapter-mock.rs"
+
+[lib]
+name = "agentgrid_adapters"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+agentgrid-common.workspace = true
