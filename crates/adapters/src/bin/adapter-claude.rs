@@ -49,7 +49,10 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
                         }
                         Some("tool_use") => {
                             let name = block.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                            let input = block.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                            let input = block
+                                .get("input")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
                             out.push(json!({ "type": "tool_call", "payload": { "name": name, "input": input } }));
                         }
                         _ => {}
@@ -62,7 +65,10 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
                 if let Some(arr) = content.as_array() {
                     for block in arr {
                         if block.get("type").and_then(|x| x.as_str()) == Some("tool_result") {
-                            let res = block.get("content").cloned().unwrap_or(serde_json::Value::Null);
+                            let res = block
+                                .get("content")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
                             out.push(json!({ "type": "tool", "payload": { "result": res } }));
                         }
                     }
@@ -179,8 +185,7 @@ mod tests {
     #[test]
     fn translate_result_marks_error() {
         let mut err = false;
-        let line = json!({ "type": "result", "result": "done", "is_error": true })
-            .to_string();
+        let line = json!({ "type": "result", "result": "done", "is_error": true }).to_string();
         let evs = translate(&line, &mut err);
         assert_eq!(types(&evs), vec!["result"]);
         assert!(err);

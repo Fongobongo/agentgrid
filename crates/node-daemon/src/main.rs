@@ -157,18 +157,18 @@ async fn probe_adapter(bin: &str) -> AdapterProbe {
             version: None,
         };
     }
-    let ver = tokio::process::Command::new(bin).arg("--version").output().await;
-    let version = ver
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        });
+    let ver = tokio::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .await;
+    let version = ver.ok().filter(|o| o.status.success()).map(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    });
     AdapterProbe {
         found: true,
         version,

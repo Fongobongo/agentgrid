@@ -104,6 +104,9 @@ pub struct CreateTaskRequest {
     /// Optional per-task timeout in seconds (server default if unset).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional validation command overriding the repository default.
+    #[serde(default)]
+    pub validation_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,6 +119,8 @@ pub struct TaskView {
     pub created_at: String,
     pub finished_at: Option<String>,
     pub assigned_attempt_id: Option<String>,
+    #[serde(default)]
+    pub validation_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -362,6 +367,7 @@ mod tests {
             adapter: "mock".into(),
             requested_node_id: Some("node-1".into()),
             timeout_secs: None,
+            validation_command: None,
         };
         assert_eq!(round_trip(&req), req);
 

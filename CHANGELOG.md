@@ -83,6 +83,25 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - `token create`, `repo add`, `task logs --follow`, `task cancel`/`retry`, `login` already present; `node list` renders an aligned table.
 - Deferred: `node install` (systemd unit + enroll) — lands with packaging in Stage 5.3.
 
+### Added (Stage 4.3 — web UI)
+- React + TypeScript single-page UI (Vite) served as static files by the control plane
+  (`web/dist`, overridable via `AGENTGRID_WEB_ROOT`); `index.html` fallback for client routing.
+- Auth gate with login and first-admin setup; JWT stored in `localStorage` and sent as Bearer.
+- Dashboard: node/task counters and the 10 most recent completed tasks.
+- Nodes view: status, adapters, repositories, load, active/max, free disk, last heartbeat,
+  with confirm-on-revoke.
+- New Task form: repository, prompt, adapter, optional validation command, auto/manual node,
+  optional timeout; client-side required-field validation.
+- Task details: status timeline, live stdout/stderr over SSE with pause + auto-scroll,
+  attempt history, `changes.patch` diff view, `validation.log`, and status-aware
+  cancel/retry buttons. SSE auto-reconnects and resumes by `sequence` so no events are
+  lost or duplicated across drops.
+- Per-task `validation_command` wired end-to-end: `CreateTaskRequest` field, `tasks`
+  migration `0007`, and assignment prefers it over the repository default. CLI
+  `task run --validate` now forwards it (was previously ignored).
+- `npm ci && npm run build && npm run lint` passes; built UI smoke-tested against the
+  running control plane (static serving + auth + SSE).
+
 ### Added (Stage 4.1 — user authentication)
 - Local users: `users` table (argon2id password hash). First user created via `POST /v1/auth/setup` (only while no users exist) or via `AGENTGRID_BOOTSTRAP_USER`/`AGENTGRID_BOOTSTRAP_PASSWORD` env at startup.
 - `POST /v1/auth/login` exchanges username+password for a 12h HS256 JWT. Secret from `AGENTGRID_JWT_SECRET` (random per start if unset).

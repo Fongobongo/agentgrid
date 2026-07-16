@@ -89,8 +89,7 @@ async fn auth_login(app: &Router, user: &str, pass: &str) -> Option<String> {
         .unwrap();
     if resp.status().is_success() {
         let lr: LoginResponse =
-            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
         Some(lr.token)
     } else {
         None
@@ -161,6 +160,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         adapter: "mock".into(),
         requested_node_id: None,
         timeout_secs: None,
+        validation_command: None,
     };
     let resp = app
         .clone()
@@ -300,6 +300,7 @@ async fn cancel_queued_marks_cancelled() {
         adapter: "mock".into(),
         requested_node_id: None,
         timeout_secs: None,
+        validation_command: None,
     };
     let resp = app
         .clone()
@@ -608,7 +609,10 @@ async fn user_auth_setup_login_and_protects_endpoints() {
     assert!(!id0.is_empty());
 
     // Setup the first user, then a second setup is rejected.
-    assert_eq!(auth_setup(&app, "alice", "secret").await, StatusCode::CREATED);
+    assert_eq!(
+        auth_setup(&app, "alice", "secret").await,
+        StatusCode::CREATED
+    );
     assert_eq!(
         auth_setup(&app, "bob", "secret").await,
         StatusCode::CONFLICT
@@ -625,6 +629,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 adapter: "mock".into(),
                 requested_node_id: None,
                 timeout_secs: None,
+                validation_command: None,
             })
             .unwrap(),
             None,
@@ -648,6 +653,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 adapter: "mock".into(),
                 requested_node_id: None,
                 timeout_secs: None,
+                validation_command: None,
             })
             .unwrap(),
             Some(&token),
@@ -664,6 +670,7 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         adapter: adapter.into(),
         requested_node_id: node,
         timeout_secs: None,
+        validation_command: None,
     };
     let resp = app
         .clone()
@@ -758,7 +765,10 @@ async fn eligibility_requested_node() {
     let id = create_task_only(&app, "demo", "mock", Some("ghost".into())).await;
     let elig = task_eligibility(&app, &id).await;
     assert!(elig.nodes.is_empty());
-    assert_eq!(elig.no_eligible_nodes, vec!["requested node ghost not registered"]);
+    assert_eq!(
+        elig.no_eligible_nodes,
+        vec!["requested node ghost not registered"]
+    );
 
     // Request an actual eligible node: eligible, no reasons.
     let (good, _c) = enroll(&app, "good", vec!["mock".into()], vec!["*".into()]).await;

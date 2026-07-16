@@ -10,9 +10,9 @@ use std::time::Duration;
 use agentgrid_common::{
     next_attempt_status, next_task_status, Assignment, AttemptStatus, AttemptTransition,
     CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest, EnrollRequest,
-    EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, NodeEligibility,
-    NodeStatus, NodeView, PollRequest, RepositoryView, TaskEligibility, TaskEvent, TaskStatus,
-    TaskTransition, TaskView, UploadArtifactRequest,
+    EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, NodeEligibility, NodeStatus,
+    NodeView, PollRequest, RepositoryView, TaskEligibility, TaskEvent, TaskStatus, TaskTransition,
+    TaskView, UploadArtifactRequest,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -444,8 +444,8 @@ impl Store {
         let now = now_iso();
         let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
         sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, status, created_at, timeout_secs) \
-             VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, status, created_at, timeout_secs, validation_command) \
+             VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
         )
         .bind(&id)
         .bind(&req.repository)
@@ -454,6 +454,7 @@ impl Store {
         .bind(&req.requested_node_id)
         .bind(&now)
         .bind(timeout_secs)
+        .bind(&req.validation_command)
         .execute(&self.pool)
         .await?;
         Ok(TaskView {
@@ -465,12 +466,13 @@ impl Store {
             created_at: now,
             finished_at: None,
             assigned_attempt_id: None,
+            validation_command: req.validation_command.clone(),
         })
     }
 
     pub async fn list_tasks(&self) -> Result<Vec<TaskView>> {
         let rows = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command \
              FROM tasks ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -480,7 +482,7 @@ impl Store {
 
     pub async fn show_task(&self, id: &str) -> Result<Option<TaskView>> {
         let row = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command \
              FROM tasks WHERE id = ?",
         )
         .bind(id)
@@ -615,7 +617,7 @@ impl Store {
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
         let mut tx = self.pool.begin().await?;
         let cand = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC LIMIT 1",
         )
@@ -632,6 +634,7 @@ impl Store {
         let adapter: String = c.try_get("adapter")?;
         let repository: String = c.try_get("repository")?;
         let timeout_secs: i64 = c.try_get("timeout_secs")?;
+        let task_validation: Option<String> = c.try_get("validation_command")?;
 
         // Resolve repository git info (absent for plain-dir tasks).
         let repo = sqlx::query(
@@ -711,7 +714,7 @@ impl Store {
             timeout_secs: timeout_secs as u64,
             git_url,
             default_branch,
-            validation_command,
+            validation_command: task_validation.or(validation_command),
         }))
     }
 
@@ -730,12 +733,11 @@ impl Store {
     /// Stage 2.4: per-node eligibility for a task plus a `no_eligible_nodes`
     /// summary (why it stays queued). Returns None if the task does not exist.
     pub async fn task_eligibility(&self, task_id: &str) -> Result<Option<TaskEligibility>> {
-        let row = sqlx::query(
-            "SELECT repository, adapter, requested_node_id FROM tasks WHERE id = ?",
-        )
-        .bind(task_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT repository, adapter, requested_node_id FROM tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_optional(&self.pool)
+                .await?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -1082,6 +1084,7 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         created_at: r.try_get("created_at").unwrap_or_default(),
         finished_at: r.try_get("finished_at").unwrap_or_default(),
         assigned_attempt_id: r.try_get("assigned_attempt_id").unwrap_or_default(),
+        validation_command: r.try_get("validation_command").unwrap_or_default(),
     }
 }
 
@@ -1096,7 +1099,11 @@ fn node_ineligibility(node: &NodeView, repository: &str, adapter: &str) -> Vec<S
     if !node.adapters.iter().any(|a| a == adapter) {
         reasons.push(format!("missing adapter {adapter}"));
     }
-    if !node.repositories.iter().any(|r| r == "*" || r == repository) {
+    if !node
+        .repositories
+        .iter()
+        .any(|r| r == "*" || r == repository)
+    {
         reasons.push(format!("missing repository {repository}"));
     }
     if node.active_attempts >= node.max_concurrency {

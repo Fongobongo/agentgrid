@@ -18,9 +18,9 @@ use agentgrid_common::{
 use axum::{
     body::Body,
     extract::{Extension, Path, Query, State},
-    http::{header, Request, StatusCode},
+    http::{header, Request, StatusCode, Uri},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -44,6 +44,9 @@ pub struct AppState {
     pub store: Store,
     assignment_notify: Arc<Notify>,
     jwt_secret: Vec<u8>,
+    /// Directory with the built web UI (Stage 4.3). Served as static files;
+    /// `None` disables the UI.
+    web_root: Option<std::path::PathBuf>,
 }
 
 impl AppState {
@@ -66,10 +69,26 @@ impl AppState {
                 store.create_user(&u, &p).await?;
             }
         }
+        let web_root = std::env::var("AGENTGRID_WEB_ROOT")
+            .map(std::path::PathBuf::from)
+            .ok()
+            .or_else(|| {
+                std::env::current_exe().ok().and_then(|p| {
+                    p.parent().map(|d| {
+                        let dist = d.join("web").join("dist");
+                        if dist.join("index.html").exists() {
+                            dist
+                        } else {
+                            d.join("web")
+                        }
+                    })
+                })
+            });
         Ok(Arc::new(Self {
             store,
             assignment_notify: Arc::new(Notify::new()),
             jwt_secret,
+            web_root,
         }))
     }
 
@@ -142,7 +161,58 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_node_auth,
         ))
+        .fallback(static_fallback)
         .with_state(state)
+}
+
+/// Serve the built web UI (Stage 4.3). Unknown non-API paths fall back to
+/// `index.html`; missing files under `/v1/` return 404.
+async fn static_fallback(State(state): State<Arc<AppState>>, uri: Uri) -> Response {
+    use axum::http::header::CONTENT_TYPE;
+    let root = match &state.web_root {
+        Some(r) => r.clone(),
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let rel = uri.path().trim_start_matches('/');
+    let fs_path = if rel.is_empty() {
+        root.join("index.html")
+    } else {
+        root.join(rel)
+    };
+    if fs_path != root && !fs_path.starts_with(&root) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match tokio::fs::read(&fs_path).await {
+        Ok(bytes) => {
+            let ct = content_type(&fs_path);
+            ([(CONTENT_TYPE, ct)], bytes).into_response()
+        }
+        Err(_) => {
+            if uri.path().starts_with("/v1/") {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            match tokio::fs::read(root.join("index.html")).await {
+                Ok(b) => {
+                    ([(CONTENT_TYPE, "text/html; charset=utf-8".to_string())], b).into_response()
+                }
+                Err(_) => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+    }
+}
+
+fn content_type(path: &std::path::Path) -> String {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("png") => "image/png",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 /// Node identity established by [`require_node_auth`]; read by node handlers.
@@ -208,7 +278,12 @@ async fn require_user_auth(
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path().to_string();
     if user_protected(&path) {
-        let open = state.store.user_count().await.map(|c| c == 0).unwrap_or(true);
+        let open = state
+            .store
+            .user_count()
+            .await
+            .map(|c| c == 0)
+            .unwrap_or(true);
         if !open {
             let ok = req
                 .headers()
@@ -246,12 +321,10 @@ async fn auth_setup(
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
-    let token = state
-        .issue_token(&req.username)
-        .map_err(|e| {
-            tracing::error!("issue_token failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let token = state.issue_token(&req.username).map_err(|e| {
+        tracing::error!("issue_token failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok((StatusCode::CREATED, Json(LoginResponse { token })))
 }
 
@@ -355,6 +428,7 @@ async fn create_task(
                     created_at: String::new(),
                     finished_at: None,
                     assigned_attempt_id: None,
+                    validation_command: None,
                 }),
             )
         }

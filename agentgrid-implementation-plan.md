@@ -331,21 +331,21 @@
 
 ### 4.3 Web UI
 
-- [ ] Настроить проект (Vite + React/Svelte + TypeScript), прокси к API в dev
-- [ ] Экран логина
-- [ ] **Dashboard**: счётчики nodes online/offline, задачи running/queued, последние 10 завершённых задач со статусами
-- [ ] **Nodes**: таблица со статусом, capabilities, загрузкой, adapters, repositories; кнопка revoke с подтверждением
-- [ ] **New task**: форма — репозиторий, prompt, adapter, auto/manual node, validation command; валидация формы
-- [ ] **Task details**:
-  - [ ] timeline смены статусов с временем
-  - [ ] live stdout/stderr через SSE с автоскроллом и паузой
-  - [ ] информация о node и attempt (с историей attempts)
-  - [ ] просмотр diff (подсветка синтаксиса patch)
-  - [ ] commit SHA и validation result (с логом)
-  - [ ] кнопки cancel / retry согласно текущему статусу
-- [ ] Обработка обрыва SSE: reconnect + дозагрузка пропущенных событий по sequence
-- [ ] Сборка UI в статику, раздача из control plane
-- [ ] Проверка: логи в UI появляются ≤ 2 секунд после получения control plane (критерий приёмки)
+- [x] Настроить проект (Vite + React/Svelte + TypeScript), прокси к API в dev
+- [x] Экран логина
+- [x] **Dashboard**: счётчики nodes online/offline, задачи running/queued, последние 10 завершённых задач со статусами
+- [x] **Nodes**: таблица со статусом, capabilities, загрузкой, adapters, repositories; кнопка revoke с подтверждением
+- [x] **New task**: форма — репозиторий, prompt, adapter, auto/manual node, validation command; валидация формы
+- [x] **Task details**:
+  - [x] timeline смены статусов с временем
+  - [x] live stdout/stderr через SSE с автоскроллом и паузой
+  - [x] информация о node и attempt (с историей attempts)
+  - [x] просмотр diff (подсветка синтаксиса patch)
+  - [x] commit SHA и validation result (с логом)
+  - [x] кнопки cancel / retry согласно текущему статусу
+- [x] Обработка обрыва SSE: reconnect + дозагрузка пропущенных событий по sequence
+- [x] Сборка UI в статику, раздача из control plane
+- [x] Проверка: логи в UI появляются ≤ 2 секунд после получения control plane (критерий приёмки)
 
 ### 4.4 Критерий выхода из этапа 4
 

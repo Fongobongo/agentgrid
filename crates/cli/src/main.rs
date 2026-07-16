@@ -3,7 +3,9 @@
 //! Command grouping (`task run`, `node list`) is deferred; this flat form
 //! exercises the same `/v1` surface.
 
-use agentgrid_common::{CreateTaskRequest, LoginRequest, LoginResponse, TaskEligibility, TaskStatus, TaskView};
+use agentgrid_common::{
+    CreateTaskRequest, LoginRequest, LoginResponse, TaskEligibility, TaskStatus, TaskView,
+};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::os::unix::fs::PermissionsExt;
@@ -80,7 +82,6 @@ struct ServerStartArgs {
     #[arg(long)]
     bootstrap_password: Option<String>,
 }
-
 
 #[derive(Args)]
 struct LogsArgs {
@@ -184,6 +185,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         adapter: a.adapter,
         requested_node_id: a.node,
         timeout_secs: a.timeout,
+        validation_command: a.validate,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -230,7 +232,10 @@ async fn cmd_show(client: &reqwest::Client, base: &str, a: ShowArgs, json: bool)
         {
             if let Ok(elig) = elig.json::<TaskEligibility>().await {
                 if elig.no_eligible_nodes.is_empty() {
-                    println!("eligibility: waiting for an eligible node ({} online)", elig.nodes.len());
+                    println!(
+                        "eligibility: waiting for an eligible node ({} online)",
+                        elig.nodes.len()
+                    );
                 } else {
                     println!("no eligible nodes:");
                     for reason in &elig.no_eligible_nodes {
@@ -457,7 +462,8 @@ fn cmd_server_start(a: ServerStartArgs) -> Result<()> {
         );
     }
     let mut cmd = std::process::Command::new(&bin);
-    cmd.env("AGENTGRID_LISTEN", &a.listen).env("AGENTGRID_DB", &a.db);
+    cmd.env("AGENTGRID_LISTEN", &a.listen)
+        .env("AGENTGRID_DB", &a.db);
     if let Some(u) = &a.bootstrap_user {
         cmd.env("AGENTGRID_BOOTSTRAP_USER", u);
     }
