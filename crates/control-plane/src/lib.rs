@@ -49,6 +49,8 @@ pub struct AppState {
     web_root: Option<std::path::PathBuf>,
     /// Request size ceilings (Stage 5.1).
     limits: Limits,
+    /// Database file path (for SQLite size metrics, Stage 5.2).
+    db_path: String,
 }
 
 /// Request size ceilings (Stage 5.1). Overridable via env; defaults:
@@ -118,6 +120,7 @@ impl AppState {
             jwt_secret,
             web_root,
             limits,
+            db_path: db_path.to_string(),
         }))
     }
 
@@ -391,7 +394,13 @@ async fn auth_login(
 }
 
 async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
-    if state.store.health_check().await {
+    let dir = std::path::Path::new(&state.db_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let probe = dir.join(".agentgrid-health-probe");
+    let writable = std::fs::write(&probe, b"ok").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    if state.store.health_check().await && writable {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -419,6 +428,33 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
         *task_status.entry(format!("{}", t.status)).or_insert(0) += 1;
     }
 
+    // Task duration histogram + terminal outcome counters (Stage 5.2).
+    let mut buckets: [(u64, u64); 5] = [(60, 0), (300, 0), (1800, 0), (3600, 0), (u64::MAX, 0)];
+    let mut dur_sum = 0u64;
+    let mut dur_count = 0u64;
+    let mut outcome: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for t in &tasks {
+        if let (Some(f), c) = (t.finished_at.as_deref(), t.created_at.as_str()) {
+            if let (Ok(fdt), Ok(cdt)) = (
+                chrono::DateTime::parse_from_rfc3339(f),
+                chrono::DateTime::parse_from_rfc3339(c),
+            ) {
+                let secs = (fdt - cdt).num_seconds().max(0) as u64;
+                dur_sum += secs;
+                dur_count += 1;
+                for b in buckets.iter_mut() {
+                    if secs <= b.0 {
+                        b.1 += 1;
+                    }
+                }
+            }
+        }
+        let st = format!("{}", t.status);
+        if st == "succeeded" || st == "failed" || st == "cancelled" {
+            *outcome.entry(st).or_insert(0) += 1;
+        }
+    }
+
     let mut s = String::new();
     s.push_str("# HELP agentgrid_nodes Nodes by status.\n");
     s.push_str("# TYPE agentgrid_nodes gauge\n");
@@ -433,6 +469,60 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
     s.push_str("# HELP agentgrid_attempts_total Total attempts.\n");
     s.push_str("# TYPE agentgrid_attempts_total counter\n");
     s.push_str(&format!("agentgrid_attempts_total {attempts}\n"));
+
+    s.push_str("# HELP agentgrid_task_duration_seconds Task duration (finished tasks).\n");
+    s.push_str("# TYPE agentgrid_task_duration_seconds histogram\n");
+    for (le, c) in &buckets {
+        let le_s = if *le == u64::MAX {
+            "+Inf".to_string()
+        } else {
+            le.to_string()
+        };
+        s.push_str(&format!(
+            "agentgrid_task_duration_seconds_bucket{{le=\"{le_s}\"}} {c}\n"
+        ));
+    }
+    s.push_str(&format!("agentgrid_task_duration_seconds_sum {dur_sum}\n"));
+    s.push_str(&format!(
+        "agentgrid_task_duration_seconds_count {dur_count}\n"
+    ));
+
+    s.push_str("# HELP agentgrid_tasks_total Terminal task outcomes (cumulative).\n");
+    s.push_str("# TYPE agentgrid_tasks_total counter\n");
+    for (st, c) in &outcome {
+        s.push_str(&format!("agentgrid_tasks_total{{status=\"{st}\"}} {c}\n"));
+    }
+
+    s.push_str("# HELP agentgrid_node_free_disk_mb Free disk reported via heartbeat.\n");
+    s.push_str("# TYPE agentgrid_node_free_disk_mb gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_free_disk_mb{{node=\"{}\"}} {}\n",
+            n.name, n.free_disk_mb
+        ));
+    }
+    s.push_str("# HELP agentgrid_node_load_avg Load average reported via heartbeat.\n");
+    s.push_str("# TYPE agentgrid_node_load_avg gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_load_avg{{node=\"{}\"}} {}\n",
+            n.name, n.load_avg
+        ));
+    }
+
+    s.push_str("# HELP agentgrid_sqlite_db_bytes Main database file size in bytes.\n");
+    s.push_str("# TYPE agentgrid_sqlite_db_bytes gauge\n");
+    let db_bytes = std::fs::metadata(&state.db_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    s.push_str(&format!("agentgrid_sqlite_db_bytes {db_bytes}\n"));
+    s.push_str("# HELP agentgrid_sqlite_wal_bytes WAL file size in bytes.\n");
+    s.push_str("# TYPE agentgrid_sqlite_wal_bytes gauge\n");
+    let wal_bytes = std::fs::metadata(format!("{}-wal", state.db_path))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    s.push_str(&format!("agentgrid_sqlite_wal_bytes {wal_bytes}\n"));
+
     (
         StatusCode::OK,
         (

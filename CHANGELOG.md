@@ -83,6 +83,15 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - `token create`, `repo add`, `task logs --follow`, `task cancel`/`retry`, `login` already present; `node list` renders an aligned table.
 - Deferred: `node install` (systemd unit + enroll) — lands with packaging in Stage 5.3.
 
+### Added (Stage 5.2 — observability)
+- `GET /metrics` expanded (Prometheus text): task duration histogram, terminal outcome
+  counters (`agentgrid_tasks_total`), per-node `free_disk_mb`/`load_avg` gauges from heartbeat,
+  and SQLite main/WAL file size gauges.
+- `GET /health/ready` now also probes writability of the database directory.
+- Control plane and node daemon emit structured JSON logs (tracing `fmt().json()`).
+- Deferred (instrumentation needed): scheduler/heartbeat latency, event-buffer size,
+  `SQLITE_BUSY`/checkpoint/write-lock metrics.
+
 ### Added (Stage 5.1 — security)
 - Request size limits (trust-boundary input validation), overridable via env, returning 413:
   `AGENTGRID_MAX_PROMPT_KB` (64), `AGENTGRID_MAX_EVENT_KB` (1024), `AGENTGRID_MAX_ARTIFACT_MB` (50).

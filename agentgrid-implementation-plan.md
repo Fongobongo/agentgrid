@@ -370,13 +370,13 @@
 
 ### 5.2 Наблюдаемость (раздел 15 спеки)
 
-- [ ] Единый формат структурированных логов (JSON): timestamp, level, component, node_id, task_id, attempt_id, message
-- [ ] `GET /metrics` в формате Prometheus:
-  - [ ] nodes по статусам, queued/running tasks
-  - [ ] task duration (histogram), success/failure/cancel rate
+- [x] Единый формат структурированных логов (JSON): timestamp, level, component, node_id, task_id, attempt_id, message
+- [x] `GET /metrics` в формате Prometheus:
+  - [x] nodes по статусам, queued/running tasks
+  - [x] task duration (histogram), success/failure/cancel rate
   - [ ] scheduler latency, heartbeat latency
-  - [ ] размер event buffer и свободный диск по nodes (из heartbeat)
-- [ ] `GET /health/ready` проверяет чтение SQLite и возможность записи в каталог данных
+  - [x] размер event buffer и свободный диск по nodes (из heartbeat)
+- [x] `GET /health/ready` проверяет чтение SQLite и возможность записи в каталог данных
 - [ ] Метрики SQLite: размер main DB/WAL, время ожидания write lock, число `SQLITE_BUSY`, длительность checkpoint
 - [ ] Документация по подключению Prometheus/Grafana (опционально — готовый dashboard JSON)
 

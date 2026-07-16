@@ -597,6 +597,12 @@ async fn metrics_endpoint_exposes_counts() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("agentgrid_tasks"));
     assert!(text.contains("agentgrid_attempts_total"));
+    // Stage 5.2 additions.
+    assert!(text.contains("agentgrid_task_duration_seconds"));
+    assert!(text.contains("agentgrid_tasks_total"));
+    assert!(text.contains("agentgrid_node_free_disk_mb"));
+    assert!(text.contains("agentgrid_sqlite_db_bytes"));
+    assert!(text.contains("agentgrid_sqlite_wal_bytes"));
 }
 
 #[tokio::test]
