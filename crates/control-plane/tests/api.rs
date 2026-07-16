@@ -23,7 +23,7 @@ fn post(uri: &str, body: String) -> Request<Body> {
 
 #[tokio::test]
 async fn full_task_lifecycle() {
-    let state = AppState::new();
+    let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
 
     // 1. Node polls before any task exists -> no assignment, but registers.
@@ -144,7 +144,7 @@ async fn full_task_lifecycle() {
 
 #[tokio::test]
 async fn failure_marks_task_failed() {
-    let state = AppState::new();
+    let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
 
     // Directly create + assign via poll with a pre-registered node.

@@ -57,6 +57,12 @@ pub enum EventType {
     Error,
 }
 
+mod state_machine;
+
+pub use state_machine::{
+    next_attempt_status, next_task_status, AttemptTransition, InvalidTransition, TaskTransition,
+};
+
 /// A single streamed event tied to an attempt, with a monotonic `sequence`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskEvent {

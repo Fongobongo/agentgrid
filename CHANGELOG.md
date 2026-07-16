@@ -15,4 +15,19 @@ All notable changes to this project are documented in this file.
 - ADR recording Stage 0.1 scope decisions (`docs/decisions/0001-mvp-scope.md`).
 
 ### Scope note
-This is the Stage-1 vertical prototype: state is in-memory (no persistence yet), no auth, single machine. Persistence (SQLite WAL), auth, Git worktrees, real adapters and web UI follow in later stages.
+This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git worktrees, real adapters and web UI follow in later stages.
+
+### Added (Stage 2.1 / 2.2 — persistence + state machine)
+- SQLite storage layer (`crates/control-plane/src/store.rs`) with bundled `libsqlite3-sys`, WAL,
+  `synchronous=NORMAL`, `busy_timeout=5000`, 4-connection pool, and `sqlx` migrations.
+- Atomic assignment via a short write transaction with `UPDATE ... WHERE status='queued'` +
+  `rows_affected` check, so concurrent schedulers can never double-assign.
+- Pure task/attempt state-machine transition functions (`crates/common/src/state_machine.rs`)
+  with exhaustive unit tests for allowed and forbidden transitions.
+- Idempotent event ingest (`ON CONFLICT(attempt_id, sequence) DO NOTHING`).
+- Background maintenance: lease-expiry revert of unconfirmed assignments; node-offline sweep.
+- `health/ready` now verifies SQLite reachability; integration tests run on a temp SQLite DB.
+
+### Verified
+- End-to-end on one machine: `task run` → mock adapter writes file → `succeeded`, logs stream.
+- Control-plane restart on the same SQLite file preserves queued tasks (WAL).
