@@ -31,3 +31,19 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 ### Verified
 - End-to-end on one machine: `task run` → mock adapter writes file → `succeeded`, logs stream.
 - Control-plane restart on the same SQLite file preserves queued tasks (WAL).
+
+### Added (Stage 2.7 — cancellation + timeout)
+- `cancel_task`: `queued` → `cancelled` immediately; `assigned|running|validating` → sets
+  `cancel_requested` on the attempt and reports `cancelled` once the node confirms completion.
+- `retry_task`: `failed|cancelled` → `queued` (new attempt created on next assign).
+- CLI `task cancel` / `task retry` subcommands.
+- Node daemon polls `GET /v1/node/attempts/{id}/cancel`; on cancel request or `timeout_secs`
+  elapse it SIGTERMs the attempt's process group (SIGKILL after 10s grace), killing the whole
+  adapter tree (no orphaned children).
+- Per-task `timeout_secs` (default 3600s) carried from request → assignment → node; schema
+  migration `0002_cancel_timeout.sql`.
+- Completion is cancellation-aware: a `cancel_requested` attempt finishes `cancelled` regardless
+  of the adapter exit code.
+- Integration tests: cancel queued, cancel-running-then-node-confirms, retry failed.
+
+### Verified

@@ -3,12 +3,13 @@
 //! Stage-1 vertical slice without network I/O.
 
 use agentgrid_common::{
-    CompleteAttemptRequest, CreateTaskRequest, EventType, IncomingEvent, IngestEventsRequest,
-    PollRequest, PollResponse, TaskStatus, TaskView,
+    Assignment, CancelState, CompleteAttemptRequest, CreateTaskRequest, EventType, IncomingEvent,
+    IngestEventsRequest, PollRequest, PollResponse, TaskStatus, TaskView,
 };
 use agentgrid_control_plane::{build_router, AppState};
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use axum::Router;
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -52,6 +53,7 @@ async fn full_task_lifecycle() {
         repository: "demo".into(),
         adapter: "mock".into(),
         requested_node_id: None,
+        timeout_secs: None,
     };
     let resp = app
         .clone()
@@ -171,6 +173,7 @@ async fn failure_marks_task_failed() {
         repository: "demo".into(),
         adapter: "mock".into(),
         requested_node_id: None,
+        timeout_secs: None,
     };
     let resp = app
         .clone()
@@ -208,4 +211,180 @@ async fn failure_marks_task_failed() {
     let tv: TaskView =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(tv.status, TaskStatus::Failed);
+}
+
+/// Register a node via long-poll, create a task, and return its assignment.
+async fn create_and_assign(app: &Router, node_id: &str, prompt: &str) -> Assignment {
+    let poll_req = PollRequest {
+        node_id: node_id.into(),
+        name: "n".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+    };
+    let app2 = app.clone();
+    let h = tokio::spawn(async move {
+        app2.oneshot(post(
+            "/v1/node/poll",
+            serde_json::to_string(&poll_req).unwrap(),
+        ))
+        .await
+        .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let req = CreateTaskRequest {
+        prompt: prompt.into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = h.await.unwrap();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let pr: PollResponse = serde_json::from_slice(&body).unwrap();
+    pr.assignment.expect("assignment")
+}
+
+async fn show_status(app: &Router, task_id: &str) -> TaskStatus {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/tasks/{task_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let tv: TaskView =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    tv.status
+}
+
+#[tokio::test]
+async fn cancel_queued_marks_cancelled() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let req = CreateTaskRequest {
+        prompt: "x".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let tv: TaskView = serde_json::from_slice(&body).unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/tasks/{}/cancel", tv.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(show_status(&app, &tv.id).await, TaskStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn cancel_running_then_node_confirms_cancelled() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let assign = create_and_assign(&app, "node-c", "sleep:30").await;
+
+    let cs: CancelState = cancel_state(&app, &assign.attempt_id).await;
+    assert!(!cs.cancel_requested);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/tasks/{}/cancel", assign.task_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let cs: CancelState = cancel_state(&app, &assign.attempt_id).await;
+    assert!(cs.cancel_requested);
+
+    let resp = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest { exit_code: 1 }).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn retry_failed_task_reques() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let assign = create_and_assign(&app, "node-r", "fail:3").await;
+    let resp = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest { exit_code: 3 }).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/tasks/{}/retry", assign.task_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
+}
+
+async fn cancel_state(app: &Router, attempt_id: &str) -> CancelState {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/node/attempts/{attempt_id}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
 }

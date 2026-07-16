@@ -87,9 +87,10 @@ impl Store {
     pub async fn create_task(&self, req: &CreateTaskRequest) -> Result<TaskView> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
+        let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
         sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, status, created_at) \
-             VALUES (?, ?, ?, ?, ?, 'queued', ?)",
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, status, created_at, timeout_secs) \
+             VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
         )
         .bind(&id)
         .bind(&req.repository)
@@ -97,6 +98,7 @@ impl Store {
         .bind(&req.adapter)
         .bind(&req.requested_node_id)
         .bind(&now)
+        .bind(timeout_secs)
         .execute(&self.pool)
         .await?;
         Ok(TaskView {
@@ -205,7 +207,7 @@ impl Store {
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
         let mut tx = self.pool.begin().await?;
         let cand = sqlx::query(
-            "SELECT id, prompt, adapter, repository FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC LIMIT 1",
         )
@@ -221,6 +223,7 @@ impl Store {
         let prompt: String = c.try_get("prompt")?;
         let adapter: String = c.try_get("adapter")?;
         let repository: String = c.try_get("repository")?;
+        let timeout_secs: i64 = c.try_get("timeout_secs")?;
 
         let node = sqlx::query(
             "SELECT status, adapters, repositories, max_concurrency, active_attempts FROM nodes WHERE id = ?",
@@ -298,6 +301,7 @@ impl Store {
             prompt,
             adapter,
             number: number as u32,
+            timeout_secs: timeout_secs as u64,
         }))
     }
 
@@ -365,10 +369,12 @@ impl Store {
         req: &CompleteAttemptRequest,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let attempt = sqlx::query("SELECT task_id, node_id, status FROM attempts WHERE id = ?")
-            .bind(attempt_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let attempt = sqlx::query(
+            "SELECT task_id, node_id, status, cancel_requested FROM attempts WHERE id = ?",
+        )
+        .bind(attempt_id)
+        .fetch_optional(&mut *tx)
+        .await?;
         let Some(attempt) = attempt else {
             let _ = tx.rollback().await;
             return Ok(false);
@@ -376,6 +382,7 @@ impl Store {
         let task_id: String = attempt.try_get("task_id")?;
         let node_id: String = attempt.try_get("node_id")?;
         let attempt_status: String = attempt.try_get("status")?;
+        let cancel_requested: i64 = attempt.try_get("cancel_requested")?;
 
         let at = if req.exit_code == 0 {
             AttemptTransition::Succeed
@@ -387,40 +394,42 @@ impl Store {
         } else {
             TaskTransition::Fail
         };
-        let attempt_target: AttemptStatus = match from_snake::<AttemptStatus>(&attempt_status) {
-            Some(s) => next_attempt_status(s, at).unwrap_or(if req.exit_code == 0 {
+
+        let as_enum = from_snake::<AttemptStatus>(&attempt_status);
+        let attempt_target: AttemptStatus = as_enum
+            .and_then(|s| next_attempt_status(s, at).ok())
+            .unwrap_or(if req.exit_code == 0 {
                 AttemptStatus::Succeeded
             } else {
                 AttemptStatus::Failed
-            }),
-            None => {
-                if req.exit_code == 0 {
-                    AttemptStatus::Succeeded
-                } else {
-                    AttemptStatus::Failed
-                }
-            }
-        };
-        let task_target: TaskStatus = {
-            let task_row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
-                .bind(&task_id)
-                .fetch_one(&mut *tx)
-                .await?;
-            let task_status: String = task_row.try_get("status")?;
-            match from_snake::<TaskStatus>(&task_status) {
-                Some(s) => next_task_status(s, tt).unwrap_or(if req.exit_code == 0 {
-                    TaskStatus::Succeeded
-                } else {
-                    TaskStatus::Failed
-                }),
-                None => {
-                    if req.exit_code == 0 {
-                        TaskStatus::Succeeded
-                    } else {
-                        TaskStatus::Failed
-                    }
-                }
-            }
+            });
+
+        let task_row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
+            .bind(&task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let task_status: String = task_row.try_get("status")?;
+        let ts_enum = from_snake::<TaskStatus>(&task_status);
+        let task_target: TaskStatus = ts_enum
+            .and_then(|s| next_task_status(s, tt).ok())
+            .unwrap_or(if req.exit_code == 0 {
+                TaskStatus::Succeeded
+            } else {
+                TaskStatus::Failed
+            });
+
+        // If cancellation was requested, the attempt ends as cancelled
+        // regardless of the adapter's exit code.
+        let (attempt_target, task_target) = if cancel_requested != 0 {
+            let a = as_enum
+                .and_then(|s| next_attempt_status(s, AttemptTransition::Cancel).ok())
+                .unwrap_or(AttemptStatus::Cancelled);
+            let t = ts_enum
+                .and_then(|s| next_task_status(s, TaskTransition::Cancel).ok())
+                .unwrap_or(TaskStatus::Cancelled);
+            (a, t)
+        } else {
+            (attempt_target, task_target)
         };
 
         let now = now_iso();
@@ -443,6 +452,77 @@ impl Store {
             .await?;
         tx.commit().await?;
         Ok(true)
+    }
+
+    pub async fn cancel_task(&self, task_id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        };
+        let status: String = row.try_get("status")?;
+        if status == "queued" {
+            sqlx::query(
+                "UPDATE tasks SET status = 'cancelled', assigned_attempt_id = NULL WHERE id = ?",
+            )
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
+        if matches!(status.as_str(), "assigned" | "running" | "validating") {
+            sqlx::query(
+                "UPDATE attempts SET cancel_requested = 1 WHERE task_id = ? AND status IN ('assigned','running','validating')",
+            )
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
+        let _ = tx.rollback().await;
+        Ok(false)
+    }
+
+    pub async fn attempt_cancel_requested(&self, attempt_id: &str) -> Result<bool> {
+        let row = sqlx::query("SELECT cancel_requested FROM attempts WHERE id = ?")
+            .bind(attempt_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some(r) => r.try_get::<i64, _>("cancel_requested")? != 0,
+            None => false,
+        })
+    }
+
+    pub async fn retry_task(&self, task_id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        };
+        let status: String = row.try_get("status")?;
+        if status == "failed" || status == "cancelled" {
+            sqlx::query(
+                "UPDATE tasks SET status = 'queued', finished_at = NULL, assigned_attempt_id = NULL WHERE id = ?",
+            )
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
+        let _ = tx.rollback().await;
+        Ok(false)
     }
 
     /// Background maintenance: revert unconfirmed assignments (lease expired)

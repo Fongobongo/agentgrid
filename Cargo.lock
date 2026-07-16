@@ -62,6 +62,7 @@ dependencies = [
  "agentgrid-adapters",
  "agentgrid-common",
  "anyhow",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

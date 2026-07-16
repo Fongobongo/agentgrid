@@ -101,6 +101,9 @@ pub struct CreateTaskRequest {
     pub adapter: String,
     #[serde(default)]
     pub requested_node_id: Option<String>,
+    /// Optional per-task timeout in seconds (server default if unset).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -144,6 +147,13 @@ pub struct Assignment {
     pub prompt: String,
     pub adapter: String,
     pub number: u32,
+    /// Seconds before the node should forcibly kill the attempt.
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelState {
+    pub cancel_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -212,6 +222,7 @@ mod tests {
             repository: "demo".into(),
             adapter: "mock".into(),
             requested_node_id: Some("node-1".into()),
+            timeout_secs: None,
         };
         assert_eq!(round_trip(&req), req);
 
@@ -232,6 +243,7 @@ mod tests {
                 prompt: "x".into(),
                 adapter: "mock".into(),
                 number: 1,
+                timeout_secs: 3600,
             }),
         };
         assert_eq!(round_trip(&pr), pr);

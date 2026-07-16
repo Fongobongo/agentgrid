@@ -31,6 +31,10 @@ enum AgCommand {
     Show(ShowArgs),
     /// List registered nodes.
     Nodes,
+    /// Cancel a task (queued -> cancelled; running -> ask node to stop).
+    Cancel(CancelArgs),
+    /// Retry a failed or cancelled task (back to queued).
+    Retry(RetryArgs),
 }
 
 #[derive(Args)]
@@ -56,6 +60,16 @@ struct ShowArgs {
     task_id: String,
 }
 
+#[derive(Args)]
+struct CancelArgs {
+    task_id: String,
+}
+
+#[derive(Args)]
+struct RetryArgs {
+    task_id: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -67,6 +81,8 @@ async fn main() -> Result<()> {
         AgCommand::Logs(a) => cmd_logs(&client, &base, a).await,
         AgCommand::Show(a) => cmd_show(&client, &base, a).await,
         AgCommand::Nodes => cmd_node_list(&client, &base).await,
+        AgCommand::Cancel(a) => cmd_cancel(&client, &base, a).await,
+        AgCommand::Retry(a) => cmd_retry(&client, &base, a).await,
     }
 }
 
@@ -76,6 +92,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         repository: a.repository,
         adapter: a.adapter,
         requested_node_id: a.node,
+        timeout_secs: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -187,4 +204,32 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str) -> Result<()> {
         println!("{id:<36} {st:<10} {active:<8} {max:<6}");
     }
     Ok(())
+}
+
+async fn cmd_cancel(client: &reqwest::Client, base: &str, a: CancelArgs) -> Result<()> {
+    let resp = client
+        .post(format!("{base}/v1/tasks/{}/cancel", a.task_id))
+        .send()
+        .await
+        .context("cancel request failed")?;
+    if resp.status().is_success() {
+        println!("cancel requested for {}", a.task_id);
+        Ok(())
+    } else {
+        anyhow::bail!("cancel failed ({})", resp.status())
+    }
+}
+
+async fn cmd_retry(client: &reqwest::Client, base: &str, a: RetryArgs) -> Result<()> {
+    let resp = client
+        .post(format!("{base}/v1/tasks/{}/retry", a.task_id))
+        .send()
+        .await
+        .context("retry request failed")?;
+    if resp.status().is_success() {
+        println!("task {} requeued", a.task_id);
+        Ok(())
+    } else {
+        anyhow::bail!("retry failed ({})", resp.status())
+    }
 }

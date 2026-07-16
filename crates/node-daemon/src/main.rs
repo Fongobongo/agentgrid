@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use agentgrid_adapters::{to_event_type, AdapterEvent};
 use agentgrid_common::{
-    Assignment, CompleteAttemptRequest, EventType, IncomingEvent, IngestEventsRequest, PollRequest,
-    PollResponse,
+    Assignment, CancelState, CompleteAttemptRequest, EventType, IncomingEvent, IngestEventsRequest,
+    PollRequest, PollResponse,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -161,6 +161,14 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         }
     };
 
+    let pid = child.id().unwrap_or(0);
+    let cancel_url = format!(
+        "{}/v1/node/attempts/{}/cancel",
+        cfg.server, assignment.attempt_id
+    );
+    let cancel_client = client.clone();
+    let timeout = Duration::from_secs(assignment.timeout_secs.max(1));
+
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let sink = EventSink::new(
@@ -173,16 +181,64 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     let r1 = tokio::spawn(read_stream(stdout, sink.clone(), "stdout"));
     let r2 = tokio::spawn(read_stream(stderr, sink.clone(), "stderr"));
 
-    let status = child.wait().await?;
+    enum Outcome {
+        Exited(i32),
+        Killed,
+    }
+    let outcome = tokio::select! {
+        status = child.wait() => Outcome::Exited(status?.code().unwrap_or(-1)),
+        _ = tokio::time::sleep(timeout) => Outcome::Killed,
+        _ = wait_for_cancel(cancel_client, cancel_url) => Outcome::Killed,
+    };
+    let code: i32 = match outcome {
+        Outcome::Exited(c) => c,
+        Outcome::Killed => {
+            terminate_group(pid);
+            let status = child.wait().await?;
+            status.code().unwrap_or(-1)
+        }
+    };
     let _ = r1.await;
     let _ = r2.await;
     sink.flush().await;
     flusher.abort();
 
-    let code = status.code().unwrap_or(-1);
     tracing::info!(attempt_id = %assignment.attempt_id, exit_code = code, "attempt finished");
     report_complete(&client, &cfg.server, &assignment.attempt_id, code).await;
     Ok(())
+}
+
+/// Poll the control plane until cancellation is requested for this attempt.
+async fn wait_for_cancel(client: reqwest::Client, url: String) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(cs) = r.json::<CancelState>().await {
+                    if cs.cancel_requested {
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SIGTERM the whole process group, then SIGKILL after a 10s grace period.
+fn terminate_group(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    unsafe {
+        libc::killpg(pid as i32, libc::SIGTERM);
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(10));
+        unsafe {
+            libc::killpg(pid as i32, libc::SIGKILL);
+        }
+    });
 }
 
 async fn report_complete(client: &reqwest::Client, server: &str, attempt_id: &str, exit_code: i32) {

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use agentgrid_common::{
-    CompleteAttemptRequest, CreateTaskRequest, EventsQuery, IngestEventsRequest, PollRequest,
-    PollResponse, TaskView,
+    CancelState, CompleteAttemptRequest, CreateTaskRequest, EventsQuery, IngestEventsRequest,
+    PollRequest, PollResponse, TaskView,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -56,6 +56,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{id}/events", get(get_events))
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/node/poll", post(poll))
+        .route("/v1/tasks/{id}/cancel", post(cancel_task_handler))
+        .route("/v1/tasks/{id}/retry", post(retry_task_handler))
+        .route("/v1/node/attempts/{id}/cancel", get(attempt_cancel_handler))
         .route("/v1/node/attempts/{id}/events", post(ingest_events))
         .route("/v1/node/attempts/{id}/complete", post(complete_attempt))
         .with_state(state)
@@ -192,6 +195,48 @@ async fn poll(
             _ = tokio::time::sleep(remaining) => {
                 return (StatusCode::OK, Json(PollResponse { assignment: None }));
             }
+        }
+    }
+}
+
+async fn attempt_cancel_handler(
+    State(state): State<Arc<AppState>>,
+    Path(attempt_id): Path<String>,
+) -> Json<CancelState> {
+    let requested = state
+        .store
+        .attempt_cancel_requested(&attempt_id)
+        .await
+        .unwrap_or(false);
+    Json(CancelState {
+        cancel_requested: requested,
+    })
+}
+
+async fn cancel_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+) -> StatusCode {
+    match state.store.cancel_task(&task_id).await {
+        Ok(true) => StatusCode::OK,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("cancel_task failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+async fn retry_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+) -> StatusCode {
+    match state.store.retry_task(&task_id).await {
+        Ok(true) => StatusCode::OK,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("retry_task failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }
