@@ -359,12 +359,12 @@
 ### 5.1 Безопасность (раздел 13 спеки)
 
 - [ ] HTTPS: документированная установка за reverse proxy (Caddy/nginx) + поддержка собственного TLS в бинарнике (rustls) — выбрать и зафиксировать
-- [ ] Проверить: enrollment token одноразовый, TTL ≤ 10 минут, хранится только hash
-- [ ] Проверить: у каждой node уникальный credential, revoke действует немедленно
-- [ ] Daemon отказывается стартовать под root без явного `--allow-root`
+- [x] Проверить: enrollment token одноразовый, TTL ≤ 10 минут, хранится только hash
+- [x] Проверить: у каждой node уникальный credential, revoke действует немедленно
+- [x] Daemon отказывается стартовать под root без явного `--allow-root`
 - [ ] systemd unit: отдельный пользователь `agentgrid`, `ProtectSystem=strict`, `ReadWritePaths` только workspace/repository roots, `NoNewPrivileges=true`
-- [ ] Лимиты размеров: prompt (например 64 KB), event (1 MB), artifact (например 50 MB) — конфигурируемы, возвращают 413
-- [ ] Audit events на все действия пользователя и nodes (login, task create/cancel/retry, enroll, revoke, repo add)
+- [x] Лимиты размеров: prompt (например 64 KB), event (1 MB), artifact (например 50 MB) — конфигурируемы, возвращают 413
+- [x] Audit events на все действия пользователя и nodes (login, task create/cancel/retry, enroll, revoke, repo add)
 - [ ] Предупреждение в UI и документации: agent имеет права пользователя daemon, sandbox отсутствует в MVP
 - [ ] Базовый threat-review: пройтись по каждому endpoint — auth, валидация входа, лимиты
 

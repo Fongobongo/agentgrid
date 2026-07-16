@@ -17,7 +17,7 @@ use agentgrid_common::{
 };
 use axum::{
     body::Body,
-    extract::{Extension, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::{header, Request, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -47,6 +47,29 @@ pub struct AppState {
     /// Directory with the built web UI (Stage 4.3). Served as static files;
     /// `None` disables the UI.
     web_root: Option<std::path::PathBuf>,
+    /// Request size ceilings (Stage 5.1).
+    limits: Limits,
+}
+
+/// Request size ceilings (Stage 5.1). Overridable via env; defaults:
+/// prompt 64 KiB, event payload 1 MiB, artifact 50 MiB.
+struct Limits {
+    prompt: usize,
+    event: usize,
+    artifact: usize,
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// User identity established by [`require_user_auth`]; read by user handlers.
+#[derive(Clone)]
+struct AuthedUser {
+    username: String,
 }
 
 impl AppState {
@@ -84,11 +107,17 @@ impl AppState {
                     })
                 })
             });
+        let limits = Limits {
+            prompt: env_usize("AGENTGRID_MAX_PROMPT_KB", 64) * 1024,
+            event: env_usize("AGENTGRID_MAX_EVENT_KB", 1024) * 1024,
+            artifact: env_usize("AGENTGRID_MAX_ARTIFACT_MB", 50) * 1024 * 1024,
+        };
         Ok(Arc::new(Self {
             store,
             assignment_notify: Arc::new(Notify::new()),
             jwt_secret,
             web_root,
+            limits,
         }))
     }
 
@@ -153,6 +182,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/node/attempts/{id}/complete", post(complete_attempt))
         .route("/v1/node/attempts/{id}/artifacts", post(upload_artifact))
         .route("/v1/tasks/{id}/artifacts/{name}", get(get_artifact))
+        .layer(DefaultBodyLimit::max(state.limits.artifact))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_user_auth,
@@ -273,7 +303,7 @@ fn user_protected(path: &str) -> bool {
 /// [`require_node_auth`] and are skipped here.
 async fn require_user_auth(
     State(state): State<Arc<AppState>>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path().to_string();
@@ -285,15 +315,17 @@ async fn require_user_auth(
             .map(|c| c == 0)
             .unwrap_or(true);
         if !open {
-            let ok = req
+            match req
                 .headers()
                 .get(header::AUTHORIZATION)
                 .and_then(|h| h.to_str().ok())
                 .and_then(|h| h.strip_prefix("Bearer "))
                 .and_then(|t| state.verify_token(t))
-                .is_some();
-            if !ok {
-                return Err(StatusCode::UNAUTHORIZED);
+            {
+                Some(u) => {
+                    req.extensions_mut().insert(AuthedUser { username: u });
+                }
+                None => return Err(StatusCode::UNAUTHORIZED),
             }
         }
     }
@@ -325,6 +357,10 @@ async fn auth_setup(
         tracing::error!("issue_token failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    let _ = state
+        .store
+        .audit("user", Some(&req.username), "user.create", None, None)
+        .await;
     Ok((StatusCode::CREATED, Json(LoginResponse { token })))
 }
 
@@ -347,6 +383,10 @@ async fn auth_login(
         tracing::error!("issue_token failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    let _ = state
+        .store
+        .audit("user", Some(&req.username), "login", None, None)
+        .await;
     Ok(Json(LoginResponse { token }))
 }
 
@@ -408,29 +448,30 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
 
 async fn create_task(
     State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
     Json(req): Json<CreateTaskRequest>,
-) -> (StatusCode, Json<TaskView>) {
+) -> Result<(StatusCode, Json<TaskView>), StatusCode> {
+    if req.prompt.len() > state.limits.prompt {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
     match state.store.create_task(&req).await {
         Ok(view) => {
             state.assignment_notify.notify_waiters();
-            (StatusCode::CREATED, Json(view))
+            let _ = state
+                .store
+                .audit(
+                    "user",
+                    auth.as_ref().map(|e| e.0.username.as_str()),
+                    "task.create",
+                    Some(&view.id),
+                    None,
+                )
+                .await;
+            Ok((StatusCode::CREATED, Json(view)))
         }
         Err(e) => {
             tracing::error!("create_task failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(TaskView {
-                    id: String::new(),
-                    repository: String::new(),
-                    prompt: String::new(),
-                    adapter: String::new(),
-                    status: agentgrid_common::TaskStatus::Queued,
-                    created_at: String::new(),
-                    finished_at: None,
-                    assigned_attempt_id: None,
-                    validation_command: None,
-                }),
-            )
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }
@@ -543,10 +584,23 @@ async fn revoke_node(State(state): State<Arc<AppState>>, Path(id): Path<String>)
 
 async fn create_repository(
     State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
     Json(req): Json<CreateRepositoryRequest>,
 ) -> (StatusCode, Json<RepositoryView>) {
     match state.store.create_repository(&req).await {
-        Ok(v) => (StatusCode::CREATED, Json(v)),
+        Ok(v) => {
+            let _ = state
+                .store
+                .audit(
+                    "user",
+                    auth.as_ref().map(|e| e.0.username.as_str()),
+                    "repo.add",
+                    Some(&v.id),
+                    None,
+                )
+                .await;
+            (StatusCode::CREATED, Json(v))
+        }
         Err(e) => {
             tracing::error!("create_repository failed: {e}");
             (
@@ -593,6 +647,9 @@ async fn upload_artifact(
     Path(attempt_id): Path<String>,
     Json(req): Json<UploadArtifactRequest>,
 ) -> StatusCode {
+    if req.content.len() > state.limits.artifact {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
     match state.store.save_artifact(&attempt_id, &req).await {
         Ok(()) => StatusCode::OK,
         Err(e) => {
@@ -713,10 +770,23 @@ async fn attempt_cancel_handler(
 
 async fn cancel_task_handler(
     State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
     Path(task_id): Path<String>,
 ) -> StatusCode {
     match state.store.cancel_task(&task_id).await {
-        Ok(true) => StatusCode::OK,
+        Ok(true) => {
+            let _ = state
+                .store
+                .audit(
+                    "user",
+                    auth.as_ref().map(|e| e.0.username.as_str()),
+                    "task.cancel",
+                    Some(&task_id),
+                    None,
+                )
+                .await;
+            StatusCode::OK
+        }
         Ok(false) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("cancel_task failed: {e}");
@@ -727,10 +797,23 @@ async fn cancel_task_handler(
 
 async fn retry_task_handler(
     State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
     Path(task_id): Path<String>,
 ) -> StatusCode {
     match state.store.retry_task(&task_id).await {
-        Ok(true) => StatusCode::OK,
+        Ok(true) => {
+            let _ = state
+                .store
+                .audit(
+                    "user",
+                    auth.as_ref().map(|e| e.0.username.as_str()),
+                    "task.retry",
+                    Some(&task_id),
+                    None,
+                )
+                .await;
+            StatusCode::OK
+        }
         Ok(false) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("retry_task failed: {e}");
@@ -744,6 +827,11 @@ async fn ingest_events(
     Path(attempt_id): Path<String>,
     Json(req): Json<IngestEventsRequest>,
 ) -> StatusCode {
+    for e in &req.events {
+        if e.payload.to_string().len() > state.limits.event {
+            return StatusCode::PAYLOAD_TOO_LARGE;
+        }
+    }
     match state.store.ingest_events(&attempt_id, &req).await {
         Ok(true) => StatusCode::OK,
         Ok(false) => StatusCode::NOT_FOUND,

@@ -732,6 +732,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Stage 5.1: refuse to run as root unless explicitly allowed.
+    if unsafe { libc::getuid() } == 0 && std::env::var_os("AGENTGRID_ALLOW_ROOT").is_none() {
+        anyhow::bail!("refusing to run as root; set AGENTGRID_ALLOW_ROOT=1 to override");
+    }
+
     let cfg = config_from_env();
     let probe = probe_adapter(&cfg.adapter).await;
     if probe.found {

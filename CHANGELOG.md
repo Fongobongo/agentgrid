@@ -83,6 +83,18 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - `token create`, `repo add`, `task logs --follow`, `task cancel`/`retry`, `login` already present; `node list` renders an aligned table.
 - Deferred: `node install` (systemd unit + enroll) — lands with packaging in Stage 5.3.
 
+### Added (Stage 5.1 — security)
+- Request size limits (trust-boundary input validation), overridable via env, returning 413:
+  `AGENTGRID_MAX_PROMPT_KB` (64), `AGENTGRID_MAX_EVENT_KB` (1024), `AGENTGRID_MAX_ARTIFACT_MB` (50).
+  A global `DefaultBodyLimit` caps request bodies at the artifact ceiling; the prompt and
+  per-event payload ceilings are enforced in the handlers.
+- Node daemon refuses to start as uid 0 unless `AGENTGRID_ALLOW_ROOT=1` is set.
+- Audit events on all user actions (login, user.create, task.create/cancel/retry, repo.add)
+  plus existing node enroll/revoke. `AuthedUser` is attached by the user-auth middleware
+  so handlers can record the acting username.
+- Enrollment token (one-time, TTL ≤ 10 min, hash-only) and per-node unique credential with
+  immediate revoke already landed in Stage 2.3; marked verified here.
+
 ### Added (Stage 4.3 — web UI)
 - React + TypeScript single-page UI (Vite) served as static files by the control plane
   (`web/dist`, overridable via `AGENTGRID_WEB_ROOT`); `index.html` fallback for client routing.

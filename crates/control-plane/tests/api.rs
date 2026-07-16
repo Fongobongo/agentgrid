@@ -778,3 +778,25 @@ async fn eligibility_requested_node() {
     assert!(elig2.nodes[0].eligible);
     assert!(elig2.no_eligible_nodes.is_empty());
 }
+
+/// Stage 5.1: prompt exceeding the size limit is rejected with 413.
+#[tokio::test]
+async fn oversized_prompt_returns_413() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    // Default prompt limit is 64 KiB; send ~200 KiB.
+    let req = CreateTaskRequest {
+        prompt: "x".repeat(200 * 1024),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
