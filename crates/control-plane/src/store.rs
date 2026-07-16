@@ -12,6 +12,7 @@ use agentgrid_common::{
     CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest, EnrollRequest,
     EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, NodeStatus, NodeView,
     PollRequest, RepositoryView, TaskEvent, TaskStatus, TaskTransition, TaskView,
+    UploadArtifactRequest,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -25,6 +26,7 @@ const ASSIGNMENT_LEASE_SECS: i64 = 30;
 
 pub struct Store {
     pool: SqlitePool,
+    artifact_root: std::path::PathBuf,
 }
 
 fn now_iso() -> String {
@@ -97,11 +99,68 @@ impl Store {
             .connect_with(opts)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
-        Ok(Self { pool })
+        let artifact_root = std::path::Path::new(db_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("artifacts");
+        Ok(Self {
+            pool,
+            artifact_root,
+        })
     }
 
     pub async fn health_check(&self) -> bool {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+    }
+
+    // ----- artifacts (Stage 2.8) -----
+
+    /// Persist an artifact's bytes on the control-plane filesystem and record
+    /// its metadata. `content` is treated as UTF-8 text (patches/logs).
+    pub async fn save_artifact(&self, attempt_id: &str, req: &UploadArtifactRequest) -> Result<()> {
+        let dir = self.artifact_root.join(attempt_id);
+        tokio::fs::create_dir_all(&dir).await?;
+        let path = dir.join(&req.name);
+        tokio::fs::write(&path, &req.content).await?;
+        let size = req.content.len() as i64;
+        let id = Uuid::new_v4().to_string();
+        let now = now_iso();
+        sqlx::query(
+            "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(attempt_id, name) DO UPDATE SET size_bytes = excluded.size_bytes, stored_at = excluded.stored_at",
+        )
+        .bind(&id)
+        .bind(attempt_id)
+        .bind(&req.name)
+        .bind(size)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Resolve the latest attempt id for a task (artifacts are per-attempt).
+    pub async fn latest_attempt_id(&self, task_id: &str) -> Result<Option<String>> {
+        let row =
+            sqlx::query("SELECT id FROM attempts WHERE task_id = ? ORDER BY number DESC LIMIT 1")
+                .bind(task_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|r| r.try_get::<String, _>("id")).transpose()?)
+    }
+
+    /// Read a stored artifact's content by task id + name (latest attempt).
+    pub async fn read_artifact(&self, task_id: &str, name: &str) -> Result<Option<String>> {
+        let Some(attempt_id) = self.latest_attempt_id(task_id).await? else {
+            return Ok(None);
+        };
+        let path = self.artifact_root.join(&attempt_id).join(name);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     // ----- enrollment + node auth (Stage 2.3) -----

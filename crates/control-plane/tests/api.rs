@@ -7,7 +7,7 @@ use agentgrid_common::{
     Assignment, CancelState, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest,
     EnrollRequest, EnrollResponse, EnrollTokenResponse, EventType, HeartbeatRequest, IncomingEvent,
     IngestEventsRequest, NodeStatus, PollRequest, PollResponse, RepositoryView, TaskStatus,
-    TaskView,
+    TaskView, UploadArtifactRequest,
 };
 use agentgrid_control_plane::{build_router, AppState};
 use axum::body::{to_bytes, Body};
@@ -452,4 +452,60 @@ async fn repository_create_and_list() {
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0].name, "demo");
+}
+
+#[tokio::test]
+async fn artifact_upload_and_read() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-art", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+            })
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let art = UploadArtifactRequest {
+        name: "changes.patch".into(),
+        content: "diff --git a/x b/x".into(),
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
+            serde_json::to_string(&art).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/tasks/{}/artifacts/changes.patch",
+                    assign.task_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), b"diff --git a/x b/x".as_slice());
 }

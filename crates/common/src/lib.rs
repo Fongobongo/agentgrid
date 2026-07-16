@@ -268,6 +268,13 @@ pub struct RepositoryView {
     pub created_at: String,
 }
 
+/// Upload a text artifact (e.g. `changes.patch`) from a node to the control plane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UploadArtifactRequest {
+    pub name: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventsQuery {
     #[serde(default)]

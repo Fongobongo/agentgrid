@@ -12,7 +12,7 @@ use std::time::Instant;
 use agentgrid_common::{
     CancelState, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest, EnrollRequest,
     EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest, IngestEventsRequest,
-    PollRequest, PollResponse, RepositoryView, TaskView,
+    PollRequest, PollResponse, RepositoryView, TaskView, UploadArtifactRequest,
 };
 use axum::{
     body::Body,
@@ -73,6 +73,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/node/attempts/{id}/cancel", get(attempt_cancel_handler))
         .route("/v1/node/attempts/{id}/events", post(ingest_events))
         .route("/v1/node/attempts/{id}/complete", post(complete_attempt))
+        .route("/v1/node/attempts/{id}/artifacts", post(upload_artifact))
+        .route("/v1/tasks/{id}/artifacts/{name}", get(get_artifact))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_node_auth,
@@ -273,6 +275,34 @@ async fn list_repositories(State(state): State<Arc<AppState>>) -> Json<Vec<Repos
         Err(e) => {
             tracing::error!("list_repositories failed: {e}");
             Json(vec![])
+        }
+    }
+}
+
+async fn get_artifact(
+    State(state): State<Arc<AppState>>,
+    Path((task_id, name)): Path<(String, String)>,
+) -> Result<String, StatusCode> {
+    match state.store.read_artifact(&task_id, &name).await {
+        Ok(Some(s)) => Ok(s),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("read_artifact failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn upload_artifact(
+    State(state): State<Arc<AppState>>,
+    Path(attempt_id): Path<String>,
+    Json(req): Json<UploadArtifactRequest>,
+) -> StatusCode {
+    match state.store.save_artifact(&attempt_id, &req).await {
+        Ok(()) => StatusCode::OK,
+        Err(e) => {
+            tracing::error!("save_artifact failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }

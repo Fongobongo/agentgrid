@@ -32,6 +32,15 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - End-to-end on one machine: `task run` → mock adapter writes file → `succeeded`, logs stream.
 - Control-plane restart on the same SQLite file preserves queued tasks (WAL).
 
+### Added (Stage 2.8 — artifacts)
+- `POST /v1/node/attempts/{id}/artifacts` (node auth) stores a text artifact on the
+  control-plane filesystem under `artifact_root/<attempt_id>/<name>` and records
+  metadata (idempotent per name).
+- `GET /v1/tasks/{id}/artifacts/{name}` serves the latest attempt's artifact.
+- Node daemon uploads `changes.patch` after finalizing a git-backed attempt.
+- Schema migration `0005`: `artifacts` table.
+- Test: artifact upload (node auth) + read by task id.
+
 ### Added (Stage 2.5 — repositories + git worktrees)
 - `POST /v1/repositories` / `GET /v1/repositories`: register a repo (name, git_url,
   default_branch, optional validation_command) and list them.

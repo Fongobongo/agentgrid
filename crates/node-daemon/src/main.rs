@@ -13,6 +13,7 @@ use agentgrid_adapters::{to_event_type, AdapterEvent};
 use agentgrid_common::{
     Assignment, CancelState, CompleteAttemptRequest, EnrollRequest, EnrollResponse, EventType,
     HeartbeatRequest, IncomingEvent, IngestEventsRequest, NodeStatus, PollRequest, PollResponse,
+    UploadArtifactRequest,
 };
 use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
@@ -256,8 +257,28 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     flusher.abort();
 
     let node_name = cfg.node_name.clone();
+    let patch_path = ws.path.join("changes.patch");
     let commit_sha =
         tokio::task::spawn_blocking(move || git::finalize_workspace(&ws, &node_name)).await??;
+
+    // Upload produced artifacts (changes.patch for git-backed tasks).
+    if let Ok(content) = tokio::fs::read_to_string(&patch_path).await {
+        let req = UploadArtifactRequest {
+            name: "changes.patch".into(),
+            content,
+        };
+        if let Err(e) = client
+            .post(format!(
+                "{}/v1/node/attempts/{}/artifacts",
+                cfg.server, assignment.attempt_id
+            ))
+            .json(&req)
+            .send()
+            .await
+        {
+            tracing::warn!("artifact upload failed: {e}");
+        }
+    }
 
     tracing::info!(attempt_id = %assignment.attempt_id, exit_code = code, "attempt finished");
     report_complete(
