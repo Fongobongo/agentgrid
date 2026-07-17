@@ -1,0 +1,27 @@
+# Multi-stage build for the agentgrid node daemon + mock adapter.
+# Stage 5.3 packaging. Bundled SQLite + rustls; no system OpenSSL/SQLite.
+# Runtime needs git + sh (bash) for worktree prep and validation commands.
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+COPY . .
+RUN cargo build --release --bins -p agentgrid-node-daemon -p agentgrid-adapters
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git bash \
+    && rm -rf /var/lib/apt/lists/*
+# The agentgrid user runs the daemon (root refused unless AGENTGRID_ALLOW_ROOT=1).
+RUN useradd -r -m -d /var/lib/agentgrid agentgrid \
+    && mkdir -p /var/lib/agentgrid/workspace /var/lib/agentgrid/repos /var/lib/agentgrid/data \
+    && chown -R agentgrid:agentgrid /var/lib/agentgrid
+WORKDIR /var/lib/agentgrid
+COPY --from=builder /src/target/release/agentgrid-node-daemon /usr/local/bin/
+COPY --from=builder /src/target/release/adapter-mock /usr/local/bin/
+COPY --from=builder /src/target/release/adapter-claude /usr/local/bin/
+ENV AGENTGRID_DATA_DIR=/var/lib/agentgrid/data \
+    AGENTGRID_WORKSPACE_ROOT=/var/lib/agentgrid/workspace \
+    AGENTGRID_REPOSITORY_ROOT=/var/lib/agentgrid/repos \
+    AGENTGRID_ADAPTER=adapter-mock \
+    AGENTGRID_ADAPTERS=mock
+USER agentgrid
+ENTRYPOINT ["agentgrid-node-daemon"]

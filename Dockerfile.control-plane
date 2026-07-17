@@ -1,0 +1,33 @@
+# Multi-stage build for the agentgrid control plane + CLI + web UI.
+# Stage 5.3 packaging. Bundled SQLite + rustls; no system OpenSSL/SQLite.
+FROM rust:1-bookworm AS builder
+# Node is needed only to build the web UI static bundle.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+# Build the control plane and CLI binaries (release profile tuned in Cargo.toml).
+RUN cargo build --release --bins -p agentgrid-control-plane -p agentgrid-cli
+# Build the web UI static bundle.
+RUN cd web && npm ci && npm run build
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# Control plane data: SQLite DB, artifacts, web root.
+RUN useradd -r -m -d /var/lib/agentgrid agentgrid \
+    && mkdir -p /var/lib/agentgrid /var/lib/agentgrid/web \
+    && chown -R agentgrid:agentgrid /var/lib/agentgrid
+WORKDIR /var/lib/agentgrid
+COPY --from=builder /src/target/release/agentgrid-control-plane /usr/local/bin/
+COPY --from=builder /src/target/release/ag /usr/local/bin/
+COPY --from=builder /src/web/dist /var/lib/agentgrid/web
+ENV AGENTGRID_LISTEN=0.0.0.0:7800 \
+    AGENTGRID_DB=/var/lib/agentgrid/control-plane.db \
+    AGENTGRID_ARTIFACT_ROOT=/var/lib/agentgrid/artifacts \
+    AGENTGRID_WEB_ROOT=/var/lib/agentgrid/web
+USER agentgrid
+EXPOSE 7800
+ENTRYPOINT ["agentgrid-control-plane"]

@@ -1,0 +1,17 @@
+# Build context exclusions for agentgrid Docker images.
+# Without these, `docker build` ships target/ and web/node_modules (GBs).
+target
+**/target
+web/node_modules
+**/node_modules
+.git
+**/.git
+deploy/compose/.env
+*.db
+*.db-*
+agentgrid-data
+agentgrid-workspace
+agentgrid-repos
+dist
+**/dist
+.DS_Store
