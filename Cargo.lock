@@ -48,6 +48,7 @@ dependencies = [
  "chrono",
  "futures-core",
  "jsonwebtoken",
+ "libc",
  "libsqlite3-sys",
  "password-hash",
  "rand 0.8.7",
