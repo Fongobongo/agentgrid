@@ -366,10 +366,14 @@ impl Store {
         .execute(&self.pool)
         .await?
         .rows_affected();
+        if affected == 1 && status == NodeStatus::Offline {
+            lose_node_attempts(&self.pool, node_id).await?;
+        }
         Ok(affected == 1)
     }
 
-    /// Revoke a node: reject its credential immediately, mark `revoked`.
+    /// Revoke a node: reject its credential immediately, mark `revoked`, and
+    /// lose any in-flight attempts (Stage 1.2).
     pub async fn revoke_node(&self, node_id: &str) -> Result<bool> {
         let now = now_iso();
         let affected =
@@ -382,6 +386,27 @@ impl Store {
         if affected == 1 {
             self.audit("node", Some(node_id), "revoke", None, None)
                 .await?;
+            lose_node_attempts(&self.pool, node_id).await?;
+        }
+        Ok(affected == 1)
+    }
+
+    /// Mark a node offline (unless already revoked) and lose its in-flight
+    /// attempts. Triggered by stale-heartbeat maintenance, a self-reported
+    /// offline status, or an explicit admin action (Stage 1.2).
+    pub async fn mark_node_offline(&self, node_id: &str) -> Result<bool> {
+        let now = now_iso();
+        let affected = sqlx::query(
+            "UPDATE nodes SET status = 'offline', last_heartbeat_at = ? \
+             WHERE id = ? AND status != 'revoked'",
+        )
+        .bind(&now)
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected == 1 {
+            lose_node_attempts(&self.pool, node_id).await?;
         }
         Ok(affected == 1)
     }
@@ -857,6 +882,26 @@ impl Store {
         let node_id: String = attempt.try_get("node_id")?;
         let attempt_status: String = attempt.try_get("status")?;
         let cancel_requested: i64 = attempt.try_get("cancel_requested")?;
+        let as_enum = from_snake::<AttemptStatus>(&attempt_status);
+
+        // Terminal/lost attempts cannot be completed again. A node that comes
+        // back and reports a completion for an attempt we already marked `lost`
+        // (node died) must not corrupt the failed task status.
+        if let Some(s) = as_enum {
+            if matches!(
+                s,
+                AttemptStatus::Succeeded
+                    | AttemptStatus::Failed
+                    | AttemptStatus::Cancelled
+                    | AttemptStatus::Lost
+            ) {
+                let _ = tx.rollback().await;
+                // Already terminal: a node reporting a completion for an attempt
+                // we already finalized (e.g. marked `lost` after it died) gets an
+                // idempotent ack without corrupting the task status.
+                return Ok(true);
+            }
+        }
 
         // Success requires a clean exit AND no distinct failure category. The
         // node reports validation/timeout failures via `error_code` even when the
@@ -873,7 +918,6 @@ impl Store {
             TaskTransition::Fail
         };
 
-        let as_enum = from_snake::<AttemptStatus>(&attempt_status);
         let attempt_target: AttemptStatus = as_enum
             .and_then(|s| next_attempt_status(s, at).ok())
             .unwrap_or(if success {
@@ -1076,16 +1120,68 @@ async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<()> {
     Ok(())
 }
 
-async fn mark_offline_nodes(pool: &SqlitePool, now: &str) -> Result<()> {
-    // last_heartbeat_at older than 30s and still 'online' -> offline.
+async fn mark_offline_nodes(pool: &SqlitePool, _now: &str) -> Result<()> {
+    // last_heartbeat_at older than 30s and still 'online' -> offline, and any
+    // in-flight attempt on that node is lost (Stage 1.2).
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-    sqlx::query(
-        "UPDATE nodes SET status = 'offline' WHERE status = 'online' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)",
+    let rows = sqlx::query(
+        "SELECT id FROM nodes WHERE status = 'online' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)",
     )
     .bind(&cutoff)
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
-    let _ = now;
+    for row in &rows {
+        let id: String = row.try_get("id")?;
+        sqlx::query("UPDATE nodes SET status = 'offline' WHERE id = ?")
+            .bind(&id)
+            .execute(pool)
+            .await?;
+        lose_node_attempts(pool, &id).await?;
+    }
+    Ok(())
+}
+
+/// Atomically mark a node's non-terminal attempts as `lost`, free its
+/// concurrency capacity, and fail the owning tasks with `error_code =
+/// node_lost`. Idempotent: a node with no in-flight attempts is a no-op.
+async fn lose_node_attempts(pool: &SqlitePool, node_id: &str) -> Result<()> {
+    let now = now_iso();
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        "SELECT id, task_id FROM attempts WHERE node_id = ? AND status IN ('assigned', 'running', 'validating')",
+    )
+    .bind(node_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if rows.is_empty() {
+        let _ = tx.rollback().await;
+        return Ok(());
+    }
+    let count = rows.len() as i64;
+    for r in &rows {
+        let aid: String = r.try_get("id")?;
+        let tid: String = r.try_get("task_id")?;
+        sqlx::query("UPDATE attempts SET status = 'lost', finished_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&aid)
+            .execute(&mut *tx)
+            .await?;
+        // Fail the task only if it has not already reached a terminal state.
+        sqlx::query(
+            "UPDATE tasks SET status = 'failed', error_code = 'node_lost', finished_at = ? \
+             WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'cancelled')",
+        )
+        .bind(&now)
+        .bind(&tid)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("UPDATE nodes SET active_attempts = MAX(0, active_attempts - ?) WHERE id = ?")
+        .bind(count)
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 

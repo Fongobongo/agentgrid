@@ -194,6 +194,22 @@ async fn show_status(app: &Router, task_id: &str) -> TaskStatus {
     tv.status
 }
 
+/// Full task view (status + error_code) for assertions.
+async fn show_task_view(app: &Router, task_id: &str) -> TaskView {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/tasks/{task_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+}
+
 async fn task_eligibility(app: &Router, task_id: &str) -> TaskEligibility {
     let resp = app
         .clone()
@@ -906,4 +922,179 @@ async fn oversized_prompt_returns_413() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn node_offline_loses_attempt_then_retry_succeeds() {
+    // Stage 1.2: a node going offline with an in-flight attempt must lose it
+    // (attempt=lost, task=failed/node_lost, capacity freed) and the task must
+    // be retryable once the node is back online.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-o", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+
+    // Node reports offline -> its in-flight attempt is lost.
+    let hb = HeartbeatRequest {
+        status: Some(NodeStatus::Offline),
+        name: "node-o".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        agent_version: "test".into(),
+        load_avg: 0.0,
+        free_disk_mb: 1000,
+        active_attempts: 1,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            serde_json::to_string(&hb).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let tv = show_task_view(&app, &assign.task_id).await;
+    assert_eq!(tv.status, TaskStatus::Failed);
+    assert_eq!(tv.error_code.as_deref(), Some("node_lost"));
+
+    // Capacity freed: the node no longer accounts for the lost attempt.
+    let nodes: serde_json::Value = serde_json::from_slice(
+        &to_bytes(
+            app.clone()
+                .oneshot(get_auth("/v1/nodes", &cred))
+                .await
+                .unwrap()
+                .into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    let na = nodes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == node_id)
+        .unwrap()["active_attempts"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(na, 0);
+
+    // Node comes back online.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            serde_json::to_string(&HeartbeatRequest {
+                status: Some(NodeStatus::Online),
+                ..hb
+            })
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Retry -> re-queue -> re-assign to the recovered node -> succeed.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/tasks/{}/retry", assign.task_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let assign2 = loop {
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/node/poll",
+                serde_json::to_string(&PollRequest {
+                    node_id: node_id.clone(),
+                    name: "node-o".into(),
+                    adapters: vec!["mock".into()],
+                    repositories: vec!["*".into()],
+                    max_concurrency: 2,
+                })
+                .unwrap(),
+                &cred,
+            ))
+            .await
+            .unwrap();
+        let pr: PollResponse =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        if let Some(a) = pr.assignment {
+            break a;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", assign2.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+            })
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn complete_on_lost_attempt_is_idempotent() {
+    // Stage 1.2: a node that comes back and reports a completion for an attempt
+    // we already marked `lost` must not corrupt the failed task status.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-l", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+
+    // Node drops offline -> attempt lost, task failed/node_lost.
+    state.store.mark_node_offline(&node_id).await.unwrap();
+    let tv = show_task_view(&app, &assign.task_id).await;
+    assert_eq!(tv.status, TaskStatus::Failed);
+    assert_eq!(tv.error_code.as_deref(), Some("node_lost"));
+
+    // Node returns and reports a (late) completion for the lost attempt.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+            })
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    // Idempotent ack: terminal/lost attempt is not re-completed.
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Task status must remain failed/node_lost (no corruption).
+    let tv = show_task_view(&app, &assign.task_id).await;
+    assert_eq!(tv.status, TaskStatus::Failed);
+    assert_eq!(tv.error_code.as_deref(), Some("node_lost"));
 }
