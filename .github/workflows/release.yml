@@ -1,0 +1,73 @@
+name: Release
+
+# Build static release binaries for every supported target. Runs on version
+# tags (v*) and manually. x86_64 + aarch64 musl are the primary artifacts;
+# x86_64-gnu is the fallback (AGENTS.md release-target matrix).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install zig (for musl cross-linking)
+        uses: mlugg/setup-zig@v1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: build release binaries
+        run: cargo zigbuild --release --target ${{ matrix.target }} \
+          -p agentgrid-control-plane -p agentgrid-cli \
+          -p agentgrid-node-daemon -p agentgrid-adapters
+
+      - name: binary size guardrail
+        run: |
+          find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -executable -print0 \
+            | xargs -0 du -h
+          # Fail if any binary exceeds 60 MiB (catches regression bloat).
+          find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -executable -print0 \
+            | xargs -0 -I{} sh -c 'test "$(stat -c%s "{}")" -le 62914560'
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentgrid-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/agentgrid-control-plane
+            target/${{ matrix.target }}/release/ag
+            target/${{ matrix.target }}/release/agentgrid-node-daemon
+            target/${{ matrix.target }}/release/adapter-mock
+            target/${{ matrix.target }}/release/adapter-claude
+            web/dist
+          if-no-files-found: warn

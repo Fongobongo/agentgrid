@@ -142,18 +142,6 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         repositories: vec!["*".into()],
         max_concurrency: 2,
     };
-    let app2 = app.clone();
-    let cred2 = cred.to_string();
-    let h = tokio::spawn(async move {
-        app2.oneshot(post_auth(
-            "/v1/node/poll",
-            serde_json::to_string(&poll_req).unwrap(),
-            &cred2,
-        ))
-        .await
-        .unwrap()
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let req = CreateTaskRequest {
         prompt: prompt.into(),
         repository: "demo".into(),
@@ -168,10 +156,25 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let resp = h.await.unwrap();
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let pr: PollResponse = serde_json::from_slice(&body).unwrap();
-    pr.assignment.expect("assignment")
+    // Long-poll until the queued task is assigned, mirroring the node daemon.
+    for _ in 0..50 {
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/node/poll",
+                serde_json::to_string(&poll_req).unwrap(),
+                cred,
+            ))
+            .await
+            .unwrap();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let pr: PollResponse = serde_json::from_slice(&body).unwrap();
+        if let Some(a) = pr.assignment {
+            return a;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("task was never assigned to the node");
 }
 
 async fn show_status(app: &Router, task_id: &str) -> TaskStatus {

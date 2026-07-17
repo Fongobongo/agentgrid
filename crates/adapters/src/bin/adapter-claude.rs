@@ -190,4 +190,45 @@ mod tests {
         assert_eq!(types(&evs), vec!["result"]);
         assert!(err);
     }
+
+    // Real-adapter smoke test: requires the `claude` CLI and ANTHROPIC_API_KEY.
+    // Ignored by default; run manually or in nightly CI (spec: real-agent tests
+    // need keys, so they are `#[ignore]`).
+    #[test]
+    #[ignore = "needs claude CLI + ANTHROPIC_API_KEY"]
+    fn real_claude_emits_events() {
+        let bin = std::env::var("AGENTGRID_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+        if std::env::var("ANTHROPIC_API_KEY").is_err() {
+            eprintln!("ANTHROPIC_API_KEY unset; skipping");
+            return;
+        }
+        let child = match Command::new(&bin)
+            .arg("-p")
+            .arg("reply with exactly the word: ok")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cannot spawn {bin}: {e}; skipping");
+                return;
+            }
+        };
+        let mut saw_error = false;
+        let mut all = Vec::new();
+        let reader = BufReader::new(child.stdout.unwrap());
+        for line in reader.lines().map_while(Result::ok) {
+            all.extend(translate(&line, &mut saw_error));
+        }
+        assert!(!all.is_empty(), "claude produced no translatable events");
+        assert!(
+            all.iter()
+                .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("result")),
+            "claude stream should end with a result event"
+        );
+    }
 }
