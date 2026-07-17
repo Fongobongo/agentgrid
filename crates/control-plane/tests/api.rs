@@ -924,6 +924,139 @@ async fn oversized_prompt_returns_413() {
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
+/// Create a queued task with the given adapter (and optional pinned node).
+async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) -> String {
+    let req = CreateTaskRequest {
+        prompt: "do thing".into(),
+        repository: "demo".into(),
+        adapter: adapter.into(),
+        requested_node_id: requested_node.map(|s| s.into()),
+        timeout_secs: None,
+        validation_command: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    serde_json::from_slice::<TaskView>(&to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn scheduler_skips_incompatible_head_of_line() {
+    // Stage 1.4: an older queued task the node cannot run (wrong adapter) must
+    // not block a newer compatible one.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (claude_node, _cc) =
+        enroll(&app, "n-claude", vec!["claude".into()], vec!["*".into()]).await;
+    let (mock_node, mock_cred) =
+        enroll(&app, "n-mock", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Older queued task needs claude; a newer one needs mock.
+    let claude_task = create_task(&app, "claude", None).await;
+    let mock_task = create_task(&app, "mock", None).await;
+
+    // mock node polls: must skip the claude head-of-line and take the mock task.
+    let mut got = None;
+    for _ in 0..50 {
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/node/poll",
+                serde_json::to_string(&PollRequest {
+                    node_id: mock_node.clone(),
+                    name: "n-mock".into(),
+                    adapters: vec!["mock".into()],
+                    repositories: vec!["*".into()],
+                    max_concurrency: 2,
+                })
+                .unwrap(),
+                &mock_cred,
+            ))
+            .await
+            .unwrap();
+        let pr: PollResponse =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        if let Some(a) = pr.assignment {
+            got = Some(a);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let got = got.expect("mock node got no assignment");
+    assert_eq!(got.task_id, mock_task);
+    assert_ne!(got.task_id, claude_task);
+}
+
+#[tokio::test]
+async fn scheduler_respects_requested_node() {
+    // Stage 1.4: a task pinned to one node must not be assigned to another.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_a, cred_a) = enroll(&app, "n-a", vec!["mock".into()], vec!["*".into()]).await;
+    let (node_b, cred_b) = enroll(&app, "n-b", vec!["mock".into()], vec!["*".into()]).await;
+
+    let pinned = create_task(&app, "mock", Some(&node_a)).await;
+
+    // node_b polls: must NOT get the pinned task.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/poll",
+            serde_json::to_string(&PollRequest {
+                node_id: node_b.clone(),
+                name: "n-b".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 2,
+            })
+            .unwrap(),
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    let pr: PollResponse =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        pr.assignment.is_none(),
+        "pinned task leaked to non-requested node"
+    );
+
+    // node_a polls: gets it.
+    let mut got = None;
+    for _ in 0..50 {
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/node/poll",
+                serde_json::to_string(&PollRequest {
+                    node_id: node_a.clone(),
+                    name: "n-a".into(),
+                    adapters: vec!["mock".into()],
+                    repositories: vec!["*".into()],
+                    max_concurrency: 2,
+                })
+                .unwrap(),
+                &cred_a,
+            ))
+            .await
+            .unwrap();
+        let pr: PollResponse =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        if let Some(a) = pr.assignment {
+            got = Some(a);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let got = got.expect("requested node got no assignment");
+    assert_eq!(got.task_id, pinned);
+}
+
 #[tokio::test]
 async fn node_offline_loses_attempt_then_retry_succeeds() {
     // Stage 1.2: a node going offline with an in-flight attempt must lose it

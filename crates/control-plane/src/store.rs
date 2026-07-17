@@ -642,65 +642,61 @@ impl Store {
     /// Atomic, race-free assignment of one queued task to `node_id`.
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
         let mut tx = self.pool.begin().await?;
-        let cand = sqlx::query(
+        let cands = sqlx::query(
             "SELECT id, prompt, adapter, repository, timeout_secs, validation_command FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
-             ORDER BY created_at ASC LIMIT 1",
+             ORDER BY created_at ASC",
         )
         .bind(node_id)
-        .fetch_optional(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
 
-        let Some(c) = cand else {
-            let _ = tx.rollback().await;
-            return Ok(None);
-        };
-        let task_id: String = c.try_get("id")?;
-        let prompt: String = c.try_get("prompt")?;
-        let adapter: String = c.try_get("adapter")?;
-        let repository: String = c.try_get("repository")?;
-        let timeout_secs: i64 = c.try_get("timeout_secs")?;
-        let task_validation: Option<String> = c.try_get("validation_command")?;
+        for c in &cands {
+            let task_id: String = c.try_get("id")?;
+            let prompt: String = c.try_get("prompt")?;
+            let adapter: String = c.try_get("adapter")?;
+            let repository: String = c.try_get("repository")?;
+            let timeout_secs: i64 = c.try_get("timeout_secs")?;
+            let task_validation: Option<String> = c.try_get("validation_command")?;
 
-        // Resolve repository git info (absent for plain-dir tasks).
-        let repo = sqlx::query(
+            // Resolve repository git info (absent for plain-dir tasks).
+            let repo = sqlx::query(
             "SELECT git_url, default_branch, validation_command FROM repositories WHERE name = ?",
         )
         .bind(&repository)
         .fetch_optional(&mut *tx)
         .await?;
-        let (git_url, default_branch, validation_command) = match repo {
-            Some(r) => (
-                r.try_get::<String, _>("git_url")?,
-                r.try_get::<String, _>("default_branch")?,
-                r.try_get::<Option<String>, _>("validation_command")?,
-            ),
-            None => (String::new(), String::new(), None),
-        };
+            let (git_url, default_branch, validation_command) = match repo {
+                Some(r) => (
+                    r.try_get::<String, _>("git_url")?,
+                    r.try_get::<String, _>("default_branch")?,
+                    r.try_get::<Option<String>, _>("validation_command")?,
+                ),
+                None => (String::new(), String::new(), None),
+            };
 
-        let node = sqlx::query(
+            let node = sqlx::query(
             "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(node) = node else {
-            let _ = tx.rollback().await;
-            return Ok(None);
-        };
-        let nv = row_to_node_view(&node);
-        if !node_ineligibility(&nv, &repository, &adapter).is_empty() {
-            let _ = tx.rollback().await;
-            return Ok(None);
-        }
+            let Some(node) = node else {
+                let _ = tx.rollback().await;
+                return Ok(None);
+            };
+            let nv = row_to_node_view(&node);
+            if !node_ineligibility(&nv, &repository, &adapter).is_empty() {
+                continue;
+            }
 
-        let attempt_id = Uuid::new_v4().to_string();
-        let number = self.attempt_count(&mut tx, &task_id).await? + 1;
-        let lease = iso_plus_secs(ASSIGNMENT_LEASE_SECS);
-        let now = now_iso();
+            let attempt_id = Uuid::new_v4().to_string();
+            let number = self.attempt_count(&mut tx, &task_id).await? + 1;
+            let lease = iso_plus_secs(ASSIGNMENT_LEASE_SECS);
+            let now = now_iso();
 
-        let affected = sqlx::query(
+            let affected = sqlx::query(
             "UPDATE tasks SET status = 'assigned', assigned_attempt_id = ? WHERE id = ? AND status = 'queued'",
         )
         .bind(&attempt_id)
@@ -708,11 +704,11 @@ impl Store {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        if affected != 1 {
-            let _ = tx.rollback().await;
-            return Ok(None);
-        }
-        sqlx::query(
+            if affected != 1 {
+                let _ = tx.rollback().await;
+                return Ok(None);
+            }
+            sqlx::query(
             "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, started_at) \
              VALUES (?, ?, ?, ?, 'assigned', ?, ?)",
         )
@@ -724,24 +720,29 @@ impl Store {
         .bind(&now)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE nodes SET active_attempts = active_attempts + 1 WHERE id = ?")
-            .bind(node_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+            sqlx::query("UPDATE nodes SET active_attempts = active_attempts + 1 WHERE id = ?")
+                .bind(node_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
 
-        Ok(Some(Assignment {
-            attempt_id,
-            task_id,
-            repository,
-            prompt,
-            adapter,
-            number: number as u32,
-            timeout_secs: timeout_secs as u64,
-            git_url,
-            default_branch,
-            validation_command: task_validation.or(validation_command),
-        }))
+            return Ok(Some(Assignment {
+                attempt_id,
+                task_id,
+                repository,
+                prompt,
+                adapter,
+                number: number as u32,
+                timeout_secs: timeout_secs as u64,
+                git_url,
+                default_branch,
+                validation_command: task_validation.or(validation_command),
+            }));
+        }
+
+        // No queued task this node can run.
+        let _ = tx.rollback().await;
+        Ok(None)
     }
 
     async fn attempt_count(
