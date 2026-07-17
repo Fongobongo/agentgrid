@@ -34,6 +34,7 @@ agentgrid-common.workspace = true
 
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 libsqlite3-sys = { version = "0.28", features = ["bundled"] }
+libc = "0.2"
 
 [dev-dependencies]
 tower.workspace = true
