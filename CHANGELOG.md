@@ -2,7 +2,9 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.1.0] - Unreleased
+## [Unreleased]
+
+## [0.1.0] - 2026-07-17
 
 ### Added (Stage 5.3 — CI / release / ops)
 - GitHub Actions `ci.yml`: `rust` (fmt/clippy/test/build), `web` (build/lint), and `e2e` job that brings up the compose stack (control plane + two mock nodes) and asserts a task reaches `succeeded`.
