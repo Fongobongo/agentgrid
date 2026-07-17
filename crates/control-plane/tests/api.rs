@@ -294,6 +294,104 @@ async fn failure_marks_task_failed() {
 }
 
 #[tokio::test]
+async fn validation_failure_must_not_report_success() {
+    // Stage 1.1 regression: a clean agent exit (exit_code 0) combined with a
+    // validation failure must NOT be reported as success. The node reports the
+    // distinct failure category via `error_code`; the control plane must decide
+    // success by outcome, not the raw exit code.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-v", vec!["mock".into()], vec!["*".into()]).await;
+
+    let req = CreateTaskRequest {
+        prompt: "do thing".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: Some("false".into()),
+    };
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let task_id: String =
+        serde_json::from_slice::<TaskView>(&to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+            .unwrap()
+            .id;
+
+    // Long-poll for assignment, mirroring the node daemon.
+    let poll_req = PollRequest {
+        node_id: node_id.clone(),
+        name: "n".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+    };
+    let mut assignment = None;
+    for _ in 0..50 {
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/node/poll",
+                serde_json::to_string(&poll_req).unwrap(),
+                &cred,
+            ))
+            .await
+            .unwrap();
+        let pr: PollResponse =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        if let Some(a) = pr.assignment {
+            assignment = Some(a);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let assignment = assignment.expect("task was never assigned");
+
+    // Agent exited 0 but validation failed -> node reports `validation_failed`.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", assignment.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: Some("validation_failed".into()),
+            })
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let tv: TaskView = serde_json::from_slice(
+        &to_bytes(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/v1/tasks/{task_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(tv.status, TaskStatus::Failed);
+    assert_eq!(tv.error_code.as_deref(), Some("validation_failed"));
+}
+
+#[tokio::test]
 async fn cancel_queued_marks_cancelled() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);

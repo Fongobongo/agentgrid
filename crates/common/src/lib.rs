@@ -121,6 +121,11 @@ pub struct TaskView {
     pub assigned_attempt_id: Option<String>,
     #[serde(default)]
     pub validation_command: Option<String>,
+    /// Distinct failure category when the task is not succeeded/cancelled
+    /// cleanly: `agent_failed` / `validation_failed` / `timeout` etc. NULL on
+    /// success or a clean cancel.
+    #[serde(default)]
+    pub error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

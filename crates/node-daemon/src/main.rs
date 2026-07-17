@@ -379,19 +379,25 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
 
     enum Outcome {
         Exited(i32),
-        Killed,
+        Timeout,
+        Cancel,
     }
     let outcome = tokio::select! {
         status = child.wait() => Outcome::Exited(status?.code().unwrap_or(-1)),
-        _ = tokio::time::sleep(timeout) => Outcome::Killed,
-        _ = wait_for_cancel(cancel_client, cancel_url) => Outcome::Killed,
+        _ = tokio::time::sleep(timeout) => Outcome::Timeout,
+        _ = wait_for_cancel(cancel_client, cancel_url) => Outcome::Cancel,
     };
-    let code: i32 = match outcome {
-        Outcome::Exited(c) => c,
-        Outcome::Killed => {
+    let (code, kill_reason) = match outcome {
+        Outcome::Exited(c) => (c, None),
+        Outcome::Timeout => {
             terminate_group(pid);
             let status = child.wait().await?;
-            status.code().unwrap_or(-1)
+            (status.code().unwrap_or(-1), Some("timeout"))
+        }
+        Outcome::Cancel => {
+            terminate_group(pid);
+            let status = child.wait().await?;
+            (status.code().unwrap_or(-1), None)
         }
     };
     let _ = r1.await;
@@ -421,7 +427,9 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     let mut error_code: Option<String> = if code == 0 {
         None
     } else {
-        Some("agent_failed".into())
+        // A killed attempt reports why: timeout is distinct from a generic
+        // agent failure (so dashboards/queries can tell them apart).
+        Some(kill_reason.unwrap_or("agent_failed").into())
     };
     if code == 0 {
         if let Some(cmd) = &assignment.validation_command {

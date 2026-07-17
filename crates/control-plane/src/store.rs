@@ -467,12 +467,13 @@ impl Store {
             finished_at: None,
             assigned_attempt_id: None,
             validation_command: req.validation_command.clone(),
+            error_code: None,
         })
     }
 
     pub async fn list_tasks(&self) -> Result<Vec<TaskView>> {
         let rows = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code \
              FROM tasks ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -482,7 +483,7 @@ impl Store {
 
     pub async fn show_task(&self, id: &str) -> Result<Option<TaskView>> {
         let row = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code \
              FROM tasks WHERE id = ?",
         )
         .bind(id)
@@ -857,12 +858,16 @@ impl Store {
         let attempt_status: String = attempt.try_get("status")?;
         let cancel_requested: i64 = attempt.try_get("cancel_requested")?;
 
-        let at = if req.exit_code == 0 {
+        // Success requires a clean exit AND no distinct failure category. The
+        // node reports validation/timeout failures via `error_code` even when the
+        // agent process exits 0, so exit 0 alone must not be treated as success.
+        let success = req.exit_code == 0 && req.error_code.as_deref().is_none();
+        let at = if success {
             AttemptTransition::Succeed
         } else {
             AttemptTransition::Fail
         };
-        let tt = if req.exit_code == 0 {
+        let tt = if success {
             TaskTransition::Succeed
         } else {
             TaskTransition::Fail
@@ -871,7 +876,7 @@ impl Store {
         let as_enum = from_snake::<AttemptStatus>(&attempt_status);
         let attempt_target: AttemptStatus = as_enum
             .and_then(|s| next_attempt_status(s, at).ok())
-            .unwrap_or(if req.exit_code == 0 {
+            .unwrap_or(if success {
                 AttemptStatus::Succeeded
             } else {
                 AttemptStatus::Failed
@@ -885,7 +890,7 @@ impl Store {
         let ts_enum = from_snake::<TaskStatus>(&task_status);
         let task_target: TaskStatus = ts_enum
             .and_then(|s| next_task_status(s, tt).ok())
-            .unwrap_or(if req.exit_code == 0 {
+            .unwrap_or(if success {
                 TaskStatus::Succeeded
             } else {
                 TaskStatus::Failed
@@ -927,9 +932,20 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::query("UPDATE tasks SET status = ?, finished_at = ? WHERE id = ?")
+        // Normalize the failure category onto the task so the UI/CLI can show
+        // WHY it failed without joining the producing attempt.
+        let task_error_code: Option<String> = match task_target {
+            TaskStatus::Failed => req
+                .error_code
+                .clone()
+                .or_else(|| Some("agent_failed".into())),
+            TaskStatus::Cancelled => Some("cancelled".into()),
+            _ => None,
+        };
+        sqlx::query("UPDATE tasks SET status = ?, finished_at = ?, error_code = ? WHERE id = ?")
             .bind(status_str(task_target))
             .bind(&now)
+            .bind(&task_error_code)
             .bind(&task_id)
             .execute(&mut *tx)
             .await?;
@@ -1085,6 +1101,7 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         finished_at: r.try_get("finished_at").unwrap_or_default(),
         assigned_attempt_id: r.try_get("assigned_attempt_id").unwrap_or_default(),
         validation_command: r.try_get("validation_command").unwrap_or_default(),
+        error_code: r.try_get("error_code").unwrap_or_default(),
     }
 }
 
