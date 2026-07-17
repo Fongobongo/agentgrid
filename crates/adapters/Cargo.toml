@@ -13,6 +13,10 @@ path = "src/bin/adapter-mock.rs"
 name = "adapter-claude"
 path = "src/bin/adapter-claude.rs"
 
+[[bin]]
+name = "adapter-opencode"
+path = "src/bin/adapter-opencode.rs"
+
 [lib]
 name = "agentgrid_adapters"
 path = "src/lib.rs"

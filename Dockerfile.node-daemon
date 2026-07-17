@@ -18,6 +18,7 @@ WORKDIR /var/lib/agentgrid
 COPY --from=builder /src/target/release/agentgrid-node-daemon /usr/local/bin/
 COPY --from=builder /src/target/release/adapter-mock /usr/local/bin/
 COPY --from=builder /src/target/release/adapter-claude /usr/local/bin/
+COPY --from=builder /src/target/release/adapter-opencode /usr/local/bin/
 ENV AGENTGRID_DATA_DIR=/var/lib/agentgrid/data \
     AGENTGRID_WORKSPACE_ROOT=/var/lib/agentgrid/workspace \
     AGENTGRID_REPOSITORY_ROOT=/var/lib/agentgrid/repos \
