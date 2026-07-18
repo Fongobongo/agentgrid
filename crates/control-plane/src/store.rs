@@ -13,7 +13,8 @@ use agentgrid_common::{
     CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest, EnrollRequest,
     EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, NodeEligibility, NodeStatus,
     NodeView, PollRequest, RepositoryView, TaskEligibility, TaskEvent, TaskStatus, TaskTransition,
-    TaskView, UploadArtifactRequest,
+    TaskView, UploadArtifactRequest, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowStep,
+    WorkflowStepRun, WorkflowTemplate,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -1556,5 +1557,297 @@ impl Store {
             }
         }
         Ok(count)
+    }
+}
+
+// ----- workflows (Stage 7) -----
+
+fn role_str(r: WorkflowRole) -> String {
+    serde_json::to_value(r)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+impl Store {
+    /// Create a workflow template. Validates the DAG up front so a broken
+    /// template can never be persisted.
+    pub async fn create_workflow_template(
+        &self,
+        name: &str,
+        steps: &[WorkflowStep],
+    ) -> Result<WorkflowTemplate> {
+        crate::workflow::validate_workflow_dag(steps)
+            .map_err(|e| anyhow::anyhow!("invalid workflow DAG: {e:?}"))?;
+        let id = format!("wft-{}", Uuid::new_v4());
+        let created_at = now_iso();
+        let steps_json = serde_json::to_string(steps)?;
+        sqlx::query(
+            "INSERT INTO workflow_templates (id, name, steps_json, created_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(&steps_json)
+        .bind(&created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(WorkflowTemplate {
+            id,
+            name: name.to_string(),
+            steps: steps.to_vec(),
+            created_at,
+        })
+    }
+
+    pub async fn get_workflow_template(&self, id: &str) -> Result<Option<WorkflowTemplate>> {
+        let row = sqlx::query(
+            "SELECT id, name, steps_json, created_at FROM workflow_templates WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| WorkflowTemplate {
+            id: r.try_get("id").unwrap_or_default(),
+            name: r.try_get("name").unwrap_or_default(),
+            steps: serde_json::from_str(&r.try_get::<String, _>("steps_json").unwrap_or_default())
+                .unwrap_or_default(),
+            created_at: r.try_get("created_at").unwrap_or_default(),
+        }))
+    }
+
+    pub async fn list_workflow_templates(&self) -> Result<Vec<WorkflowTemplate>> {
+        let rows = sqlx::query(
+            "SELECT id, name, steps_json, created_at FROM workflow_templates ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| WorkflowTemplate {
+                id: r.try_get("id").unwrap_or_default(),
+                name: r.try_get("name").unwrap_or_default(),
+                steps: serde_json::from_str(
+                    &r.try_get::<String, _>("steps_json").unwrap_or_default(),
+                )
+                .unwrap_or_default(),
+                created_at: r.try_get("created_at").unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// Instantiate a template into a run. Creates one step instance per
+    /// template step and one role-run per step (for its declared role).
+    pub async fn create_workflow_run(
+        &self,
+        template_id: &str,
+        context: Option<&str>,
+    ) -> Result<WorkflowRun> {
+        let tpl = self
+            .get_workflow_template(template_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("unknown workflow template {template_id}"))?;
+        let run_id = format!("wfr-{}", Uuid::new_v4());
+        let created_at = now_iso();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO workflow_runs (id, template_id, status, context, created_at, finished_at) \
+             VALUES (?, ?, 'pending', ?, ?, NULL)",
+        )
+        .bind(&run_id)
+        .bind(template_id)
+        .bind(context)
+        .bind(&created_at)
+        .execute(&mut *tx)
+        .await?;
+        for step in &tpl.steps {
+            let step_run_id = format!("wfs-{}", Uuid::new_v4());
+            let depends_json = serde_json::to_string(&step.depends_on)?;
+            sqlx::query(
+                "INSERT INTO workflow_steps \
+                 (id, run_id, step_id, prompt, depends_on, role, adapter, status, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+            )
+            .bind(&step_run_id)
+            .bind(&run_id)
+            .bind(&step.id)
+            .bind(&step.prompt)
+            .bind(&depends_json)
+            .bind(role_str(step.role))
+            .bind(&step.adapter)
+            .bind(&created_at)
+            .execute(&mut *tx)
+            .await?;
+            let role_run_id = format!("wrr-{}", Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO role_runs (id, step_run_id, role, task_id, status, created_at) \
+                 VALUES (?, ?, ?, NULL, 'pending', ?)",
+            )
+            .bind(&role_run_id)
+            .bind(&step_run_id)
+            .bind(role_str(step.role))
+            .bind(&created_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(WorkflowRun {
+            id: run_id,
+            template_id: template_id.to_string(),
+            status: WorkflowRunStatus::Pending,
+            created_at,
+            finished_at: None,
+            context: context.map(|s| s.to_string()),
+        })
+    }
+
+    pub async fn get_workflow_run(&self, id: &str) -> Result<Option<WorkflowRun>> {
+        let row = sqlx::query(
+            "SELECT id, template_id, status, context, created_at, finished_at \
+             FROM workflow_runs WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| WorkflowRun {
+            id: r.try_get("id").unwrap_or_default(),
+            template_id: r.try_get("template_id").unwrap_or_default(),
+            status: from_snake(&r.try_get::<String, _>("status").unwrap_or_default())
+                .unwrap_or(WorkflowRunStatus::Pending),
+            created_at: r.try_get("created_at").unwrap_or_default(),
+            finished_at: r.try_get("finished_at").ok(),
+            context: r.try_get("context").ok(),
+        }))
+    }
+
+    pub async fn list_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
+        let rows = sqlx::query(
+            "SELECT id, template_id, status, context, created_at, finished_at \
+             FROM workflow_runs ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| WorkflowRun {
+                id: r.try_get("id").unwrap_or_default(),
+                template_id: r.try_get("template_id").unwrap_or_default(),
+                status: from_snake(&r.try_get::<String, _>("status").unwrap_or_default())
+                    .unwrap_or(WorkflowRunStatus::Pending),
+                created_at: r.try_get("created_at").unwrap_or_default(),
+                finished_at: r.try_get("finished_at").ok(),
+                context: r.try_get("context").ok(),
+            })
+            .collect())
+    }
+
+    pub async fn get_workflow_run_steps(&self, run_id: &str) -> Result<Vec<WorkflowStepRun>> {
+        let rows = sqlx::query(
+            "SELECT id, run_id, step_id, prompt, depends_on, role, adapter, status, created_at \
+             FROM workflow_steps WHERE run_id = ? ORDER BY created_at ASC",
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| WorkflowStepRun {
+                id: r.try_get("id").unwrap_or_default(),
+                run_id: r.try_get("run_id").unwrap_or_default(),
+                step_id: r.try_get("step_id").unwrap_or_default(),
+                prompt: r.try_get("prompt").unwrap_or_default(),
+                depends_on: serde_json::from_str(
+                    &r.try_get::<String, _>("depends_on").unwrap_or_default(),
+                )
+                .unwrap_or_default(),
+                role: from_snake(&r.try_get::<String, _>("role").unwrap_or_default())
+                    .unwrap_or(WorkflowRole::Worker),
+                adapter: r.try_get("adapter").ok(),
+                status: from_snake(&r.try_get::<String, _>("status").unwrap_or_default())
+                    .unwrap_or(agentgrid_common::WorkflowStepStatus::Pending),
+                created_at: r.try_get("created_at").unwrap_or_default(),
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    async fn temp_store() -> Store {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("ag-wf-{nanos}-{n}.db"));
+        let _ = std::fs::remove_file(&p);
+        Store::open(p.to_str().unwrap()).await.unwrap()
+    }
+
+    fn step(id: &str, deps: &[&str], role: WorkflowRole) -> WorkflowStep {
+        WorkflowStep {
+            id: id.into(),
+            prompt: format!("do {id}"),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            role,
+            adapter: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_dag_on_create() {
+        let s = temp_store().await;
+        let bad = vec![step("a", &["b"], WorkflowRole::Worker)];
+        assert!(s.create_workflow_template("x", &bad).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_template_and_run_roundtrips() {
+        let s = temp_store().await;
+        let steps = vec![
+            step("a", &[], WorkflowRole::Architect),
+            step("b", &["a"], WorkflowRole::Worker),
+            step("c", &["a"], WorkflowRole::Verifier),
+        ];
+        let tpl = s.create_workflow_template("build", &steps).await.unwrap();
+        assert!(tpl.id.starts_with("wft-"));
+        assert_eq!(tpl.steps.len(), 3);
+
+        let got = s.get_workflow_template(&tpl.id).await.unwrap().unwrap();
+        assert_eq!(got.steps.len(), 3);
+
+        let run = s
+            .create_workflow_run(&tpl.id, Some(r#"{"branch":"feat"}"#))
+            .await
+            .unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Pending);
+        assert_eq!(run.context.as_deref(), Some(r#"{"branch":"feat"}"#));
+
+        let run_got = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(run_got.id, run.id);
+
+        let steps_run = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(steps_run.len(), 3);
+        // Each step instance got one role-run; verify roles carried through.
+        let roles: Vec<_> = steps_run.iter().map(|x| x.role).collect();
+        assert!(roles.contains(&WorkflowRole::Architect));
+        assert!(roles.contains(&WorkflowRole::Worker));
+        assert!(roles.contains(&WorkflowRole::Verifier));
+
+        let all = s.list_workflow_runs().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(s.list_workflow_templates().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_template_rejected_on_run() {
+        let s = temp_store().await;
+        assert!(s.create_workflow_run("wft-nope", None).await.is_err());
     }
 }

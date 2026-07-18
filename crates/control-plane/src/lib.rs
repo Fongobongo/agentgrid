@@ -5,6 +5,7 @@
 //! persistence in Stage 2.1.
 
 pub mod store;
+pub mod workflow;
 
 use std::sync::Arc;
 use std::time::Instant;

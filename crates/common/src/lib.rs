@@ -1,6 +1,8 @@
-//! Shared types for agentgrid: task/attempt/node status enums, the adapter
-//! event model, and the API DTOs exchanged between control plane, node daemon
-//! and CLI.
+pub mod workflow;
+pub use workflow::{
+    RoleRunStatus, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepRun,
+    WorkflowStepStatus, WorkflowTemplate,
+};
 
 use serde::{Deserialize, Serialize};
 
