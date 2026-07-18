@@ -104,3 +104,27 @@ pub struct WorkflowStepRun {
     pub status: WorkflowStepStatus,
     pub created_at: String,
 }
+
+/// Request body for `POST /v1/workflows` — define a template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateWorkflowRequest {
+    pub name: String,
+    pub steps: Vec<WorkflowStep>,
+    /// Default shared context JSON for runs of this template (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+/// Request body for `POST /v1/workflows/{id}/runs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateWorkflowRunRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+/// `GET /v1/workflow-runs/{id}` response: the run plus its step instances.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowRunWithSteps {
+    pub run: WorkflowRun,
+    pub steps: Vec<WorkflowStepRun>,
+}

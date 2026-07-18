@@ -1500,3 +1500,99 @@ fn get_q(uri: &str) -> Request<Body> {
         .body(Body::empty())
         .unwrap()
 }
+
+#[tokio::test]
+async fn workflow_create_list_show_run_and_steps() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+
+    let steps = json!([
+        {"id":"a","prompt":"design","role":"architect","depends_on":[]},
+        {"id":"b","prompt":"impl","role":"worker","depends_on":["a"]},
+        {"id":"c","prompt":"verify","role":"verifier","depends_on":["a"]}
+    ]);
+    let body = json!({"name":"build","steps":steps,"context":null}).to_string();
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/workflows", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tpl: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let tid = tpl.get("id").unwrap().as_str().unwrap().to_string();
+    assert!(tid.starts_with("wft-"));
+
+    // list
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/workflows")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let list: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    // show
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/workflows/{tid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // run
+    let resp = app
+        .clone()
+        .oneshot(post(&format!("/v1/workflows/{tid}/runs"), "{}".into()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let run: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let rid = run.get("id").unwrap().as_str().unwrap().to_string();
+    assert_eq!(run.get("status").unwrap(), "pending");
+
+    // show run + steps
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/workflow-runs/{rid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let run_view: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(run_view.get("steps").unwrap().as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn workflow_rejects_invalid_dag() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let steps = json!([{"id":"a","prompt":"x","depends_on":["ghost"]}]);
+    let body = json!({"name":"bad","steps":steps}).to_string();
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/workflows", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

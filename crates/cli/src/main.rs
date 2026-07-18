@@ -4,8 +4,8 @@
 //! exercises the same `/v1` surface.
 
 use agentgrid_common::{
-    ApprovalView, CreateTaskRequest, LoginRequest, LoginResponse, TaskEligibility, TaskStatus,
-    TaskView,
+    ApprovalView, CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest, LoginRequest,
+    LoginResponse, TaskEligibility, TaskStatus, TaskView, WorkflowStep, WorkflowTemplate,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -52,6 +52,8 @@ enum AgCommand {
     Approvals(ApprovalArgs),
     /// Start the control plane (standalone binary).
     Server(ServerStartArgs),
+    /// Define and run Agentgrid workflows (DAGs of agent steps).
+    Workflow(WorkflowArgs),
 }
 
 #[derive(Args)]
@@ -176,6 +178,49 @@ struct RepoAddArgs {
     validate: Option<String>,
 }
 
+#[derive(Args)]
+struct WorkflowArgs {
+    #[command(subcommand)]
+    command: WorkflowSub,
+}
+
+#[derive(Subcommand)]
+enum WorkflowSub {
+    /// Define a workflow template from a steps JSON file.
+    Create(WorkflowCreateArgs),
+    /// List workflow templates.
+    List,
+    /// Show a workflow template (its DAG).
+    Show(WorkflowShowArgs),
+    /// Start a run of a template.
+    Run(WorkflowRunArgs),
+}
+
+#[derive(Args)]
+struct WorkflowCreateArgs {
+    #[arg(long)]
+    name: String,
+    /// Path to a JSON file: an array of WorkflowStep objects.
+    #[arg(long)]
+    steps: String,
+    /// Optional default context JSON.
+    #[arg(long)]
+    context: Option<String>,
+}
+
+#[derive(Args)]
+struct WorkflowShowArgs {
+    template_id: String,
+}
+
+#[derive(Args)]
+struct WorkflowRunArgs {
+    template_id: String,
+    /// Optional run context JSON (overrides the template default).
+    #[arg(long)]
+    context: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -203,6 +248,7 @@ async fn main() -> Result<()> {
         AgCommand::Login(a) => cmd_login(&client, &base, a).await,
         AgCommand::Approvals(a) => cmd_approvals(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
+        AgCommand::Workflow(a) => cmd_workflow(&client, &base, a, cli.json).await,
     }
 }
 
@@ -579,5 +625,119 @@ async fn cmd_login(client: &reqwest::Client, base: &str, a: LoginArgs) -> Result
     let lr: LoginResponse = resp.json().await.context("parse login response")?;
     save_token(&lr.token)?;
     println!("logged in; token stored at {}", credential_path().display());
+    Ok(())
+}
+
+async fn cmd_workflow(
+    client: &reqwest::Client,
+    base: &str,
+    a: WorkflowArgs,
+    json: bool,
+) -> Result<()> {
+    match a.command {
+        WorkflowSub::Create(c) => cmd_workflow_create(client, base, c).await,
+        WorkflowSub::List => cmd_workflow_list(client, base, json).await,
+        WorkflowSub::Show(s) => cmd_workflow_show(client, base, s, json).await,
+        WorkflowSub::Run(r) => cmd_workflow_run(client, base, r).await,
+    }
+}
+
+async fn cmd_workflow_create(
+    client: &reqwest::Client,
+    base: &str,
+    a: WorkflowCreateArgs,
+) -> Result<()> {
+    let body = std::fs::read_to_string(&a.steps).with_context(|| format!("read {}", a.steps))?;
+    let steps: Vec<WorkflowStep> = serde_json::from_str(&body)
+        .with_context(|| format!("parse steps JSON from {}", a.steps))?;
+    let req = CreateWorkflowRequest {
+        name: a.name,
+        steps,
+        context: a.context,
+    };
+    let resp = client
+        .post(format!("{base}/v1/workflows"))
+        .json(&req)
+        .send()
+        .await
+        .context("create workflow request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("create workflow failed ({})", resp.status());
+    }
+    let tpl: WorkflowTemplate = resp.json().await.context("parse workflow response")?;
+    println!("workflow {} created ({} steps)", tpl.id, tpl.steps.len());
+    println!("{}", tpl.id);
+    Ok(())
+}
+
+async fn cmd_workflow_list(client: &reqwest::Client, base: &str, json: bool) -> Result<()> {
+    let resp = client
+        .get(format!("{base}/v1/workflows"))
+        .send()
+        .await
+        .context("list workflows request failed")?;
+    let tpls: Vec<WorkflowTemplate> = resp.json().await.context("parse workflows response")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&tpls)?);
+        return Ok(());
+    }
+    if tpls.is_empty() {
+        println!("(no workflows)");
+        return Ok(());
+    }
+    for t in &tpls {
+        println!("{}\t{}\t{} steps", t.id, t.name, t.steps.len());
+    }
+    Ok(())
+}
+
+async fn cmd_workflow_show(
+    client: &reqwest::Client,
+    base: &str,
+    a: WorkflowShowArgs,
+    json: bool,
+) -> Result<()> {
+    let resp = client
+        .get(format!("{base}/v1/workflows/{}", a.template_id))
+        .send()
+        .await
+        .context("show workflow request failed")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("workflow {} not found", a.template_id);
+    }
+    let tpl: WorkflowTemplate = resp.json().await.context("parse workflow response")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&tpl)?);
+        return Ok(());
+    }
+    println!("workflow {}", tpl.id);
+    println!("name: {}", tpl.name);
+    println!("steps:");
+    for s in &tpl.steps {
+        println!(
+            "  - {} [{}] deps={:?}",
+            s.id,
+            format!("{:?}", s.role).to_lowercase(),
+            s.depends_on
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_workflow_run(client: &reqwest::Client, base: &str, a: WorkflowRunArgs) -> Result<()> {
+    let req = CreateWorkflowRunRequest { context: a.context };
+    let resp = client
+        .post(format!("{base}/v1/workflows/{}/runs", a.template_id))
+        .json(&req)
+        .send()
+        .await
+        .context("create workflow run request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("create workflow run failed ({})", resp.status());
+    }
+    let run: agentgrid_common::WorkflowRun =
+        resp.json().await.context("parse workflow run response")?;
+    println!("workflow run {} started (status: {:?})", run.id, run.status);
+    println!("{}", run.id);
     Ok(())
 }

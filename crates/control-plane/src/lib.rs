@@ -12,9 +12,11 @@ use std::time::Instant;
 
 use agentgrid_common::{
     ApprovalEvent, ApprovalView, CancelState, CompleteAttemptRequest, CreateAgentSessionRequest,
-    CreateRepositoryRequest, CreateTaskRequest, EnrollRequest, EnrollResponse, EnrollTokenResponse,
-    EventsQuery, HeartbeatRequest, IngestEventsRequest, LoginRequest, LoginResponse, PollRequest,
-    PollResponse, RepositoryView, SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest,
+    CreateRepositoryRequest, CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest,
+    EnrollRequest, EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest,
+    IngestEventsRequest, LoginRequest, LoginResponse, PollRequest, PollResponse, RepositoryView,
+    SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest, WorkflowRun,
+    WorkflowRunWithSteps, WorkflowTemplate,
 };
 use axum::{
     body::Body,
@@ -207,6 +209,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/node/attempts/{id}/artifacts", post(upload_artifact))
         .route("/v1/tasks/{id}/artifacts/{name}", get(get_artifact))
+        .route("/v1/workflows", post(create_workflow).get(list_workflows))
+        .route("/v1/workflows/{id}", get(show_workflow))
+        .route("/v1/workflows/{id}/runs", post(create_workflow_run))
+        .route("/v1/workflow-runs", get(list_workflow_runs))
+        .route("/v1/workflow-runs/{id}", get(show_workflow_run))
         .layer(DefaultBodyLimit::max(state.limits.artifact))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -628,6 +635,89 @@ async fn task_eligibility_handler(
         })?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+// ----- workflows (Stage 7.2) -----
+
+async fn create_workflow(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateWorkflowRequest>,
+) -> Result<(StatusCode, Json<WorkflowTemplate>), StatusCode> {
+    state
+        .store
+        .create_workflow_template(&req.name, &req.steps)
+        .await
+        .map(|t| (StatusCode::CREATED, Json(t)))
+        .map_err(|e| {
+            tracing::error!("create_workflow failed: {e}");
+            StatusCode::BAD_REQUEST
+        })
+}
+
+async fn list_workflows(State(state): State<Arc<AppState>>) -> Json<Vec<WorkflowTemplate>> {
+    match state.store.list_workflow_templates().await {
+        Ok(t) => Json(t),
+        Err(e) => {
+            tracing::error!("list_workflows failed: {e}");
+            Json(vec![])
+        }
+    }
+}
+
+async fn show_workflow(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkflowTemplate>, StatusCode> {
+    match state.store.get_workflow_template(&id).await {
+        Ok(Some(t)) => Ok(Json(t)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("show_workflow failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn create_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateWorkflowRunRequest>,
+) -> Result<(StatusCode, Json<WorkflowRun>), StatusCode> {
+    state
+        .store
+        .create_workflow_run(&id, req.context.as_deref())
+        .await
+        .map(|r| (StatusCode::CREATED, Json(r)))
+        .map_err(|e| {
+            tracing::error!("create_workflow_run failed: {e}");
+            StatusCode::BAD_REQUEST
+        })
+}
+
+async fn list_workflow_runs(State(state): State<Arc<AppState>>) -> Json<Vec<WorkflowRun>> {
+    match state.store.list_workflow_runs().await {
+        Ok(r) => Json(r),
+        Err(e) => {
+            tracing::error!("list_workflow_runs failed: {e}");
+            Json(vec![])
+        }
+    }
+}
+
+async fn show_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkflowRunWithSteps>, StatusCode> {
+    let run = state.store.get_workflow_run(&id).await;
+    let steps = state.store.get_workflow_run_steps(&id).await;
+    match (run, steps) {
+        (Ok(Some(r)), Ok(s)) => Ok(Json(WorkflowRunWithSteps { run: r, steps: s })),
+        (Ok(None), _) => Err(StatusCode::NOT_FOUND),
+        _ => {
+            tracing::error!("show_workflow_run failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 async fn list_nodes(State(state): State<Arc<AppState>>) -> Json<Vec<agentgrid_common::NodeView>> {
