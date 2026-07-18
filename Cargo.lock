@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "agentgrid-acp"
+version = "0.1.0"
+dependencies = [
+ "agentgrid-common",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "agentgrid-adapters"
 version = "0.1.0"
 dependencies = [

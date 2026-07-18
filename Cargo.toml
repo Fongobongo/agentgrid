@@ -7,6 +7,7 @@ members = [
     "crates/cli",
     "crates/adapters",
     "crates/skills",
+    "crates/acp",
 ]
 
 [workspace.package]

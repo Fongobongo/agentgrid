@@ -175,13 +175,13 @@
 
 ## Этап 5 — 0.2 ACP southbound client (1–2 недели)
 
-- [ ] JSON-RPC 2.0 codec + stdio transport (framing, ordering, errors)
-- [ ] `initialize`: version/capability negotiation; unknown optional capability не ломает session
-- [ ] `session/new`, `session/prompt`, `session/cancel`
-- [ ] Mapping `session/update` → `AgentEventEnvelope` (plan, tool calls, diffs, usage, logs)
-- [ ] До ACP integration реализовать минимальный durable approval flow: таблица/API/state machine `pending → allowed|denied|expired|cancelled`, timeout, audit, CLI/UI prompt
+- [x] JSON-RPC 2.0 codec + stdio transport (framing, ordering, errors)
+- [x] `initialize`: version/capability negotiation; unknown optional capability не ломает session
+- [x] `session/new`, `session/prompt`, `session/cancel`
+- [x] Mapping `session/update` → `AgentEventEnvelope` (plan, tool calls, diffs, usage, logs)
+- [x] Durable approval state machine (`pending → allowed|denied|expired|cancelled`, fail-closed); таблица/API/CLI-запрос — follow-up
 - [ ] `session/request_permission` → этот approval flow; default fail-closed (`ask/deny`), без временного unconditional allow
-- [ ] Absolute paths, MCP stdio passthrough в session config
+- [ ] Absolute paths, MCP stdio passthrough в session config (поля есть, wiring — follow-up)
 - [ ] `session/load`/`resume` если agent поддерживает
 - [ ] ACP adapter как новый тип в adapter registry (не замена wrappers)
 - [ ] Conformance fixtures: initialize/session-new/plan-update/tool-call/diff/permission/cancel
