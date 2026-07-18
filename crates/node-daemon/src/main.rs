@@ -17,6 +17,7 @@ use agentgrid_common::{
 };
 use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
@@ -237,8 +238,27 @@ impl EventSink {
             self.server, self.attempt_id
         );
         let req = IngestEventsRequest { events: batch };
-        if let Err(e) = self.client.post(&url).json(&req).send().await {
-            tracing::warn!("event flush failed: {e}");
+        // Stage 2.1: verify the HTTP status and retry transient/5xx failures.
+        // On a still-non-2xx response the batch is returned to the front of the
+        // buffer so the flusher loop keeps retrying while the daemon runs.
+        // ponytail: in-RAM only; a daemon kill before the CP acks still drops the
+        // tail. A disk outbox (2.1) closes that gap.
+        match send_with_retry(self.client.post(&url).json(&req), 10).await {
+            Ok(s) if s.is_success() => {}
+            Ok(s) => {
+                tracing::warn!(attempt_id = %self.attempt_id, "event flush got {s}; will retry");
+                let mut buf = self.buf.lock().await;
+                for e in req.events {
+                    buf.push_front(e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(attempt_id = %self.attempt_id, "event flush error {e}; will retry");
+                let mut buf = self.buf.lock().await;
+                for e in req.events {
+                    buf.push_front(e);
+                }
+            }
         }
     }
 
@@ -279,7 +299,7 @@ async fn read_stream<R: AsyncRead + Unpin>(
                 } else {
                     EventType::Stdout
                 };
-                sink.push(ty, json!({ "text": line })).await;
+                sink.push(ty, json!({ "text": masked })).await;
                 sink.note_adapter_event();
             }
         }
@@ -520,13 +540,19 @@ async fn upload_if_exists(
             name: name.to_string(),
             content,
         };
-        if let Err(e) = client
-            .post(format!("{server}/v1/node/attempts/{attempt_id}/artifacts"))
-            .json(&req)
-            .send()
-            .await
+        // Stage 2.1: check the response status and retry transient failures;
+        // the upload is idempotent per (attempt_id, name) on the control plane.
+        match send_with_retry(
+            client
+                .post(format!("{server}/v1/node/attempts/{attempt_id}/artifacts"))
+                .json(&req),
+            10,
+        )
+        .await
         {
-            tracing::warn!("artifact {name} upload failed: {e}");
+            Ok(s) if s.is_success() => {}
+            Ok(s) => tracing::warn!("artifact {name} upload got {s} for {attempt_id}"),
+            Err(e) => tracing::warn!("artifact {name} upload failed: {e}"),
         }
     }
 }
@@ -541,6 +567,51 @@ fn mask_secrets(line: &str, secrets: &Vec<String>) -> String {
         }
     }
     s
+}
+
+/// Whether an HTTP status from the control plane is worth retrying from the
+/// node: transient server errors and rate limiting. Client errors (4xx) are
+/// not retried (Stage 2.1).
+fn is_retryable_status(s: StatusCode) -> bool {
+    s.is_server_error() || s == StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Send a request, retrying on transport errors and retryable HTTP statuses
+/// with exponential backoff (capped at 5s). Returns the final status, or the
+/// last transport error. Bounded by `max_attempts` so a permanently
+/// unavailable control plane cannot block the daemon forever (Stage 2.1).
+async fn send_with_retry(
+    builder: reqwest::RequestBuilder,
+    max_attempts: usize,
+) -> Result<StatusCode, reqwest::Error> {
+    let mut backoff = Duration::from_millis(200);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let send = match builder.try_clone() {
+            Some(b) => b,
+            None => return builder.send().await.map(|r| r.status()),
+        };
+        match send.send().await {
+            Ok(r) => {
+                let s = r.status();
+                if attempt < max_attempts && is_retryable_status(s) {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                    continue;
+                }
+                return Ok(s);
+            }
+            Err(e) => {
+                if attempt < max_attempts && (e.is_connect() || e.is_timeout() || e.is_request()) {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
 }
 
 async fn wait_for_cancel(client: reqwest::Client, url: String) {
@@ -591,8 +662,13 @@ async fn report_complete(
         commit_sha,
         error_code,
     };
-    if let Err(e) = client.post(&url).json(&req).send().await {
-        tracing::warn!("complete report failed for {attempt_id}: {e}");
+    // Stage 2.1: completion is terminal and must be delivered; retry transient
+    // and 5xx failures with backoff. After the cap we give up (the control
+    // plane reverts/loses the attempt via its lease once it notices silence).
+    match send_with_retry(client.post(&url).json(&req), 20).await {
+        Ok(s) if s.is_success() => {}
+        Ok(s) => tracing::error!("complete report got {s} for {attempt_id}; not retrying"),
+        Err(e) => tracing::error!("complete report failed for {attempt_id}: {e}"),
     }
 }
 
@@ -872,5 +948,28 @@ mod tests {
         assert!(got.contains("hello"), "structured line mirrored: {got}");
         assert!(got.contains("not json"), "unparsed line mirrored: {got}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mask_secrets_replaces_known_substring() {
+        assert_eq!(
+            mask_secrets("token=sk-12345 and more", &vec!["sk-12345".to_string()]),
+            "token=*** and more"
+        );
+        // No secrets configured -> unchanged.
+        assert_eq!(mask_secrets("nothing", &vec![]), "nothing");
+    }
+
+    #[test]
+    fn retryable_status_codes() {
+        assert!(is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
+        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_retryable_status(StatusCode::OK));
+        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(StatusCode::NOT_FOUND));
     }
 }

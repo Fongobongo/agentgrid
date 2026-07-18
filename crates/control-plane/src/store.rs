@@ -126,6 +126,11 @@ impl Store {
             .connect_with(opts)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        // Stage 2.5: fail fast on a corrupt database rather than serving bad state.
+        sqlx::query("PRAGMA quick_check")
+            .execute(&pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("sqlite quick_check failed: {e}"))?;
         let artifact_root = std::path::Path::new(db_path)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))

@@ -78,12 +78,20 @@ impl AppState {
     /// Open (or create) the SQLite database at `db_path` and return shared state.
     pub async fn open(db_path: &str) -> anyhow::Result<Arc<Self>> {
         let store = Store::open(db_path).await?;
-        let jwt_secret = std::env::var("AGENTGRID_JWT_SECRET")
-            .map(|s| s.into_bytes())
-            .unwrap_or_else(|_| {
+        let jwt_secret = match std::env::var("AGENTGRID_JWT_SECRET") {
+            Ok(s) => s.into_bytes(),
+            Err(_) => {
+                // Stage 2.5: a random-per-start secret invalidates previously
+                // issued node tokens after a restart. Require a stable secret in
+                // production; warn loudly when one is not configured.
+                tracing::warn!(
+                    "AGENTGRID_JWT_SECRET unset: using a random secret for this run; \
+                     existing node tokens will not survive a restart"
+                );
                 use rand::Rng;
                 rand::thread_rng().gen::<[u8; 32]>().to_vec()
-            });
+            }
+        };
         // Bootstrap the first user from env (one-time) so a fresh install is
         // not left in its open window.
         if let (Ok(u), Ok(p)) = (
