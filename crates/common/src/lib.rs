@@ -57,8 +57,12 @@ pub enum EventType {
     Error,
 }
 
+pub mod approval;
 mod state_machine;
 
+pub use approval::{
+    next_approval, ApprovalEvent, ApprovalStatus, ApprovalView, InvalidApprovalTransition,
+};
 pub use state_machine::{
     next_attempt_status, next_task_status, AttemptTransition, InvalidTransition, TaskTransition,
 };

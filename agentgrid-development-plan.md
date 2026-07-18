@@ -179,7 +179,7 @@
 - [x] `initialize`: version/capability negotiation; unknown optional capability не ломает session
 - [x] `session/new`, `session/prompt`, `session/cancel`
 - [x] Mapping `session/update` → `AgentEventEnvelope` (plan, tool calls, diffs, usage, logs)
-- [x] Durable approval state machine (`pending → allowed|denied|expired|cancelled`, fail-closed); таблица/API/CLI-запрос — follow-up
+- [x] Durable approval flow: state machine + таблица `approvals` + API (`/v1/approvals` list/allow/deny) + CLI (`ag approvals`) + auto-expiry tick; fail-closed
 - [ ] `session/request_permission` → этот approval flow; default fail-closed (`ask/deny`), без временного unconditional allow
 - [ ] Absolute paths, MCP stdio passthrough в session config (поля есть, wiring — follow-up)
 - [ ] `session/load`/`resume` если agent поддерживает

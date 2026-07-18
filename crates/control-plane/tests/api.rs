@@ -4,10 +4,11 @@
 //! (Stage 2.3), so tests enroll first.
 
 use agentgrid_common::{
-    Assignment, CancelState, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest,
-    EnrollRequest, EnrollResponse, EnrollTokenResponse, EventType, HeartbeatRequest, IncomingEvent,
-    IngestEventsRequest, LoginResponse, NodeStatus, PollRequest, PollResponse, RepositoryView,
-    TaskEligibility, TaskStatus, TaskView, UploadArtifactRequest,
+    ApprovalStatus, ApprovalView, Assignment, CancelState, CompleteAttemptRequest,
+    CreateRepositoryRequest, CreateTaskRequest, EnrollRequest, EnrollResponse, EnrollTokenResponse,
+    EventType, HeartbeatRequest, IncomingEvent, IngestEventsRequest, LoginResponse, NodeStatus,
+    PollRequest, PollResponse, RepositoryView, TaskEligibility, TaskStatus, TaskView,
+    UploadArtifactRequest,
 };
 use agentgrid_control_plane::{build_router, AppState};
 use axum::body::{to_bytes, Body};
@@ -1352,4 +1353,76 @@ async fn complete_on_lost_attempt_is_idempotent() {
     let tv = show_task_view(&app, &assign.task_id).await;
     assert_eq!(tv.status, TaskStatus::Failed);
     assert_eq!(tv.error_code.as_deref(), Some("node_lost"));
+}
+
+#[tokio::test]
+async fn approval_flow_allow_deny_and_expiry() {
+    // Stage 5 durable approval: create (pending) -> list -> allow/deny -> list
+    // reflects the new state; answering a terminal approval is a no-op.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+
+    let task_id = create_task(&app, "mock", None).await;
+    let ap_id = state
+        .store
+        .create_approval(&task_id, "attempt-x", None, "run Bash", 3600)
+        .await
+        .unwrap();
+
+    // Initially pending and visible.
+    let listed = list_approvals(&app, Some("pending")).await;
+    assert!(listed.iter().any(|a| a.id == ap_id));
+    assert!(list_approvals(&app, Some("allowed")).await.is_empty());
+
+    // Allow it.
+    let allow = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/v1/approvals/{ap_id}/allow"),
+            "{}".into(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(allow.status(), StatusCode::OK);
+
+    let allowed = list_approvals(&app, Some("allowed")).await;
+    assert!(allowed
+        .iter()
+        .any(|a| a.id == ap_id && a.status == ApprovalStatus::Allowed));
+    assert!(list_approvals(&app, Some("pending")).await.is_empty());
+
+    // Answering a terminal approval is a safe no-op (idempotent).
+    let again = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/v1/approvals/{ap_id}/deny"),
+            "{}".into(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::OK);
+    assert!(list_approvals(&app, Some("allowed"))
+        .await
+        .iter()
+        .any(|a| a.id == ap_id));
+}
+
+async fn list_approvals(app: &Router, status: Option<&str>) -> Vec<ApprovalView> {
+    let uri = match status {
+        Some(s) => format!("/v1/approvals?status={s}"),
+        None => "/v1/approvals".into(),
+    };
+    let resp = app.clone().oneshot(get_q(&uri)).await.unwrap();
+    assert!(resp.status().is_success());
+    serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+}
+
+fn get_q(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
 }

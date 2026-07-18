@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use agentgrid_common::{
-    CancelState, CompleteAttemptRequest, CreateAgentSessionRequest, CreateRepositoryRequest,
-    CreateTaskRequest, EnrollRequest, EnrollResponse, EnrollTokenResponse, EventsQuery,
-    HeartbeatRequest, IngestEventsRequest, LoginRequest, LoginResponse, PollRequest, PollResponse,
-    RepositoryView, SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest,
+    ApprovalEvent, ApprovalView, CancelState, CompleteAttemptRequest, CreateAgentSessionRequest,
+    CreateRepositoryRequest, CreateTaskRequest, EnrollRequest, EnrollResponse, EnrollTokenResponse,
+    EventsQuery, HeartbeatRequest, IngestEventsRequest, LoginRequest, LoginResponse, PollRequest,
+    PollResponse, RepositoryView, SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest,
 };
 use axum::{
     body::Body,
@@ -176,6 +176,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{id}/cancel", post(cancel_task_handler))
         .route("/v1/tasks/{id}/retry", post(retry_task_handler))
         .route("/v1/tasks/{id}/eligibility", get(task_eligibility_handler))
+        .route("/v1/approvals", get(list_approvals_handler))
+        .route("/v1/approvals/{id}/allow", post(allow_approval_handler))
+        .route("/v1/approvals/{id}/deny", post(deny_approval_handler))
         .route("/v1/auth/setup", post(auth_setup))
         .route("/v1/auth/login", post(auth_login))
         .route("/v1/nodes", get(list_nodes))
@@ -893,6 +896,73 @@ async fn cancel_task_handler(
         Ok(false) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("cancel_task failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalListQuery {
+    status: Option<String>,
+}
+
+async fn list_approvals_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ApprovalListQuery>,
+) -> Result<Json<Vec<ApprovalView>>, StatusCode> {
+    let status = q
+        .status
+        .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok());
+    state
+        .store
+        .list_approvals(status)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            tracing::error!("list_approvals failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+async fn allow_approval_handler(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let actor = auth
+        .as_ref()
+        .map(|e| e.0.username.as_str())
+        .unwrap_or("system");
+    match state
+        .store
+        .answer_approval(&id, ApprovalEvent::Allow, None, actor)
+        .await
+    {
+        Ok(_) => StatusCode::OK,
+        Err(e) => {
+            tracing::error!("allow_approval failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+async fn deny_approval_handler(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let actor = auth
+        .as_ref()
+        .map(|e| e.0.username.as_str())
+        .unwrap_or("system");
+    match state
+        .store
+        .answer_approval(&id, ApprovalEvent::Deny, Some("denied by operator"), actor)
+        .await
+    {
+        Ok(_) => StatusCode::OK,
+        Err(e) => {
+            tracing::error!("deny_approval failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }

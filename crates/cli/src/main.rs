@@ -4,7 +4,8 @@
 //! exercises the same `/v1` surface.
 
 use agentgrid_common::{
-    CreateTaskRequest, LoginRequest, LoginResponse, TaskEligibility, TaskStatus, TaskView,
+    ApprovalView, CreateTaskRequest, LoginRequest, LoginResponse, TaskEligibility, TaskStatus,
+    TaskView,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -47,6 +48,8 @@ enum AgCommand {
     Repo(RepoArgs),
     /// Log in and store a session token for user-authenticated endpoints.
     Login(LoginArgs),
+    /// Review and answer agent permission approvals (fail-closed by default).
+    Approvals(ApprovalArgs),
     /// Start the control plane (standalone binary).
     Server(ServerStartArgs),
 }
@@ -137,6 +140,30 @@ enum RepoAction {
 }
 
 #[derive(Args)]
+struct ApprovalArgs {
+    #[command(subcommand)]
+    action: ApprovalAction,
+}
+
+#[derive(Subcommand)]
+enum ApprovalAction {
+    /// List approvals (optionally filter by status).
+    List {
+        /// Filter by status: pending|allowed|denied|expired|cancelled.
+        status: Option<String>,
+    },
+    /// Allow a pending approval by id.
+    Allow(ApprovalIdArgs),
+    /// Deny a pending approval by id.
+    Deny(ApprovalIdArgs),
+}
+
+#[derive(Args)]
+struct ApprovalIdArgs {
+    id: String,
+}
+
+#[derive(Args)]
 struct RepoAddArgs {
     name: String,
     /// Git URL (https/token or local path).
@@ -174,6 +201,7 @@ async fn main() -> Result<()> {
         AgCommand::Token(a) => cmd_token(&client, &base, a).await,
         AgCommand::Repo(a) => cmd_repo(&client, &base, a).await,
         AgCommand::Login(a) => cmd_login(&client, &base, a).await,
+        AgCommand::Approvals(a) => cmd_approvals(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
     }
 }
@@ -353,6 +381,57 @@ async fn cmd_retry(client: &reqwest::Client, base: &str, a: RetryArgs) -> Result
         Ok(())
     } else {
         anyhow::bail!("retry failed ({})", resp.status())
+    }
+}
+
+async fn cmd_approvals(client: &reqwest::Client, base: &str, a: ApprovalArgs) -> Result<()> {
+    match a.action {
+        ApprovalAction::List { status } => {
+            let mut url = format!("{base}/v1/approvals");
+            if let Some(s) = status {
+                url.push_str(&format!("?status={s}"));
+            }
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .context("approvals list request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("approvals list failed ({})", resp.status());
+            }
+            let approvals: Vec<ApprovalView> = resp.json().await.context("bad approvals json")?;
+            for ap in &approvals {
+                println!(
+                    "{:<36} {:<10} {:<9} {}",
+                    ap.id,
+                    format!("{:?}", ap.status),
+                    ap.task_id,
+                    ap.permission
+                );
+            }
+            Ok(())
+        }
+        ApprovalAction::Allow(id) => answer_approval(client, base, &id.id, "allow").await,
+        ApprovalAction::Deny(id) => answer_approval(client, base, &id.id, "deny").await,
+    }
+}
+
+async fn answer_approval(
+    client: &reqwest::Client,
+    base: &str,
+    id: &str,
+    decision: &str,
+) -> Result<()> {
+    let resp = client
+        .post(format!("{base}/v1/approvals/{id}/{decision}"))
+        .send()
+        .await
+        .context("approval answer request failed")?;
+    if resp.status().is_success() {
+        println!("approval {id} -> {decision}");
+        Ok(())
+    } else {
+        anyhow::bail!("approval {decision} failed ({})", resp.status())
     }
 }
 
