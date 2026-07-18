@@ -951,7 +951,7 @@ async fn scheduler_skips_incompatible_head_of_line() {
     // not block a newer compatible one.
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
-    let (claude_node, _cc) =
+    let (_claude_node, _cc) =
         enroll(&app, "n-claude", vec!["claude".into()], vec!["*".into()]).await;
     let (mock_node, mock_cred) =
         enroll(&app, "n-mock", vec!["mock".into()], vec!["*".into()]).await;
@@ -1055,6 +1055,126 @@ async fn scheduler_respects_requested_node() {
     }
     let got = got.expect("requested node got no assignment");
     assert_eq!(got.task_id, pinned);
+}
+
+/// Acknowledge an assignment via the explicit ack endpoint.
+async fn ack_attempt(app: &Router, attempt_id: &str, cred: &str) -> StatusCode {
+    app.clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{attempt_id}/ack"),
+            "{}".into(),
+            cred,
+        ))
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn ack_attempt_moves_to_running() {
+    // Stage 1.3: explicit ack flips the assigned attempt (and task) to running.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-ack3", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Assigned
+    );
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Running
+    );
+    // Idempotent re-ack.
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn legacy_metric_event_acts_as_ack() {
+    // Stage 1.3: an N-1 node that sends the synthetic "attempt started" metric
+    // must still flip the attempt to running (backward compatibility).
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-ack4", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    let ev = IngestEventsRequest {
+        events: vec![IncomingEvent {
+            sequence: 1,
+            r#type: EventType::Metric,
+            payload: json!({ "text": "attempt started" }),
+        }],
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn unacked_assignment_is_reverted() {
+    // Stage 1.3: a node that never acks loses the assignment once the ack
+    // deadline passes; the task returns to the queue.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-ack1", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    state
+        .store
+        .set_attempt_ack_deadline(&assign.attempt_id, "1970-01-01T00:00:00Z")
+        .await
+        .unwrap();
+    state.store.tick_maintenance().await.unwrap();
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
+}
+
+#[tokio::test]
+async fn acked_slow_agent_keeps_assignment() {
+    // Stage 1.3: after ack, a slow agent that produces no output for >deadline
+    // seconds must NOT lose the assignment.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-ack2", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Running
+    );
+    // Force the ack deadline into the past and run maintenance: still running.
+    state
+        .store
+        .set_attempt_ack_deadline(&assign.attempt_id, "1970-01-01T00:00:00Z")
+        .await
+        .unwrap();
+    state.store.tick_maintenance().await.unwrap();
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Running
+    );
 }
 
 #[tokio::test]

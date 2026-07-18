@@ -23,6 +23,9 @@ use sqlx::Row;
 use uuid::Uuid;
 
 const ASSIGNMENT_LEASE_SECS: i64 = 30;
+/// Window after assignment within which the node must ack (Stage 1.3). An
+/// unacked assignment is reverted (returned to the queue) once this passes.
+const ACK_DEADLINE_SECS: i64 = 30;
 
 pub struct Store {
     pool: SqlitePool,
@@ -694,6 +697,7 @@ impl Store {
             let attempt_id = Uuid::new_v4().to_string();
             let number = self.attempt_count(&mut tx, &task_id).await? + 1;
             let lease = iso_plus_secs(ASSIGNMENT_LEASE_SECS);
+            let ack_deadline = iso_plus_secs(ACK_DEADLINE_SECS);
             let now = now_iso();
 
             let affected = sqlx::query(
@@ -709,14 +713,15 @@ impl Store {
                 return Ok(None);
             }
             sqlx::query(
-            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, started_at) \
-             VALUES (?, ?, ?, ?, 'assigned', ?, ?)",
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
+             VALUES (?, ?, ?, ?, 'assigned', ?, ?, ?)",
         )
         .bind(&attempt_id)
         .bind(&task_id)
         .bind(number as i64)
         .bind(node_id)
         .bind(&lease)
+        .bind(&ack_deadline)
         .bind(&now)
         .execute(&mut *tx)
         .await?;
@@ -1002,6 +1007,47 @@ impl Store {
         Ok(true)
     }
 
+    /// Explicit assignment acknowledgement (Stage 1.3): atomically flips an
+    /// `assigned` attempt (and its task) to `running` and clears the ack
+    /// deadline. Idempotent for already-running/terminal attempts.
+    pub async fn ack_attempt(&self, attempt_id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let attempt = sqlx::query("SELECT task_id, status FROM attempts WHERE id = ?")
+            .bind(attempt_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(attempt) = attempt else {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        };
+        let task_id: String = attempt.try_get("task_id")?;
+        let attempt_status: String = attempt.try_get("status")?;
+        let as_enum = from_snake::<AttemptStatus>(&attempt_status);
+        // Already running or terminal: idempotent no-op (a legacy metric event
+        // may already have flipped it, or the attempt was lost).
+        if let Some(s) = as_enum {
+            if s != AttemptStatus::Assigned {
+                let _ = tx.rollback().await;
+                return Ok(true);
+            }
+        }
+        let now = now_iso();
+        sqlx::query(
+            "UPDATE attempts SET status = 'running', ack_deadline = NULL, started_at = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE tasks SET status = 'running', started_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn cancel_task(&self, task_id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
@@ -1075,6 +1121,26 @@ impl Store {
 
     /// Background maintenance: revert unconfirmed assignments (lease expired)
     /// and mark silent nodes offline. Spawns a detached task.
+    /// Run the lease/offline maintenance tick once (used by the background
+    /// task and exposed for tests/ops).
+    pub async fn tick_maintenance(&self) -> Result<()> {
+        let now = now_iso();
+        revert_expired_leases(&self.pool, &now).await?;
+        mark_offline_nodes(&self.pool, &now).await?;
+        Ok(())
+    }
+
+    /// Test/debug: set an attempt's ack deadline (e.g. into the past to drive
+    /// the unacked-assignment revert without waiting).
+    pub async fn set_attempt_ack_deadline(&self, attempt_id: &str, iso: &str) -> Result<()> {
+        sqlx::query("UPDATE attempts SET ack_deadline = ? WHERE id = ?")
+            .bind(iso)
+            .bind(attempt_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub fn start_maintenance(&self) {
         let pool = self.pool.clone();
         tokio::spawn(async move {
@@ -1094,7 +1160,7 @@ impl Store {
 
 async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<()> {
     let rows = sqlx::query(
-        "SELECT id, task_id, node_id FROM attempts WHERE status = 'assigned' AND lease_expires_at < ?",
+        "SELECT id, task_id, node_id FROM attempts WHERE status = 'assigned' AND ack_deadline < ?",
     )
     .bind(now)
     .fetch_all(pool)

@@ -181,8 +181,8 @@ struct EventSink {
     buf: Mutex<VecDeque<IncomingEvent>>,
     next: AtomicU64,
     notify: Notify,
-    // Counts events that came from the adapter's stdout/stderr (excludes the
-    // daemon's own synthetic "attempt started" event). Used to warn on a
+    // adapter_events: AtomicU64,
+    // Counts events that came from the adapter's stdout/stderr. Used to warn on a
     // silent agent that exits 0 but produced no output.
     adapter_events: AtomicU64,
     attempt_id: String,
@@ -353,13 +353,13 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         client.clone(),
         cfg.server.clone(),
     );
-    // Confirm liveness at once so the assignment lease (store.rs ASSIGNMENT_LEASE_SECS)
-    // cannot expire before a slow agent emits its first event. Without this a silent
-    // agent that starts but takes >lease seconds to produce output loses the
-    // assignment and the task is reassigned (double-attempt). The first ingested
-    // event flips the attempt to 'running', after which the lease revert is a no-op.
-    sink.push(EventType::Metric, json!({ "text": "attempt started" }))
-        .await;
+    // Acknowledge the assignment immediately so the ack deadline (store.rs
+    // ACK_DEADLINE_SECS) cannot expire before a slow agent emits its first
+    // event. Without this a silent agent that starts but takes >deadline
+    // seconds to produce output loses the assignment and the task is
+    // reassigned (double-attempt). After ack the attempt is 'running' and the
+    // revert no longer applies (Stage 1.3).
+    ack_attempt(&client, &cfg.server, &assignment.attempt_id).await;
     let flusher = tokio::spawn(sink.clone().run_flusher());
 
     let r1 = tokio::spawn(read_stream(
@@ -593,6 +593,15 @@ async fn report_complete(
     };
     if let Err(e) = client.post(&url).json(&req).send().await {
         tracing::warn!("complete report failed for {attempt_id}: {e}");
+    }
+}
+
+/// Explicit assignment acknowledgement (Stage 1.3): tell the control plane the
+/// agent actually started so the assignment is not reverted by the ack deadline.
+async fn ack_attempt(client: &reqwest::Client, server: &str, attempt_id: &str) {
+    let url = format!("{}/v1/node/attempts/{}/ack", server, attempt_id);
+    if let Err(e) = client.post(&url).send().await {
+        tracing::warn!("ack failed for {attempt_id}: {e}");
     }
 }
 

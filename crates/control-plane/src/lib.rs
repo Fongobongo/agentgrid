@@ -183,6 +183,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/node/attempts/{id}/cancel", get(attempt_cancel_handler))
         .route("/v1/node/attempts/{id}/events", post(ingest_events))
         .route("/v1/node/attempts/{id}/complete", post(complete_attempt))
+        .route("/v1/node/attempts/{id}/ack", post(ack_attempt_handler))
         .route("/v1/node/attempts/{id}/artifacts", post(upload_artifact))
         .route("/v1/tasks/{id}/artifacts/{name}", get(get_artifact))
         .layer(DefaultBodyLimit::max(state.limits.artifact))
@@ -942,6 +943,20 @@ async fn complete_attempt(
         Ok(false) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("complete_attempt failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+async fn ack_attempt_handler(
+    State(state): State<Arc<AppState>>,
+    Path(attempt_id): Path<String>,
+) -> StatusCode {
+    match state.store.ack_attempt(&attempt_id).await {
+        Ok(true) => StatusCode::OK,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("ack_attempt failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
