@@ -9,8 +9,11 @@ rust-version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
+tokio = { version = "1", features = ["io-util", "io-std", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 agentgrid-common.workspace = true
+reqwest = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync"] }
+axum = { workspace = true }
