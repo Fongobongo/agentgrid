@@ -193,6 +193,7 @@ where
 mod tests {
     use super::*;
     use crate::methods::map_session_update;
+    use serde_json::json;
     use tokio::io::AsyncWriteExt;
 
     /// A minimal fake ACP agent: echoes `session/new` with a fixed session id
@@ -335,6 +336,97 @@ mod tests {
             prompt_res.get("status").unwrap(),
             &serde_json::json!("done")
         );
+    }
+
+    // Conformance: the full session/update vocabulary maps to the right
+    // AgentEventEnvelope kind (plan/tool_call/tool_result/file_change/progress/
+    // permission_request/usage/log), and unknown types fall back to Other.
+    #[test]
+    fn map_session_update_vocabulary() {
+        let build = |t: &str, extra: serde_json::Value| {
+            let mut o = serde_json::Map::new();
+            o.insert("type".into(), serde_json::Value::String(t.into()));
+            if let serde_json::Value::Object(e) = extra {
+                o.extend(e);
+            }
+            serde_json::Value::Object(o)
+        };
+        let map =
+            |t: &str, extra: serde_json::Value| map_session_update("sess-1", &build(t, extra)).kind;
+        use agentgrid_common::EventKind;
+        assert_eq!(map("plan", json!({})), EventKind::Plan);
+        assert_eq!(
+            map("tool_call", json!({ "tool": "bash" })),
+            EventKind::ToolCall
+        );
+        assert_eq!(map("tool_result", json!({})), EventKind::ToolResult);
+        assert_eq!(map("diff", json!({})), EventKind::FileChange);
+        assert_eq!(map("file_change", json!({})), EventKind::FileChange);
+        assert_eq!(map("progress", json!({})), EventKind::Progress);
+        assert_eq!(
+            map("permission_request", json!({})),
+            EventKind::PermissionRequest
+        );
+        assert_eq!(map("usage", json!({})), EventKind::Usage);
+        assert_eq!(map("log", json!({})), EventKind::Log);
+        assert_eq!(
+            map("weird_new_type", json!({})),
+            EventKind::Other("weird_new_type".into())
+        );
+        assert_eq!(
+            map_session_update("sess-1", &json!({ "x": 1 })).kind,
+            EventKind::Other("unknown".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn session_cancel_returns_response() {
+        let (c2a, a_read) = tokio::io::duplex(4096);
+        let (a_write, c_read) = tokio::io::duplex(4096);
+        tokio::spawn(fake_agent(a_read, a_write));
+        let (client, _notif) = new(c_read, c2a);
+        let client = std::sync::Arc::new(client);
+        client
+            .initialize(InitializeParams {
+                protocol_version: "0.2".into(),
+                agent: "opencode".into(),
+                model: "claude-3".into(),
+                session_id: None,
+                cwd: "/tmp".into(),
+                capabilities: serde_json::json!({}),
+                client: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let new_res = client
+            .session_new(SessionNewParams {
+                agent: "opencode".into(),
+                model: None,
+                cwd: "/abs".into(),
+                prompt: None,
+                mcp: serde_json::Value::Null,
+                parent_session_id: None,
+            })
+            .await
+            .unwrap();
+        let prompt = tokio::spawn({
+            let c = client.clone();
+            let sid = new_res.session_id.clone();
+            async move {
+                c.session_prompt(SessionPromptParams {
+                    session_id: sid,
+                    prompt: "do it".into(),
+                })
+                .await
+            }
+        });
+        let cancel = client
+            .session_cancel(SessionCancelParams {
+                session_id: new_res.session_id.clone(),
+            })
+            .await;
+        assert!(cancel.is_ok(), "session/cancel is acknowledged");
+        prompt.abort();
     }
 
     #[tokio::test]

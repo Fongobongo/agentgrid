@@ -185,7 +185,7 @@
 - [ ] `session/load`/`resume` если agent поддерживает
 - [x] ACP adapter как новый тип в adapter registry (не замена wrappers)
 - [x] Node-daemon spawn через `AcpClient`: `initialize`→`session/new`→`session/prompt`, стрим `session/update`→event sink, `request_permission`→durable approval poll; cancel/timeout внутри `drive_acp_session`
-- [ ] Conformance fixtures: initialize/session-new/plan-update/tool-call/diff/permission/cancel
+- [x] Conformance fixtures: initialize/session-new/plan-update/tool-call/diff/permission/cancel (acp crate tests: lifecycle + full `session/update` vocabulary mapping + `session/cancel` acknowledged)
 - [ ] Запустить минимум один реальный ACP-compatible agent E2E (локально и на удалённой node)
 - [ ] Test: cancellation обрывает prompt turn и завершает attempt `cancelled`
 - [ ] Test: kill ACP subprocess посреди JSON frame → attempt корректно failed, без зависания
