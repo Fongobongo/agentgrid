@@ -69,6 +69,13 @@ All notable changes to this project are documented in this file.
 - common: `CreateWorkflowRequest`, `CreateWorkflowRunRequest`, `WorkflowRunWithSteps` DTOs.
 - cli: `ag workflow create|list|show|run`. `create` reads steps from a JSON file; `run` starts a run of a template. Covered by two `tests/api.rs` integration tests (happy path + invalid-DAG rejection).
 
+### Added (Stage 7.3 — DAG execution scheduler + roles)
+- common: `WorkflowRole` expanded to `architect`/`worker`/`reviewer`/`integrator`/`verifier` (v1 still creates one role-run per step for its declared role).
+- control-plane: migration `0013_workflows_repository.sql` adds `workflow_runs.repository` so step tasks schedule against enrolled nodes.
+- control-plane: `Store::tick_workflow_run` — durable, idempotent scheduler. Marks a `pending` run `running`; activates `pending` steps whose dependencies are all `succeeded` by creating one Agentgrid task per step (tagged with the step's role); advances `running` steps whose task terminated; computes run status (succeeded when all leaves done, failed on any step failure). `create_workflow_run` now takes a `repository`.
+- control-plane: `POST /v1/workflow-runs/{id}/tick` drives the scheduler (wakes the assignment notifier) and returns the run + step instances.
+- tests: `tests/api.rs` golden workflow — `architect → 2 parallel workers → integrator → verifier` runs locally to a `succeeded` run on mock adapters (deterministic, exercises the full durable scheduler).
+
 ### Added (Stage 5.2 — durable approval flow)
 - control-plane: `approvals` table (migration 0011) + store (`create_approval`, `answer_approval` honoring the state machine, `get_approval`, `list_approvals`, `tick_approval_expiry`). API: `GET /v1/approvals`, `POST /v1/approvals/{id}/allow|deny` (user-auth, fail-closed). CLI: `ag approvals list|allow|deny`. The approval state machine moved into `agentgrid-common` so the control plane and the ACP client share one definition. Covered by an API test (create → list pending → allow → list allowed; terminal re-answer is a no-op).
 

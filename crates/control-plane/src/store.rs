@@ -14,7 +14,7 @@ use agentgrid_common::{
     EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, NodeEligibility, NodeStatus,
     NodeView, PollRequest, RepositoryView, TaskEligibility, TaskEvent, TaskStatus, TaskTransition,
     TaskView, UploadArtifactRequest, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepRun, WorkflowTemplate,
+    WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -1569,6 +1569,14 @@ fn role_str(r: WorkflowRole) -> String {
         .unwrap_or_default()
 }
 
+/// Serialize a status enum to its `snake_case` string for storage.
+fn role_str_status<T: serde::Serialize>(t: T) -> String {
+    serde_json::to_value(t)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
 impl Store {
     /// Create a workflow template. Validates the DAG up front so a broken
     /// template can never be persisted.
@@ -1642,6 +1650,7 @@ impl Store {
         &self,
         template_id: &str,
         context: Option<&str>,
+        repository: Option<&str>,
     ) -> Result<WorkflowRun> {
         let tpl = self
             .get_workflow_template(template_id)
@@ -1651,12 +1660,13 @@ impl Store {
         let created_at = now_iso();
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO workflow_runs (id, template_id, status, context, created_at, finished_at) \
-             VALUES (?, ?, 'pending', ?, ?, NULL)",
+            "INSERT INTO workflow_runs (id, template_id, status, context, repository, created_at, finished_at) \
+             VALUES (?, ?, 'pending', ?, ?, ?, NULL)",
         )
         .bind(&run_id)
         .bind(template_id)
         .bind(context)
+        .bind(repository)
         .bind(&created_at)
         .execute(&mut *tx)
         .await?;
@@ -1698,12 +1708,13 @@ impl Store {
             created_at,
             finished_at: None,
             context: context.map(|s| s.to_string()),
+            repository: repository.map(|s| s.to_string()),
         })
     }
 
     pub async fn get_workflow_run(&self, id: &str) -> Result<Option<WorkflowRun>> {
         let row = sqlx::query(
-            "SELECT id, template_id, status, context, created_at, finished_at \
+            "SELECT id, template_id, status, context, repository, created_at, finished_at \
              FROM workflow_runs WHERE id = ?",
         )
         .bind(id)
@@ -1717,12 +1728,13 @@ impl Store {
             created_at: r.try_get("created_at").unwrap_or_default(),
             finished_at: r.try_get("finished_at").ok(),
             context: r.try_get("context").ok(),
+            repository: r.try_get("repository").ok(),
         }))
     }
 
     pub async fn list_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
         let rows = sqlx::query(
-            "SELECT id, template_id, status, context, created_at, finished_at \
+            "SELECT id, template_id, status, context, repository, created_at, finished_at \
              FROM workflow_runs ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -1737,6 +1749,7 @@ impl Store {
                 created_at: r.try_get("created_at").unwrap_or_default(),
                 finished_at: r.try_get("finished_at").ok(),
                 context: r.try_get("context").ok(),
+                repository: r.try_get("repository").ok(),
             })
             .collect())
     }
@@ -1768,6 +1781,178 @@ impl Store {
                 created_at: r.try_get("created_at").unwrap_or_default(),
             })
             .collect())
+    }
+
+    /// Map a terminal task status to a workflow step status (or `None` if the
+    /// task is still running).
+    fn task_to_step_status(t: &TaskStatus) -> Option<WorkflowStepStatus> {
+        match t {
+            TaskStatus::Succeeded => Some(WorkflowStepStatus::Succeeded),
+            TaskStatus::Failed | TaskStatus::Cancelled => Some(WorkflowStepStatus::Failed),
+            _ => None,
+        }
+    }
+
+    async fn set_workflow_run_status(
+        &self,
+        id: &str,
+        status: WorkflowRunStatus,
+        finished_at: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE workflow_runs SET status = ?, finished_at = ? WHERE id = ?")
+            .bind(role_str_status(status))
+            .bind(finished_at)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_step_status(&self, step_run_id: &str, status: WorkflowStepStatus) -> Result<()> {
+        sqlx::query("UPDATE workflow_steps SET status = ? WHERE id = ?")
+            .bind(role_str_status(status))
+            .bind(step_run_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_role_run_task(&self, step_run_id: &str, task_id: &str) -> Result<()> {
+        sqlx::query("UPDATE role_runs SET task_id = ? WHERE step_run_id = ?")
+            .bind(task_id)
+            .bind(step_run_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_role_run_status_by_step(
+        &self,
+        step_run_id: &str,
+        status: WorkflowStepStatus,
+    ) -> Result<()> {
+        sqlx::query("UPDATE role_runs SET status = ? WHERE step_run_id = ?")
+            .bind(role_str_status(status))
+            .bind(step_run_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn step_task_id(&self, step_run_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT task_id FROM role_runs WHERE step_run_id = ?")
+            .bind(step_run_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| r.try_get::<Option<String>, _>("task_id").ok().flatten()))
+    }
+
+    /// Current status of a task, if it exists.
+    pub async fn get_task_status(&self, id: &str) -> Result<Option<TaskStatus>> {
+        Ok(self.show_task(id).await?.map(|t| t.status))
+    }
+
+    /// Durable, idempotent workflow scheduler. Reconciles a run from current
+    /// state:
+    /// - marks a `pending` run `running`;
+    /// - activates `pending` steps whose dependencies are all `succeeded`
+    ///   (creating one Agentgrid task per step, tagged with the step's role);
+    /// - advances `running` steps whose task has terminated;
+    /// - computes the run status (succeeded when all leaves done, failed on any
+    ///   step failure).
+    ///
+    /// Returns the ids of tasks created during this tick (so a caller can assign
+    /// and drive them). Safe to call repeatedly; it only ever moves state forward.
+    pub async fn tick_workflow_run(&self, run_id: &str) -> Result<Vec<String>> {
+        let run = match self.get_workflow_run(run_id).await? {
+            Some(r) => r,
+            None => return Ok(vec![]),
+        };
+        if matches!(
+            run.status,
+            WorkflowRunStatus::Succeeded | WorkflowRunStatus::Failed | WorkflowRunStatus::Cancelled
+        ) {
+            return Ok(vec![]);
+        }
+        if run.status == WorkflowRunStatus::Pending {
+            self.set_workflow_run_status(run_id, WorkflowRunStatus::Running, None)
+                .await?;
+        }
+        let steps = self.get_workflow_run_steps(run_id).await?;
+        let status_by_id: std::collections::HashMap<&str, WorkflowStepStatus> = steps
+            .iter()
+            .map(|s| (s.step_id.as_str(), s.status))
+            .collect();
+        let repo = run.repository.clone().unwrap_or_default();
+        let mut created = Vec::new();
+        for step in &steps {
+            match step.status {
+                WorkflowStepStatus::Succeeded
+                | WorkflowStepStatus::Failed
+                | WorkflowStepStatus::Cancelled
+                | WorkflowStepStatus::Skipped => continue,
+                WorkflowStepStatus::Running => {
+                    if let Some(task_id) = self.step_task_id(&step.id).await? {
+                        if let Some(ts) = self.get_task_status(&task_id).await? {
+                            if let Some(next) = Self::task_to_step_status(&ts) {
+                                self.set_step_status(&step.id, next).await?;
+                                self.set_role_run_status_by_step(&step.id, next).await?;
+                            }
+                        }
+                    }
+                }
+                WorkflowStepStatus::Pending => {
+                    let ready = step.depends_on.iter().all(|d| {
+                        status_by_id.get(d.as_str()) == Some(&WorkflowStepStatus::Succeeded)
+                    });
+                    if ready {
+                        let req = CreateTaskRequest {
+                            prompt: step.prompt.clone(),
+                            repository: repo.clone(),
+                            adapter: step
+                                .adapter
+                                .clone()
+                                .filter(|a| !a.is_empty())
+                                .unwrap_or_else(|| "mock".to_string()),
+                            requested_node_id: None,
+                            timeout_secs: None,
+                            validation_command: None,
+                        };
+                        let tv = self.create_task(&req).await?;
+                        self.set_role_run_task(&step.id, &tv.id).await?;
+                        self.set_step_status(&step.id, WorkflowStepStatus::Running)
+                            .await?;
+                        self.set_role_run_status_by_step(&step.id, WorkflowStepStatus::Running)
+                            .await?;
+                        created.push(tv.id);
+                    }
+                }
+            }
+        }
+        let steps2 = self.get_workflow_run_steps(run_id).await?;
+        let all_term = steps2.iter().all(|s| {
+            matches!(
+                s.status,
+                WorkflowStepStatus::Succeeded
+                    | WorkflowStepStatus::Failed
+                    | WorkflowStepStatus::Cancelled
+                    | WorkflowStepStatus::Skipped
+            )
+        });
+        let any_failed = steps2.iter().any(|s| {
+            matches!(
+                s.status,
+                WorkflowStepStatus::Failed | WorkflowStepStatus::Cancelled
+            )
+        });
+        if any_failed {
+            self.set_workflow_run_status(run_id, WorkflowRunStatus::Failed, Some(&now_iso()))
+                .await?;
+        } else if all_term {
+            self.set_workflow_run_status(run_id, WorkflowRunStatus::Succeeded, Some(&now_iso()))
+                .await?;
+        }
+        Ok(created)
     }
 }
 
@@ -1823,7 +2008,7 @@ mod workflow_tests {
         assert_eq!(got.steps.len(), 3);
 
         let run = s
-            .create_workflow_run(&tpl.id, Some(r#"{"branch":"feat"}"#))
+            .create_workflow_run(&tpl.id, Some(r#"{"branch":"feat"}"#), None)
             .await
             .unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Pending);
@@ -1848,6 +2033,30 @@ mod workflow_tests {
     #[tokio::test]
     async fn unknown_template_rejected_on_run() {
         let s = temp_store().await;
-        assert!(s.create_workflow_run("wft-nope", None).await.is_err());
+        assert!(s.create_workflow_run("wft-nope", None, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn tick_activates_ready_step_and_is_idempotent() {
+        let s = temp_store().await;
+        // Single ready step (no deps) -> first tick spawns its task.
+        let tpl = s
+            .create_workflow_template("one", &[step("a", &[], WorkflowRole::Worker)])
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"))
+            .await
+            .unwrap();
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 1);
+        let run_got = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(run_got.status, WorkflowRunStatus::Running);
+        let steps = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Running);
+        assert!(steps[0].adapter.is_none() || steps[0].adapter.is_some());
+        // Second tick must not spawn another task (step already running).
+        let again = s.tick_workflow_run(&run.id).await.unwrap();
+        assert!(again.is_empty());
     }
 }

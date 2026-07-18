@@ -214,6 +214,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/workflows/{id}/runs", post(create_workflow_run))
         .route("/v1/workflow-runs", get(list_workflow_runs))
         .route("/v1/workflow-runs/{id}", get(show_workflow_run))
+        .route("/v1/workflow-runs/{id}/tick", post(tick_workflow_run))
         .layer(DefaultBodyLimit::max(state.limits.artifact))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -685,7 +686,7 @@ async fn create_workflow_run(
 ) -> Result<(StatusCode, Json<WorkflowRun>), StatusCode> {
     state
         .store
-        .create_workflow_run(&id, req.context.as_deref())
+        .create_workflow_run(&id, req.context.as_deref(), req.repository.as_deref())
         .await
         .map(|r| (StatusCode::CREATED, Json(r)))
         .map_err(|e| {
@@ -717,6 +718,29 @@ async fn show_workflow_run(
             tracing::error!("show_workflow_run failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
+    }
+}
+
+async fn tick_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkflowRunWithSteps>, StatusCode> {
+    if state.store.tick_workflow_run(&id).await.is_err() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    // Wake the scheduler so freshly-created step tasks get assigned promptly.
+    state.assignment_notify.notify_waiters();
+    match state.store.get_workflow_run(&id).await {
+        Ok(Some(r)) => {
+            let steps = state
+                .store
+                .get_workflow_run_steps(&id)
+                .await
+                .unwrap_or_default();
+            Ok(Json(WorkflowRunWithSteps { run: r, steps }))
+        }
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 

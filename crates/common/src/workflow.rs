@@ -12,6 +12,10 @@ pub enum WorkflowRole {
     /// Implements the change. (Default.)
     #[default]
     Worker,
+    /// Reviews a peer's output before integration.
+    Reviewer,
+    /// Merges worker results into an integration branch.
+    Integrator,
     /// Checks the result against the acceptance criteria. (Future: runs the
     /// verification task and gates downstream steps on its outcome.)
     Verifier,
@@ -89,6 +93,9 @@ pub struct WorkflowRun {
     /// Shared JSON context passed to every step (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// Target repository the step tasks run against (optional; v1: whole run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// A step instance inside a run.
@@ -120,6 +127,9 @@ pub struct CreateWorkflowRequest {
 pub struct CreateWorkflowRunRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// Target repository for the step tasks (optional; defaults to none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// `GET /v1/workflow-runs/{id}` response: the run plus its step instances.

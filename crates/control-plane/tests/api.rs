@@ -1596,3 +1596,126 @@ async fn workflow_rejects_invalid_dag() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn workflow_golden_architect_workers_integrator_verifier() {
+    // Exit 7: architect -> 2 parallel workers -> integrator -> verifier runs
+    // locally; the durable scheduler activates ready steps as Agentgrid tasks
+    // and advances the DAG to a succeeded run (mock adapters, no network).
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "wf-node", vec!["mock".into()], vec!["*".into()]).await;
+
+    let steps = json!([
+        {"id":"arch","prompt":"design","role":"architect","depends_on":[]},
+        {"id":"w1","prompt":"impl a","role":"worker","depends_on":["arch"]},
+        {"id":"w2","prompt":"impl b","role":"worker","depends_on":["arch"]},
+        {"id":"int","prompt":"merge","role":"integrator","depends_on":["w1","w2"]},
+        {"id":"ver","prompt":"verify","role":"verifier","depends_on":["int"]}
+    ]);
+    let tpl_body = json!({"name":"golden","steps":steps}).to_string();
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/workflows", tpl_body))
+        .await
+        .unwrap();
+    let tpl: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let tid = tpl.get("id").unwrap().as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/workflows/{tid}/runs"),
+            json!({"repository":"demo"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let run: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let rid = run.get("id").unwrap().as_str().unwrap().to_string();
+
+    let poll_req = PollRequest {
+        node_id: node_id.clone(),
+        name: "wf-node".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+    };
+
+    for _ in 0..200 {
+        // Scheduler tick: activates ready steps + advances completed ones.
+        let resp = app
+            .clone()
+            .oneshot(post(&format!("/v1/workflow-runs/{rid}/tick"), "{}".into()))
+            .await
+            .unwrap();
+        let rv: serde_json::Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let status = rv
+            .get("run")
+            .unwrap()
+            .get("status")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        if status == "succeeded" || status == "failed" {
+            assert_eq!(status, "succeeded");
+            break;
+        }
+        // Drive one pending task to completion (mock success), like the daemon.
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/node/poll",
+                serde_json::to_string(&poll_req).unwrap(),
+                &cred,
+            ))
+            .await
+            .unwrap();
+        let pr: PollResponse =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        if let Some(a) = pr.assignment {
+            let resp = app
+                .clone()
+                .oneshot(post_auth(
+                    &format!("/v1/node/attempts/{}/complete", a.attempt_id),
+                    serde_json::to_string(&CompleteAttemptRequest {
+                        exit_code: 0,
+                        commit_sha: None,
+                        error_code: None,
+                    })
+                    .unwrap(),
+                    &cred,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    let rv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/workflow-runs/{rid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let rv: serde_json::Value =
+        serde_json::from_slice(&to_bytes(rv.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(rv.get("run").unwrap().get("status").unwrap(), "succeeded");
+    // All five steps ran to success.
+    let steps_done = rv
+        .get("steps")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s.get("status").unwrap() == "succeeded");
+    assert!(steps_done, "every step should succeed: {rv}");
+}
