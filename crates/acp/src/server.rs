@@ -91,6 +91,22 @@ pub trait AcpAgent: Send + Sync {
         &self,
         params: SessionCancelParams,
     ) -> impl std::future::Future<Output = Result<Value, RpcError>> + Send;
+    /// Custom `_`-prefixed extension methods (e.g. `_agentgrid/nodes`).
+    /// Default: method not found, so non-gateway agents ignore them.
+    fn handle_extension(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> impl std::future::Future<Output = Result<Value, RpcError>> + Send {
+        let _ = (method, params);
+        async {
+            Err(RpcError {
+                code: -32601,
+                message: "method not found".into(),
+                data: None,
+            })
+        }
+    }
     /// Inbound notifications (client→agent). Default: ignore.
     fn handle_notification(&self, _params: Value) -> impl std::future::Future<Output = ()> + Send {
         async {}
@@ -209,43 +225,49 @@ async fn dispatch<A: AcpAgent + ?Sized>(
     method: &str,
     params: Value,
 ) -> Message {
-    let result = match method {
-        "initialize" => match from_value::<InitializeParams>(params) {
-            Ok(p) => agent.initialize(p).await,
-            Err(e) => Err(e),
-        },
-        "session/new" => match from_value::<SessionNewParams>(params) {
-            Ok(p) => agent.session_new(p).await,
-            Err(e) => Err(e),
-        },
-        "session/prompt" => match serde_json::from_value::<SessionPromptParams>(params) {
-            Ok(p) => {
-                agent
-                    .session_prompt(
-                        AcpCtx {
-                            sender: sender.clone(),
-                            pending: pending.clone(),
-                            idgen: idgen.clone(),
-                        },
-                        p,
-                    )
-                    .await
-            }
-            Err(e) => Err(RpcError {
-                code: -32602,
-                message: format!("invalid params: {e}"),
+    let result = if method.starts_with('_') {
+        // Custom extension methods (e.g. `_agentgrid/nodes`); the gateway
+        // exposes read-only control-plane views to external ACP clients.
+        agent.handle_extension(method, params).await
+    } else {
+        match method {
+            "initialize" => match from_value::<InitializeParams>(params) {
+                Ok(p) => agent.initialize(p).await,
+                Err(e) => Err(e),
+            },
+            "session/new" => match from_value::<SessionNewParams>(params) {
+                Ok(p) => agent.session_new(p).await,
+                Err(e) => Err(e),
+            },
+            "session/prompt" => match serde_json::from_value::<SessionPromptParams>(params) {
+                Ok(p) => {
+                    agent
+                        .session_prompt(
+                            AcpCtx {
+                                sender: sender.clone(),
+                                pending: pending.clone(),
+                                idgen: idgen.clone(),
+                            },
+                            p,
+                        )
+                        .await
+                }
+                Err(e) => Err(RpcError {
+                    code: -32602,
+                    message: format!("invalid params: {e}"),
+                    data: None,
+                }),
+            },
+            "session/cancel" => match from_value::<SessionCancelParams>(params) {
+                Ok(p) => agent.session_cancel(p).await,
+                Err(e) => Err(e),
+            },
+            _ => Err(RpcError {
+                code: -32601,
+                message: "method not found".into(),
                 data: None,
             }),
-        },
-        "session/cancel" => match from_value::<SessionCancelParams>(params) {
-            Ok(p) => agent.session_cancel(p).await,
-            Err(e) => Err(e),
-        },
-        _ => Err(RpcError {
-            code: -32601,
-            message: "method not found".into(),
-            data: None,
-        }),
+        }
     };
     Message::Response { id, result }
 }

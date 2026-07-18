@@ -181,6 +181,24 @@ fn http_err(e: impl std::fmt::Display) -> RpcError {
     }
 }
 
+/// GET a control-plane path and return the JSON body verbatim (used by the
+/// `_agentgrid/*` extension methods).
+async fn get_json(agent: &GatewayAgent, path: &str) -> Result<Value, RpcError> {
+    let resp = agent
+        .auth(agent.client.get(format!("{}{}", agent.server, path)))
+        .send()
+        .await
+        .map_err(http_err)?;
+    if !resp.status().is_success() {
+        return Err(RpcError {
+            code: -32000,
+            message: format!("get_json {path}: {status}", status = resp.status()),
+            data: None,
+        });
+    }
+    resp.json().await.map_err(http_err)
+}
+
 fn is_terminal(s: &TaskStatus) -> bool {
     matches!(
         s,
@@ -296,6 +314,28 @@ impl AcpAgent for GatewayAgent {
             }
             // Nothing created yet; nothing to cancel.
             None => Ok(serde_json::json!({})),
+        }
+    }
+
+    async fn handle_extension(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match method {
+            "_agentgrid/nodes" => get_json(self, "/v1/nodes").await,
+            "_agentgrid/task_eligibility" => {
+                let task_id = params
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RpcError {
+                        code: -32602,
+                        message: "task_eligibility requires task_id".into(),
+                        data: None,
+                    })?;
+                get_json(self, &format!("/v1/tasks/{task_id}/eligibility")).await
+            }
+            other => Err(RpcError {
+                code: -32601,
+                message: format!("unknown extension method: {other}"),
+                data: None,
+            }),
         }
     }
 }
@@ -454,6 +494,33 @@ mod integration_tests {
         StatusCode::OK
     }
 
+    async fn cp_list_nodes(State(_s): State<Arc<FakeCp>>) -> Json<Vec<Value>> {
+        Json(vec![json!({
+            "id": "node-1",
+            "name": "n1",
+            "status": "online",
+            "adapters": ["claude"],
+            "repositories": ["*"],
+            "max_concurrency": 2,
+            "active_attempts": 0,
+            "last_heartbeat_at": "t",
+            "agent_version": "0.1",
+            "load_avg": 0.0,
+            "free_disk_mb": 100000,
+        })])
+    }
+
+    async fn cp_task_eligibility(
+        State(_s): State<Arc<FakeCp>>,
+        Path(id): Path<String>,
+    ) -> Json<Value> {
+        Json(json!({
+            "task_id": id,
+            "no_eligible_nodes": [],
+            "nodes": [],
+        }))
+    }
+
     #[tokio::test]
     async fn gateway_streams_events_and_relays_approval() {
         let cp = Arc::new(FakeCp {
@@ -552,5 +619,79 @@ mod integration_tests {
         assert!(kinds.contains(&EventKind::Plan));
         assert!(kinds.contains(&EventKind::Result));
         assert_eq!(*cp.decided.lock().unwrap(), vec!["allow:apr-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn gateway_exposes_extension_methods() {
+        let cp = Arc::new(FakeCp {
+            task_id: "task-x".into(),
+            delivered: AtomicBool::new(false),
+            decided: Mutex::new(vec![]),
+        });
+        let app = Router::new()
+            .route("/v1/nodes", axum::routing::get(cp_list_nodes))
+            .route(
+                "/v1/tasks/{id}/eligibility",
+                axum::routing::get(cp_task_eligibility),
+            )
+            .with_state(cp.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (c2s, s_read) = duplex(8192);
+        let (s_write, c_read) = duplex(8192);
+        tokio::spawn(
+            AcpServer::new(
+                s_read,
+                s_write,
+                GatewayAgent::new(format!("http://{addr}"), None),
+            )
+            .run(),
+        );
+
+        let (client, _notif) = acp_client_new(c_read, c2s);
+        let client = Arc::new(client);
+        client
+            .initialize(InitializeParams {
+                protocol_version: "0.1".into(),
+                agent: "claude".into(),
+                model: "v1".into(),
+                session_id: None,
+                cwd: "/tmp".into(),
+                capabilities: json!({}),
+                client: json!({}),
+            })
+            .await
+            .unwrap();
+
+        let nodes = client
+            .request("_agentgrid/nodes", json!({}))
+            .await
+            .expect("nodes extension");
+        assert_eq!(
+            nodes.as_array().unwrap()[0].get("id").unwrap(),
+            &json!("node-1")
+        );
+
+        let elig = client
+            .request(
+                "_agentgrid/task_eligibility",
+                json!({ "task_id": "task-x" }),
+            )
+            .await
+            .expect("eligibility extension");
+        assert_eq!(elig.get("task_id").unwrap(), &json!("task-x"));
+        assert!(elig
+            .get("no_eligible_nodes")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // Unknown extension method is a clean RPC error, not a hang.
+        assert!(client.request("_agentgrid/bogus", json!({})).await.is_err());
     }
 }
