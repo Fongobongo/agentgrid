@@ -70,6 +70,10 @@ pub struct WorkflowStep {
     pub role: WorkflowRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<String>,
+    /// Optional placement constraint: pin this step's task to a specific node
+    /// (Stage 8: node affinity). `None` lets the scheduler pick any eligible node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_node_id: Option<String>,
 }
 
 /// A reusable workflow definition (the DAG).
@@ -108,6 +112,9 @@ pub struct WorkflowStepRun {
     pub depends_on: Vec<String>,
     pub role: WorkflowRole,
     pub adapter: Option<String>,
+    /// Optional placement constraint (Stage 8): node this step's task is pinned to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_node_id: Option<String>,
     pub status: WorkflowStepStatus,
     pub created_at: String,
 }

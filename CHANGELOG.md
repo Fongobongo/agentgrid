@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (Stage 8 — distributed workflows: placement)
+- control-plane (8): per-step node placement. `WorkflowStep`/`WorkflowStepRun` gain `requested_node_id`; it is stored in `workflow_steps` (migration 0014) and carried into the Agentgrid task spawned for that step, so the scheduler's `try_assign` pins the task to the requested node (NULL = any eligible node). Honored end-to-end: template → run → task. `TaskView` now exposes `requested_node_id` for UI/CLI visibility. Covered by a store-level regression test (`step_requested_node_id_pins_task`) and the golden workflow integration test.
+
+### Fixed (Stage 8 — distributed workflows: placement)
+- control-plane: bind `workflow_steps.requested_node_id` as `Option<&str>` (via `as_deref()`) instead of `&Option<String>`, and normalize empty-string to `None` on read. Binding `&Option<String>::None` into an `ALTER TABLE … ADD COLUMN` text column stored the empty string `""` rather than NULL, which poisoned the spawned task's `requested_node_id` and broke the `try_assign` `requested_node_id IS NULL` filter (unpinned steps could never be assigned).
 ### Fixed (Stage 1 — 0.1.1 correctness)
 - control-plane (1.1): decide task success from the adapter **outcome** (`error_code`), not raw `exit_code==0`. A validation failure that exits 0 is now `failed`/`validation_failed`, never silently `succeeded`. Adapter timeout reports a distinct `error_code="timeout"`.
 - control-plane (1.2): a node that goes `offline` (heartbeat lapse) or is `revoked` atomically loses its in-flight `assigned`/`running`/`validating` attempts (→ `lost`) and fails the owning task with `error_code="node_lost"`, freeing capacity. Late completions on a lost attempt are treated as idempotent no-ops.

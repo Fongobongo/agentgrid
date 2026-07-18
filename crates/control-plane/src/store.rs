@@ -513,12 +513,13 @@ impl Store {
             assigned_attempt_id: None,
             validation_command: req.validation_command.clone(),
             error_code: None,
+            requested_node_id: req.requested_node_id.clone(),
         })
     }
 
     pub async fn list_tasks(&self) -> Result<Vec<TaskView>> {
         let rows = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id \
              FROM tasks ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -528,7 +529,7 @@ impl Store {
 
     pub async fn show_task(&self, id: &str) -> Result<Option<TaskView>> {
         let row = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id \
              FROM tasks WHERE id = ?",
         )
         .bind(id)
@@ -670,7 +671,6 @@ impl Store {
         .bind(node_id)
         .fetch_all(&mut *tx)
         .await?;
-
         for c in &cands {
             let task_id: String = c.try_get("id")?;
             let prompt: String = c.try_get("prompt")?;
@@ -1351,6 +1351,7 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         assigned_attempt_id: r.try_get("assigned_attempt_id").unwrap_or_default(),
         validation_command: r.try_get("validation_command").unwrap_or_default(),
         error_code: r.try_get("error_code").unwrap_or_default(),
+        requested_node_id: r.try_get("requested_node_id").unwrap_or_default(),
     }
 }
 
@@ -1675,8 +1676,8 @@ impl Store {
             let depends_json = serde_json::to_string(&step.depends_on)?;
             sqlx::query(
                 "INSERT INTO workflow_steps \
-                 (id, run_id, step_id, prompt, depends_on, role, adapter, status, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                 (id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, status, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
             )
             .bind(&step_run_id)
             .bind(&run_id)
@@ -1685,6 +1686,7 @@ impl Store {
             .bind(&depends_json)
             .bind(role_str(step.role))
             .bind(&step.adapter)
+            .bind(step.requested_node_id.as_deref())
             .bind(&created_at)
             .execute(&mut *tx)
             .await?;
@@ -1756,7 +1758,7 @@ impl Store {
 
     pub async fn get_workflow_run_steps(&self, run_id: &str) -> Result<Vec<WorkflowStepRun>> {
         let rows = sqlx::query(
-            "SELECT id, run_id, step_id, prompt, depends_on, role, adapter, status, created_at \
+            "SELECT id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, status, created_at \
              FROM workflow_steps WHERE run_id = ? ORDER BY created_at ASC",
         )
         .bind(run_id)
@@ -1776,6 +1778,14 @@ impl Store {
                 role: from_snake(&r.try_get::<String, _>("role").unwrap_or_default())
                     .unwrap_or(WorkflowRole::Worker),
                 adapter: r.try_get("adapter").ok(),
+                // Normalize both NULL and empty-string to `None` so an
+                // unpinned step never becomes `Some("")` (which would break
+                // the `try_assign` `requested_node_id IS NULL` filter).
+                requested_node_id: r
+                    .try_get::<Option<String>, _>("requested_node_id")
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty()),
                 status: from_snake(&r.try_get::<String, _>("status").unwrap_or_default())
                     .unwrap_or(agentgrid_common::WorkflowStepStatus::Pending),
                 created_at: r.try_get("created_at").unwrap_or_default(),
@@ -1914,7 +1924,7 @@ impl Store {
                                 .clone()
                                 .filter(|a| !a.is_empty())
                                 .unwrap_or_else(|| "mock".to_string()),
-                            requested_node_id: None,
+                            requested_node_id: step.requested_node_id.clone(),
                             timeout_secs: None,
                             validation_command: None,
                         };
@@ -1982,6 +1992,7 @@ mod workflow_tests {
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             role,
             adapter: None,
+            requested_node_id: None,
         }
     }
 
@@ -2058,5 +2069,32 @@ mod workflow_tests {
         // Second tick must not spawn another task (step already running).
         let again = s.tick_workflow_run(&run.id).await.unwrap();
         assert!(again.is_empty());
+    }
+
+    #[tokio::test]
+    async fn step_requested_node_id_pins_task() {
+        let s = temp_store().await;
+        let steps = vec![agentgrid_common::WorkflowStep {
+            id: "a".into(),
+            prompt: "do a".into(),
+            depends_on: vec![],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: Some("node-pinned".into()),
+        }];
+        let tpl = s.create_workflow_template("pin", &steps).await.unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"))
+            .await
+            .unwrap();
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 1);
+        let task = s.show_task(&created[0]).await.unwrap().unwrap();
+        assert_eq!(task.requested_node_id.as_deref(), Some("node-pinned"));
+        let steps_run = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(
+            steps_run[0].requested_node_id.as_deref(),
+            Some("node-pinned")
+        );
     }
 }

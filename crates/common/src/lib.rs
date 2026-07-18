@@ -255,6 +255,10 @@ pub struct TaskView {
     /// success or a clean cancel.
     #[serde(default)]
     pub error_code: Option<String>,
+    /// Node this task is pinned to, if the creator requested one (Stage 8
+    /// workflow placement). `None` => scheduler picks any eligible node.
+    #[serde(default)]
+    pub requested_node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

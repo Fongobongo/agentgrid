@@ -245,7 +245,8 @@
 
 ## Этап 8 — 0.3 Distributed workflows (2–3 недели)
 
-- [ ] Placement constraints per step: adapter, capability, node affinity/anti-affinity
+- [x] Placement constraints per step: node affinity via `requested_node_id` (pin a step's task to a specific node). Adapter (`adapter` field, already per-step) + capability + anti-affinity remain follow-ups. Wired template → run → task; `requested_node_id` stored in `workflow_steps` (migration 0014), carried into the spawned task, and honored by the scheduler's `try_assign` NULL filter. Regression test: pinned step spawns a task pinned to that node.
+- [ ] Workers на разных nodes; verifier по возможности на другой node/agent
 - [ ] Workers на разных nodes; verifier по возможности на другой node/agent
 - [ ] Cross-node handoff только через artifacts + commits (hash-проверка); без прямых node↔node соединений
 - [ ] Единый `base_commit` для параллельных workers одного run
