@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentgrid_adapters::{to_event_type, AdapterEvent};
+use agentgrid_adapters::{to_event_type, AdapterEvent, ExecutionBackend};
 use agentgrid_common::{
-    AgentEventEnvelope, Assignment, CancelState, CompleteAttemptRequest, CreateAgentSessionRequest,
-    EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IncomingEvent, IngestEventsRequest,
-    NodeStatus, PollRequest, PollResponse, UploadArtifactRequest,
+    AdapterCapability, AgentEventEnvelope, Assignment, CancelState, CompleteAttemptRequest,
+    CreateAgentSessionRequest, EnrollRequest, EnrollResponse, EventType, HeartbeatRequest,
+    IncomingEvent, IngestEventsRequest, NodeStatus, PollRequest, PollResponse,
+    UploadArtifactRequest,
 };
 use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
@@ -379,23 +380,19 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             return Ok(());
         }
     };
-    let mut cmd = tokio::process::Command::new(&bin);
-    cmd.arg("--prompt").arg(&assignment.prompt);
-    cmd.current_dir(&ws.path);
-    cmd.env("AGENTGRID_ATTEMPT_ID", &assignment.attempt_id);
-    // Forward configured env (e.g. API keys) to the adapter subprocess (Stage 3.1).
-    for (k, v) in &cfg.adapter_env {
-        cmd.env(k, v);
-    }
-    // Separate process group so a cancel can SIGTERM the whole tree (Stage 2.7).
-    cmd.process_group(0);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    // Stage 3.2: spawn through the ExecutionBackend contract (native process).
+    let req = agentgrid_adapters::SpawnRequest {
+        bin,
+        prompt: assignment.prompt.clone(),
+        workdir: ws.path.clone(),
+        attempt_id: assignment.attempt_id.clone(),
+        timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
+        env: cfg.adapter_env.clone(),
+    };
+    let bp = match agentgrid_adapters::ProcessBackend.spawn(req) {
+        Ok(b) => b,
         Err(e) => {
-            tracing::error!("failed to spawn adapter {}: {e}", bin);
+            tracing::error!("failed to spawn adapter: {e}");
             report_complete(
                 &client,
                 &cfg.server,
@@ -409,16 +406,17 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         }
     };
 
-    let pid = child.id().unwrap_or(0);
+    let pid = bp.pid;
     let cancel_url = format!(
         "{}/v1/node/attempts/{}/cancel",
         cfg.server, assignment.attempt_id
     );
     let cancel_client = client.clone();
-    let timeout = Duration::from_secs(assignment.timeout_secs.max(1));
+    let timeout = bp.timeout;
 
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let stdout = bp.stdout;
+    let stderr = bp.stderr;
+    let mut child = bp.child;
     let sink = EventSink::new(
         assignment.attempt_id.clone(),
         client.clone(),
@@ -837,15 +835,22 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
     tokio::spawn(async move {
         loop {
             // Stage 2.4: only advertise as Online when every configured adapter
-            // binary is present; a missing one degrades the node.
+            // binary is present; a missing one degrades the node. Stage 3.2:
+            // report per-adapter capabilities (version + readiness) each beat.
+            let mut capabilities = Vec::new();
             let all_ok = {
                 let mut ok = true;
                 for a in &hb_cfg.adapters {
-                    let bin = format!("adapter-{}", a.replace('_', "-"));
-                    if !probe_adapter(&bin).await.found {
+                    let bin = adapter_bin_name(a);
+                    let probe = probe_adapter(&bin).await;
+                    if !probe.found {
                         ok = false;
-                        break;
                     }
+                    capabilities.push(AdapterCapability {
+                        id: a.clone(),
+                        version: probe.version,
+                        ready: probe.found,
+                    });
                 }
                 ok
             };
@@ -866,6 +871,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                 load_avg: read_load_avg(),
                 free_disk_mb: read_free_disk_mb(&hb_cfg.workspace_root),
                 active_attempts: active,
+                capabilities,
             };
             if let Err(e) = hb_client
                 .post(format!("{}/v1/node/heartbeat", hb_cfg.server))

@@ -201,6 +201,14 @@ pub struct AgentSession {
     pub error_code: Option<String>,
 }
 
+/// Per-adapter capability advertised in the heartbeat (Stage 3.2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdapterCapability {
+    pub id: String,
+    pub version: Option<String>,
+    pub ready: bool,
+}
+
 // ----- API DTOs -----
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -357,6 +365,10 @@ pub struct HeartbeatRequest {
     pub free_disk_mb: u64,
     #[serde(default)]
     pub active_attempts: u32,
+    /// Per-adapter capability the node advertises each heartbeat (Stage 3.2):
+    /// which adapters it can run, their versions, and whether each is ready.
+    #[serde(default)]
+    pub capabilities: Vec<AdapterCapability>,
 }
 
 fn default_max_concurrency() -> u32 {
@@ -575,6 +587,7 @@ mod tests {
             load_avg: 0.5,
             free_disk_mb: 1024,
             active_attempts: 1,
+            capabilities: vec![],
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

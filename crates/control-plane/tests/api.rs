@@ -545,6 +545,7 @@ async fn revoked_node_gets_401() {
         load_avg: 0.1,
         free_disk_mb: 1000,
         active_attempts: 0,
+        capabilities: vec![],
     };
     let resp = app
         .clone()
@@ -1198,6 +1199,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         load_avg: 0.0,
         free_disk_mb: 1000,
         active_attempts: 1,
+        capabilities: vec![],
     };
     let resp = app
         .clone()
