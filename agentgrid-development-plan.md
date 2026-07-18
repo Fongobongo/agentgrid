@@ -138,7 +138,7 @@
 
 - [ ] Оформить текущие wrapper binaries как `ProcessAdapter` implementation (без переноса в in-process traits)
 - [ ] Выделить trait/contract `ExecutionBackend`; первый backend — текущий native process + worktree
-- [ ] Добавить `AgentSession` (таблица + DTO), связанную с existing Attempt (`agent_session_id` nullable)
+- [x] Добавить `AgentSession` (таблица + DTO), связанную с existing Attempt (`agent_session_id` nullable)
 - [ ] `AgentCapabilities` с версиями/readiness поверх heartbeat JSON
 - [ ] Conformance suite: fixtures для mock/claude/opencode (prepare/start/stream/cancel/collect)
 - [ ] Cancellation semantics в normalized events (`cancel_requested` → `cancelled` без гонок)
