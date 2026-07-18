@@ -79,6 +79,7 @@ dependencies = [
 name = "agentgrid-node-daemon"
 version = "0.1.0"
 dependencies = [
+ "agentgrid-acp",
  "agentgrid-adapters",
  "agentgrid-common",
  "anyhow",

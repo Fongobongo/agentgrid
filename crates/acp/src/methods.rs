@@ -18,6 +18,11 @@ pub const METHOD_SESSION_REQUEST_PERMISSION: &str = "session/request_permission"
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct InitializeParams {
     pub protocol_version: String,
+    pub agent: String,
+    pub model: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub cwd: String,
     #[serde(default)]
     pub capabilities: Value,
     #[serde(default)]

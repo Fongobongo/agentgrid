@@ -180,10 +180,11 @@
 - [x] `session/new`, `session/prompt`, `session/cancel`
 - [x] Mapping `session/update` → `AgentEventEnvelope` (plan, tool calls, diffs, usage, logs)
 - [x] Durable approval flow: state machine + таблица `approvals` + API (`/v1/approvals` list/allow/deny) + CLI (`ag approvals`) + auto-expiry tick; fail-closed
-- [ ] `session/request_permission` → этот approval flow; default fail-closed (`ask/deny`), без временного unconditional allow
+- [x] `session/request_permission` → этот approval flow; default fail-closed (`ask/deny`), без временного unconditional allow
 - [ ] Absolute paths, MCP stdio passthrough в session config (поля есть, wiring — follow-up)
 - [ ] `session/load`/`resume` если agent поддерживает
-- [ ] ACP adapter как новый тип в adapter registry (не замена wrappers)
+- [x] ACP adapter как новый тип в adapter registry (не замена wrappers)
+- [x] Node-daemon spawn через `AcpClient`: `initialize`→`session/new`→`session/prompt`, стрим `session/update`→event sink, `request_permission`→durable approval poll; cancel/timeout внутри `drive_acp_session`
 - [ ] Conformance fixtures: initialize/session-new/plan-update/tool-call/diff/permission/cancel
 - [ ] Запустить минимум один реальный ACP-compatible agent E2E (локально и на удалённой node)
 - [ ] Test: cancellation обрывает prompt turn и завершает attempt `cancelled`

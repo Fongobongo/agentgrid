@@ -177,8 +177,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{id}/retry", post(retry_task_handler))
         .route("/v1/tasks/{id}/eligibility", get(task_eligibility_handler))
         .route("/v1/approvals", get(list_approvals_handler))
+        .route("/v1/approvals/{id}", get(get_approval_handler))
         .route("/v1/approvals/{id}/allow", post(allow_approval_handler))
         .route("/v1/approvals/{id}/deny", post(deny_approval_handler))
+        .route(
+            "/v1/tasks/{id}/approvals",
+            post(create_approval_for_task_handler),
+        )
         .route("/v1/auth/setup", post(auth_setup))
         .route("/v1/auth/login", post(auth_login))
         .route("/v1/nodes", get(list_nodes))
@@ -964,6 +969,56 @@ async fn deny_approval_handler(
         Err(e) => {
             tracing::error!("deny_approval failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateApprovalBody {
+    attempt_id: String,
+    session_id: Option<String>,
+    permission: serde_json::Value,
+}
+
+/// Stage 5: an ACP agent's `session/request_permission` creates a durable,
+/// operator-answerable approval. Returns its id so the daemon can poll.
+async fn create_approval_for_task_handler(
+    State(state): State<Arc<AppState>>,
+    _auth: Option<Extension<AuthedUser>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<CreateApprovalBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let perm = serde_json::to_string(&body.permission).unwrap_or_default();
+    match state
+        .store
+        .create_approval(
+            &task_id,
+            &body.attempt_id,
+            body.session_id.as_deref(),
+            &perm,
+            300,
+        )
+        .await
+    {
+        Ok(id) => Ok(Json(serde_json::json!({ "id": id }))),
+        Err(e) => {
+            tracing::error!("create_approval failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_approval_handler(
+    State(state): State<Arc<AppState>>,
+    _auth: Option<Extension<AuthedUser>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApprovalView>, StatusCode> {
+    match state.store.get_approval(&id).await {
+        Ok(Some(v)) => Ok(Json(v)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("get_approval failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }

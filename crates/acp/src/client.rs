@@ -140,6 +140,17 @@ where
         }
     }
 
+    /// Respond to an agent→client request (e.g. `session/request_permission`)
+    /// without awaiting a further response. Used when the agent asks the
+    /// client a question and expects a result back.
+    pub async fn respond(&self, id: Id, allowed: bool) -> Result<(), AcpError> {
+        self.send(Message::Response {
+            id,
+            result: Ok(serde_json::json!({ "allowed": allowed })),
+        })
+        .await
+    }
+
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
         self.send(Message::Notification {
             method: method.to_string(),
@@ -262,6 +273,10 @@ mod tests {
         let init = client
             .initialize(InitializeParams {
                 protocol_version: "0.2".into(),
+                agent: "opencode".into(),
+                model: "claude-3".into(),
+                session_id: None,
+                cwd: "/tmp".into(),
                 capabilities: serde_json::json!({}),
                 client: serde_json::json!({}),
             })

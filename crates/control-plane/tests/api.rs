@@ -1419,6 +1419,80 @@ async fn list_approvals(app: &Router, status: Option<&str>) -> Vec<ApprovalView>
     serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
+#[tokio::test]
+async fn approval_create_and_get_by_id_drives_permission_flow() {
+    // Stage 5: an ACP agent's session/request_permission creates a durable
+    // approval (POST /v1/tasks/{id}/approvals) that the daemon polls via
+    // GET /v1/approvals/{id}.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+
+    let create = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/tasks/t-1/approvals",
+            serde_json::to_string(&serde_json::json!({
+                "attempt_id": "att-x",
+                "session_id": "sess-x",
+                "permission": { "tool": "Bash", "input": "rm -rf /" }
+            }))
+            .unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let id: String = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(create.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!id.is_empty());
+
+    // Pending immediately after creation.
+    let pending = app
+        .clone()
+        .oneshot(get_q(&format!("/v1/approvals/{id}")))
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::OK);
+    let view: ApprovalView =
+        serde_json::from_slice(&to_bytes(pending.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(view.status, ApprovalStatus::Pending);
+    assert_eq!(view.attempt_id, "att-x");
+    assert_eq!(view.session_id.as_deref(), Some("sess-x"));
+
+    // Allow the approval; the daemon's poll loop then proceeds.
+    let allow = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/v1/approvals/{id}/allow"),
+            "{}".into(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(allow.status(), StatusCode::OK);
+    let allowed = app
+        .clone()
+        .oneshot(get_q(&format!("/v1/approvals/{id}")))
+        .await
+        .unwrap();
+    let view: ApprovalView =
+        serde_json::from_slice(&to_bytes(allowed.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(view.status, ApprovalStatus::Allowed);
+
+    // Unknown id 404s.
+    let missing = app
+        .clone()
+        .oneshot(get_q("/v1/approvals/does-not-exist"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
 fn get_q(uri: &str) -> Request<Body> {
     Request::builder()
         .method("GET")

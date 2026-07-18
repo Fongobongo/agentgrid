@@ -9,18 +9,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use agentgrid_acp::{
+    map_session_update, InitializeParams, Message, SessionCancelParams, SessionNewParams,
+    SessionPromptParams,
+};
 use agentgrid_adapters::{to_event_type, AdapterEvent, ExecutionBackend};
 use agentgrid_common::{
-    AdapterCapability, AgentEventEnvelope, Assignment, CancelState, CompleteAttemptRequest,
-    CreateAgentSessionRequest, EnrollRequest, EnrollResponse, EventKind, EventType,
-    HeartbeatRequest, IncomingEvent, IngestEventsRequest, NodeStatus, PollRequest, PollResponse,
-    UploadArtifactRequest,
+    AdapterCapability, AgentEventEnvelope, ApprovalStatus, ApprovalView, Assignment, CancelState,
+    CompleteAttemptRequest, CreateAgentSessionRequest, EnrollRequest, EnrollResponse, EventKind,
+    EventType, HeartbeatRequest, IncomingEvent, IngestEventsRequest, NodeStatus, PollRequest,
+    PollResponse, UploadArtifactRequest,
 };
 use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
@@ -33,7 +37,7 @@ struct Config {
     workspace_root: PathBuf,
     max_concurrency: u32,
     agent_version: String,
-    adapters: Vec<String>,
+    adapters: Vec<AdapterSpec>,
     repositories: Vec<String>,
     heartbeat_secs: u64,
     enroll_token: Option<String>,
@@ -70,6 +74,49 @@ fn split_csv(env: &str, default: &str) -> Vec<String> {
         .unwrap_or_else(|| vec![default.to_string()])
 }
 
+/// How an adapter is driven: a legacy wrapper binary (stdout-parsed) or an
+/// ACP-speaking agent (JSON-RPC 2.0 over stdio). Not a replacement — both
+/// coexist in the registry (Stage 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdapterProtocol {
+    Wrapper,
+    Acp,
+}
+
+impl AdapterProtocol {
+    fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "acp" => AdapterProtocol::Acp,
+            _ => AdapterProtocol::Wrapper,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AdapterSpec {
+    pub id: String,
+    pub protocol: AdapterProtocol,
+}
+
+/// Parse `AGENTGRID_ADAPTERS=mock,claude,opencode:acp` into specs. An entry
+/// with no `:protocol` suffix defaults to `Wrapper` (backward compatible).
+fn parse_adapters(s: &str) -> Vec<AdapterSpec> {
+    s.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.split_once(':') {
+            Some((id, proto)) => AdapterSpec {
+                id: id.trim().to_string(),
+                protocol: AdapterProtocol::parse(proto),
+            },
+            None => AdapterSpec {
+                id: p.to_string(),
+                protocol: AdapterProtocol::Wrapper,
+            },
+        })
+        .collect()
+}
+
 fn config_from_env() -> Config {
     let data_dir =
         std::env::var("AGENTGRID_DATA_DIR").unwrap_or_else(|_| "./agentgrid-data".into());
@@ -88,7 +135,9 @@ fn config_from_env() -> Config {
             .unwrap_or(2),
         agent_version: std::env::var("AGENTGRID_AGENT_VERSION")
             .unwrap_or_else(|_| "0.1.0-dev".into()),
-        adapters: split_csv("AGENTGRID_ADAPTERS", "mock"),
+        adapters: parse_adapters(
+            &std::env::var("AGENTGRID_ADAPTERS").unwrap_or_else(|_| "mock".into()),
+        ),
         repositories: split_csv("AGENTGRID_REPOSITORIES", "*"),
         heartbeat_secs: std::env::var("AGENTGRID_HEARTBEAT_SECS")
             .ok()
@@ -335,6 +384,215 @@ async fn read_stream<R: AsyncRead + Unpin>(
     }
 }
 
+/// Terminal outcome of an ACP-driven attempt.
+struct AcpResult {
+    success: bool,
+    error_code: Option<String>,
+}
+
+/// Stage 5: drive an ACP agent over stdio (JSON-RPC 2.0). Spawns
+/// `adapter-<id>`, runs initialize/new/prompt, forwards `session/update` into
+/// the event sink, answers `session/request_permission` via the durable
+/// approval flow, and returns the terminal outcome. Cancellation/timeout are
+/// handled here (the wrapper path keeps those in run_attempt's select!).
+async fn drive_acp_session(
+    cfg: &Config,
+    client: &reqwest::Client,
+    assignment: &Assignment,
+    ws_path: &std::path::Path,
+    sink: Arc<EventSink>,
+) -> Result<AcpResult> {
+    let bin = match resolve_adapter_bin(&assignment.adapter) {
+        Some(b) => b,
+        None => {
+            tracing::error!(adapter = %assignment.adapter, "ACP adapter binary not found");
+            return Ok(AcpResult {
+                success: false,
+                error_code: Some("infrastructure_failed".into()),
+            });
+        }
+    };
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+    for (k, v) in &cfg.adapter_env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stdin = child.stdin.take().expect("piped stdin");
+    let (acp, mut notif) = agentgrid_acp::new(stdout, stdin);
+    let acp = std::sync::Arc::new(acp);
+
+    let model = std::env::var("AGENTGRID_AGENT_VERSION").unwrap_or_else(|_| "default".into());
+    if let Err(e) = acp
+        .initialize(InitializeParams {
+            protocol_version: "0.1".into(),
+            agent: assignment.adapter.clone(),
+            model,
+            session_id: None,
+            cwd: ws_path.to_string_lossy().into_owned(),
+            capabilities: Value::Null,
+            client: Value::Null,
+        })
+        .await
+    {
+        tracing::error!("ACP initialize failed: {e}");
+        let _ = child.start_kill();
+        return Ok(AcpResult {
+            success: false,
+            error_code: Some("infrastructure_failed".into()),
+        });
+    }
+    let session_id = match acp
+        .session_new(SessionNewParams {
+            agent: assignment.adapter.clone(),
+            model: None,
+            cwd: ws_path.to_string_lossy().into_owned(),
+            prompt: None,
+            mcp: Value::Null,
+            parent_session_id: None,
+        })
+        .await
+    {
+        Ok(r) => r.session_id,
+        Err(e) => {
+            tracing::error!("ACP session/new failed: {e}");
+            let _ = child.start_kill();
+            return Ok(AcpResult {
+                success: false,
+                error_code: Some("infrastructure_failed".into()),
+            });
+        }
+    };
+
+    let flusher = tokio::spawn(sink.clone().run_flusher());
+
+    let sid = session_id.clone();
+    let task_id = assignment.task_id.clone();
+    let attempt_id = assignment.attempt_id.clone();
+    let sink2 = sink.clone();
+    let acp2 = acp.clone();
+    let client2 = client.clone();
+    let server2 = cfg.server.clone();
+    let stream_task = tokio::spawn(async move {
+        while let Some(msg) = notif.recv().await {
+            match msg {
+                Message::Notification { params, .. } => {
+                    let upd = params.get("update").unwrap_or(&params);
+                    let env = map_session_update(&sid, upd);
+                    sink2.push(env.kind.to_event_type(), env.payload).await;
+                    sink2.note_adapter_event();
+                }
+                Message::Request { id, method, params }
+                    if method == "session/request_permission" =>
+                {
+                    let allow = request_permission(
+                        &client2,
+                        &server2,
+                        &task_id,
+                        &attempt_id,
+                        &sid,
+                        &params,
+                    )
+                    .await;
+                    let _ = acp2.respond(id, allow).await;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let acp3 = acp.clone();
+    let prompt_text = assignment.prompt.clone();
+    let sid_prompt = session_id.clone();
+    let mut prompt = tokio::spawn(async move {
+        acp3.session_prompt(SessionPromptParams {
+            session_id: sid_prompt,
+            prompt: prompt_text,
+        })
+        .await
+    });
+    let cancel_client = client.clone();
+    let cancel_url = format!(
+        "{}/v1/node/attempts/{}/cancel",
+        cfg.server, assignment.attempt_id
+    );
+    let pid = child.id().unwrap_or(0);
+    let timeout = Duration::from_secs(assignment.timeout_secs.max(1));
+    let outcome = tokio::select! {
+        res = &mut prompt => match res {
+            Ok(_) => AcpResult { success: true, error_code: None },
+            Err(e) => AcpResult { success: false, error_code: Some(format!("agent_error: {e}")) },
+        },
+        _ = wait_for_cancel(cancel_client, cancel_url) => {
+            acp.session_cancel(SessionCancelParams { session_id: session_id.clone() }).await.ok();
+            let _ = child.wait().await;
+            AcpResult { success: false, error_code: Some("cancelled".into()) }
+        }
+        _ = tokio::time::sleep(timeout) => {
+            terminate_group(pid);
+            let _ = child.wait().await;
+            AcpResult { success: false, error_code: Some("timeout".into()) }
+        }
+    };
+    stream_task.abort();
+    flusher.abort();
+    Ok(outcome)
+}
+
+/// Stage 5: create a durable approval for an agent permission request and poll
+/// until an operator answers. Fail-closed: any error or timeout denies.
+async fn request_permission(
+    client: &reqwest::Client,
+    server: &str,
+    task_id: &str,
+    attempt_id: &str,
+    session_id: &str,
+    permission: &Value,
+) -> bool {
+    let create = client
+        .post(format!("{server}/v1/tasks/{task_id}/approvals"))
+        .json(&json!({ "attempt_id": attempt_id, "session_id": session_id, "permission": permission }))
+        .send()
+        .await;
+    let id = match create {
+        Ok(r) if r.status().is_success() => match r.json::<Value>().await {
+            Ok(v) => v
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
+    if id.is_empty() {
+        return false;
+    }
+    for _ in 0..150 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        match client
+            .get(format!("{server}/v1/approvals/{id}"))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => match resp.json::<ApprovalView>().await {
+                Ok(av) => match av.status {
+                    ApprovalStatus::Allowed => return true,
+                    ApprovalStatus::Pending => continue,
+                    _ => return false,
+                },
+                Err(_) => return false,
+            },
+            _ => return false,
+        }
+    }
+    false
+}
+
 async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignment) -> Result<()> {
     let repo_root = cfg.repository_root.clone();
     let ws_root = cfg.workspace_root.clone();
@@ -344,6 +602,41 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     })
     .await??;
     tracing::info!(attempt_id = %assignment.attempt_id, git = ws.is_git, "starting attempt");
+
+    // Stage 5: ACP adapters are driven over JSON-RPC 2.0 (stdio), not stdout
+    // parsing. Everything below that point lives in drive_acp_session.
+    if cfg
+        .adapters
+        .iter()
+        .find(|s| s.id == assignment.adapter)
+        .map(|s| s.protocol)
+        == Some(AdapterProtocol::Acp)
+    {
+        let sink = EventSink::new(
+            assignment.attempt_id.clone(),
+            client.clone(),
+            cfg.server.clone(),
+        );
+        ack_attempt(&client, &cfg.server, &assignment.attempt_id).await;
+        create_agent_session(
+            &client,
+            &cfg.server,
+            &assignment.attempt_id,
+            &assignment.adapter,
+        )
+        .await;
+        let res = drive_acp_session(&cfg, &client, &assignment, &ws.path, sink.clone()).await?;
+        report_complete(
+            &client,
+            &cfg.server,
+            &assignment.attempt_id,
+            if res.success { 0 } else { 1 },
+            None,
+            res.error_code,
+        )
+        .await;
+        return Ok(());
+    }
 
     // Raw adapter output is mirrored to disk as a safety net against CLI
     // output-format changes (Stage 3.1): the structured events may be lossy,
@@ -781,7 +1074,7 @@ async fn load_or_enroll(cfg: &Config) -> Result<SavedCredential> {
     let req = EnrollRequest {
         token,
         name: cfg.node_name.clone(),
-        adapters: cfg.adapters.clone(),
+        adapters: cfg.adapters.iter().map(|s| s.id.clone()).collect(),
         repositories: cfg.repositories.clone(),
         max_concurrency: cfg.max_concurrency,
         agent_version: cfg.agent_version.clone(),
@@ -852,13 +1145,13 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
             let all_ok = {
                 let mut ok = true;
                 for a in &hb_cfg.adapters {
-                    let bin = adapter_bin_name(a);
+                    let bin = adapter_bin_name(&a.id);
                     let probe = probe_adapter(&bin).await;
                     if !probe.found {
                         ok = false;
                     }
                     capabilities.push(AdapterCapability {
-                        id: a.clone(),
+                        id: a.id.clone(),
                         version: probe.version,
                         ready: probe.found,
                     });
@@ -875,7 +1168,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
             let req = HeartbeatRequest {
                 status: Some(status),
                 name: hb_cfg.node_name.clone(),
-                adapters: hb_cfg.adapters.clone(),
+                adapters: hb_cfg.adapters.iter().map(|s| s.id.clone()).collect(),
                 repositories: hb_cfg.repositories.clone(),
                 max_concurrency: hb_cfg.max_concurrency,
                 agent_version: hb_cfg.agent_version.clone(),
@@ -899,7 +1192,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
         let poll_req = PollRequest {
             node_id: hb_node_id.clone(),
             name: cfg.node_name.clone(),
-            adapters: cfg.adapters.clone(),
+            adapters: cfg.adapters.iter().map(|s| s.id.clone()).collect(),
             repositories: cfg.repositories.clone(),
             max_concurrency: cfg.max_concurrency,
         };
@@ -966,13 +1259,13 @@ async fn main() -> Result<()> {
 
     let cfg = config_from_env();
     for a in &cfg.adapters {
-        let bin = format!("adapter-{}", a.replace('_', "-"));
+        let bin = format!("adapter-{}", a.id.replace('_', "-"));
         let probe = probe_adapter(&bin).await;
         if probe.found {
-            tracing::info!(adapter = %a, version = ?probe.version, "adapter detected");
+            tracing::info!(adapter = %a.id, version = ?probe.version, "adapter detected");
         } else {
             tracing::warn!(
-                adapter = %a,
+                adapter = %a.id,
                 "adapter binary {bin} not found in PATH; node will report degraded until installed"
             );
         }
@@ -1084,5 +1377,104 @@ mod tests {
         assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
         assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
         assert!(!is_retryable_status(StatusCode::NOT_FOUND));
+    }
+
+    /// Accept anything on a port and answer 200 OK, so the daemon's event sink
+    /// flushes without retry/backoff noise during the test.
+    async fn dummy_ingest_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let _ = s
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn drive_acp_session_runs_fake_agent_and_streams_events() {
+        // Make the test-only ACP agent discoverable on PATH. It is built into
+        // the same target dir; locate it relative to CARGO_MANIFEST_DIR.
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let fake = [
+            "../../target/debug/adapter-fake-acp",
+            "../../target/release/adapter-fake-acp",
+        ]
+        .iter()
+        .map(|p| std::path::Path::new(manifest).join(p))
+        .find(|p| p.is_file())
+        .expect("fake ACP agent built");
+        let bin_dir = fake.parent().unwrap();
+        let orig = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
+
+        let server = dummy_ingest_server().await;
+        let cfg = Config {
+            server: server.clone(),
+            node_name: "test".into(),
+            workspace_root: std::env::temp_dir().join("ag-acp-ws"),
+            max_concurrency: 2,
+            agent_version: "0.1.0".into(),
+            adapters: vec![AdapterSpec {
+                id: "fake-acp".into(),
+                protocol: AdapterProtocol::Acp,
+            }],
+            repositories: vec!["*".into()],
+            heartbeat_secs: 10,
+            enroll_token: None,
+            credential_path: std::env::temp_dir().join("ag-acp-cred.json"),
+            repository_root: std::env::temp_dir().join("ag-acp-repos"),
+            secrets: vec![],
+            adapter_env: vec![],
+        };
+        let ws = std::env::temp_dir().join(format!(
+            "ag-acp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let assignment = Assignment {
+            attempt_id: format!("att-{}", uuid::Uuid::new_v4()),
+            task_id: "t1".into(),
+            repository: "*".into(),
+            prompt: "do the thing".into(),
+            adapter: "fake-acp".into(),
+            number: 1,
+            timeout_secs: 30,
+            git_url: String::new(),
+            default_branch: String::new(),
+            validation_command: None,
+        };
+        let sink = EventSink::new(
+            assignment.attempt_id.clone(),
+            reqwest::Client::new(),
+            cfg.server.clone(),
+        );
+        let res = drive_acp_session(
+            &cfg,
+            &reqwest::Client::new(),
+            &assignment,
+            &ws,
+            sink.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(res.success, "ACP session should succeed");
+        assert_eq!(res.error_code, None);
+        assert!(
+            sink.adapter_event_count() >= 2,
+            "two session/update events should stream; got {}",
+            sink.adapter_event_count()
+        );
+        std::fs::remove_dir_all(&ws).ok();
     }
 }

@@ -20,4 +20,5 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 agentgrid-common.workspace = true
 agentgrid-adapters.workspace = true
+agentgrid-acp.workspace = true
 libc = "0.2"
