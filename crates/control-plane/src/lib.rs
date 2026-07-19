@@ -445,12 +445,26 @@ async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
 /// Stage 9: evaluate a command against the builtin policy provider and return
 /// its verdict. Fail-closed: a provider error yields `ask`, never `allow`.
 async fn evaluate_policy(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<EvaluatePolicyRequest>,
 ) -> Json<agentgrid_common::PolicyVerdict> {
     let level = req.autonomy.unwrap_or_default();
     let verdict = agentgrid_common::BuiltinPolicyProvider::new()
         .evaluate_with(level, &req.command, &req.cwd)
         .unwrap_or_else(|e| agentgrid_common::PolicyVerdict::fail_closed(&e.0));
+    // Fail-closed audit: every policy decision is recorded so dangerous commands
+    // are never silent.
+    let payload = serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".to_string());
+    let _ = state
+        .store
+        .audit(
+            "system",
+            None,
+            "policy.evaluate",
+            Some(&req.command),
+            Some(&payload),
+        )
+        .await;
     Json(verdict)
 }
 
@@ -1139,6 +1153,8 @@ struct CreateApprovalBody {
     attempt_id: String,
     session_id: Option<String>,
     permission: serde_json::Value,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Stage 5: an ACP agent's `session/request_permission` creates a durable,
@@ -1159,6 +1175,7 @@ async fn create_approval_for_task_handler(
             &perm,
             300,
             None,
+            body.scope.as_deref().unwrap_or("session"),
         )
         .await
     {

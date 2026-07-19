@@ -279,12 +279,12 @@
 ### 9.2 Autonomy и approvals
 
 - [x] Autonomy levels L0–L4 в profile (default L2 patch)
-- [ ] Approval API: `POST /v1/approvals/{id}` (scope: tool call / session / step / command digest / duration)
+- [x] Approval API: `POST /v1/approvals/{id}` (scope: tool call / session / step / command digest / duration)
 - [ ] Approval UI в web (список pending, allow/deny с причиной) и CLI (`ag approvals list/approve/deny`)
-- [ ] Audit event на каждое policy decision и approval
+- [x] Audit event на каждое policy decision и approval
 - [ ] Skill trust management UI/CLI
 - [x] Timeout неотвеченного approval → step `blocked`, не висящий run
-- [ ] Tests: malicious `SKILL.md`, destructive command fixture → deny/ask; secrets не в approval payload
+- [x] Tests: malicious `SKILL.md`, destructive command fixture → deny/ask; secrets не в approval payload
 
 **Exit 9:** опасные операции fail closed или требуют approval; unattended режим без policy невозможен.
 

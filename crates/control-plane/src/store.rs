@@ -484,6 +484,32 @@ impl Store {
         Ok(())
     }
 
+    /// Most-recent audit events (newest first), optionally filtered by action.
+    pub async fn list_audit(&self, action: Option<&str>, limit: i64) -> Result<Vec<AuditEvent>> {
+        let rows = match action {
+            Some(a) => {
+                sqlx::query(
+                    "SELECT id, actor_type, actor_id, action, subject, payload, created_at \
+                     FROM audit_events WHERE action = ? ORDER BY created_at DESC LIMIT ?",
+                )
+                .bind(a)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT id, actor_type, actor_id, action, subject, payload, created_at \
+                     FROM audit_events ORDER BY created_at DESC LIMIT ?",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        Ok(rows.iter().map(audit_from_row).collect())
+    }
+
     pub async fn create_task(&self, req: &CreateTaskRequest) -> Result<TaskView> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
@@ -1408,6 +1434,28 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
 
 // ---- Approvals (Stage 5 durable approval flow) ----
 
+pub struct AuditEvent {
+    pub id: String,
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub action: String,
+    pub subject: Option<String>,
+    pub payload: Option<String>,
+    pub created_at: String,
+}
+
+fn audit_from_row(r: &sqlx::sqlite::SqliteRow) -> AuditEvent {
+    AuditEvent {
+        id: r.try_get("id").unwrap_or_default(),
+        actor_type: r.try_get("actor_type").unwrap_or_default(),
+        actor_id: r.try_get("actor_id").ok(),
+        action: r.try_get("action").unwrap_or_default(),
+        subject: r.try_get("subject").ok(),
+        payload: r.try_get("payload").ok(),
+        created_at: r.try_get("created_at").unwrap_or_default(),
+    }
+}
+
 fn approval_from_row(r: &sqlx::sqlite::SqliteRow) -> ApprovalView {
     ApprovalView {
         id: r.try_get("id").unwrap_or_default(),
@@ -1423,12 +1471,14 @@ fn approval_from_row(r: &sqlx::sqlite::SqliteRow) -> ApprovalView {
         created_at: r.try_get("created_at").unwrap_or_default(),
         expires_at: r.try_get("expires_at").unwrap_or_default(),
         decided_at: r.try_get("decided_at").ok(),
+        scope: r.try_get("scope").unwrap_or_else(|_| "session".to_string()),
     }
 }
 
 impl Store {
     /// Create a pending approval for an agent permission request. `ttl_secs`
     /// controls auto-expiry (fail-closed). Returns the new approval id.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_approval(
         &self,
         task_id: &str,
@@ -1437,13 +1487,14 @@ impl Store {
         permission: &str,
         ttl_secs: i64,
         step_run_id: Option<&str>,
+        scope: &str,
     ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         let expires = iso_plus_secs(ttl_secs);
         sqlx::query(
-        "INSERT INTO approvals (id, task_id, attempt_id, session_id, permission, status, created_at, expires_at, step_run_id) \
-         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+        "INSERT INTO approvals (id, task_id, attempt_id, session_id, permission, status, created_at, expires_at, step_run_id, scope) \
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(task_id)
@@ -1453,6 +1504,7 @@ impl Store {
     .bind(&now)
     .bind(&expires)
     .bind(step_run_id)
+    .bind(scope)
     .execute(&self.pool)
     .await?;
         Ok(id)
@@ -1504,7 +1556,7 @@ impl Store {
     pub async fn get_approval(&self, id: &str) -> Result<Option<ApprovalView>> {
         let row = sqlx::query(
             "SELECT id, task_id, attempt_id, session_id, permission, status, reason, \
-                created_at, expires_at, decided_at \
+                created_at, expires_at, decided_at, scope \
          FROM approvals WHERE id = ?",
         )
         .bind(id)
@@ -1524,7 +1576,7 @@ impl Store {
                     serde_json::to_value(s).map(|v| v.as_str().unwrap_or("pending").to_string())?;
                 sqlx::query(
                     "SELECT id, task_id, attempt_id, session_id, permission, status, reason, \
-                        created_at, expires_at, decided_at \
+                        created_at, expires_at, decided_at, scope \
                  FROM approvals WHERE status = ? ORDER BY created_at ASC",
                 )
                 .bind(v)
@@ -1534,7 +1586,7 @@ impl Store {
             None => {
                 sqlx::query(
                     "SELECT id, task_id, attempt_id, session_id, permission, status, reason, \
-                        created_at, expires_at, decided_at \
+                        created_at, expires_at, decided_at, scope \
                  FROM approvals ORDER BY created_at ASC",
                 )
                 .fetch_all(&self.pool)
@@ -2478,6 +2530,7 @@ mod workflow_tests {
                 "run Bash",
                 -10,
                 Some(&step_id),
+                "step",
             )
             .await
             .unwrap();

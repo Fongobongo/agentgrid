@@ -1373,7 +1373,15 @@ async fn approval_flow_allow_deny_and_expiry() {
     let task_id = create_task(&app, "mock", None).await;
     let ap_id = state
         .store
-        .create_approval(&task_id, "attempt-x", None, "run Bash", 3600, None)
+        .create_approval(
+            &task_id,
+            "attempt-x",
+            None,
+            "run Bash",
+            3600,
+            None,
+            "session",
+        )
         .await
         .unwrap();
 
@@ -1904,4 +1912,90 @@ async fn policy_endpoint_honors_autonomy_level() {
     // L0: cat → ask (fully supervised).
     let v = eval(&app, "cat README.md", "l0").await;
     assert_eq!(v.get("decision").unwrap(), "ask");
+}
+
+#[tokio::test]
+async fn approval_scope_round_trips() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let task_id = create_task(&app, "mock", None).await;
+    let ap = state
+        .store
+        .create_approval(
+            &task_id,
+            "attempt-x",
+            None,
+            "run Bash",
+            3600,
+            None,
+            "tool_call",
+        )
+        .await
+        .unwrap();
+    let got = state.store.get_approval(&ap).await.unwrap().unwrap();
+    assert_eq!(got.scope, "tool_call");
+    // Default scope when omitted.
+    let ap2 = state
+        .store
+        .create_approval(
+            &task_id,
+            "attempt-y",
+            None,
+            "run Bash",
+            3600,
+            None,
+            "session",
+        )
+        .await
+        .unwrap();
+    let got2 = state.store.get_approval(&ap2).await.unwrap().unwrap();
+    assert_eq!(got2.scope, "session");
+}
+
+#[tokio::test]
+async fn policy_evaluate_audits_decision() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let body = serde_json::json!({ "command": "rm -rf /tmp/x", "cwd": "/workspace" }).to_string();
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/policy/evaluate", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let events = state
+        .store
+        .list_audit(Some("policy.evaluate"), 10)
+        .await
+        .unwrap();
+    assert!(!events.is_empty(), "every policy decision must be audited");
+    assert_eq!(events[0].subject.as_deref(), Some("rm -rf /tmp/x"));
+}
+
+#[tokio::test]
+async fn approval_payload_has_no_secrets() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let task_id = create_task(&app, "mock", None).await;
+    let ap = state
+        .store
+        .create_approval(
+            &task_id,
+            "attempt-x",
+            None,
+            "run Bash",
+            3600,
+            None,
+            "session",
+        )
+        .await
+        .unwrap();
+    let got = state.store.get_approval(&ap).await.unwrap().unwrap();
+    let serialized = serde_json::to_string(&got).unwrap();
+    for forbidden in ["secret", "password", "AGENTGRID_", "token"] {
+        assert!(
+            !serialized.contains(forbidden),
+            "approval payload must not contain {forbidden}"
+        );
+    }
 }

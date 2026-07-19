@@ -62,6 +62,13 @@ pub struct ApprovalView {
     pub expires_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_at: Option<String>,
+    /// What the operator is approving: tool_call | session | step | command | duration.
+    #[serde(default = "default_approval_scope")]
+    pub scope: String,
+}
+
+fn default_approval_scope() -> String {
+    "session".to_string()
 }
 
 #[cfg(test)]

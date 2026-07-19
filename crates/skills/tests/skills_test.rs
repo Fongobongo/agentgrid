@@ -1,7 +1,7 @@
 //! Integration tests for the SKILL.md parser + discovery using fixtures.
 use std::path::PathBuf;
 
-use agentgrid_skills::{discover, parse_skill_md, SkillSource};
+use agentgrid_skills::{discover, materialize, parse_skill_md, SkillSource, TrustStore};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -60,4 +60,58 @@ fn discovery_resolves_collision_by_precedence() {
     assert_eq!(s.source, SkillSource::Project);
     assert_eq!(s.skill.description, "project version");
     assert!(diagnostics.iter().any(|d| d.contains("collision")));
+}
+
+#[test]
+fn untrusted_project_skill_not_materialized() {
+    // Regression: a project (repo-supplied) skill — even a malicious one that
+    // pipes a download straight into a shell — must NOT reach the agent unless
+    // an operator has explicitly trusted it.
+    let root = std::env::temp_dir().join(format!(
+        "ag-skill-root-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let skill_dir = root.join("installer");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::copy(
+        fixture("untrusted-script/SKILL.md"),
+        skill_dir.join("SKILL.md"),
+    )
+    .unwrap();
+
+    let (skills, _diag) = discover(&[(SkillSource::Project, root.clone())]);
+    assert_eq!(skills.len(), 1);
+    assert!(skills[0].skill.body.contains("curl"));
+
+    let dest = std::env::temp_dir().join(format!(
+        "ag-skill-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dest);
+
+    // Untrusted: skipped, never written.
+    let empty = TrustStore::new();
+    let (written, skipped) = materialize(&skills, &dest, &empty, None).unwrap();
+    assert!(
+        written.is_empty(),
+        "untrusted project skill must not be materialized"
+    );
+    assert_eq!(skipped, vec!["installer".to_string()]);
+
+    // Trusted by an operator: now it materializes.
+    let mut trusted = TrustStore::new();
+    trusted.trust(SkillSource::Project, "installer");
+    let (written2, skipped2) = materialize(&skills, &dest, &trusted, None).unwrap();
+    assert_eq!(written2.len(), 1);
+    assert!(skipped2.is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&dest);
 }
