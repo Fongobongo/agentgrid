@@ -737,7 +737,10 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         println!("(no nodes registered)");
         return Ok(());
     }
-    println!("{:<36} {:<10} {:<8} {:<6}", "ID", "STATUS", "ACTIVE", "MAX");
+    println!(
+        "{:<36} {:<10} {:<8} {:<6} {:<10}",
+        "ID", "STATUS", "ACTIVE", "MAX", "DISK"
+    );
     for n in &nodes {
         let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("-");
         let st = n.get("status").and_then(|v| v.as_str()).unwrap_or("-");
@@ -749,7 +752,13 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
             .get("max_concurrency")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        println!("{id:<36} {st:<10} {active:<8} {max:<6}");
+        let disk = n.get("free_disk_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+        let disk = if disk < 1024 {
+            format!("{} MB !", disk)
+        } else {
+            format!("{:.0} GB", disk as f64 / 1024.0)
+        };
+        println!("{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10}");
     }
     Ok(())
 }

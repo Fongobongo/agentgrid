@@ -1,0 +1,20 @@
+[package]
+name = "agentgrid-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentgrid-common = { path = "../common" }
+anyhow.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "agentgrid-gateway"
+path = "src/main.rs"

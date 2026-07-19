@@ -1142,6 +1142,23 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
             // Stage 2.4: only advertise as Online when every configured adapter
             // binary is present; a missing one degrades the node. Stage 3.2:
             // report per-adapter capabilities (version + readiness) each beat.
+            // Stage 2.5 ops: flag the node Degraded when free disk falls below
+            // AGENTGRID_DISK_LOW_MB (default 1 GB) so it shows up in `ag nodes
+            // list` and the scheduler can avoid stacking work onto a full host.
+            let free_disk = read_free_disk_mb(&hb_cfg.workspace_root);
+            let disk_low_mb = std::env::var("AGENTGRID_DISK_LOW_MB")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1024);
+            let disk_low = free_disk < disk_low_mb;
+            if disk_low {
+                tracing::warn!(
+                    "free disk low on node {}: {} MB < {} MB threshold; marking degraded",
+                    hb_cfg.node_name,
+                    free_disk,
+                    disk_low_mb
+                );
+            }
             let mut capabilities = Vec::new();
             let all_ok = {
                 let mut ok = true;
@@ -1158,7 +1175,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                     });
                 }
                 ok
-            };
+            } && !disk_low;
             let status = if all_ok {
                 NodeStatus::Online
             } else {
@@ -1174,7 +1191,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                 max_concurrency: hb_cfg.max_concurrency,
                 agent_version: hb_cfg.agent_version.clone(),
                 load_avg: read_load_avg(),
-                free_disk_mb: read_free_disk_mb(&hb_cfg.workspace_root),
+                free_disk_mb: free_disk,
                 active_attempts: active,
                 capabilities,
                 protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),

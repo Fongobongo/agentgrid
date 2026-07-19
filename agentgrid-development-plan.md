@@ -288,6 +288,15 @@
 
 **Exit 9:** опасные операции fail closed или требуют approval; unattended режим без policy невозможен.
 
+### 9.3 Operations: disk-space alerting
+
+- [x] Node помечает себя `Degraded` + `tracing::warn!` когда свободное место на диске workspace < `AGENTGRID_DISK_LOW_MB` (дефолт 1024 MB). Значение `free_disk_mb` уже шлётся в heartbeat и хранится control-plane; теперь полный хост виден как `degraded` в `ag nodes list` (добавлена колонка `DISK` с маркером `!` под 1 GB).
+
+### 9.4 Chat gateway (front-end для оператора)
+
+- [x] Новый crate `crates/gateway` (`agentgrid-gateway`): bridge из чат-платформы в control-plane HTTP API. `ChatProvider` trait + реализация Telegram (raw `reqwest` к Bot API long-polling, без chat-client крейта). Команды: `/nodes /tasks /run <repo> <adapter> <prompt...> /show <id> /logs <id> /cancel <id> /help`. Auth = allowlist chat-id (`AGENTGRID_GATEWAY_ADMINS`). Контроль-плейн URL + JWT из env.
+- [ ] Discord и WhatsApp за тем же `ChatProvider` trait — не реализованы; WhatsApp не имеет лёгкого открытого bot API (Business API gated/heavy). Честно отложено.
+
 ---
 
 ## Этап 10 — 0.4 Zeroshot integration (1 неделя spike + hardening)
