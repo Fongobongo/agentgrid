@@ -33,11 +33,11 @@
 
 ### 1.2 Lost attempts и node recovery
 
-- [ ] При переводе node в `offline`/`revoked` атомарно переводить её non-terminal attempts в `lost`
-- [ ] Освобождать `active_attempts` capacity при потере attempt
-- [ ] Политика задачи после `lost`: default `failed/node_lost`; автоматический retry разрешён только явно retryable/idempotent steps с лимитом попыток и backoff — зафиксировать в ADR
+- [x] При переводе node в `offline`/`revoked` атомарно переводить её non-terminal attempts в `lost`
+- [x] Освобождать `active_attempts` capacity при потере attempt
+- [x] Политика задачи после `lost`: default `failed/node_lost`; автоматический retry разрешён только явно retryable/idempotent steps с лимитом попыток и backoff — зафиксировать в ADR
 - [ ] Test: kill node-контейнера во время running → attempt `lost`, task `failed`, повторный `retry` работает
-- [ ] Test: node вернулась после offline и репортит completion уже `lost` attempt → идемпотентный отказ без порчи статуса
+- [x] Test: node вернулась после offline и репортит completion уже `lost` attempt → идемпотентный отказ без порчи статуса
 
 ### 1.3 Explicit assignment acknowledgement
 
@@ -53,7 +53,7 @@
 - [x] Сохранить fairness: сортировка по `created_at`, tie-break по последнему назначению
 - [x] Test: несовместимый первый task (другой adapter) не блокирует следующий подходящий
 - [x] Test: `requested_node_id` по-прежнему уважается
-- [ ] Метрика scheduler latency (queued → assigned)
+- [x] Метрика scheduler latency (queued → assigned)
 
 **Exit 1:** статусы задач всегда правдивы; потеря node не подвешивает задачи; очередь не блокируется несовместимой головой.
 

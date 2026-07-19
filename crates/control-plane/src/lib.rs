@@ -658,6 +658,19 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
         .unwrap_or(0);
     s.push_str(&format!("agentgrid_sqlite_wal_bytes {wal_bytes}\n"));
 
+    s.push_str("# HELP agentgrid_scheduler_latency_ms Last scheduler latency: queued→assigned in ms.\n");
+    s.push_str("# TYPE agentgrid_scheduler_latency_ms gauge\n");
+    s.push_str(&format!(
+        "agentgrid_scheduler_latency_ms {}\n",
+        state.store.scheduler_latency_ms.load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    s.push_str("# HELP agentgrid_scheduler_assignments_total Total assignments made by the scheduler.\n");
+    s.push_str("# TYPE agentgrid_scheduler_assignments_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_scheduler_assignments_total {}\n",
+        state.store.scheduler_assignments.load(std::sync::atomic::Ordering::Relaxed)
+    ));
+
     (
         StatusCode::OK,
         (

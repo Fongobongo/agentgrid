@@ -33,6 +33,10 @@ const ACK_DEADLINE_SECS: i64 = 30;
 pub struct Store {
     pool: SqlitePool,
     artifact_root: std::path::PathBuf,
+    /// Observability: last scheduler latency (queued→assigned) in ms and total
+    /// assignments (Stage 2.5 ops). Wrapped in Arc so `Store` can derive Clone.
+    pub(crate) scheduler_latency_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) scheduler_assignments: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn now_iso() -> String {
@@ -151,6 +155,8 @@ impl Store {
         Ok(Self {
             pool,
             artifact_root,
+            scheduler_latency_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            scheduler_assignments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -693,7 +699,7 @@ impl Store {
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
         let mut tx = self.pool.begin().await?;
         let cands = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, created_at FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC",
         )
@@ -708,6 +714,7 @@ impl Store {
             let timeout_secs: i64 = c.try_get("timeout_secs")?;
             let task_validation: Option<String> = c.try_get("validation_command")?;
             let base_commit: Option<String> = c.try_get("base_commit").ok().flatten();
+            let created_at: String = c.try_get("created_at")?;
 
             // Resolve repository git info (absent for plain-dir tasks).
             let repo = sqlx::query(
@@ -758,6 +765,15 @@ impl Store {
             if affected != 1 {
                 let _ = tx.rollback().await;
                 return Ok(None);
+            }
+            // Observability: queued→assigned latency (Stage 2.5 ops).
+            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&created_at) {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let latency = (now_ms - created.timestamp_millis()).max(0) as u64;
+                self.scheduler_latency_ms
+                    .store(latency, std::sync::atomic::Ordering::Relaxed);
+                self.scheduler_assignments
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             sqlx::query(
             "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
@@ -2732,5 +2748,43 @@ mod workflow_tests {
             .await
             .unwrap();
         assert_eq!(remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn scheduler_records_latency_metric() {
+        let s = temp_store().await;
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            agent_version: "test".into(),
+        };
+        let resp = s.enroll_node(&node).await.unwrap().expect("node enroll");
+        let node_id = resp.node_id;
+        let task = CreateTaskRequest {
+            prompt: "do".into(),
+            repository: String::new(),
+            adapter: "mock".into(),
+            requested_node_id: None,
+            timeout_secs: Some(60),
+            validation_command: None,
+            base_commit: None,
+        };
+        let _ = s.create_task(&task).await.unwrap();
+        let before = s
+            .scheduler_assignments
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let assigned = s.try_assign(&node_id).await.unwrap();
+        assert!(assigned.is_some(), "task should be assigned to the node");
+        let after = s
+            .scheduler_assignments
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            after, before + 1,
+            "an assignment must increment the scheduler metric"
+        );
     }
 }
