@@ -15,8 +15,8 @@ use agentgrid_common::{
     CreateRepositoryRequest, CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest,
     EnrollRequest, EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest,
     IngestEventsRequest, LoginRequest, LoginResponse, PollRequest, PollResponse, RepositoryView,
-    SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest, WorkflowRun,
-    WorkflowRunWithSteps, WorkflowTemplate,
+    SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest, WorkflowProjection,
+    WorkflowRun, WorkflowRunWithSteps, WorkflowTemplate,
 };
 use axum::{
     body::Body,
@@ -214,6 +214,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/workflows/{id}/runs", post(create_workflow_run))
         .route("/v1/workflow-runs", get(list_workflow_runs))
         .route("/v1/workflow-runs/{id}", get(show_workflow_run))
+        .route(
+            "/v1/workflow-runs/{id}/projection",
+            get(workflow_run_projection),
+        )
         .route("/v1/workflow-runs/{id}/tick", post(tick_workflow_run))
         .layer(DefaultBodyLimit::max(state.limits.artifact))
         .layer(middleware::from_fn_with_state(
@@ -721,6 +725,21 @@ async fn show_workflow_run(
         (Ok(None), _) => Err(StatusCode::NOT_FOUND),
         _ => {
             tracing::error!("show_workflow_run failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Stage 8 ACP plan projection: live roles/steps/nodes/verdicts for a run.
+async fn workflow_run_projection(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkflowProjection>, StatusCode> {
+    match state.store.get_workflow_run_projection(&id).await {
+        Ok(Some(p)) => Ok(Json(p)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("workflow_run_projection failed: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

@@ -1727,3 +1727,116 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
         .all(|s| s.get("status").unwrap() == "succeeded");
     assert!(steps_done, "every step should succeed: {rv}");
 }
+
+#[tokio::test]
+async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "proj-node", vec!["mock".into()], vec!["*".into()]).await;
+
+    let steps = json!([
+        {"id":"arch","prompt":"design","role":"architect","depends_on":[]},
+        {"id":"work","prompt":"impl","role":"worker","depends_on":["arch"]}
+    ]);
+    let tpl_body = json!({"name":"proj","steps":steps}).to_string();
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/workflows", tpl_body))
+        .await
+        .unwrap();
+    let tpl: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let tid = tpl.get("id").unwrap().as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/workflows/{tid}/runs"),
+            json!({"repository":"demo"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let run: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let rid = run.get("id").unwrap().as_str().unwrap().to_string();
+
+    let poll_req = PollRequest {
+        node_id: node_id.clone(),
+        name: "proj-node".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+    };
+
+    app.clone()
+        .oneshot(post(&format!("/v1/workflow-runs/{rid}/tick"), "{}".into()))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/poll",
+            serde_json::to_string(&poll_req).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    let pr: PollResponse =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let a = pr.assignment.expect("architect assigned");
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", a.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+            })
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    for _ in 0..4 {
+        app.clone()
+            .oneshot(post(&format!("/v1/workflow-runs/{rid}/tick"), "{}".into()))
+            .await
+            .unwrap();
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/workflow-runs/{rid}/projection"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let proj: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let steps = proj.get("steps").unwrap().as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    let arch = steps
+        .iter()
+        .find(|s| s.get("step_id").unwrap() == "arch")
+        .unwrap();
+    assert_eq!(arch.get("role").unwrap(), "architect");
+    assert_eq!(arch.get("verdict").unwrap(), "succeeded");
+    assert_eq!(arch.get("node_id").unwrap().as_str().unwrap(), node_id);
+    let work = steps
+        .iter()
+        .find(|s| s.get("step_id").unwrap() == "work")
+        .unwrap();
+    assert_eq!(work.get("role").unwrap(), "worker");
+    assert!(
+        work.get("task_id").unwrap().is_string(),
+        "worker task should be spawned"
+    );
+}

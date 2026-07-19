@@ -1,8 +1,8 @@
 pub mod workflow;
 pub use workflow::{
-    CreateWorkflowRequest, CreateWorkflowRunRequest, RoleRunStatus, WorkflowRole, WorkflowRun,
-    WorkflowRunStatus, WorkflowRunWithSteps, WorkflowStep, WorkflowStepRun, WorkflowStepStatus,
-    WorkflowTemplate,
+    CreateWorkflowRequest, CreateWorkflowRunRequest, RoleRunStatus, StepProjection,
+    WorkflowProjection, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowRunWithSteps,
+    WorkflowStep, WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,
 };
 
 use serde::{Deserialize, Serialize};

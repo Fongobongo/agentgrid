@@ -332,6 +332,17 @@ impl AcpAgent for GatewayAgent {
                     })?;
                 get_json(self, &format!("/v1/tasks/{task_id}/eligibility")).await
             }
+            "_agentgrid/workflow/projection" => {
+                let run_id = params
+                    .get("run_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RpcError {
+                        code: -32602,
+                        message: "workflow/projection requires run_id".into(),
+                        data: None,
+                    })?;
+                get_json(self, &format!("/v1/workflow-runs/{run_id}/projection")).await
+            }
             other => Err(RpcError {
                 code: -32601,
                 message: format!("unknown extension method: {other}"),
@@ -694,5 +705,75 @@ mod integration_tests {
 
         // Unknown extension method is a clean RPC error, not a hang.
         assert!(client.request("_agentgrid/bogus", json!({})).await.is_err());
+    }
+
+    async fn cp_workflow_projection(Path(_id): Path<String>) -> Json<Value> {
+        Json(json!({
+            "run": {"id": "run-x", "status": "blocked"},
+            "steps": [{"step_id": "a", "role": "integrator", "verdict": "failed"}]
+        }))
+    }
+
+    #[tokio::test]
+    async fn gateway_exposes_workflow_projection() {
+        let cp = Arc::new(FakeCp {
+            task_id: "task-x".into(),
+            delivered: AtomicBool::new(false),
+            decided: Mutex::new(vec![]),
+        });
+        let app = Router::new()
+            .route(
+                "/v1/workflow-runs/{id}/projection",
+                axum::routing::get(cp_workflow_projection),
+            )
+            .with_state(cp.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (c2s, s_read) = duplex(8192);
+        let (s_write, c_read) = duplex(8192);
+        tokio::spawn(
+            AcpServer::new(
+                s_read,
+                s_write,
+                GatewayAgent::new(format!("http://{addr}"), None),
+            )
+            .run(),
+        );
+        let (client, _notif) = acp_client_new(c_read, c2s);
+        let client = Arc::new(client);
+        client
+            .initialize(InitializeParams {
+                protocol_version: "0.1".into(),
+                agent: "claude".into(),
+                model: "v1".into(),
+                session_id: None,
+                cwd: "/tmp".into(),
+                capabilities: json!({}),
+                client: json!({}),
+            })
+            .await
+            .unwrap();
+
+        let proj = client
+            .request(
+                "_agentgrid/workflow/projection",
+                json!({ "run_id": "run-x" }),
+            )
+            .await
+            .expect("projection extension");
+        assert_eq!(
+            proj.get("run").unwrap().get("status").unwrap(),
+            &json!("blocked")
+        );
+        assert_eq!(
+            proj.get("steps").unwrap().as_array().unwrap()[0]
+                .get("role")
+                .unwrap(),
+            &json!("integrator")
+        );
     }
 }

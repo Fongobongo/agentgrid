@@ -1831,6 +1831,74 @@ impl Store {
             .collect())
     }
 
+    /// Stage 8 ACP plan projection: the live view of a run's roles, steps,
+    /// placement, spawned tasks, assigned nodes and latest verdicts.
+    pub async fn get_workflow_run_projection(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<agentgrid_common::WorkflowProjection>> {
+        let run = match self.get_workflow_run(run_id).await? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let steps = self.get_workflow_run_steps(run_id).await?;
+        let mut out = Vec::with_capacity(steps.len());
+        for s in &steps {
+            let task_row = sqlx::query("SELECT task_id FROM role_runs WHERE step_run_id = ?")
+                .bind(&s.id)
+                .fetch_optional(&self.pool)
+                .await?;
+            let task_id: Option<String> =
+                task_row.and_then(|r| r.try_get::<Option<String>, _>("task_id").ok().flatten());
+            let (node_id, verdict, error_code) = match &task_id {
+                Some(tid) => {
+                    let ts = self
+                        .get_task_status(tid)
+                        .await?
+                        .unwrap_or(agentgrid_common::TaskStatus::Queued);
+                    let att = sqlx::query(
+                        "SELECT node_id, error_code FROM attempts WHERE task_id = ? ORDER BY number DESC LIMIT 1",
+                    )
+                    .bind(tid)
+                    .fetch_optional(&self.pool)
+                    .await?;
+                    let node_id = att
+                        .as_ref()
+                        .and_then(|r| r.try_get::<Option<String>, _>("node_id").ok().flatten());
+                    let error_code = att
+                        .as_ref()
+                        .and_then(|r| r.try_get::<Option<String>, _>("error_code").ok().flatten());
+                    let verdict = match ts {
+                        agentgrid_common::TaskStatus::Succeeded => "succeeded",
+                        agentgrid_common::TaskStatus::Failed => "failed",
+                        agentgrid_common::TaskStatus::Validating
+                        | agentgrid_common::TaskStatus::Running
+                        | agentgrid_common::TaskStatus::Assigned => "running",
+                        _ => "pending",
+                    };
+                    (node_id, verdict.to_string(), error_code)
+                }
+                None => (None, "pending".to_string(), None),
+            };
+            out.push(agentgrid_common::StepProjection {
+                step_id: s.step_id.clone(),
+                role: s.role,
+                status: s.status,
+                depends_on: s.depends_on.clone(),
+                requested_node_id: s.requested_node_id.clone(),
+                attempts: s.attempts,
+                task_id,
+                node_id,
+                verdict,
+                error_code,
+            });
+        }
+        Ok(Some(agentgrid_common::WorkflowProjection {
+            run,
+            steps: out,
+        }))
+    }
+
     async fn set_workflow_run_status(
         &self,
         id: &str,
@@ -1918,7 +1986,10 @@ impl Store {
         };
         if matches!(
             run.status,
-            WorkflowRunStatus::Succeeded | WorkflowRunStatus::Failed | WorkflowRunStatus::Cancelled
+            WorkflowRunStatus::Succeeded
+                | WorkflowRunStatus::Failed
+                | WorkflowRunStatus::Cancelled
+                | WorkflowRunStatus::Blocked
         ) {
             return Ok(vec![]);
         }
@@ -1938,7 +2009,8 @@ impl Store {
                 WorkflowStepStatus::Succeeded
                 | WorkflowStepStatus::Failed
                 | WorkflowStepStatus::Cancelled
-                | WorkflowStepStatus::Skipped => continue,
+                | WorkflowStepStatus::Skipped
+                | WorkflowStepStatus::Blocked => continue,
                 WorkflowStepStatus::Running => {
                     if let Some(task_id) = self.step_task_id(&step.id).await? {
                         if let Some(ts) = self.get_task_status(&task_id).await? {
@@ -1982,6 +2054,19 @@ impl Store {
                                         self.set_role_run_task(&step.id, &tv.id).await?;
                                         created.push(tv.id);
                                         // step stays `Running` pending the retry
+                                    } else if step.role == WorkflowRole::Integrator {
+                                        // Conflict policy (Stage 8): a failed
+                                        // integrator must not silently overwrite and
+                                        // must not fail the whole run. It blocks for
+                                        // human/repair resolution; the bounded retries
+                                        // above are the automated repair budget.
+                                        self.set_step_status(&step.id, WorkflowStepStatus::Blocked)
+                                            .await?;
+                                        self.set_role_run_status_by_step(
+                                            &step.id,
+                                            WorkflowStepStatus::Blocked,
+                                        )
+                                        .await?;
                                     } else {
                                         self.set_step_status(&step.id, WorkflowStepStatus::Failed)
                                             .await?;
@@ -2046,7 +2131,14 @@ impl Store {
                 WorkflowStepStatus::Failed | WorkflowStepStatus::Cancelled
             )
         });
-        if any_failed {
+        let any_blocked = steps2
+            .iter()
+            .any(|s| s.status == WorkflowStepStatus::Blocked);
+        if any_blocked {
+            // Terminal-but-not-failed: await human/repair. No finished_at.
+            self.set_workflow_run_status(run_id, WorkflowRunStatus::Blocked, None)
+                .await?;
+        } else if any_failed {
             self.set_workflow_run_status(run_id, WorkflowRunStatus::Failed, Some(&now_iso()))
                 .await?;
         } else if all_term {
@@ -2278,5 +2370,142 @@ mod workflow_tests {
         s.tick_workflow_run(&run.id).await.unwrap();
         let run_got = s.get_workflow_run(&run.id).await.unwrap().unwrap();
         assert_eq!(run_got.status, WorkflowRunStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn integrator_failure_blocks_run_not_failed() {
+        let s = temp_store().await;
+        let steps = vec![step("a", &[], WorkflowRole::Integrator)];
+        let tpl = s.create_workflow_template("integ", &steps).await.unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let poll = agentgrid_common::PollRequest {
+            node_id: "n1".into(),
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+        };
+        s.register_or_touch_node(&poll).await.unwrap();
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 1);
+        let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &a1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 1,
+                commit_sha: None,
+                error_code: Some("merge_conflict".into()),
+            },
+        )
+        .await
+        .unwrap();
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let steps_run = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(
+            steps_run[0].status,
+            WorkflowStepStatus::Blocked,
+            "integrator failure must block, not fail"
+        );
+        let run_got = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(
+            run_got.status,
+            WorkflowRunStatus::Blocked,
+            "run must be blocked, not failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_failure_still_fails_run() {
+        let s = temp_store().await;
+        let steps = vec![step("a", &[], WorkflowRole::Worker)];
+        let tpl = s.create_workflow_template("w", &steps).await.unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let poll = agentgrid_common::PollRequest {
+            node_id: "n1".into(),
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+        };
+        s.register_or_touch_node(&poll).await.unwrap();
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 1);
+        let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &a1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 1,
+                commit_sha: None,
+                error_code: Some("agent_failed".into()),
+            },
+        )
+        .await
+        .unwrap();
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let steps_run = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(steps_run[0].status, WorkflowStepStatus::Failed);
+        let run_got = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(run_got.status, WorkflowRunStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn workflow_run_projection_exposes_roles_nodes_verdicts() {
+        let s = temp_store().await;
+        let steps = vec![
+            step("arch", &[], WorkflowRole::Architect),
+            step("work", &["arch"], WorkflowRole::Worker),
+        ];
+        let tpl = s.create_workflow_template("p", &steps).await.unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let poll = agentgrid_common::PollRequest {
+            node_id: "n1".into(),
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+        };
+        s.register_or_touch_node(&poll).await.unwrap();
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 1);
+        let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &a1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Tick until the worker (dependent on arch) is spawned.
+        for _ in 0..4 {
+            s.tick_workflow_run(&run.id).await.unwrap();
+        }
+
+        let proj = s
+            .get_workflow_run_projection(&run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proj.steps.len(), 2);
+        let arch = proj.steps.iter().find(|x| x.step_id == "arch").unwrap();
+        assert_eq!(arch.role, WorkflowRole::Architect);
+        assert_eq!(arch.verdict, "succeeded");
+        assert_eq!(arch.node_id.as_deref(), Some("n1"));
+        assert!(arch.task_id.is_some());
+        let work = proj.steps.iter().find(|x| x.step_id == "work").unwrap();
+        assert_eq!(work.role, WorkflowRole::Worker);
+        assert!(work.task_id.is_some(), "worker task should be spawned");
+        assert_eq!(work.node_id, None, "worker not assigned yet");
     }
 }

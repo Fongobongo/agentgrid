@@ -25,6 +25,8 @@ pub struct Workspace {
     pub branch: Option<String>,
     pub default_branch: String,
     pub is_git: bool,
+    /// Optional exact commit the worktree was pinned to (Stage 8 base_commit).
+    pub base_commit: Option<String>,
 }
 
 /// Run `git` with explicit args (no shell). Args are passed verbatim, so they
@@ -92,6 +94,7 @@ pub fn prepare_workspace(
             branch: None,
             default_branch: String::new(),
             is_git: false,
+            base_commit: None,
         });
     }
     validate_token(&assignment.repository)?;
@@ -104,6 +107,25 @@ pub fn prepare_workspace(
     let db = assignment.default_branch.as_str();
     let gurl = assignment.git_url.as_str();
     let repo = assignment.repository.as_str();
+
+    // Stage 8: if a fixed base_commit is requested, every attempt of this step
+    // starts from that exact commit (parallel workers share it). Best-effort
+    // fetch so the commit is present locally, then validate the token
+    // (defense-in-depth: git is invoked without a shell).
+    let base_commit = assignment
+        .base_commit
+        .as_ref()
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            validate_token(c)?;
+            let _ = Command::new("git")
+                .args(["fetch", "origin", c])
+                .current_dir(&repo_dir)
+                .status();
+            Ok::<&str, anyhow::Error>(c.as_str())
+        })
+        .transpose()?;
+
     if repo_dir.join(".git").exists() {
         git(&repo_dir, &["fetch", "origin", db])?;
     } else {
@@ -111,6 +133,7 @@ pub fn prepare_workspace(
         git(repository_root, &["clone", gurl, repo])?;
     }
     git(&repo_dir, &["checkout", "-B", db, &format!("origin/{db}")])?;
+    let start_point = base_commit.unwrap_or(db);
     git(
         &repo_dir,
         &[
@@ -119,7 +142,7 @@ pub fn prepare_workspace(
             ws.to_str().unwrap_or(""),
             "-b",
             &branch,
-            db,
+            start_point,
         ],
     )?;
     Ok(Workspace {
@@ -128,6 +151,7 @@ pub fn prepare_workspace(
         branch: Some(branch),
         default_branch: assignment.default_branch.clone(),
         is_git: true,
+        base_commit: base_commit.map(|c| c.to_string()),
     })
 }
 
@@ -162,7 +186,8 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
     } else {
         git_out(&ws.path, &["rev-parse", "HEAD"])?
     };
-    let patch = git_out(repo_dir, &["diff", &ws.default_branch, branch, "--binary"])?;
+    let diff_base = ws.base_commit.clone().unwrap_or(ws.default_branch.clone());
+    let patch = git_out(repo_dir, &["diff", &diff_base, branch, "--binary"])?;
     std::fs::write(ws.path.join("changes.patch"), patch)?;
     Ok(Some(sha))
 }
@@ -229,6 +254,65 @@ mod tests {
         // Agent writes a new file in the worktree.
         std::fs::write(ws.path.join("new.txt"), "hello").unwrap();
 
+        let patch_path = ws.path.join("changes.patch");
+        let sha = finalize_workspace(ws, "agent@agentgrid").unwrap();
+        assert!(sha.is_some());
+        let patch = std::fs::read_to_string(&patch_path).unwrap();
+        assert!(patch.contains("new.txt"), "patch missing new file: {patch}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn base_commit_pins_worktree_to_commit() {
+        let dir = std::env::temp_dir().join(format!("ag-git-base-{}", uuid::Uuid::new_v4()));
+        let origin = dir.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(origin.join("a.txt"), "a").unwrap();
+        git(&origin, &["add", "-A"]).unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "c0",
+            ],
+        )
+        .unwrap();
+        let c0 = git_out(&origin, &["rev-parse", "HEAD"]).unwrap();
+        // a second commit so the default branch tip != base_commit
+        std::fs::write(origin.join("b.txt"), "b").unwrap();
+        git(&origin, &["add", "-A"]).unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "c1",
+            ],
+        )
+        .unwrap();
+
+        let mut a = make_assignment(origin.to_str().unwrap(), "main");
+        a.base_commit = Some(c0.clone());
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a).unwrap();
+        assert!(ws.is_git);
+        assert_eq!(ws.base_commit.as_deref(), Some(c0.as_str()));
+        // worktree HEAD is the pinned commit, not the main tip
+        let head = git_out(&ws.path, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head, c0);
+        // the agent's new file is diffed relative to base_commit
+        std::fs::write(ws.path.join("new.txt"), "hello").unwrap();
         let patch_path = ws.path.join("changes.patch");
         let sha = finalize_workspace(ws, "agent@agentgrid").unwrap();
         assert!(sha.is_some());

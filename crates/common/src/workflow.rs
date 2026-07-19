@@ -31,6 +31,9 @@ pub enum WorkflowRunStatus {
     Succeeded,
     Failed,
     Cancelled,
+    /// Run is stuck awaiting human/repair resolution (e.g. an integrator
+    /// merge conflict); it is terminal-but-not-failed (Stage 8 conflict policy).
+    Blocked,
 }
 
 /// Lifecycle of an individual step within a run.
@@ -44,6 +47,8 @@ pub enum WorkflowStepStatus {
     Failed,
     Cancelled,
     Skipped,
+    /// Step is stuck awaiting human/repair resolution (Stage 8 conflict policy).
+    Blocked,
 }
 
 /// Lifecycle of a single role execution within a step.
@@ -176,4 +181,34 @@ pub struct CreateWorkflowRunRequest {
 pub struct WorkflowRunWithSteps {
     pub run: WorkflowRun,
     pub steps: Vec<WorkflowStepRun>,
+}
+
+/// One step in a workflow projection (Stage 8 ACP plan projection): the live
+/// view an external client gets — role, status, placement, the spawned task,
+/// the node it is assigned to, and the latest attempt verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepProjection {
+    pub step_id: String,
+    pub role: WorkflowRole,
+    pub status: WorkflowStepStatus,
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_node_id: Option<String>,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Node the step's task is assigned to (None until assigned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Latest attempt verdict: `succeeded` | `failed` | `running` | `pending`.
+    pub verdict: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+/// Live projection of a workflow run for external (ACP) clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowProjection {
+    pub run: WorkflowRun,
+    pub steps: Vec<StepProjection>,
 }
