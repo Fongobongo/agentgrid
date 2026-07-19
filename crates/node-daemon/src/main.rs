@@ -246,6 +246,32 @@ fn resolve_acp_launch(adapter_id: &str) -> Option<(String, Vec<String>)> {
     Some((program, args))
 }
 
+/// Agent profile (idea: oh-my-agent SSOT): an optional system prompt for this
+/// adapter. `AGENTGRID_AGENT_PROFILE_<ID>` is either a path to a `.md` file
+/// (read) or inline text. Returns None when unset. Projected into the worktree
+/// as `AGENTS.md` (cross-agent convention); per-agent native projection
+/// (`CLAUDE.md`, `.kiro/`) is a follow-up mapping table.
+// ponytail: single AGENTS.md projection; native per-agent files if an agent
+// ignores AGENTS.md.
+fn agent_profile(adapter_id: &str) -> Option<String> {
+    let key = format!(
+        "AGENTGRID_AGENT_PROFILE_{}",
+        adapter_id
+            .to_ascii_uppercase()
+            .replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+    let val = std::env::var(&key).ok()?;
+    if val.trim().is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(&val);
+    if p.is_file() {
+        std::fs::read_to_string(p).ok()
+    } else {
+        Some(val)
+    }
+}
+
 async fn probe_adapter(bin: &str) -> AdapterProbe {
     if resolve_in_path(bin).is_none() {
         return AdapterProbe {
@@ -452,6 +478,10 @@ async fn drive_acp_session(
     for (k, v) in &cfg.adapter_env {
         cmd.env(k, v);
     }
+    // Forward the agent profile as an env hint for agents that read it.
+    if let Some(text) = agent_profile(&assignment.adapter) {
+        cmd.env("AGENTGRID_SYSTEM_PROMPT", &text);
+    }
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stdin = child.stdin.take().expect("piped stdin");
@@ -634,6 +664,14 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     })
     .await??;
     tracing::info!(attempt_id = %assignment.attempt_id, git = ws.is_git, "starting attempt");
+
+    // Agent profile (idea 6): an optional system prompt for this adapter,
+    // projected into the worktree as AGENTS.md before the agent runs. Sourced
+    // from AGENTGRID_AGENT_PROFILE_<ID> (a path to a .md file, or inline text).
+    if let Some(text) = agent_profile(&assignment.adapter) {
+        let p = ws.path.join("AGENTS.md");
+        let _ = tokio::fs::write(&p, &text).await;
+    }
 
     // Stage 5: ACP adapters are driven over JSON-RPC 2.0 (stdio), not stdout
     // parsing. Everything below that point lives in drive_acp_session.
@@ -1540,5 +1578,14 @@ mod tests {
             sink.adapter_event_count()
         );
         std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[test]
+    fn agent_profile_reads_inline_and_none() {
+        std::env::set_var("AGENTGRID_AGENT_PROFILE_TESTAG", "be brief");
+        assert_eq!(agent_profile("testag"), Some("be brief".into()));
+        std::env::set_var("AGENTGRID_AGENT_PROFILE_TESTAG", "");
+        assert_eq!(agent_profile("testag"), None);
+        std::env::remove_var("AGENTGRID_AGENT_PROFILE_TESTAG");
     }
 }

@@ -19,6 +19,10 @@ complete; the two-container E2E run is the release validation gate.
 ### Added (gateway — chat front-end, Stage 9.3)
 - New crate `crates/gateway` (`agentgrid-gateway`): a chat bridge that lets an operator drive the grid from a phone. A `ChatProvider` trait with one implementation — Telegram, via raw `reqwest` calls to the Bot API `getUpdates`/`sendMessage` long-polling (no chat-client crate). Commands proxy to the control-plane HTTP API: `/nodes`, `/tasks`, `/run <repo> <adapter> <prompt...>`, `/show <id>`, `/logs <id>`, `/cancel <id>`, `/help`. Auth is an allowlist of numeric chat ids (`AGENTGRID_GATEWAY_ADMINS`); chats off the list are ignored. The control-plane URL + a user JWT come from `AGENTGRID_SERVER` / `AGENTGRID_GATEWAY_TOKEN`. Discord and WhatsApp sit behind the same trait but are **not implemented yet** — WhatsApp especially has no easy open bot API (the Business API is gated/heavy); both are honestly deferred rather than stubbed. Covered by `tests::fmt_*` (the pure formatting/dispatch helpers); live bot wiring needs a real Telegram token.
 
+### Added (agent-profile SSOT, Stage 11.3)
+
+- An optional system prompt per adapter, projected into the worktree before the agent runs. `AGENTGRID_AGENT_PROFILE_<ID>` is either a path to a `.md` file (read) or inline text; the node writes it to `<worktree>/AGENTS.md` (the cross-agent convention that Claude Code, opencode, pi, etc. read) and forwards it as the `AGENTGRID_SYSTEM_PROMPT` env hint. Per-agent native projection (`CLAUDE.md`, `.kiro/`) is a follow-up mapping table.
+
 ### Added (Sandbox trait, Stage 11.2)
 
 - Agent isolation: a `Sandbox` wraps the spawned agent command so an agent can run inside a container instead of sharing the node's full environment. `NoSandbox` (default, runs directly in the worktree) and `DockerSandbox` (`docker run --rm -i -v <workdir>:/ag -w /ag <image> --`). Configured via `AGENTGRID_SANDBOX` (`none` | `docker`) and `AGENTGRID_SANDBOX_IMAGE`. The ACP path (native ACP launcher + wrapper binary) routes through `sandbox_command`; the legacy `ExecutionBackend` wrapper path is left unsandboxed with a noted TODO.
