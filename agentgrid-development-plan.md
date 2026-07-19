@@ -266,13 +266,13 @@
 
 ### 9.1 Command policy interface
 
-- [ ] Trait/contract `CommandPolicyProvider`: `decision: allow | ask | deny | rewrite`, `riskClass`, `reason`, `matchedRules`
-- [ ] Builtin-basic provider: классификация `read / edit-workspace / execute-local / network-write / git-remote / package-install / destructive` и др.
+- [x] Trait/contract `CommandPolicyProvider`: `decision: allow | ask | deny | rewrite`, `riskClass`, `reason`, `matchedRules`
+- [x] Builtin-basic provider: классификация `read / edit-workspace / execute-local / network-write / git-remote / package-install / destructive` и др. (+ `POST /v1/policy/evaluate` в control-plane, integration-тест)
 - [ ] Расширить минимальный approval foundation Этапа 5 до pluggable policy providers; интеграция в ACP `session/request_permission` и adapter tool-call путь
 - [ ] Явно описать enforcement boundary: wrapper-adapter без структурированных tool calls нельзя считать полностью перехваченным; для strict режима требовать sandbox/backend policy
 - [ ] Provider для CodeAlive bash-guard (внешний executable, pinned version)
 - [ ] Spike совместимости Destructive Command Guard
-- [ ] Fail-closed: ошибка/недоступность provider → `ask`, не `allow`
+- [x] Fail-closed: ошибка/недоступность provider → `ask`, не `allow`
 
 ### 9.2 Autonomy и approvals
 

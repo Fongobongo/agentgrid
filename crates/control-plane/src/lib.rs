@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use agentgrid_common::{
-    ApprovalEvent, ApprovalView, CancelState, CompleteAttemptRequest, CreateAgentSessionRequest,
-    CreateRepositoryRequest, CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest,
-    EnrollRequest, EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest,
-    IngestEventsRequest, LoginRequest, LoginResponse, PollRequest, PollResponse, RepositoryView,
-    SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest, WorkflowProjection,
-    WorkflowRun, WorkflowRunWithSteps, WorkflowTemplate,
+    ApprovalEvent, ApprovalView, CancelState, CommandPolicyProvider, CompleteAttemptRequest,
+    CreateAgentSessionRequest, CreateRepositoryRequest, CreateTaskRequest, CreateWorkflowRequest,
+    CreateWorkflowRunRequest, EnrollRequest, EnrollResponse, EnrollTokenResponse, EventsQuery,
+    HeartbeatRequest, IngestEventsRequest, LoginRequest, LoginResponse, PollRequest, PollResponse,
+    RepositoryView, SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest,
+    WorkflowProjection, WorkflowRun, WorkflowRunWithSteps, WorkflowTemplate,
 };
 use axum::{
     body::Body,
@@ -189,6 +189,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/auth/setup", post(auth_setup))
         .route("/v1/auth/login", post(auth_login))
+        .route("/v1/policy/evaluate", post(evaluate_policy))
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/nodes/enrollment-token", post(create_enrollment_token))
         .route("/v1/nodes/{id}", delete(revoke_node))
@@ -439,6 +440,24 @@ async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     }
+}
+
+/// Stage 9: evaluate a command against the builtin policy provider and return
+/// its verdict. Fail-closed: a provider error yields `ask`, never `allow`.
+async fn evaluate_policy(
+    Json(req): Json<EvaluatePolicyRequest>,
+) -> Json<agentgrid_common::PolicyVerdict> {
+    let verdict = agentgrid_common::BuiltinPolicyProvider::new()
+        .evaluate(&req.command, &req.cwd)
+        .unwrap_or_else(|e| agentgrid_common::PolicyVerdict::fail_closed(&e.0));
+    Json(verdict)
+}
+
+#[derive(serde::Deserialize)]
+struct EvaluatePolicyRequest {
+    command: String,
+    #[serde(default)]
+    cwd: String,
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::response::Response) {

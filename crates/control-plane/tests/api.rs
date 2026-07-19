@@ -1840,3 +1840,40 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
         "worker task should be spawned"
     );
 }
+
+#[tokio::test]
+async fn policy_endpoint_classifies_commands() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+
+    async fn eval_cmd(app: &Router, cmd: &str) -> serde_json::Value {
+        let body = serde_json::json!({ "command": cmd, "cwd": "/workspace" }).to_string();
+        let resp = app
+            .clone()
+            .oneshot(post("/v1/policy/evaluate", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    let v = eval_cmd(&app, "rm -rf /tmp/x").await;
+    assert_eq!(v.get("decision").unwrap(), "deny");
+    assert_eq!(v.get("risk_class").unwrap(), "destructive");
+
+    let v = eval_cmd(&app, "cat README.md").await;
+    assert_eq!(v.get("decision").unwrap(), "allow");
+    assert_eq!(v.get("risk_class").unwrap(), "read");
+
+    let v = eval_cmd(&app, "git push origin main").await;
+    assert_eq!(v.get("decision").unwrap(), "ask");
+    assert_eq!(v.get("risk_class").unwrap(), "git_remote");
+
+    let v = eval_cmd(&app, "apt-get install -y curl").await;
+    assert_eq!(v.get("decision").unwrap(), "ask");
+    assert_eq!(v.get("risk_class").unwrap(), "package_install");
+
+    // Unterminated quote → fail-closed (ask), never allow.
+    let v = eval_cmd(&app, "echo \"unterminated").await;
+    assert_eq!(v.get("decision").unwrap(), "ask");
+}
