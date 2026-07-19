@@ -9,6 +9,7 @@ pub mod workflow;
 
 use std::sync::Arc;
 use std::time::Instant;
+use anyhow::Context;
 
 use agentgrid_common::{
     ApprovalEvent, ApprovalView, CancelState, CompleteAttemptRequest, CreateAgentSessionRequest,
@@ -1447,14 +1448,84 @@ async fn create_agent_session_handler(
 }
 
 /// Bind and serve. Starts background maintenance (lease/heartbeat jobs).
+/// If `AGENTGRID_TLS_CERT` and `AGENTGRID_TLS_KEY` are both set, the listener is
+/// wrapped in a rustls TLS acceptor (no system OpenSSL); otherwise plaintext.
 pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     state.store.start_maintenance();
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("control plane listening on {addr}");
-    axum::serve(listener, build_router(state.clone()))
-        .with_graceful_shutdown(shutdown_signal(state.clone()))
-        .await?;
+    let app = build_router(state.clone());
+    match (
+        std::env::var("AGENTGRID_TLS_CERT"),
+        std::env::var("AGENTGRID_TLS_KEY"),
+    ) {
+        (Ok(cert), Ok(key)) => {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let acceptor = load_tls_acceptor(&cert, &key)?;
+            tracing::info!("control plane listening with TLS on {addr}");
+            axum::serve(TlsListener { tcp: listener, acceptor }, app)
+                .with_graceful_shutdown(shutdown_signal(state.clone()))
+                .await?;
+        }
+        _ => {
+            tracing::info!("control plane listening on {addr} (plaintext)");
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal(state.clone()))
+                .await?;
+        }
+    }
     Ok(())
+}
+
+/// TLS-wrapped listener implementing axum 0.8's `Listener` trait, so it drops
+/// straight into `axum::serve`. Performs the TLS handshake per accepted TCP
+/// stream; a failed handshake is logged and the accept loop continues.
+struct TlsListener {
+    tcp: tokio::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.tcp.accept().await {
+                Ok((stream, addr)) => match self.acceptor.accept(stream).await {
+                    Ok(tls) => return (tls, addr),
+                    Err(e) => tracing::warn!("tls handshake failed: {e}"),
+                },
+                Err(e) => {
+                    tracing::error!("accept failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.tcp.local_addr()
+    }
+}
+
+/// Build a rustls acceptor from a PEM cert chain + private key (no system OpenSSL).
+fn load_tls_acceptor(
+    cert_path: &str,
+    key_path: &str,
+) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    let cert_pem = std::fs::read(cert_path).with_context(|| format!("read TLS cert {cert_path}"))?;
+    let key_pem = std::fs::read(key_path).with_context(|| format!("read TLS key {key_path}"))?;
+    let mut cert_reader = std::io::Cursor::new(&cert_pem[..]);
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_reader).collect::<Result<_, _>>()?;
+    let mut key_reader = std::io::Cursor::new(&key_pem[..]);
+    let key = rustls_pemfile::private_key(&mut key_reader)?
+        .context("no private key found in TLS key PEM")?;
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("build rustls server config")?;
+    Ok(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)))
 }
 
 /// Await Ctrl-C / SIGTERM, then truncate the WAL so a restart replays nothing
@@ -1479,4 +1550,14 @@ async fn shutdown_signal(state: Arc<AppState>) {
         _ = terminate => {}
     }
     let _ = state.store.wal_checkpoint().await;
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    #[test]
+    fn load_tls_acceptor_missing_file_errors() {
+        assert!(load_tls_acceptor("/no/such/cert.pem", "/no/such/key.pem").is_err());
+    }
 }

@@ -13,6 +13,9 @@ complete; the two-container E2E run is the release validation gate.
 
 ## [Unreleased]
 
+### Added (control-plane — TLS termination, Step 2)
+- control-plane serves HTTPS when `AGENTGRID_TLS_CERT` + `AGENTGRID_TLS_KEY` (PEM) are set: a `TlsListener` (axum 0.8 `Listener` trait over `tokio-rustls`) wraps the TCP listener; rustls with the `ring` provider, no system OpenSSL. Plaintext is retained for loopback / `--tls-cert` unset. `ag server start --tls-cert/--tls-key` forwards the paths as env. Nodes are already rustls-HTTPS clients (reqwest `rustls-tls`), so a node just needs `AGENTGRID_SERVER=https://cp`; no VPN is required for a star topology. `ag nodes install --server https://cp ...` skips the SSH reverse tunnel and points the node directly at the TLS control plane (SSH used only to `scp` the binary + start it). Covered by `tls_tests::load_tls_acceptor_missing_file_errors`. Reverse-proxy docs / mTLS remain follow-ups.
+
 ### Added (CLI — remote node bootstrap)
 - CLI `ag nodes install --host user@host[:port] [--ssh-key ...] [--transport ssh-tunnel]` provisions a remote host as a node: mints a one-time enrollment token, `scp`s the node binary, opens a persistent reverse SSH tunnel (`remote localhost:<remote_port>` → control plane `:<local_port>`), writes a `chmod 600` env file, and starts the node in the background. The node then long-polls the control plane through the tunnel — so two hosts link automatically, working behind NAT with SSH providing encryption. `--transport wireguard` is reserved (planned; SSH used only for one-time bootstrap). Key-based auth preferred; `--password` wraps `sshpass` (SSHPASS env, never argv). User-supplied fields (`name`/`repositories`/`adapters`/`data-dir`) are validated against a safe charset (trust boundary). Covered by `node_install_tests` (parse_host, env-file format, validation).
 

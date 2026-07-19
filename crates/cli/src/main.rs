@@ -86,6 +86,12 @@ struct ServerStartArgs {
     /// Bootstrap password for the first user.
     #[arg(long)]
     bootstrap_password: Option<String>,
+    /// TLS certificate (PEM). Enables HTTPS on the control plane.
+    #[arg(long)]
+    tls_cert: Option<String>,
+    /// TLS private key (PEM). Enables HTTPS on the control plane.
+    #[arg(long)]
+    tls_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -230,6 +236,10 @@ struct NodeInstallArgs {
     /// Agent version reported at enroll.
     #[arg(long, default_value = "0.1.0-cli")]
     agent_version: String,
+    /// Control plane URL the node reaches directly (e.g. https://cp.example.com:7800).
+    /// When set, no reverse tunnel is opened; SSH is used only to bootstrap.
+    #[arg(long)]
+    server: Option<String>,
 }
 
 #[derive(Args)]
@@ -475,15 +485,22 @@ async fn cmd_node_install(
     // 1. copy the node binary to the remote host
     scp_file(&a, &bin, &remote_bin)?;
 
-    // 2. persistent reverse tunnel: remote localhost:<remote_port> -> local :<local_port>
-    let mut tun = remote_shell(&a, false);
-    tun.arg("-f").arg("-N");
-    tun.arg("-R")
-        .arg(format!("{}:127.0.0.1:{}", a.remote_port, a.local_port));
-    run_ssh(tun, "establish reverse tunnel")?;
+    // 2. resolve the control-plane URL the node will use
+    let (server_url, transport_label) = match &a.server {
+        Some(s) => (s.clone(), "direct/https"),
+        None => {
+            // persistent reverse tunnel: remote localhost:<remote_port> -> local :<local_port>
+            let mut tun = remote_shell(&a, false);
+            tun.arg("-f").arg("-N");
+            tun.arg("-R")
+                .arg(format!("{}:127.0.0.1:{}", a.remote_port, a.local_port));
+            run_ssh(tun, "establish reverse tunnel")?;
+            (format!("http://127.0.0.1:{}", a.remote_port), "ssh-tunnel")
+        }
+    };
 
     // 3. write env file on remote (temp locally, scp, chmod 600), then start node
-    let env = build_node_env_file(&a, &token);
+    let env = build_node_env_file(&a, &token, &server_url);
     let tmp = std::env::temp_dir().join(format!("ag-env-{}.env", std::process::id()));
     std::fs::write(&tmp, env).context("write local env temp")?;
     scp_file(&a, &tmp.to_string_lossy(), &format!("{data}/agentgrid.env"))?;
@@ -497,14 +514,13 @@ async fn cmd_node_install(
     sh.arg(start);
     run_ssh(sh, "start node")?;
 
-    println!("node '{}' provisioned (transport=ssh-tunnel)", a.name);
+    println!("node '{}' provisioned (transport={})", a.name, transport_label);
     println!("check status with: ag node list");
     Ok(())
 }
 
 /// Build the remote env file (single-quoted values, safe for `env $(cat ...)`).
-fn build_node_env_file(a: &NodeInstallArgs, token: &str) -> String {
-    let server = format!("http://127.0.0.1:{}", a.remote_port);
+fn build_node_env_file(a: &NodeInstallArgs, token: &str, server: &str) -> String {
     let data = a.data_dir.trim_end_matches('/');
     format!(
         "AGENTGRID_SERVER='{server}'\n\
@@ -542,6 +558,9 @@ fn validate_install_args(a: &NodeInstallArgs) -> Result<()> {
     sane(&a.repositories, "repositories")?;
     sane(&a.adapters, "adapters")?;
     sane(&a.data_dir, "data-dir")?;
+    if let Some(s) = &a.server {
+        sane(s, "server")?;
+    }
     Ok(())
 }
 
@@ -837,8 +856,11 @@ fn cmd_server_start(a: ServerStartArgs) -> Result<()> {
     if let Some(u) = &a.bootstrap_user {
         cmd.env("AGENTGRID_BOOTSTRAP_USER", u);
     }
-    if let Some(p) = &a.bootstrap_password {
-        cmd.env("AGENTGRID_BOOTSTRAP_PASSWORD", p);
+    if let Some(c) = &a.tls_cert {
+        cmd.env("AGENTGRID_TLS_CERT", c);
+    }
+    if let Some(k) = &a.tls_key {
+        cmd.env("AGENTGRID_TLS_KEY", k);
     }
     #[cfg(unix)]
     {
@@ -1037,6 +1059,7 @@ mod node_install_tests {
             binary: None,
             data_dir: "/var/lib/agentgrid".into(),
             agent_version: "0.1.0-cli".into(),
+            server: None,
         }
     }
 
@@ -1050,8 +1073,8 @@ mod node_install_tests {
 
     #[test]
     fn env_file_has_server_and_token() {
-        let env = build_node_env_file(&sample(), "TOK123");
-        assert!(env.contains("AGENTGRID_SERVER='http://127.0.0.1:7800'"));
+        let env = build_node_env_file(&sample(), "TOK123", "http://cp.example.com:7800");
+        assert!(env.contains("AGENTGRID_SERVER='http://cp.example.com:7800'"));
         assert!(env.contains("AGENTGRID_ENROLL_TOKEN='TOK123'"));
         assert!(env.contains("AGENTGRID_NODE_NAME='node-b'"));
         // single-quoted values survive `env $(cat ...)`
