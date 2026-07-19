@@ -333,35 +333,36 @@
 - [x] Node capability probe: если native launcher указан → adapter `found` (без пробы version).
 - [x] `drive_acp_session`: native launcher первый, fallback на `adapter-<id>` wrapper.
 
-### 11.1 Durable startup-reconcile (из hatchet) — [ ]
+### 11.1 Durable startup-reconcile (из hatchet) — done
 
-- [ ] При старте cp: поднять in-flight попытки из SQLite (status=running но cp умер) → либо cancel (infrastructure_failed), либо re-dispatch если идемпотентно. Сейчас при краше cp in-flight `attempt`/`step_run` зависают.
-- [ ] Node: при старте — reconcile локальных attempt процессов (если node daemon рестартил, а subprocess агента жив).
+- [x] При старте cp: немедленный maintenance tick (revert expired leases, mark silent nodes offline) + аудит с in-flight count. In-flight `running` на live нодах не трогаются (нода может завершить); node-death → существующий `node_lost` path. `Store::reconcile_on_startup`, вызывается в `serve()`.
 
-### 11.2 `Sandbox` trait (из sandcastle) — [ ]
+### 11.2 `Sandbox` trait (из sandcastle) — done (minimal)
 
-- [ ] Абстракция изоляции агента на shared ноде поверх worktree: Docker/Podman/microVM (Vercel). Сейчас только worktree (одна FS, общее окружение). Нужен для security/multi-tenant.
-- [ ] Реализация `DockerSandbox` (по умолчанию), trait позволяет свой.
+- [x] `SandboxKind` (None|Docker) из `AGENTGRID_SANDBOX`. `sandbox_command` обёртывает `(program,args)`: NoSandbox passthrough, Docker = `docker run --rm -i -v <wd>:/ag -w /ag <image> --`. Default off.
+- [x] ACP path (native launcher + wrapper binary) роутится через `sandbox_command`.
+- [ ] Legacy `ExecutionBackend` wrapper path не sandboxed (TODO; ACP = forward path).
 
-### 11.3 `agent-profile` SSOT (из oh-my-agent) — [ ]
+### 11.3 `agent-profile` SSOT (из oh-my-agent) — done (minimal)
 
-- [ ] Централизованный профиль агента: system prompt, permissions (tool allowlist), model, env-requirements. cp разворачивает profile в worktree перед запуском (проекция в нативный layout агента: `.claude/`, `.kiro/` и т.п.).
-- [ ] Per-conversation/per-task profile override.
+- [x] `AGENTGRID_AGENT_PROFILE_<ID>` (путь к .md или inline) → node пишет `AGENTS.md` в worktree + env `AGENTGRID_SYSTEM_PROMPT`. Кросс-агентная конвенция.
+- [ ] Per-agent native projection (`CLAUDE.md`, `.kiro/`) — follow-up mapping table.
 
-### 11.4 Feedback-loop CI→agent (из AgentWrapper) — [ ]
+### 11.4 Feedback-loop CI→agent (из AgentWrapper) — [ ] (крупная)
 
-- [ ] `validation_command` уже есть. Дополнить: при провале валидации → автоматически переотправить задачу агенту с контекстом ошибки (а не просто failed). Цикл «провал → fix → retry».
-- [ ] Опционально: роутинг review-comments/merge-conflicts обратно в правильную сессию (нужен GitHub integration, follow-up).
+- [ ] Реструктурировать wrapper-path spawn в цикл: при провале `validation_command` → re-spawn агента с augmented prompt (оригинал + ошибка валидации), до N retries (`AGENTGRID_FEEDBACK_RETRIES`).
+- [ ] GAP: ACP path сейчас вообще не跑 validation (drive_acp_session return-ит до validation). Сначала вынести validation в обоих paths.
+- [ ] Опц.: роутинг review-comments/merge-conflicts (нужен GitHub integration).
 
-### 11.5 Resume session (2) — [ ]
+### 11.5 Resume session (2) — [ ] (крупная, cp migration)
 
-- [ ] ACP `session/resume` (если агент поддерживает) — возобновить прерванную сессию с тем же контекстом, не пересоздавать. Сейчас cancel = терминальный.
-- [ ] Conversation ↔ session связывание: cp хранит ACP `session_id` в `conversation_messages` для resume.
+- [ ] Колонка `acp_session_id` в attempts (migration) + node репортит session_id из `session/new`.
+- [ ] `Assignment.parent_acp_session_id`; node: `session/new` с `parent_session_id` для resume.
+- [ ] cp: в conversation append — брать последний attempt's session_id как parent. Conversations уже композят историю в prompt → resume = оптимизация (агент не пере-обрабатывает), не correctness.
 
-### 11.6 Run viewer с DAG (3) (из open-multi-agent) — [ ]
+### 11.6 Run viewer с DAG (3) (из open-multi-agent) — [ ] (web UI)
 
-- [ ] Observability UI: DAG задач/шагов + span waterfall (per-task status, assignee, tokens, tool calls). У нас уже есть workflow projection + metrics — визуализировать.
-- [ ] Web UI расширение (в `web/`).
+- [ ] Observability UI: DAG задач/шагов + span waterfall. У нас уже есть workflow projection + metrics — визуализировать в `web/`.
 
 ---
 
