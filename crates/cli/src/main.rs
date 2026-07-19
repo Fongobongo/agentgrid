@@ -194,6 +194,8 @@ enum WorkflowSub {
     Show(WorkflowShowArgs),
     /// Start a run of a template.
     Run(WorkflowRunArgs),
+    /// Cancel a whole workflow run (and its non-terminal steps/tasks).
+    Cancel(WorkflowCancelArgs),
 }
 
 #[derive(Args)]
@@ -640,6 +642,7 @@ async fn cmd_workflow(
         WorkflowSub::List => cmd_workflow_list(client, base, json).await,
         WorkflowSub::Show(s) => cmd_workflow_show(client, base, s, json).await,
         WorkflowSub::Run(r) => cmd_workflow_run(client, base, r).await,
+        WorkflowSub::Cancel(c) => cmd_workflow_cancel(client, base, c).await,
     }
 }
 
@@ -723,6 +726,32 @@ async fn cmd_workflow_show(
         );
     }
     Ok(())
+}
+
+async fn cmd_workflow_cancel(
+    client: &reqwest::Client,
+    base: &str,
+    a: WorkflowCancelArgs,
+) -> Result<()> {
+    let resp = client
+        .post(format!("{base}/v1/workflow-runs/{}/cancel", a.id))
+        .send()
+        .await
+        .context("cancel workflow run request failed")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("workflow run {} not found", a.id);
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("cancel workflow run failed ({})", resp.status());
+    }
+    println!("workflow run {} cancelled", a.id);
+    Ok(())
+}
+
+#[derive(Args)]
+struct WorkflowCancelArgs {
+    /// Workflow run id to cancel.
+    id: String,
 }
 
 async fn cmd_workflow_run(client: &reqwest::Client, base: &str, a: WorkflowRunArgs) -> Result<()> {

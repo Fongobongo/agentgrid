@@ -296,6 +296,10 @@ pub struct PollRequest {
     pub adapters: Vec<String>,
     pub repositories: Vec<String>,
     pub max_concurrency: u32,
+    /// Node→control-plane protocol version (Stage 2.5). Absent on legacy
+    /// nodes; a major mismatch marks the node `degraded`.
+    #[serde(default)]
+    pub protocol_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -354,7 +358,20 @@ pub struct LoginResponse {
     pub token: String,
 }
 
-/// Exchange an enrollment token for a permanent node credential.
+/// Node→control-plane protocol version (Stage 2.5). Bump the major on any
+/// incompatible change to enroll/heartbeat/poll; a node advertising a
+/// different major is marked `degraded(incompatible_protocol)`.
+pub const NODE_PROTOCOL_VERSION: &str = "1";
+
+/// True when a node-advertised `protocol_version` is incompatible with the
+/// current major. `None` (legacy node) is treated as compatible.
+pub fn is_incompatible_protocol(pv: &Option<String>) -> bool {
+    match pv {
+        None => false,
+        Some(v) => v.split('.').next().unwrap_or("") != NODE_PROTOCOL_VERSION,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnrollRequest {
     pub token: String,
@@ -367,6 +384,10 @@ pub struct EnrollRequest {
     pub max_concurrency: u32,
     #[serde(default)]
     pub agent_version: String,
+    /// Node→control-plane protocol version (Stage 2.5). Absent on legacy
+    /// nodes; a major mismatch marks the node `degraded`.
+    #[serde(default)]
+    pub protocol_version: Option<String>,
 }
 
 /// Node identity + secret credential returned once at enroll (never stored plaintext).
@@ -397,6 +418,10 @@ pub struct HeartbeatRequest {
     pub free_disk_mb: u64,
     #[serde(default)]
     pub active_attempts: u32,
+    /// Node→control-plane protocol version (Stage 2.5). Absent on legacy
+    /// nodes; a major mismatch marks the node `degraded`.
+    #[serde(default)]
+    pub protocol_version: Option<String>,
     /// Per-adapter capability the node advertises each heartbeat (Stage 3.2):
     /// which adapters it can run, their versions, and whether each is ready.
     #[serde(default)]
@@ -610,6 +635,7 @@ mod tests {
             repositories: vec!["*".into()],
             max_concurrency: 2,
             agent_version: "0.1".into(),
+            protocol_version: None,
         };
         assert_eq!(round_trip(&er), er);
         let hb = HeartbeatRequest {
@@ -623,6 +649,7 @@ mod tests {
             free_disk_mb: 1024,
             active_attempts: 1,
             capabilities: vec![],
+            protocol_version: None,
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

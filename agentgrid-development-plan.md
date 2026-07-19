@@ -119,7 +119,7 @@
 - [x] Rate limit на `/v1/auth/login`; lockout/backoff и audit не должны позволять user enumeration
 - [ ] Web auth: уйти от JWT в `localStorage` к HttpOnly + Secure + SameSite cookie (либо memory token для non-browser clients); добавить CSRF-защиту для cookie flow
 - [ ] Transport security для разных ПК: TLS обязателен вне loopback; documented reverse-proxy mode на 0.1.1, roadmap native TLS/mTLS; enrollment tokens одноразовые и с TTL
-- [ ] Protocol versioning: `protocol_version` в enroll/heartbeat/poll; N/N-1 совместимость; несовместимая node → `degraded(incompatible_protocol)`
+- [x] Protocol versioning: `protocol_version` в enroll/heartbeat/poll; N/N-1 совместимость; несовместимая node → `degraded(incompatible_protocol)`
 - [ ] Метрики: event spool size, SQLITE_BUSY count, checkpoint duration
 - [ ] Обновить threat model и CHANGELOG; выпустить тег `v0.1.1`
 
@@ -219,7 +219,7 @@
 
 - [x] Таблицы: `workflow_templates`, `workflow_runs`, `workflow_steps`, `role_runs`, `agent_messages`, `handoff_packages` (FK, индексы)
 - [x] Legacy attempts: `workflow_step_id = NULL` — обычные задачи работают как раньше
-- [ ] YAML парсер `WorkflowTemplate`: roles, steps, depends_on, placement, budgets, validation
+- [x] YAML парсер `WorkflowTemplate`: roles, steps, depends_on, placement, budgets, validation
 - [x] DAG validation: циклы, недостижимые steps, неизвестные роли → ошибка до запуска
 - [x] State machines: step (`pending → ready → running → succeeded/failed/blocked/skipped`), run (`created → running → paused → completed/failed/cancelled`)
 
@@ -237,7 +237,7 @@
 - [ ] Integrator step: слияние результатов в integration branch
 - [ ] Independent verifier: чистый workspace, без доступа к private transcripts workers; verdict с reproducible evidence
 - [ ] Repair rounds: ограниченное число; после лимита — эскалация человеку
-- [ ] Pause/resume/cancel всего run и отдельных steps
+- [x] Pause/resume/cancel всего run и отдельных steps
 - [ ] UI/CLI: workflow graph, step timeline, сообщения, verdicts
 - [x] Golden workflow test: architect → 2 параллельных worker → integrator → validation → verifier на mock adapters (детерминированно)
 

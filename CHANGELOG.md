@@ -63,6 +63,11 @@ complete; the two-container E2E run is the release validation gate.
 - control-plane (2.5): artifact metadata older than the 168h retention window is reaped by the maintenance loop (`cleanup_artifacts(168)`); files on disk are left for an operator cleanup job. Covered by `cleanup_old_artifacts` (store).
 - control-plane (2.5): scheduler observability. `try_assign` records the queued→assigned latency (ms) and a cumulative assignment counter, exposed as `agentgrid_scheduler_latency_ms` / `agentgrid_scheduler_assignments_total` in `/metrics`. Covered by `scheduler_records_latency_metric` (store).
 - control-plane (1.2, shipped): node `offline`/`revoked` atomically loses its in-flight attempts (→ `lost`) and frees `active_attempts` capacity; a late completion on a lost attempt is an idempotent no-op (`complete_on_lost_attempt_is_idempotent`). A task whose attempt is lost is failed with `error_code="node_lost"`. Marks plan items 36/37/38/40 done.
+- control-plane (2.5): node protocol versioning. `EnrollRequest`/`HeartbeatRequest`/`PollRequest` carry an optional `protocol_version`; a major mismatch marks the node `degraded` (incompatible_protocol) instead of scheduling it. The node daemon advertises `NODE_PROTOCOL_VERSION` on every enroll/heartbeat/poll. Covered by `node_protocol_mismatch_marks_degraded` (api).
+
+### Added (Stage 8 — workflow operations)
+- control-plane (8): `POST /v1/workflow-runs/{id}/cancel` cancels the whole run and every non-terminal step, and cancels any spawned task (`cancel_workflow_run`). CLI `ag workflow cancel <id>` added. Covered by `cancel_workflow_run_cancels_steps_and_tasks` (store) and `cancel_workflow_run_handler_cancels` (api). Pause/resume remain a follow-up.
+- control-plane (8): `POST /v1/workflows` accepts YAML bodies (content-type `application/yaml`) via `WorkflowTemplate::from_yaml`; the JSON contract is unchanged. Covered by `yaml_round_trips_to_template` (common) and `create_workflow_accepts_yaml` (api).
 
 ### Added (Stage 3.1 — versioned event envelope)
 - common: `AgentEventEnvelope { version, kind, payload, raw_ref }` layered over the stored `TaskEvent`, plus an `EventKind` vocabulary (`plan`/`tool_call`/`tool_result`/`file_change`/`permission_request`/`usage`/`handoff`/...). Unknown kinds are preserved as `EventKind::Other` and never fatal; serde round-trip tested.

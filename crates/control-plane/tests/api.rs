@@ -5,10 +5,12 @@
 
 use agentgrid_common::{
     ApprovalStatus, ApprovalView, Assignment, CancelState, CompleteAttemptRequest,
-    CreateRepositoryRequest, CreateTaskRequest, EnrollRequest, EnrollResponse, EnrollTokenResponse,
-    EventType, HeartbeatRequest, IncomingEvent, IngestEventsRequest, LoginResponse, NodeStatus,
-    PollRequest, PollResponse, RepositoryView, TaskEligibility, TaskStatus, TaskView,
-    UploadArtifactRequest,
+    CreateRepositoryRequest, CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest,
+    EnrollRequest, EnrollResponse, EnrollTokenResponse, EventType, HeartbeatRequest, IncomingEvent,
+    IngestEventsRequest, LoginResponse, NodeStatus, NodeView, PollRequest, PollResponse,
+    RepositoryView, TaskEligibility, TaskStatus, TaskView, UploadArtifactRequest, WorkflowRole,
+    WorkflowRun, WorkflowRunStatus, WorkflowRunWithSteps, WorkflowStep, WorkflowStepStatus,
+    WorkflowTemplate,
 };
 use agentgrid_control_plane::{build_router, AppState};
 use axum::body::{to_bytes, Body};
@@ -119,7 +121,7 @@ async fn enroll(
         repositories: repos,
         max_concurrency: 2,
         agent_version: "test".into(),
-    };
+   protocol_version: None, };
     let resp = app
         .clone()
         .oneshot(post(
@@ -142,7 +144,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-    };
+   protocol_version: None, };
     let req = CreateTaskRequest {
         prompt: prompt.into(),
         repository: "demo".into(),
@@ -348,7 +350,7 @@ async fn validation_failure_must_not_report_success() {
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-    };
+   protocol_version: None, };
     let mut assignment = None;
     for _ in 0..50 {
         let resp = app
@@ -550,7 +552,7 @@ async fn revoked_node_gets_401() {
         free_disk_mb: 1000,
         active_attempts: 0,
         capabilities: vec![],
-    };
+   protocol_version: None, };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -588,7 +590,7 @@ async fn revoked_node_gets_401() {
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-    };
+   protocol_version: None, };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -983,7 +985,7 @@ async fn scheduler_skips_incompatible_head_of_line() {
                     adapters: vec!["mock".into()],
                     repositories: vec!["*".into()],
                     max_concurrency: 2,
-                })
+               protocol_version: None, })
                 .unwrap(),
                 &mock_cred,
             ))
@@ -1023,7 +1025,7 @@ async fn scheduler_respects_requested_node() {
                 adapters: vec!["mock".into()],
                 repositories: vec!["*".into()],
                 max_concurrency: 2,
-            })
+           protocol_version: None, })
             .unwrap(),
             &cred_b,
         ))
@@ -1049,7 +1051,7 @@ async fn scheduler_respects_requested_node() {
                     adapters: vec!["mock".into()],
                     repositories: vec!["*".into()],
                     max_concurrency: 2,
-                })
+               protocol_version: None, })
                 .unwrap(),
                 &cred_a,
             ))
@@ -1209,7 +1211,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         free_disk_mb: 1000,
         active_attempts: 1,
         capabilities: vec![],
-    };
+   protocol_version: None, };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -1290,7 +1292,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
                     adapters: vec!["mock".into()],
                     repositories: vec!["*".into()],
                     max_concurrency: 2,
-                })
+               protocol_version: None, })
                 .unwrap(),
                 &cred,
             ))
@@ -1658,7 +1660,7 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-    };
+   protocol_version: None, };
 
     for _ in 0..200 {
         // Scheduler tick: activates ready steps + advances completed ones.
@@ -1775,7 +1777,7 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-    };
+   protocol_version: None, };
 
     app.clone()
         .oneshot(post(&format!("/v1/workflow-runs/{rid}/tick"), "{}".into()))
@@ -2083,4 +2085,127 @@ async fn backup_endpoint_writes_file() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(path.exists(), "backup file must be created");
     let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn create_workflow_accepts_yaml() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let yaml = "name: demo\nsteps:\n  - id: plan\n    prompt: plan\n    role: architect\n  - id: work\n    prompt: do\n    depends_on: [plan]\n    role: worker\n";
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/workflows")
+        .header("content-type", "application/yaml")
+        .body(Body::from(yaml))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let t: WorkflowTemplate = serde_json::from_slice(&body).unwrap();
+    assert_eq!(t.name, "demo");
+    assert_eq!(t.steps.len(), 2);
+}
+
+#[tokio::test]
+async fn cancel_workflow_run_handler_cancels() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let tmpl = CreateWorkflowRequest {
+        name: "t".into(),
+        steps: vec![WorkflowStep {
+            id: "a".into(),
+            prompt: "do".into(),
+            depends_on: vec![],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: None,
+            max_attempts: None,
+        }],
+        context: None,
+    };
+    let r = app
+        .clone()
+        .oneshot(post("/v1/workflows", serde_json::to_string(&tmpl).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let t: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let run_req = CreateWorkflowRunRequest {
+        context: None,
+        repository: None,
+        base_commit: None,
+    };
+    let rr = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/workflows/{}/runs", t.id),
+            serde_json::to_string(&run_req).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rr.status(), StatusCode::CREATED);
+    let run: WorkflowRun =
+        serde_json::from_slice(&to_bytes(rr.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let c = app
+        .clone()
+        .oneshot(post(
+            &format!("/v1/workflow-runs/{}/cancel", run.id),
+            "{}".into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(c.status(), StatusCode::OK);
+    let show = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/workflow-runs/{}", run.id), ""))
+        .await
+        .unwrap();
+    assert_eq!(show.status(), StatusCode::OK);
+    let shown: WorkflowRunWithSteps =
+        serde_json::from_slice(&to_bytes(show.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(shown.run.status, WorkflowRunStatus::Cancelled);
+    assert!(shown
+        .steps
+        .iter()
+        .all(|s| s.status == WorkflowStepStatus::Cancelled));
+}
+
+#[tokio::test]
+async fn node_protocol_mismatch_marks_degraded() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let tk = app
+        .clone()
+        .oneshot(post("/v1/nodes/enrollment-token", "{}".into()))
+        .await
+        .unwrap();
+    assert_eq!(tk.status(), StatusCode::OK);
+    let tkr: EnrollTokenResponse =
+        serde_json::from_slice(&to_bytes(tk.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let req = EnrollRequest {
+        token: tkr.token,
+        name: "n1".into(),
+        adapters: vec![],
+        repositories: vec![],
+        max_concurrency: 2,
+        agent_version: "t".into(),
+        protocol_version: Some("0".into()),
+    };
+    let er = app
+        .clone()
+        .oneshot(post("/v1/node/enroll", serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(er.status(), StatusCode::OK);
+    let er: EnrollResponse =
+        serde_json::from_slice(&to_bytes(er.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let nodes = app.clone().oneshot(get_auth("/v1/nodes", "")).await.unwrap();
+    assert_eq!(nodes.status(), StatusCode::OK);
+    let nodes: Vec<NodeView> =
+        serde_json::from_slice(&to_bytes(nodes.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let node = nodes.iter().find(|n| n.id == er.node_id).expect("node present");
+    assert_eq!(node.status, NodeStatus::Degraded);
 }

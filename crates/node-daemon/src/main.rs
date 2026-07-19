@@ -1078,6 +1078,7 @@ async fn load_or_enroll(cfg: &Config) -> Result<SavedCredential> {
         repositories: cfg.repositories.clone(),
         max_concurrency: cfg.max_concurrency,
         agent_version: cfg.agent_version.clone(),
+        protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
     };
     let resp = client
         .post(format!("{}/v1/node/enroll", cfg.server))
@@ -1176,6 +1177,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                 free_disk_mb: read_free_disk_mb(&hb_cfg.workspace_root),
                 active_attempts: active,
                 capabilities,
+                protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
             };
             if let Err(e) = hb_client
                 .post(format!("{}/v1/node/heartbeat", hb_cfg.server))
@@ -1195,6 +1197,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
             adapters: cfg.adapters.iter().map(|s| s.id.clone()).collect(),
             repositories: cfg.repositories.clone(),
             max_concurrency: cfg.max_concurrency,
+            protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
         };
         let resp = client
             .post(format!("{}/v1/node/poll", cfg.server))

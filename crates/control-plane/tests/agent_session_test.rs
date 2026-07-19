@@ -52,7 +52,7 @@ async fn enroll(
         repositories: repos,
         max_concurrency: 2,
         agent_version: "test".into(),
-    };
+   protocol_version: None, };
     let resp = app
         .clone()
         .oneshot(post(
@@ -74,7 +74,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-    };
+   protocol_version: None, };
     let req = CreateTaskRequest {
         prompt: prompt.into(),
         repository: "demo".into(),

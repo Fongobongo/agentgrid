@@ -96,10 +96,49 @@ pub struct WorkflowStep {
 /// A reusable workflow definition (the DAG).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowTemplate {
+    #[serde(default)]
     pub id: String,
     pub name: String,
     pub steps: Vec<WorkflowStep>,
+    #[serde(default)]
     pub created_at: String,
+}
+
+impl WorkflowTemplate {
+    /// Parse a template from YAML (Stage 8 convenience; the control plane also
+    /// accepts YAML bodies on `POST /v1/workflows`).
+    pub fn from_yaml(s: &str) -> Result<Self, serde_yaml::Error> {
+        serde_yaml::from_str(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yaml_round_trips_to_template() {
+        let yaml = r#"
+name: demo
+steps:
+  - id: plan
+    prompt: plan it
+    role: architect
+  - id: work
+    prompt: do it
+    depends_on: [plan]
+    role: worker
+"#;
+        let t = WorkflowTemplate::from_yaml(yaml).expect("yaml parses");
+        assert_eq!(t.name, "demo");
+        assert_eq!(t.steps.len(), 2);
+        assert_eq!(t.steps[0].id, "plan");
+        assert_eq!(t.steps[1].depends_on, vec!["plan".to_string()]);
+        // Re-serialize to JSON to prove serde compatibility with the API shape.
+        let json = serde_json::to_string(&t).unwrap();
+        let back: WorkflowTemplate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, t.name);
+    }
 }
 
 /// One execution of a template.

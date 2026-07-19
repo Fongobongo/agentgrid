@@ -19,9 +19,9 @@ use agentgrid_common::{
     WorkflowRun, WorkflowRunWithSteps, WorkflowTemplate,
 };
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
-    http::{header, Request, StatusCode, Uri},
+    http::{header, HeaderMap, Request, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -255,6 +255,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(workflow_run_projection),
         )
         .route("/v1/workflow-runs/{id}/tick", post(tick_workflow_run))
+        .route("/v1/workflow-runs/{id}/cancel", post(cancel_workflow_run_handler))
         .layer(DefaultBodyLimit::max(state.limits.artifact))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -489,6 +490,19 @@ async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
     }
 }
 
+async fn cancel_workflow_run_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    match state.store.cancel_workflow_run(&id).await {
+        Ok(true) => StatusCode::OK,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("cancel_workflow_run failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
 /// Stage 2.5: compact-copy the database to `path` via `VACUUM INTO`.
 /// User-authenticated (the global user-auth middleware covers it).
 async fn admin_backup(
@@ -760,8 +774,31 @@ async fn task_eligibility_handler(
 
 async fn create_workflow(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateWorkflowRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<(StatusCode, Json<WorkflowTemplate>), StatusCode> {
+    let is_yaml = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("yaml") || v.contains("yml"))
+        .unwrap_or(false);
+    let req: CreateWorkflowRequest = if is_yaml {
+        let text = String::from_utf8_lossy(&body);
+        let t = WorkflowTemplate::from_yaml(&text).map_err(|e| {
+            tracing::error!("workflow yaml parse failed: {e}");
+            StatusCode::BAD_REQUEST
+        })?;
+        CreateWorkflowRequest {
+            name: t.name,
+            steps: t.steps,
+            context: None,
+        }
+    } else {
+        serde_json::from_slice(&body).map_err(|e| {
+            tracing::error!("workflow json parse failed: {e}");
+            StatusCode::BAD_REQUEST
+        })?
+    };
     state
         .store
         .create_workflow_template(&req.name, &req.steps)
@@ -911,7 +948,12 @@ async fn enroll(
     Json(req): Json<EnrollRequest>,
 ) -> (StatusCode, Json<Option<EnrollResponse>>) {
     match state.store.enroll_node(&req).await {
-        Ok(Some(r)) => (StatusCode::OK, Json(Some(r))),
+        Ok(Some(r)) => {
+            if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
+                let _ = state.store.set_node_degraded(&r.node_id).await;
+            }
+            (StatusCode::OK, Json(Some(r)))
+        }
         Ok(None) => (StatusCode::BAD_REQUEST, Json(None)),
         Err(e) => {
             tracing::error!("enroll failed: {e}");
@@ -925,6 +967,9 @@ async fn heartbeat(
     Extension(auth): Extension<AuthedNode>,
     Json(req): Json<HeartbeatRequest>,
 ) -> StatusCode {
+    if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
+        let _ = state.store.set_node_degraded(&auth.node_id).await;
+    }
     match state.store.heartbeat(&auth.node_id, &req).await {
         Ok(true) => StatusCode::OK,
         Ok(false) => StatusCode::NOT_FOUND,
@@ -1097,6 +1142,9 @@ async fn poll(
 ) -> (StatusCode, Json<PollResponse>) {
     // The authenticated node id is the source of truth; ignore any client-supplied id.
     req.node_id = auth.node_id;
+    if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
+        let _ = state.store.set_node_degraded(&req.node_id).await;
+    }
     if let Err(e) = state.store.register_or_touch_node(&req).await {
         tracing::error!("register node failed: {e}");
         return (

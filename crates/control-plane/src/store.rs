@@ -1227,6 +1227,81 @@ impl Store {
         })
     }
 
+    /// Cancel a whole workflow run: the run and every non-terminal step move to
+    /// `cancelled`, and any spawned task is cancelled (Stage 8 operation).
+    /// Terminal runs (completed/failed/cancelled/blocked) are left untouched.
+    pub async fn cancel_workflow_run(&self, run_id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let run = sqlx::query("SELECT status FROM workflow_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(run) = run else {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        };
+        let status: String = run.try_get("status")?;
+        if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "blocked") {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        }
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled' WHERE id = ?")
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+        let steps = sqlx::query("SELECT id, status FROM workflow_steps WHERE run_id = ?")
+            .bind(run_id)
+            .fetch_all(&mut *tx)
+            .await?;
+        for s in &steps {
+            let step_id: String = s.try_get("id")?;
+            let step_status: String = s.try_get("status")?;
+            if matches!(
+                step_status.as_str(),
+                "succeeded" | "failed" | "cancelled" | "blocked" | "skipped"
+            ) {
+                continue;
+            }
+            sqlx::query("UPDATE workflow_steps SET status = 'cancelled' WHERE id = ?")
+                .bind(&step_id)
+                .execute(&mut *tx)
+                .await?;
+            let runs = sqlx::query("SELECT task_id FROM role_runs WHERE step_run_id = ?")
+                .bind(&step_id)
+                .fetch_all(&mut *tx)
+                .await?;
+            for r in &runs {
+                if let Ok(Some(task_id)) = r.try_get::<Option<String>, _>("task_id") {
+                    sqlx::query(
+                        "UPDATE tasks SET status = 'cancelled', assigned_attempt_id = NULL \
+                         WHERE id = ? AND status = 'queued'",
+                    )
+                    .bind(&task_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(
+                        "UPDATE attempts SET cancel_requested = 1 WHERE task_id = ? \
+                         AND status IN ('assigned','running','validating')",
+                    )
+                    .bind(&task_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Mark a node `degraded` (e.g. protocol incompatibility), unless revoked.
+    pub async fn set_node_degraded(&self, node_id: &str) -> Result<()> {
+        sqlx::query("UPDATE nodes SET status = 'degraded' WHERE id = ? AND status != 'revoked'")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn retry_task(&self, task_id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
@@ -2470,7 +2545,7 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-        };
+       protocol_version: None, };
         s.register_or_touch_node(&poll).await.unwrap();
 
         // Tick -> first task.
@@ -2524,7 +2599,7 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-        };
+       protocol_version: None, };
         s.register_or_touch_node(&poll).await.unwrap();
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
@@ -2569,7 +2644,7 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-        };
+       protocol_version: None, };
         s.register_or_touch_node(&poll).await.unwrap();
         let _ = s.tick_workflow_run(&run.id).await.unwrap();
         let a1 = s.try_assign("n1").await.unwrap().unwrap();
@@ -2619,7 +2694,7 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-        };
+       protocol_version: None, };
         s.register_or_touch_node(&poll).await.unwrap();
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
@@ -2659,7 +2734,7 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-        };
+       protocol_version: None, };
         s.register_or_touch_node(&poll).await.unwrap();
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
@@ -2761,7 +2836,7 @@ mod workflow_tests {
             repositories: vec!["*".into()],
             max_concurrency: 2,
             agent_version: "test".into(),
-        };
+       protocol_version: None, };
         let resp = s.enroll_node(&node).await.unwrap().expect("node enroll");
         let node_id = resp.node_id;
         let task = CreateTaskRequest {
@@ -2786,5 +2861,72 @@ mod workflow_tests {
             after, before + 1,
             "an assignment must increment the scheduler metric"
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_workflow_run_cancels_steps_and_tasks() {
+        let s = temp_store().await;
+        let steps = vec![WorkflowStep {
+            id: "a".into(),
+            prompt: "do".into(),
+            depends_on: vec![],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: None,
+            max_attempts: None,
+        }];
+        let t = s.create_workflow_template("t", &steps).await.unwrap();
+        let run = s.create_workflow_run(&t.id, None, None, None).await.unwrap();
+        // Link the step to a queued task, then cancel the whole run.
+        let task_id = "task-x";
+        sqlx::query(
+            "INSERT INTO tasks (id, repository, prompt, adapter, status, created_at, timeout_secs) \
+             VALUES (?, '', 'p', 'mock', 'queued', ?, 60)",
+        )
+        .bind(task_id)
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let step_run_id: String =
+            sqlx::query_scalar("SELECT id FROM workflow_steps WHERE run_id = ?")
+                .bind(&run.id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO role_runs (id, step_run_id, task_id, role, created_at) VALUES (?, ?, ?, 'Worker', ?)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&step_run_id)
+            .bind(task_id)
+            .bind(now_iso())
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert!(s.cancel_workflow_run(&run.id).await.unwrap());
+        let run_status: String =
+            sqlx::query_scalar("SELECT status FROM workflow_runs WHERE id = ?")
+                .bind(&run.id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(run_status, "cancelled");
+        let step_status: String =
+            sqlx::query_scalar("SELECT status FROM workflow_steps WHERE id = ?")
+                .bind(&step_run_id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(step_status, "cancelled");
+        let task_status: String =
+            sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(task_status, "cancelled");
+        // Already terminal: cancelling again is a no-op.
+        assert!(!s.cancel_workflow_run(&run.id).await.unwrap());
     }
 }
