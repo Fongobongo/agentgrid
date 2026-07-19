@@ -323,6 +323,46 @@
 
 **Exit 10:** Zeroshot доступен как optional adapter; cancel убивает весь cluster.
 
+## Этап 11 — multi-agent runtime: native ACP + hardening (вдохновлено обзором конкурентских orchestrators)
+
+Контекст: ни один внешний проект не «код для копирования» (чужой стек TS/Python, мы Rust+ACP). Обзор дал идеи поверх базовых (1) feedback-loop CI→agent, (2) resume session, (3) run viewer с DAG.
+
+### 11.0 Native ACP launcher (универсальная обёртка над любым ACP-agent CLI) — done
+
+- [x] Node: `AGENTGRID_ACP_LAUNCH_<ID>` env-mapping → нода запускает native ACP-агента напрямую (e.g. `claude --acp`, `codex --acp`, `gemini --acp`, `opencode acp`) минуя per-CLI wrapper-бинарь. Один env-var = новый агент, без нового крейта-парсера. Per-CLI парсеры (`adapter-claude`/`adapter-opencode`) остаются legacy fallback для агентов без ACP.
+- [x] Node capability probe: если native launcher указан → adapter `found` (без пробы version).
+- [x] `drive_acp_session`: native launcher первый, fallback на `adapter-<id>` wrapper.
+
+### 11.1 Durable startup-reconcile (из hatchet) — [ ]
+
+- [ ] При старте cp: поднять in-flight попытки из SQLite (status=running но cp умер) → либо cancel (infrastructure_failed), либо re-dispatch если идемпотентно. Сейчас при краше cp in-flight `attempt`/`step_run` зависают.
+- [ ] Node: при старте — reconcile локальных attempt процессов (если node daemon рестартил, а subprocess агента жив).
+
+### 11.2 `Sandbox` trait (из sandcastle) — [ ]
+
+- [ ] Абстракция изоляции агента на shared ноде поверх worktree: Docker/Podman/microVM (Vercel). Сейчас только worktree (одна FS, общее окружение). Нужен для security/multi-tenant.
+- [ ] Реализация `DockerSandbox` (по умолчанию), trait позволяет свой.
+
+### 11.3 `agent-profile` SSOT (из oh-my-agent) — [ ]
+
+- [ ] Централизованный профиль агента: system prompt, permissions (tool allowlist), model, env-requirements. cp разворачивает profile в worktree перед запуском (проекция в нативный layout агента: `.claude/`, `.kiro/` и т.п.).
+- [ ] Per-conversation/per-task profile override.
+
+### 11.4 Feedback-loop CI→agent (из AgentWrapper) — [ ]
+
+- [ ] `validation_command` уже есть. Дополнить: при провале валидации → автоматически переотправить задачу агенту с контекстом ошибки (а не просто failed). Цикл «провал → fix → retry».
+- [ ] Опционально: роутинг review-comments/merge-conflicts обратно в правильную сессию (нужен GitHub integration, follow-up).
+
+### 11.5 Resume session (2) — [ ]
+
+- [ ] ACP `session/resume` (если агент поддерживает) — возобновить прерванную сессию с тем же контекстом, не пересоздавать. Сейчас cancel = терминальный.
+- [ ] Conversation ↔ session связывание: cp хранит ACP `session_id` в `conversation_messages` для resume.
+
+### 11.6 Run viewer с DAG (3) (из open-multi-agent) — [ ]
+
+- [ ] Observability UI: DAG задач/шагов + span waterfall (per-task status, assignee, tokens, tool calls). У нас уже есть workflow projection + metrics — визуализировать.
+- [ ] Web UI расширение (в `web/`).
+
 ---
 
 ## Этап 11 — 0.4 CTX context provider (1 неделя)

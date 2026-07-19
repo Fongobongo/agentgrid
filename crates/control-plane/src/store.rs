@@ -1473,6 +1473,37 @@ impl Store {
         });
     }
 
+    /// Startup reconcile (durable execution): on cp boot, immediately revert
+    /// expired leases and mark silent nodes offline so the scheduler starts
+    /// from a consistent state instead of waiting for the first background
+    /// tick. Also audits the reconcile and logs in-flight attempt counts.
+    /// In-flight `running` attempts on live nodes are left alone — the node
+    /// may still complete them and report back; node-death is caught by the
+    /// normal `node_lost` path. (Idea: hatchet-style durable startup-reconcile.)
+    pub async fn reconcile_on_startup(&self) -> Result<()> {
+        let inflight: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attempts WHERE status IN ('assigned','running')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        tracing::info!(
+            in_flight = inflight,
+            "startup reconcile: in-flight attempts"
+        );
+        self.tick_maintenance().await?;
+        let _ = self
+            .audit(
+                "system",
+                None,
+                "startup_reconcile",
+                None,
+                Some(&format!("in_flight={inflight}")),
+            )
+            .await;
+        tracing::info!("startup reconcile complete");
+        Ok(())
+    }
+
     /// Truncate the WAL into the main database (Stage 2.5 ops).
     pub async fn wal_checkpoint(&self) -> Result<()> {
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -3039,5 +3070,14 @@ mod workflow_tests {
         assert_eq!(task_status, "cancelled");
         // Already terminal: cancelling again is a no-op.
         assert!(!s.cancel_workflow_run(&run.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reconcile_on_startup_runs_maintenance_and_audits() {
+        let s = temp_store().await;
+        // No in-flight attempts: reconcile is a clean no-op that still audits.
+        s.reconcile_on_startup().await.unwrap();
+        let audits = s.list_audit(None, 100).await.unwrap();
+        assert!(audits.iter().any(|a| a.action == "startup_reconcile"));
     }
 }

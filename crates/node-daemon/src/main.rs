@@ -221,6 +221,27 @@ fn resolve_adapter_bin(adapter_id: &str) -> Option<String> {
     resolve_in_path(&bin).map(|_| bin)
 }
 
+/// Native ACP launcher: if `AGENTGRID_ACP_LAUNCH_<ID>` is set, the node runs
+/// that command directly (e.g. `claude --acp`, `codex --acp`) over stdio
+/// instead of spawning a `adapter-<id>` wrapper binary. This lets a new
+/// native-ACP agent be added with one env var, no per-agent crate/parser.
+/// Returns `(program, args)`. The value is split on whitespace; operator config
+/// (not task input), so quoting is the operator's responsibility.
+// ponytail: naive whitespace split; use shlex if args need spaces.
+fn resolve_acp_launch(adapter_id: &str) -> Option<(String, Vec<String>)> {
+    let key = format!(
+        "AGENTGRID_ACP_LAUNCH_{}",
+        adapter_id
+            .to_ascii_uppercase()
+            .replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+    let val = std::env::var(&key).ok()?;
+    let mut parts = val.split_whitespace();
+    let program = parts.next()?.to_string();
+    let args = parts.map(|s| s.to_string()).collect();
+    Some((program, args))
+}
+
 async fn probe_adapter(bin: &str) -> AdapterProbe {
     if resolve_in_path(bin).is_none() {
         return AdapterProbe {
@@ -402,17 +423,28 @@ async fn drive_acp_session(
     ws_path: &std::path::Path,
     sink: Arc<EventSink>,
 ) -> Result<AcpResult> {
-    let bin = match resolve_adapter_bin(&assignment.adapter) {
-        Some(b) => b,
+    // Native ACP launcher (direct CLI, e.g. `claude --acp`) takes priority
+    // over the `adapter-<id>` wrapper binary.
+    let mut cmd = match resolve_acp_launch(&assignment.adapter) {
+        Some((program, args)) => {
+            let mut c = tokio::process::Command::new(&program);
+            c.args(&args);
+            c
+        }
         None => {
-            tracing::error!(adapter = %assignment.adapter, "ACP adapter binary not found");
-            return Ok(AcpResult {
-                success: false,
-                error_code: Some("infrastructure_failed".into()),
-            });
+            let bin = match resolve_adapter_bin(&assignment.adapter) {
+                Some(b) => b,
+                None => {
+                    tracing::error!(adapter = %assignment.adapter, "ACP adapter binary not found");
+                    return Ok(AcpResult {
+                        success: false,
+                        error_code: Some("infrastructure_failed".into()),
+                    });
+                }
+            };
+            tokio::process::Command::new(&bin)
         }
     };
-    let mut cmd = tokio::process::Command::new(&bin);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
@@ -1163,8 +1195,15 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
             let all_ok = {
                 let mut ok = true;
                 for a in &hb_cfg.adapters {
-                    let bin = adapter_bin_name(&a.id);
-                    let probe = probe_adapter(&bin).await;
+                    let probe = if resolve_acp_launch(&a.id).is_some() {
+                        AdapterProbe {
+                            found: true,
+                            version: None,
+                        }
+                    } else {
+                        let bin = adapter_bin_name(&a.id);
+                        probe_adapter(&bin).await
+                    };
                     if !probe.found {
                         ok = false;
                     }

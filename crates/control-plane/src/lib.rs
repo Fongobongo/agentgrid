@@ -1602,6 +1602,9 @@ async fn create_agent_session_handler(
 /// If `AGENTGRID_TLS_CERT` and `AGENTGRID_TLS_KEY` are both set, the listener is
 /// wrapped in a rustls TLS acceptor (no system OpenSSL); otherwise plaintext.
 pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    if let Err(e) = state.store.reconcile_on_startup().await {
+        tracing::warn!("startup reconcile failed: {e}");
+    }
     state.store.start_maintenance();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let app = build_router(state.clone());
