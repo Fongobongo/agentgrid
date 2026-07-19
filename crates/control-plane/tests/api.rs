@@ -121,7 +121,8 @@ async fn enroll(
         repositories: repos,
         max_concurrency: 2,
         agent_version: "test".into(),
-   protocol_version: None, };
+        protocol_version: None,
+    };
     let resp = app
         .clone()
         .oneshot(post(
@@ -144,7 +145,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-   protocol_version: None, };
+        protocol_version: None,
+    };
     let req = CreateTaskRequest {
         prompt: prompt.into(),
         repository: "demo".into(),
@@ -350,7 +352,8 @@ async fn validation_failure_must_not_report_success() {
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-   protocol_version: None, };
+        protocol_version: None,
+    };
     let mut assignment = None;
     for _ in 0..50 {
         let resp = app
@@ -552,7 +555,8 @@ async fn revoked_node_gets_401() {
         free_disk_mb: 1000,
         active_attempts: 0,
         capabilities: vec![],
-   protocol_version: None, };
+        protocol_version: None,
+    };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -590,7 +594,8 @@ async fn revoked_node_gets_401() {
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-   protocol_version: None, };
+        protocol_version: None,
+    };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -985,7 +990,8 @@ async fn scheduler_skips_incompatible_head_of_line() {
                     adapters: vec!["mock".into()],
                     repositories: vec!["*".into()],
                     max_concurrency: 2,
-               protocol_version: None, })
+                    protocol_version: None,
+                })
                 .unwrap(),
                 &mock_cred,
             ))
@@ -1025,7 +1031,8 @@ async fn scheduler_respects_requested_node() {
                 adapters: vec!["mock".into()],
                 repositories: vec!["*".into()],
                 max_concurrency: 2,
-           protocol_version: None, })
+                protocol_version: None,
+            })
             .unwrap(),
             &cred_b,
         ))
@@ -1051,7 +1058,8 @@ async fn scheduler_respects_requested_node() {
                     adapters: vec!["mock".into()],
                     repositories: vec!["*".into()],
                     max_concurrency: 2,
-               protocol_version: None, })
+                    protocol_version: None,
+                })
                 .unwrap(),
                 &cred_a,
             ))
@@ -1211,7 +1219,8 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         free_disk_mb: 1000,
         active_attempts: 1,
         capabilities: vec![],
-   protocol_version: None, };
+        protocol_version: None,
+    };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -1292,7 +1301,8 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
                     adapters: vec!["mock".into()],
                     repositories: vec!["*".into()],
                     max_concurrency: 2,
-               protocol_version: None, })
+                    protocol_version: None,
+                })
                 .unwrap(),
                 &cred,
             ))
@@ -1660,7 +1670,8 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-   protocol_version: None, };
+        protocol_version: None,
+    };
 
     for _ in 0..200 {
         // Scheduler tick: activates ready steps + advances completed ones.
@@ -1777,7 +1788,8 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
         adapters: vec!["mock".into()],
         repositories: vec!["*".into()],
         max_concurrency: 2,
-   protocol_version: None, };
+        protocol_version: None,
+    };
 
     app.clone()
         .oneshot(post(&format!("/v1/workflow-runs/{rid}/tick"), "{}".into()))
@@ -2196,16 +2208,26 @@ async fn node_protocol_mismatch_marks_degraded() {
     };
     let er = app
         .clone()
-        .oneshot(post("/v1/node/enroll", serde_json::to_string(&req).unwrap()))
+        .oneshot(post(
+            "/v1/node/enroll",
+            serde_json::to_string(&req).unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(er.status(), StatusCode::OK);
     let er: EnrollResponse =
         serde_json::from_slice(&to_bytes(er.into_body(), usize::MAX).await.unwrap()).unwrap();
-    let nodes = app.clone().oneshot(get_auth("/v1/nodes", "")).await.unwrap();
+    let nodes = app
+        .clone()
+        .oneshot(get_auth("/v1/nodes", ""))
+        .await
+        .unwrap();
     assert_eq!(nodes.status(), StatusCode::OK);
     let nodes: Vec<NodeView> =
         serde_json::from_slice(&to_bytes(nodes.into_body(), usize::MAX).await.unwrap()).unwrap();
-    let node = nodes.iter().find(|n| n.id == er.node_id).expect("node present");
+    let node = nodes
+        .iter()
+        .find(|n| n.id == er.node_id)
+        .expect("node present");
     assert_eq!(node.status, NodeStatus::Degraded);
 }

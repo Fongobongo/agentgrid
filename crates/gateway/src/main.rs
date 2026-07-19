@@ -19,6 +19,8 @@
 //! Commands: /help /nodes /tasks /run <repo> <adapter> <prompt...>
 //!           /show <id> /cancel <id> /logs <id> /whoami
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agentgrid_common::CreateTaskRequest;
@@ -140,8 +142,11 @@ async fn run(args: RunArgs) -> Result<()> {
         "gateway up: provider=telegram, control_plane={} (allowlist re-read per message)",
         args.control_plane
     );
-    provider.run(&client, &ctl).await
+    let conv: ConvState = Arc::new(Mutex::new(HashMap::new()));
+    provider.run(&client, &ctl, &conv).await
 }
+
+type ConvState = Arc<Mutex<HashMap<i64, String>>>;
 
 /// A control-plane HTTP client for the handful of endpoints the gateway uses.
 struct ControlPlane<'a> {
@@ -225,14 +230,120 @@ impl<'a> ControlPlane<'a> {
         }
         let mut out = String::new();
         for (i, e) in arr.iter().take(20).enumerate() {
-            let kind = e.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-            let data = e.get("data").map(|v| v.to_string()).unwrap_or_default();
-            out.push_str(&format!("{} {kind}: {data}\n", i));
+            let ty = e.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+            let payload = e.get("payload").map(|v| v.to_string()).unwrap_or_default();
+            out.push_str(&format!("{} {ty}: {payload}\n", i));
         }
         if arr.len() > 20 {
             out.push_str(&format!("... ({} more)\n", arr.len() - 20));
         }
         Ok(out)
+    }
+
+    async fn create_conversation(&self, adapter: &str, repository: &str) -> Result<String> {
+        let r = self
+            .post("/v1/conversations")
+            .json(&serde_json::json!({"adapter": adapter, "repository": repository}))
+            .send()
+            .await?;
+        if !r.status().is_success() {
+            anyhow::bail!("create conversation failed ({})", r.status());
+        }
+        let v: serde_json::Value = r.json().await?;
+        Ok(v.get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("?")
+            .to_string())
+    }
+
+    async fn append_message(&self, conv_id: &str, content: &str) -> Result<String> {
+        let r = self
+            .post(&format!("/v1/conversations/{conv_id}/messages"))
+            .json(&serde_json::json!({"content": content}))
+            .send()
+            .await?;
+        if !r.status().is_success() {
+            anyhow::bail!("append message failed ({})", r.status());
+        }
+        let v: serde_json::Value = r.json().await?;
+        Ok(v.get("task_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("?")
+            .to_string())
+    }
+
+    /// Poll the task until it reaches a terminal state (or timeout), returning
+    /// the best available answer text: the `result` event payload if the adapter
+    /// emitted one, else the last `log`/`error` line, else the final status.
+    async fn await_task_answer(&self, task_id: &str) -> Result<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(300);
+        let mut seen = 0usize;
+        loop {
+            let status = self
+                .get(&format!("/v1/tasks/{task_id}"))
+                .send()
+                .await?
+                .json::<serde_json::Value>()
+                .await
+                .ok();
+            let st = status
+                .as_ref()
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let events = self
+                .get(&format!("/v1/tasks/{task_id}/events"))
+                .send()
+                .await?
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            let arr = events.as_array().cloned().unwrap_or_default();
+            let mut answer: Option<String> = None;
+            let mut last_log = String::new();
+            for e in arr.iter().skip(seen) {
+                seen += 1;
+                let ty = e.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+                let payload = e.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let text = payload
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        payload
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| payload.to_string());
+                match ty {
+                    "result" => {
+                        answer = Some(if text.is_empty() || text == "null" {
+                            format!("done ({})", payload)
+                        } else {
+                            text
+                        })
+                    }
+                    "error" => answer = Some(format!("error: {text}")),
+                    "log" | "stdout" => last_log = text,
+                    _ => {}
+                }
+            }
+            if matches!(st, "succeeded" | "failed" | "cancelled") {
+                break Ok(answer.unwrap_or_else(|| {
+                    if !last_log.is_empty() {
+                        last_log
+                    } else {
+                        format!("task {task_id} {st}")
+                    }
+                }));
+            }
+            if std::time::Instant::now() > deadline {
+                break Ok(
+                    answer.unwrap_or_else(|| format!("task {task_id} still {st} (timed out)"))
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 }
 
@@ -243,6 +354,7 @@ trait ChatProvider: Send {
         self: Box<Self>,
         client: &'a reqwest::Client,
         ctl: &'a ControlPlane<'a>,
+        conv: &'a ConvState,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
 }
 
@@ -250,13 +362,27 @@ fn allowed(chat_id: i64) -> bool {
     load_admins().contains(&chat_id)
 }
 
-async fn dispatch(ctl: &ControlPlane<'_>, text: &str) -> String {
+async fn dispatch(ctl: &ControlPlane<'_>, text: &str, chat_id: i64, conv: &ConvState) -> String {
     let mut parts = text.split_whitespace();
     let cmd = parts.next().unwrap_or("");
     // strip an optional leading bot mention like "/nodes@botname"
     let cmd = cmd.split('@').next().unwrap_or(cmd).trim_start_matches('/');
     match cmd {
         "help" | "start" => HELP.to_string(),
+        "new" => {
+            let adapter = parts.next().map(|s| s.to_string());
+            let repository = parts.next().map(|s| s.to_string()).unwrap_or_default();
+            match adapter {
+                Some(adapter) => match ctl.create_conversation(&adapter, &repository).await {
+                    Ok(id) => {
+                        conv.lock().unwrap().insert(chat_id, id.clone());
+                        format!("conversation {id} created (adapter={adapter}, repo='{repository}')\nsend messages, I'll route them to an agent on a node and reply.")
+                    }
+                    Err(e) => format!("create conversation failed: {e}"),
+                },
+                None => "usage: /new <adapter> [repository]".into(),
+            }
+        }
         "nodes" => ctl.nodes().await.unwrap_or_else(|e| e.to_string()),
         "tasks" => ctl.tasks().await.unwrap_or_else(|e| e.to_string()),
         "show" => match parts.next() {
@@ -283,7 +409,34 @@ async fn dispatch(ctl: &ControlPlane<'_>, text: &str) -> String {
                 _ => "usage: /run <repo-url> <adapter> <prompt...>".into(),
             }
         }
-        _ => format!("unknown command: {cmd} — try /help"),
+        _ => {
+            // plain text without a slash = a chat message to the current
+            // conversation. If no conversation is bound for this chat, nudge the
+            // operator to create one (offering to set up a repo too).
+            let content = text.trim().to_string();
+            let cid = conv.lock().unwrap().get(&chat_id).cloned();
+            match cid {
+                None => {
+                    let adapters = std::env::var("AGENTGRID_GATEWAY_CHAT_ADAPTER")
+                        .unwrap_or_else(|_| "mock".to_string());
+                    format!(
+                        "no conversation for this chat yet.\n\
+create one with:\n  /new <adapter> [repository]\n\
+(e.g. `/new {adapters}` to chat without a code repo; pass a repository name if you want the agent to work in a git workspace)."
+                    )
+                }
+                Some(cid) => match ctl.append_message(&cid, &content).await {
+                    Ok(task_id) => {
+                        let reply = ctl
+                            .await_task_answer(&task_id)
+                            .await
+                            .unwrap_or_else(|e| e.to_string());
+                        reply
+                    }
+                    Err(e) => format!("failed to send to agent: {e}"),
+                },
+            }
+        }
     }
 }
 
@@ -363,6 +516,7 @@ impl ChatProvider for Telegram {
         self: Box<Self>,
         client: &'a reqwest::Client,
         ctl: &'a ControlPlane<'a>,
+        conv: &'a ConvState,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         let tg = self;
         Box::pin(async move {
@@ -446,7 +600,7 @@ then send /nodes\n\
                         continue;
                     }
                     tracing::info!("tg {chat_id}: {text}");
-                    let reply = dispatch(ctl, &text).await;
+                    let reply = dispatch(ctl, &text, chat_id, conv).await;
                     let _ = client
                         .post(tg.url("sendMessage"))
                         .json(&serde_json::json!({"chat_id": chat_id, "text": reply}))

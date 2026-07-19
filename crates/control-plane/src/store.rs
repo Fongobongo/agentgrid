@@ -657,6 +657,105 @@ impl Store {
             .collect())
     }
 
+    // ----- conversations (stateful multi-turn chat) -----
+
+    pub async fn create_conversation(
+        &self,
+        adapter: &str,
+        repository: &str,
+    ) -> Result<agentgrid_common::Conversation> {
+        let id = Uuid::new_v4().to_string();
+        let now = now_iso();
+        sqlx::query(
+            "INSERT INTO conversations (id, adapter, repository, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(adapter)
+        .bind(repository)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(agentgrid_common::Conversation {
+            id,
+            adapter: adapter.to_string(),
+            repository: repository.to_string(),
+            created_at: now,
+        })
+    }
+
+    pub async fn get_conversation(
+        &self,
+        id: &str,
+    ) -> Result<Option<agentgrid_common::Conversation>> {
+        let row = sqlx::query(
+            "SELECT id, adapter, repository, created_at FROM conversations WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| agentgrid_common::Conversation {
+            id: r.try_get("id").unwrap_or_default(),
+            adapter: r.try_get("adapter").unwrap_or_default(),
+            repository: r.try_get("repository").unwrap_or_default(),
+            created_at: r.try_get("created_at").unwrap_or_default(),
+        }))
+    }
+
+    /// Append a message; returns its sequence number. `task_id` is the task that
+    /// produced (assistant) or carried (user) the message.
+    pub async fn append_conversation_message(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        task_id: Option<&str>,
+    ) -> Result<i64> {
+        let now = now_iso();
+        let seq: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_messages WHERE conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .fetch_one(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO conversation_messages (id, conversation_id, seq, role, content, task_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(conversation_id)
+        .bind(seq)
+        .bind(role)
+        .bind(content)
+        .bind(task_id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(seq)
+    }
+
+    pub async fn list_conversation_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<agentgrid_common::ConversationMessage>> {
+        let rows = sqlx::query(
+            "SELECT seq, role, content, task_id, created_at FROM conversation_messages \
+             WHERE conversation_id = ? ORDER BY seq ASC",
+        )
+        .bind(conversation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| agentgrid_common::ConversationMessage {
+                seq: r.try_get("seq").unwrap_or_default(),
+                role: r.try_get("role").unwrap_or_default(),
+                content: r.try_get("content").unwrap_or_default(),
+                task_id: r.try_get("task_id").unwrap_or_default(),
+                created_at: r.try_get("created_at").unwrap_or_default(),
+            })
+            .collect())
+    }
+
     pub async fn list_nodes(&self) -> Result<Vec<NodeView>> {
         let rows = sqlx::query(
             "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb \
@@ -1241,7 +1340,10 @@ impl Store {
             return Ok(false);
         };
         let status: String = run.try_get("status")?;
-        if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "blocked") {
+        if matches!(
+            status.as_str(),
+            "completed" | "failed" | "cancelled" | "blocked"
+        ) {
             let _ = tx.rollback().await;
             return Ok(false);
         }
@@ -2545,7 +2647,8 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-       protocol_version: None, };
+            protocol_version: None,
+        };
         s.register_or_touch_node(&poll).await.unwrap();
 
         // Tick -> first task.
@@ -2599,7 +2702,8 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-       protocol_version: None, };
+            protocol_version: None,
+        };
         s.register_or_touch_node(&poll).await.unwrap();
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
@@ -2644,7 +2748,8 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-       protocol_version: None, };
+            protocol_version: None,
+        };
         s.register_or_touch_node(&poll).await.unwrap();
         let _ = s.tick_workflow_run(&run.id).await.unwrap();
         let a1 = s.try_assign("n1").await.unwrap().unwrap();
@@ -2694,7 +2799,8 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-       protocol_version: None, };
+            protocol_version: None,
+        };
         s.register_or_touch_node(&poll).await.unwrap();
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
@@ -2734,7 +2840,8 @@ mod workflow_tests {
             adapters: vec!["mock".into()],
             repositories: vec!["*".into()],
             max_concurrency: 2,
-       protocol_version: None, };
+            protocol_version: None,
+        };
         s.register_or_touch_node(&poll).await.unwrap();
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
@@ -2836,7 +2943,8 @@ mod workflow_tests {
             repositories: vec!["*".into()],
             max_concurrency: 2,
             agent_version: "test".into(),
-       protocol_version: None, };
+            protocol_version: None,
+        };
         let resp = s.enroll_node(&node).await.unwrap().expect("node enroll");
         let node_id = resp.node_id;
         let task = CreateTaskRequest {
@@ -2858,7 +2966,8 @@ mod workflow_tests {
             .scheduler_assignments
             .load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
-            after, before + 1,
+            after,
+            before + 1,
             "an assignment must increment the scheduler metric"
         );
     }
@@ -2878,7 +2987,10 @@ mod workflow_tests {
             max_attempts: None,
         }];
         let t = s.create_workflow_template("t", &steps).await.unwrap();
-        let run = s.create_workflow_run(&t.id, None, None, None).await.unwrap();
+        let run = s
+            .create_workflow_run(&t.id, None, None, None)
+            .await
+            .unwrap();
         // Link the step to a queued task, then cancel the whole run.
         let task_id = "task-x";
         sqlx::query(
@@ -2919,12 +3031,11 @@ mod workflow_tests {
                 .await
                 .unwrap();
         assert_eq!(step_status, "cancelled");
-        let task_status: String =
-            sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
-                .bind(task_id)
-                .fetch_one(&s.pool)
-                .await
-                .unwrap();
+        let task_status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
         assert_eq!(task_status, "cancelled");
         // Already terminal: cancelling again is a no-op.
         assert!(!s.cancel_workflow_run(&run.id).await.unwrap());

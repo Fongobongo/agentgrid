@@ -295,7 +295,17 @@
 ### 9.4 Chat gateway (front-end для оператора)
 
 - [x] Новый crate `crates/gateway` (`agentgrid-gateway`): bridge из чат-платформы в control-plane HTTP API. `ChatProvider` trait + реализация Telegram (raw `reqwest` к Bot API long-polling, без chat-client крейта). Команды: `/nodes /tasks /run <repo> <adapter> <prompt...> /show <id> /logs <id> /cancel <id> /help`. Auth = allowlist chat-id (`AGENTGRID_GATEWAY_ADMINS`). Контроль-плейн URL + JWT из env.
+- [x] Подтверждение владения chat-id: `/start` и `/whoami` открыты (показывают chat-id + команду `agentgrid-gateway allow <id>` на хост-машине). Allowlist = файл `~/.config/agentgrid/gateway-admins.txt` (+ env), перечитывается на каждое сообщение.
 - [ ] Discord и WhatsApp за тем же `ChatProvider` trait — не реализованы; WhatsApp не имеет лёгкого открытого bot API (Business API gated/heavy). Честно отложено.
+
+### 9.5 Conversations: stateful multi-turn chat с общим контекстом
+
+- [x] Таблицы `conversations` + `conversation_messages` (миграция `0018`). Каждое сообщение пользователя создаёт task, чей prompt = скомпонованная история диалога (`user:`/`assistant:`), так что любая нода, подхватившая task, видит полный общий контекст. Параллельные сессии изолированы по conversation id; сессия может хопать между нодами.
+- [x] Эндпоинты: `POST /v1/conversations` (adapter, optional repository), `GET /v1/conversations/{id}`, `POST /v1/conversations/{id}/messages`, `GET /v1/conversations/{id}/messages`.
+- [x] Gateway: plain text (без `/`) = сообщение в текущую сессию; `/new <adapter> [repository]` создаёт сессию. Шлюз пушит сообщение в cp, поллит events, шлёт `result` текст обратно в Telegram. Без сессии — подсказка создать (предлагает `AGENTGRID_GATEWAY_CHAT_ADAPTER`, дефолт `mock`).
+- [x] `adapter-mock` эмитит `result.text` (эхо последней строки промпта) — демонстрационный ответ без LLM; реальные адаптеры (`claude`/`opencode`) дают свой текст.
+- [ ] Реальный агент-ответ (claude/opencode CLI на ноде + ключи) — mock только эхо. Контур готов, нужен реальный адаптер.
+- [ ] Нет репо → предложить создать: сейчас `/new mock` без репо = plain-dir task (без git). Полный flow «создать git-репо на cp» — follow-up.
 
 ---
 

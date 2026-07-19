@@ -479,6 +479,38 @@ pub struct RepositoryView {
     pub created_at: String,
 }
 
+/// A multi-turn chat conversation routed through the control plane to a coding
+/// agent on some node. Each user message becomes a task whose prompt is the
+/// composed conversation history, so any node picking it up sees full context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Conversation {
+    pub id: String,
+    pub adapter: String,
+    pub repository: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationMessage {
+    pub seq: i64,
+    pub role: String,
+    pub content: String,
+    pub task_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateConversationRequest {
+    pub adapter: String,
+    #[serde(default)]
+    pub repository: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppendMessageRequest {
+    pub content: String,
+}
+
 /// Per-node eligibility for a (repository, adapter) pair, with reasons when not
 /// eligible (Stage 2.4 `no_eligible_nodes` visibility).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

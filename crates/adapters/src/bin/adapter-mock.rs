@@ -82,6 +82,13 @@ fn main() {
         }
     }
 
-    emit("result", json!({ "exit_code": exit_code }));
+    // Echo the last user line back as the result text so the chat loop has a
+    // readable answer (mock has no LLM; real adapters emit their own text).
+    let answer = prompt
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .to_string();
+    emit("result", json!({ "exit_code": exit_code, "text": answer }));
     std::process::exit(exit_code);
 }
