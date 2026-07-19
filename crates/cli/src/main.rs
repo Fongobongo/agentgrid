@@ -450,23 +450,14 @@ async fn current_status(client: &reqwest::Client, base: &str, task_id: &str) -> 
     Ok(task.status)
 }
 
-async fn cmd_nodes(
-    client: &reqwest::Client,
-    base: &str,
-    json: bool,
-    a: NodeArgs,
-) -> Result<()> {
+async fn cmd_nodes(client: &reqwest::Client, base: &str, json: bool, a: NodeArgs) -> Result<()> {
     match a.command {
         NodeSub::List => cmd_node_list(client, base, json).await,
         NodeSub::Install(i) => cmd_node_install(client, base, *i).await,
     }
 }
 
-async fn cmd_node_install(
-    client: &reqwest::Client,
-    base: &str,
-    a: NodeInstallArgs,
-) -> Result<()> {
+async fn cmd_node_install(client: &reqwest::Client, base: &str, a: NodeInstallArgs) -> Result<()> {
     if let Transport::Wireguard = a.transport {
         anyhow::bail!(
             "transport 'wireguard' is planned but not implemented yet; use --transport ssh-tunnel"
@@ -477,10 +468,34 @@ async fn cmd_node_install(
     let bin = a
         .binary
         .clone()
-        .or_else(|| std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()))
-        .context("no --binary given and cannot determine current executable")?;
+        .or_else(|| {
+            let candidate = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("agentgrid-node-daemon")))
+                .filter(|p| p.exists())
+                .or_else(|| {
+                    let p = std::path::PathBuf::from("agentgrid-node-daemon");
+                    if p.exists() {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                })?;
+            Some(candidate.to_string_lossy().into_owned())
+        })
+        .context("no --binary given and agentgrid-node-daemon not found next to `ag`")?;
     let data = a.data_dir.trim_end_matches('/');
     let remote_bin = format!("{data}/agentgrid-node");
+
+    // 0. ensure the remote data dir exists (scp would fail otherwise)
+    run_remote(
+        &a,
+        false,
+        &[],
+        Some(format!("mkdir -p {data}")),
+        "prepare remote dir",
+        false,
+    )?;
 
     // 1. copy the node binary to the remote host
     scp_file(&a, &bin, &remote_bin)?;
@@ -490,11 +505,19 @@ async fn cmd_node_install(
         Some(s) => (s.clone(), "direct/https"),
         None => {
             // persistent reverse tunnel: remote localhost:<remote_port> -> local :<local_port>
-            let mut tun = remote_shell(&a, false);
-            tun.arg("-f").arg("-N");
-            tun.arg("-R")
-                .arg(format!("{}:127.0.0.1:{}", a.remote_port, a.local_port));
-            run_ssh(tun, "establish reverse tunnel")?;
+            run_remote(
+                &a,
+                false,
+                &[
+                    "-f".into(),
+                    "-N".into(),
+                    "-R".into(),
+                    format!("{}:127.0.0.1:{}", a.remote_port, a.local_port),
+                ],
+                None,
+                "establish reverse tunnel",
+                true,
+            )?;
             (format!("http://127.0.0.1:{}", a.remote_port), "ssh-tunnel")
         }
     };
@@ -505,16 +528,22 @@ async fn cmd_node_install(
     std::fs::write(&tmp, env).context("write local env temp")?;
     scp_file(&a, &tmp.to_string_lossy(), &format!("{data}/agentgrid.env"))?;
     let _ = std::fs::remove_file(&tmp);
+    // Source the env file in a shell so the single-quoted values (and the `*`
+    // in AGENTGRID_REPOSITORIES) are parsed correctly; `env $(cat file)` would
+    // keep the literal quotes and glob the `*`.
     let start = format!(
-        "mkdir -p {data} && chmod 600 {data}/agentgrid.env && setsid nohup env $(cat {data}/agentgrid.env) {bin} >{data}/node.log 2>&1 &",
+        "mkdir -p {data} && chmod 600 {data}/agentgrid.env && setsid nohup bash -c 'set -a; . {data}/agentgrid.env; set +a; exec {bin}' >{data}/node.log 2>&1 </dev/null &",
         data = data,
         bin = remote_bin,
     );
-    let mut sh = remote_shell(&a, false);
-    sh.arg(start);
-    run_ssh(sh, "start node")?;
+    // The start command backgrounds itself on the remote; launch the ssh that
+    // delivers it detached so it doesn't block install (and survives our exit).
+    run_remote(&a, false, &[], Some(start), "start node", true)?;
 
-    println!("node '{}' provisioned (transport={})", a.name, transport_label);
+    println!(
+        "node '{}' provisioned (transport={})",
+        a.name, transport_label
+    );
     println!("check status with: ag node list");
     Ok(())
 }
@@ -522,15 +551,8 @@ async fn cmd_node_install(
 /// Build the remote env file (single-quoted values, safe for `env $(cat ...)`).
 fn build_node_env_file(a: &NodeInstallArgs, token: &str, server: &str) -> String {
     let data = a.data_dir.trim_end_matches('/');
-    format!(
-        "AGENTGRID_SERVER='{server}'\n\
-         AGENTGRID_ENROLL_TOKEN='{token}'\n\
-         AGENTGRID_NODE_NAME='{name}'\n\
-         AGENTGRID_REPOSITORIES='{repos}'\n\
-         AGENTGRID_ADAPTERS='{adapters}'\n\
-         AGENTGRID_MAX_CONCURRENCY='{mc}'\n\
-         AGENTGRID_DATA_DIR='{data}'\n\
-         AGENTGRID_AGENT_VERSION='{av}'\n",
+    let mut s = format!(
+        "AGENTGRID_SERVER='{server}'\nAGENTGRID_ENROLL_TOKEN='{token}'\nAGENTGRID_NODE_NAME='{name}'\nAGENTGRID_REPOSITORIES='{repos}'\nAGENTGRID_ADAPTERS='{adapters}'\nAGENTGRID_MAX_CONCURRENCY='{mc}'\nAGENTGRID_DATA_DIR='{data}'\n",
         server = server,
         token = token,
         name = a.name,
@@ -538,16 +560,18 @@ fn build_node_env_file(a: &NodeInstallArgs, token: &str, server: &str) -> String
         adapters = a.adapters,
         mc = a.max_concurrency,
         data = data,
-        av = a.agent_version,
-    )
+    );
+    // nodes provisioned as root need this to start (daemon refuses root otherwise)
+    s.push_str("AGENTGRID_ALLOW_ROOT='1'\n");
+    s.push_str(&format!("AGENTGRID_AGENT_VERSION='{}'\n", a.agent_version));
+    s
 }
 
 /// Reject shell-breaking characters in user-supplied fields (trust boundary).
 fn validate_install_args(a: &NodeInstallArgs) -> Result<()> {
     let sane = |s: &str, what: &str| {
         if s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./@:,*"
-            .contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "-_./@:,*".contains(c))
         {
             Ok(())
         } else {
@@ -564,31 +588,107 @@ fn validate_install_args(a: &NodeInstallArgs) -> Result<()> {
     Ok(())
 }
 
-/// Build a `ssh`/`scp` Command (optionally wrapping `sshpass`) for the remote host.
-fn remote_shell(a: &NodeInstallArgs, is_scp: bool) -> std::process::Command {
+/// Run an ssh/scp invocation against the remote host, choosing the auth wrapper:
+/// key (direct), password via `sshpass` when present, else `expect` (universally
+/// available on Linux). `extra` are program-specific args (e.g. `-f -N -R ...`);
+/// `remote_cmd` (ssh only) is the final argument (the remote shell command).
+/// Run an ssh/scp invocation against the remote host, choosing the auth wrapper:
+/// key (direct), password via `sshpass` when present, else `expect` (universally
+/// available on Linux). `extra` are program-specific args (e.g. `-f -N -R ...`);
+/// `remote_cmd` (ssh only) is the final argument (the remote shell command).
+/// `detach` launches the command in its own session (setsid) so it survives the
+/// `ag nodes install` process — used for the persistent reverse tunnel.
+fn run_remote(
+    a: &NodeInstallArgs,
+    is_scp: bool,
+    extra: &[String],
+    remote_cmd: Option<String>,
+    what: &str,
+    detach: bool,
+) -> Result<()> {
     let prog = if is_scp { "scp" } else { "ssh" };
-    let mut cmd = if let Some(pw) = &a.password {
-        let mut c = std::process::Command::new("sshpass");
-        c.arg("-e").env("SSHPASS", pw);
-        c.arg(prog);
-        c
-    } else {
-        std::process::Command::new(prog)
-    };
+    let mut base: Vec<String> = vec![prog.to_string()];
     if let Some(key) = &a.ssh_key {
-        cmd.arg("-i").arg(key);
+        base.push("-i".into());
+        base.push(key.clone());
     }
-    cmd.arg("-o").arg("StrictHostKeyChecking=no");
+    base.push("-o".into());
+    base.push("StrictHostKeyChecking=no".into());
     if !is_scp && a.password.is_none() {
-        cmd.arg("-o").arg("BatchMode=yes");
+        base.push("-o".into());
+        base.push("BatchMode=yes".into());
     }
-    let (.., port) = parse_host(&a.host);
-    if let Some(p) = port {
-        cmd.arg(if is_scp { "-P" } else { "-p" }).arg(p.to_string());
+    if let (.., Some(p)) = parse_host(&a.host) {
+        base.push((if is_scp { "-P" } else { "-p" }).into());
+        base.push(p.to_string());
     }
+    base.extend(extra.iter().cloned());
     let (user, host, _p) = parse_host(&a.host);
-    cmd.arg(user.map(|u| format!("{u}@{host}")).unwrap_or(host));
-    cmd
+    let target = user
+        .map(|u| format!("{u}@{host}"))
+        .unwrap_or_else(|| host.clone());
+    if !is_scp {
+        base.push(target);
+        if let Some(rc) = &remote_cmd {
+            base.push(rc.clone());
+        }
+    }
+
+    // auth wrapper -> final argv (+ optional SSHPASS for sshpass mode)
+    let (argv, sshpass_pw) = if let Some(pw) = &a.password {
+        if std::process::Command::new("sshpass")
+            .arg("true")
+            .status()
+            .is_ok()
+        {
+            let mut v = vec!["sshpass".to_string(), "-e".to_string()];
+            v.extend(base);
+            (v, Some(pw.clone()))
+        } else {
+            let spawn_line = format!(
+                "spawn {}",
+                base.iter()
+                    .map(|x| format!("{{{x}}}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let script = format!(
+                "set timeout 600\n{spawn_line}\nexpect {{\n    -re \"(?i)password:\" {{ send \"{pw}\\r\"; exp_continue }}\n    eof\n}}\n"
+            );
+            (vec!["expect".to_string(), "-c".to_string(), script], None)
+        }
+    } else {
+        (base, None)
+    };
+
+    if detach {
+        let mut c = std::process::Command::new("setsid");
+        c.arg("nohup").args(&argv);
+        if let Some(pw) = &sshpass_pw {
+            c.env("SSHPASS", pw);
+        }
+        // Detached children must NOT inherit our stdout/stderr/ stdin — the
+        // node install command would otherwise hang waiting on a pipe the
+        // detached tunnel/start ssh keeps open.
+        c.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to spawn detached ssh/scp ({what})"))?;
+        return Ok(());
+    }
+    let mut c = std::process::Command::new(&argv[0]);
+    c.args(&argv[1..]);
+    if let Some(pw) = &sshpass_pw {
+        c.env("SSHPASS", pw);
+    }
+    let status = c
+        .status()
+        .with_context(|| format!("failed to run ssh/scp ({what})"))?;
+    if !status.success() {
+        anyhow::bail!("ssh/scp step failed ({what}): exit {status}");
+    }
+    Ok(())
 }
 
 /// user@host[:port] -> (user, host, port)
@@ -603,27 +703,23 @@ fn parse_host(host: &str) -> (Option<String>, String, Option<u16>) {
     }
 }
 
-fn run_ssh(mut cmd: std::process::Command, what: &str) -> Result<()> {
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to run ssh/scp ({what})"))?;
-    if !status.success() {
-        anyhow::bail!("ssh/scp step failed ({what}): exit {status}");
-    }
-    Ok(())
-}
-
 /// Copy a local file to the remote host.
 fn scp_file(a: &NodeInstallArgs, local: &str, remote: &str) -> Result<()> {
     let (user, host, _p) = parse_host(&a.host);
     let target = format!(
         "{}:{}",
-        user.map(|u| format!("{u}@{host}")).unwrap_or_else(|| host.clone()),
+        user.map(|u| format!("{u}@{host}"))
+            .unwrap_or_else(|| host.clone()),
         remote
     );
-    let mut cmd = remote_shell(a, true);
-    cmd.arg(local).arg(target);
-    run_ssh(cmd, "scp file")
+    run_remote(
+        a,
+        true,
+        &[local.to_string(), target],
+        None,
+        "scp file",
+        false,
+    )
 }
 
 async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Result<()> {
@@ -1065,7 +1161,10 @@ mod node_install_tests {
 
     #[test]
     fn parse_host_splits_user_port() {
-        assert_eq!(parse_host("u@h:22"), (Some("u".into()), "h".into(), Some(22)));
+        assert_eq!(
+            parse_host("u@h:22"),
+            (Some("u".into()), "h".into(), Some(22))
+        );
         assert_eq!(parse_host("h:2222"), (None, "h".into(), Some(2222)));
         assert_eq!(parse_host("u@h"), (Some("u".into()), "h".into(), None));
         assert_eq!(parse_host("h"), (None, "h".into(), None));
@@ -1098,4 +1197,3 @@ mod node_install_tests {
         let _ = Transport::Wireguard;
     }
 }
-
