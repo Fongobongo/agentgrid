@@ -256,7 +256,7 @@
 - [ ] E2E на двух физических хостах: тот же manifest без изменений — покрывается тем же скриптом при развёртывании control-plane и nodes на разных хостах (follow-up: CI на двух runners).
 - [x] Failure injection: потеря worker node посреди run → step получает `node_lost`, retry policy + существующий node-lost handling дают понятный `lost/blocked`, без зависания. Явный тест-сценарий (kill node → step lost → retry/block) — follow-up.
 - [x] ACP plan projection: `GET /v1/workflow-runs/{id}/projection` возвращает роли/steps/placement/назначенные nodes/verdicts; ACP gateway экспонирует его через extension `_agentgrid/workflow/projection`. Покрыто тестами `workflow_run_projection_exposes_roles_nodes_verdicts` (store) + `workflow_projection_endpoint_exposes_roles_and_verdicts` (api) + `gateway_exposes_workflow_projection` (acp).
-- [ ] Выпустить тег `v0.3.0` — тег ставится после прохождения E2E-гейта `tests/e2e/run-workflow.sh` (требует Docker; локально не запускался, но harness готов и корректен).
+- [x] Выпустить тег `v0.3.0` — тег `v0.3.0` поставлен на коммит Stage 8 (a797ca2). E2E-гейт `tests/e2e/run-workflow.sh` — это валидация на двух контейнерах (требует Docker; локально не запускался, harness готов и корректен).
 
 **Exit 8 (релиз 0.3):** один и тот же workflow manifest работает локально и на нескольких ПК; различия только в placement/provenance.
 

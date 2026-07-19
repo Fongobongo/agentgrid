@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] — 2026-07-17
+
+Stage 8 distributed multi-agent workflows. See the `Added (Stage 8 …)` entries
+under `[Unreleased]` below for the full list: per-step node placement, shared
+`base_commit` (control plane + node-side checkout), lost-step retry policy,
+integrator conflict policy (`Blocked`), ACP plan projection, and the two-node
+E2E harness (`tests/e2e/run-workflow.sh`). Tag `v0.3.0` marks the Stage 8 code
+complete; the two-container E2E run is the release validation gate.
+
 ## [Unreleased]
 
 ### Added (Stage 8 — distributed workflows: node-side base_commit, conflict policy, ACP projection)
