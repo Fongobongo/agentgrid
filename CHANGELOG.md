@@ -13,6 +13,9 @@ complete; the two-container E2E run is the release validation gate.
 
 ## [Unreleased]
 
+### Added (CLI — remote node bootstrap)
+- CLI `ag nodes install --host user@host[:port] [--ssh-key ...] [--transport ssh-tunnel]` provisions a remote host as a node: mints a one-time enrollment token, `scp`s the node binary, opens a persistent reverse SSH tunnel (`remote localhost:<remote_port>` → control plane `:<local_port>`), writes a `chmod 600` env file, and starts the node in the background. The node then long-polls the control plane through the tunnel — so two hosts link automatically, working behind NAT with SSH providing encryption. `--transport wireguard` is reserved (planned; SSH used only for one-time bootstrap). Key-based auth preferred; `--password` wraps `sshpass` (SSHPASS env, never argv). User-supplied fields (`name`/`repositories`/`adapters`/`data-dir`) are validated against a safe charset (trust boundary). Covered by `node_install_tests` (parse_host, env-file format, validation).
+
 ### Added (Stage 9 — approval scope, audit, tests)
 - control-plane (9): approvals gain a `scope` column (migration 0017) — `tool_call | session | step | command | duration` — so operators see what they are approving. `create_approval` threads it through; `ApprovalView` and the list/get SELECTs expose it. Covered by `approval_scope_round_trips` (api).
 - control-plane (9): `POST /v1/policy/evaluate` now emits a fail-closed audit event (`policy.evaluate`) for every decision, so dangerous commands are never silent. `Store::list_audit` added for the trail. Covered by `policy_evaluate_audits_decision` (api).

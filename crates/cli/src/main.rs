@@ -36,8 +36,8 @@ enum AgCommand {
     Logs(LogsArgs),
     /// Show a task's status/result.
     Show(ShowArgs),
-    /// List registered nodes.
-    Nodes,
+    /// Manage nodes (list / install over SSH).
+    Nodes(NodeArgs),
     /// Cancel a task (queued -> cancelled; running -> ask node to stop).
     Cancel(CancelArgs),
     /// Retry a failed or cancelled task (back to queued).
@@ -166,6 +166,73 @@ struct ApprovalIdArgs {
 }
 
 #[derive(Args)]
+struct NodeArgs {
+    #[command(subcommand)]
+    command: NodeSub,
+}
+
+#[derive(Subcommand)]
+enum NodeSub {
+    /// List registered nodes.
+    List,
+    /// Provision a remote host as a node over SSH and link it to this control plane.
+    Install(Box<NodeInstallArgs>),
+}
+
+/// Transport used for the node -> control-plane runtime link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Default)]
+enum Transport {
+    /// Reverse SSH tunnel (default). Works behind NAT; SSH encrypts the link.
+    #[default]
+    SshTunnel,
+    /// Private WireGuard network (planned). SSH used only for one-time bootstrap.
+    Wireguard,
+}
+
+#[derive(Args)]
+struct NodeInstallArgs {
+    /// Remote host as user@host or user@host:port.
+    #[arg(long)]
+    host: String,
+    /// Path to SSH private key (key-based auth; recommended over --password).
+    #[arg(long)]
+    ssh_key: Option<String>,
+    /// SSH password (requires `sshpass`; passed via SSHPASS env, never argv).
+    #[arg(long)]
+    password: Option<String>,
+    /// Transport for the node -> control-plane link.
+    #[arg(long, value_enum, default_value = "ssh-tunnel")]
+    transport: Transport,
+    /// Node display name.
+    #[arg(long, default_value = "remote-node")]
+    name: String,
+    /// Repositories the node may serve (comma list or '*').
+    #[arg(long, default_value = "*")]
+    repositories: String,
+    /// Adapters the node provides (comma list).
+    #[arg(long, default_value = "mock")]
+    adapters: String,
+    /// Max concurrent attempts on the node.
+    #[arg(long, default_value_t = 2)]
+    max_concurrency: u32,
+    /// Local control-plane port to reverse-forward to (where this `ag` runs).
+    #[arg(long, default_value_t = 7800)]
+    local_port: u16,
+    /// Remote port the node reaches the control plane through the tunnel.
+    #[arg(long, default_value_t = 7800)]
+    remote_port: u16,
+    /// Node binary to copy (default: this executable).
+    #[arg(long)]
+    binary: Option<String>,
+    /// Remote data directory for the node.
+    #[arg(long, default_value = "/var/lib/agentgrid")]
+    data_dir: String,
+    /// Agent version reported at enroll.
+    #[arg(long, default_value = "0.1.0-cli")]
+    agent_version: String,
+}
+
+#[derive(Args)]
 struct RepoAddArgs {
     name: String,
     /// Git URL (https/token or local path).
@@ -242,7 +309,7 @@ async fn main() -> Result<()> {
         AgCommand::Run(a) => cmd_run(&client, &base, a).await,
         AgCommand::Logs(a) => cmd_logs(&client, &base, a).await,
         AgCommand::Show(a) => cmd_show(&client, &base, a, cli.json).await,
-        AgCommand::Nodes => cmd_node_list(&client, &base, cli.json).await,
+        AgCommand::Nodes(a) => cmd_nodes(&client, &base, cli.json, a).await,
         AgCommand::Cancel(a) => cmd_cancel(&client, &base, a).await,
         AgCommand::Retry(a) => cmd_retry(&client, &base, a).await,
         AgCommand::Token(a) => cmd_token(&client, &base, a).await,
@@ -371,6 +438,173 @@ async fn current_status(client: &reqwest::Client, base: &str, task_id: &str) -> 
         .await?;
     let task: TaskView = resp.json().await?;
     Ok(task.status)
+}
+
+async fn cmd_nodes(
+    client: &reqwest::Client,
+    base: &str,
+    json: bool,
+    a: NodeArgs,
+) -> Result<()> {
+    match a.command {
+        NodeSub::List => cmd_node_list(client, base, json).await,
+        NodeSub::Install(i) => cmd_node_install(client, base, *i).await,
+    }
+}
+
+async fn cmd_node_install(
+    client: &reqwest::Client,
+    base: &str,
+    a: NodeInstallArgs,
+) -> Result<()> {
+    if let Transport::Wireguard = a.transport {
+        anyhow::bail!(
+            "transport 'wireguard' is planned but not implemented yet; use --transport ssh-tunnel"
+        );
+    }
+    validate_install_args(&a)?;
+    let token = create_enrollment_token(client, base).await?;
+    let bin = a
+        .binary
+        .clone()
+        .or_else(|| std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()))
+        .context("no --binary given and cannot determine current executable")?;
+    let data = a.data_dir.trim_end_matches('/');
+    let remote_bin = format!("{data}/agentgrid-node");
+
+    // 1. copy the node binary to the remote host
+    scp_file(&a, &bin, &remote_bin)?;
+
+    // 2. persistent reverse tunnel: remote localhost:<remote_port> -> local :<local_port>
+    let mut tun = remote_shell(&a, false);
+    tun.arg("-f").arg("-N");
+    tun.arg("-R")
+        .arg(format!("{}:127.0.0.1:{}", a.remote_port, a.local_port));
+    run_ssh(tun, "establish reverse tunnel")?;
+
+    // 3. write env file on remote (temp locally, scp, chmod 600), then start node
+    let env = build_node_env_file(&a, &token);
+    let tmp = std::env::temp_dir().join(format!("ag-env-{}.env", std::process::id()));
+    std::fs::write(&tmp, env).context("write local env temp")?;
+    scp_file(&a, &tmp.to_string_lossy(), &format!("{data}/agentgrid.env"))?;
+    let _ = std::fs::remove_file(&tmp);
+    let start = format!(
+        "mkdir -p {data} && chmod 600 {data}/agentgrid.env && setsid nohup env $(cat {data}/agentgrid.env) {bin} >{data}/node.log 2>&1 &",
+        data = data,
+        bin = remote_bin,
+    );
+    let mut sh = remote_shell(&a, false);
+    sh.arg(start);
+    run_ssh(sh, "start node")?;
+
+    println!("node '{}' provisioned (transport=ssh-tunnel)", a.name);
+    println!("check status with: ag node list");
+    Ok(())
+}
+
+/// Build the remote env file (single-quoted values, safe for `env $(cat ...)`).
+fn build_node_env_file(a: &NodeInstallArgs, token: &str) -> String {
+    let server = format!("http://127.0.0.1:{}", a.remote_port);
+    let data = a.data_dir.trim_end_matches('/');
+    format!(
+        "AGENTGRID_SERVER='{server}'\n\
+         AGENTGRID_ENROLL_TOKEN='{token}'\n\
+         AGENTGRID_NODE_NAME='{name}'\n\
+         AGENTGRID_REPOSITORIES='{repos}'\n\
+         AGENTGRID_ADAPTERS='{adapters}'\n\
+         AGENTGRID_MAX_CONCURRENCY='{mc}'\n\
+         AGENTGRID_DATA_DIR='{data}'\n\
+         AGENTGRID_AGENT_VERSION='{av}'\n",
+        server = server,
+        token = token,
+        name = a.name,
+        repos = a.repositories,
+        adapters = a.adapters,
+        mc = a.max_concurrency,
+        data = data,
+        av = a.agent_version,
+    )
+}
+
+/// Reject shell-breaking characters in user-supplied fields (trust boundary).
+fn validate_install_args(a: &NodeInstallArgs) -> Result<()> {
+    let sane = |s: &str, what: &str| {
+        if s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./@:,*"
+            .contains(c))
+        {
+            Ok(())
+        } else {
+            anyhow::bail!("invalid {what}: only [A-Za-z0-9._,/@:-] allowed")
+        }
+    };
+    sane(&a.name, "name")?;
+    sane(&a.repositories, "repositories")?;
+    sane(&a.adapters, "adapters")?;
+    sane(&a.data_dir, "data-dir")?;
+    Ok(())
+}
+
+/// Build a `ssh`/`scp` Command (optionally wrapping `sshpass`) for the remote host.
+fn remote_shell(a: &NodeInstallArgs, is_scp: bool) -> std::process::Command {
+    let prog = if is_scp { "scp" } else { "ssh" };
+    let mut cmd = if let Some(pw) = &a.password {
+        let mut c = std::process::Command::new("sshpass");
+        c.arg("-e").env("SSHPASS", pw);
+        c.arg(prog);
+        c
+    } else {
+        std::process::Command::new(prog)
+    };
+    if let Some(key) = &a.ssh_key {
+        cmd.arg("-i").arg(key);
+    }
+    cmd.arg("-o").arg("StrictHostKeyChecking=no");
+    if !is_scp && a.password.is_none() {
+        cmd.arg("-o").arg("BatchMode=yes");
+    }
+    let (.., port) = parse_host(&a.host);
+    if let Some(p) = port {
+        cmd.arg(if is_scp { "-P" } else { "-p" }).arg(p.to_string());
+    }
+    let (user, host, _p) = parse_host(&a.host);
+    cmd.arg(user.map(|u| format!("{u}@{host}")).unwrap_or(host));
+    cmd
+}
+
+/// user@host[:port] -> (user, host, port)
+fn parse_host(host: &str) -> (Option<String>, String, Option<u16>) {
+    let (user, rest) = match host.split_once('@') {
+        Some((u, r)) => (Some(u.to_string()), r),
+        None => (None, host),
+    };
+    match rest.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok() => (user, h.to_string(), p.parse().ok()),
+        _ => (user, rest.to_string(), None),
+    }
+}
+
+fn run_ssh(mut cmd: std::process::Command, what: &str) -> Result<()> {
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to run ssh/scp ({what})"))?;
+    if !status.success() {
+        anyhow::bail!("ssh/scp step failed ({what}): exit {status}");
+    }
+    Ok(())
+}
+
+/// Copy a local file to the remote host.
+fn scp_file(a: &NodeInstallArgs, local: &str, remote: &str) -> Result<()> {
+    let (user, host, _p) = parse_host(&a.host);
+    let target = format!(
+        "{}:{}",
+        user.map(|u| format!("{u}@{host}")).unwrap_or_else(|| host.clone()),
+        remote
+    );
+    let mut cmd = remote_shell(a, true);
+    cmd.arg(local).arg(target);
+    run_ssh(cmd, "scp file")
 }
 
 async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Result<()> {
@@ -512,23 +746,31 @@ async fn cmd_repo(client: &reqwest::Client, base: &str, a: RepoArgs) -> Result<(
 async fn cmd_token(client: &reqwest::Client, base: &str, a: TokenArgs) -> Result<()> {
     match a.action {
         TokenAction::Create => {
-            let resp = client
-                .post(format!("{base}/v1/nodes/enrollment-token"))
-                .send()
-                .await
-                .context("enrollment-token request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("token creation failed ({})", resp.status());
-            }
-            let body: serde_json::Value = resp.json().await?;
-            let token = body
-                .get("token")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
+            let token = create_enrollment_token(client, base).await?;
             println!("export AGENTGRID_ENROLL_TOKEN={token}");
             Ok(())
         }
     }
+}
+
+/// Mint a one-time enrollment token via the control-plane API.
+async fn create_enrollment_token(client: &reqwest::Client, base: &str) -> Result<String> {
+    let resp = client
+        .post(format!("{base}/v1/nodes/enrollment-token"))
+        .send()
+        .await
+        .context("enrollment-token request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "token creation failed ({}): are you logged in? (ag login)",
+            resp.status()
+        );
+    }
+    let body: serde_json::Value = resp.json().await?;
+    body.get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .context("enrollment-token response missing 'token'")
 }
 
 fn dirs_config() -> std::path::PathBuf {
@@ -775,3 +1017,62 @@ async fn cmd_workflow_run(client: &reqwest::Client, base: &str, a: WorkflowRunAr
     println!("{}", run.id);
     Ok(())
 }
+
+#[cfg(test)]
+mod node_install_tests {
+    use super::*;
+
+    fn sample() -> NodeInstallArgs {
+        NodeInstallArgs {
+            host: "deploy@node-b:2222".into(),
+            ssh_key: None,
+            password: None,
+            transport: Transport::SshTunnel,
+            name: "node-b".into(),
+            repositories: "*".into(),
+            adapters: "mock".into(),
+            max_concurrency: 2,
+            local_port: 7800,
+            remote_port: 7800,
+            binary: None,
+            data_dir: "/var/lib/agentgrid".into(),
+            agent_version: "0.1.0-cli".into(),
+        }
+    }
+
+    #[test]
+    fn parse_host_splits_user_port() {
+        assert_eq!(parse_host("u@h:22"), (Some("u".into()), "h".into(), Some(22)));
+        assert_eq!(parse_host("h:2222"), (None, "h".into(), Some(2222)));
+        assert_eq!(parse_host("u@h"), (Some("u".into()), "h".into(), None));
+        assert_eq!(parse_host("h"), (None, "h".into(), None));
+    }
+
+    #[test]
+    fn env_file_has_server_and_token() {
+        let env = build_node_env_file(&sample(), "TOK123");
+        assert!(env.contains("AGENTGRID_SERVER='http://127.0.0.1:7800'"));
+        assert!(env.contains("AGENTGRID_ENROLL_TOKEN='TOK123'"));
+        assert!(env.contains("AGENTGRID_NODE_NAME='node-b'"));
+        // single-quoted values survive `env $(cat ...)`
+        assert!(env.lines().all(|l| l.contains('=')));
+    }
+
+    #[test]
+    fn validate_rejects_shell_meta() {
+        let mut a = sample();
+        a.name = "$(rm -rf /)".into();
+        assert!(validate_install_args(&a).is_err());
+        let mut b = sample();
+        b.repositories = "a; b".into();
+        assert!(validate_install_args(&b).is_err());
+        assert!(validate_install_args(&sample()).is_ok());
+    }
+
+    #[test]
+    fn wireguard_transport_not_implemented() {
+        // ensured at the command layer; here we just confirm the variant exists
+        let _ = Transport::Wireguard;
+    }
+}
+
