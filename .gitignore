@@ -54,3 +54,8 @@ opt/
 /target/
 agentgrid-workspace/
 *.log
+cp-test.db*
+*.db
+*.db-shm
+*.db-wal
+*.db.lock
