@@ -348,10 +348,10 @@
 - [x] `AGENTGRID_AGENT_PROFILE_<ID>` (путь к .md или inline) → node пишет `AGENTS.md` в worktree + env `AGENTGRID_SYSTEM_PROMPT`. Кросс-агентная конвенция.
 - [ ] Per-agent native projection (`CLAUDE.md`, `.kiro/`) — follow-up mapping table.
 
-### 11.4 Feedback-loop CI→agent (из AgentWrapper) — [ ] (крупная)
+### 11.4 Feedback-loop CI→agent (из AgentWrapper) — done
 
-- [ ] Реструктурировать wrapper-path spawn в цикл: при провале `validation_command` → re-spawn агента с augmented prompt (оригинал + ошибка валидации), до N retries (`AGENTGRID_FEEDBACK_RETRIES`).
-- [ ] GAP: ACP path сейчас вообще не跑 validation (drive_acp_session return-ит до validation). Сначала вынести validation в обоих paths.
+- [x] Wrapper path: spawn→select→finalize→validate обёрнуты в цикл. При провале `validation_command` (agent exit 0, validation fail) и остались retries (`AGENTGRID_FEEDBACK_RETRIES`, default 0=off) — re-spawn агента с prompt = оригинал + "\n\nValidation failed (round N):\n```\n<validation.log>\n```\nFix the code so the validation passes.". Worktree накапливает фиксы, commit один раз в конце. Все события (включая `feedback` event) под одним attempt. Backward compatible (retries=0).
+- [x] ACP path: раньше вообще не бегал validation (баг) — теперь `finalize_workspace` + `run_validation` после `drive_acp_session`, перед report_complete. Feedback-loop на ACP = follow-up (structure differs).
 - [ ] Опц.: роутинг review-comments/merge-conflicts (нужен GitHub integration).
 
 ### 11.5 Resume session (2) — [ ] (крупная, cp migration)

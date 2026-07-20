@@ -19,6 +19,11 @@ complete; the two-container E2E run is the release validation gate.
 ### Added (gateway — chat front-end, Stage 9.3)
 - New crate `crates/gateway` (`agentgrid-gateway`): a chat bridge that lets an operator drive the grid from a phone. A `ChatProvider` trait with one implementation — Telegram, via raw `reqwest` calls to the Bot API `getUpdates`/`sendMessage` long-polling (no chat-client crate). Commands proxy to the control-plane HTTP API: `/nodes`, `/tasks`, `/run <repo> <adapter> <prompt...>`, `/show <id>`, `/logs <id>`, `/cancel <id>`, `/help`. Auth is an allowlist of numeric chat ids (`AGENTGRID_GATEWAY_ADMINS`); chats off the list are ignored. The control-plane URL + a user JWT come from `AGENTGRID_SERVER` / `AGENTGRID_GATEWAY_TOKEN`. Discord and WhatsApp sit behind the same trait but are **not implemented yet** — WhatsApp especially has no easy open bot API (the Business API is gated/heavy); both are honestly deferred rather than stubbed. Covered by `tests::fmt_*` (the pure formatting/dispatch helpers); live bot wiring needs a real Telegram token.
 
+### Added (feedback-loop CI→agent, Stage 11.4)
+
+- **Wrapper path**: the spawn→select→finalize→validate flow is wrapped in a retry loop. When `validation_command` is configured and the agent exits 0 but validation fails, the node re-spawns the agent with the validation error appended to the prompt (same worktree, fixes accumulate, single commit at the end), up to `AGENTGRID_FEEDBACK_RETRIES` rounds (default 0 = off, backward compatible). A `feedback` event is emitted each round so the loop is visible in the event stream.
+- **ACP path bugfix**: the ACP path used to skip `finalize_workspace` and `run_validation` entirely, silently leaving `validation_command` unenforced for ACP agents. Now both run after `drive_acp_session`, before `report_complete`.
+
 ### Added (agent-profile SSOT, Stage 11.3)
 
 - An optional system prompt per adapter, projected into the worktree before the agent runs. `AGENTGRID_AGENT_PROFILE_<ID>` is either a path to a `.md` file (read) or inline text; the node writes it to `<worktree>/AGENTS.md` (the cross-agent convention that Claude Code, opencode, pi, etc. read) and forwards it as the `AGENTGRID_SYSTEM_PROMPT` env hint. Per-agent native projection (`CLAUDE.md`, `.kiro/`) is a follow-up mapping table.

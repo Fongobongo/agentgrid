@@ -696,13 +696,41 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         )
         .await;
         let res = drive_acp_session(&cfg, &client, &assignment, &ws.path, sink.clone()).await?;
+        // Keep the worktree path so validation can run against it; `ws` itself
+        // moves into finalize_workspace (which commits any diff).
+        let workdir = ws.path.clone();
+        let node_name = cfg.node_name.clone();
+        let commit_sha =
+            tokio::task::spawn_blocking(move || git::finalize_workspace(ws, node_name.as_str()))
+                .await??;
+        // Run the optional validation command — the ACP path used to skip it,
+        // silently leaving validation_command unenforced for ACP agents. The
+        // diff is already committed so it survives a validation failure.
+        // Stage 11.4.
+        let mut exit_code = if res.success { 0 } else { 1 };
+        let mut error_code = res.error_code;
+        if exit_code == 0 {
+            if let Some(cmd) = &assignment.validation_command {
+                match run_validation(&workdir, cmd, &sink).await {
+                    Ok(vcode) if vcode != 0 => {
+                        exit_code = vcode;
+                        error_code = Some("validation_failed".into());
+                    }
+                    Err(e) => {
+                        tracing::error!("ACP validation failed to run: {e}");
+                        error_code = Some("validation_failed".into());
+                    }
+                    _ => {}
+                }
+            }
+        }
         report_complete(
             &client,
             &cfg.server,
             &assignment.attempt_id,
-            if res.success { 0 } else { 1 },
-            None,
-            res.error_code,
+            exit_code,
+            commit_sha,
+            error_code,
         )
         .await;
         return Ok(());
@@ -747,53 +775,34 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     // ponytail: sandbox not applied here (legacy wrapper path); the ACP path
     // is sandboxed. Wire Sandbox into ExecutionBackend if legacy isolation is
     // needed.
-    let req = agentgrid_adapters::SpawnRequest {
-        bin,
-        prompt: assignment.prompt.clone(),
-        workdir: ws.path.clone(),
-        attempt_id: assignment.attempt_id.clone(),
-        timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
-        env: cfg.adapter_env.clone(),
-    };
-    let bp = match agentgrid_adapters::ProcessBackend.spawn(req) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!("failed to spawn adapter: {e}");
-            report_complete(
-                &client,
-                &cfg.server,
-                &assignment.attempt_id,
-                127,
-                None,
-                None,
-            )
-            .await;
-            return Ok(());
-        }
-    };
-
-    let pid = bp.pid;
+    //
+    // Feedback loop (Stage 11.4): when a validation_command is configured and
+    // the agent exits 0 but validation fails, re-spawn the agent with the
+    // validation error appended to the prompt (same worktree) so it can fix
+    // its own output. Bounded by AGENTGRID_FEEDBACK_RETRIES (default 0 = off,
+    // backward compatible). Each round reuses the same sink/flusher so all
+    // events stay under one attempt; the worktree accumulates the agent's
+    // fixes and is committed once at the end.
+    let retries: usize = std::env::var("AGENTGRID_FEEDBACK_RETRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let cancel_url = format!(
         "{}/v1/node/attempts/{}/cancel",
         cfg.server, assignment.attempt_id
     );
-    let cancel_client = client.clone();
-    let timeout = bp.timeout;
-
-    let stdout = bp.stdout;
-    let stderr = bp.stderr;
-    let mut child = bp.child;
     let sink = EventSink::new(
         assignment.attempt_id.clone(),
         client.clone(),
         cfg.server.clone(),
     );
-    // Acknowledge the assignment immediately so the ack deadline (store.rs
-    // ACK_DEADLINE_SECS) cannot expire before a slow agent emits its first
-    // event. Without this a silent agent that starts but takes >deadline
-    // seconds to produce output loses the assignment and the task is
-    // reassigned (double-attempt). After ack the attempt is 'running' and the
-    // revert no longer applies (Stage 1.3).
+    let workdir = ws.path.clone();
+    let validation_log = workdir.join("validation.log");
+    let mut prompt = assignment.prompt.clone();
+    let mut last_code: i32;
+    let mut last_kill_reason: Option<&'static str> = None;
+
+    // Ack once; the attempt is `running` for its whole (multi-round) lifetime.
     ack_attempt(&client, &cfg.server, &assignment.attempt_id).await;
     create_agent_session(
         &client,
@@ -804,98 +813,151 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     .await;
     let flusher = tokio::spawn(sink.clone().run_flusher());
 
-    let r1 = tokio::spawn(read_stream(
-        stdout,
-        sink.clone(),
-        "stdout",
-        cfg.secrets.clone(),
-        raw_file.clone(),
-    ));
-    let r2 = tokio::spawn(read_stream(
-        stderr,
-        sink.clone(),
-        "stderr",
-        cfg.secrets.clone(),
-        raw_file.clone(),
-    ));
+    let mut round = 0usize;
+    let validation_passed = loop {
+        let req = agentgrid_adapters::SpawnRequest {
+            bin: bin.clone(),
+            prompt: prompt.clone(),
+            workdir: ws.path.clone(),
+            attempt_id: assignment.attempt_id.clone(),
+            timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
+            env: cfg.adapter_env.clone(),
+        };
+        let bp = match agentgrid_adapters::ProcessBackend.spawn(req) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("failed to spawn adapter: {e}");
+                last_code = 127;
+                break false;
+            }
+        };
+        let pid = bp.pid;
+        let timeout = bp.timeout;
+        let stdout = bp.stdout;
+        let stderr = bp.stderr;
+        let mut child = bp.child;
+        let cancel_client = client.clone();
 
-    enum Outcome {
-        Exited(i32),
-        Timeout,
-        Cancel,
-    }
-    let outcome = tokio::select! {
-        status = child.wait() => Outcome::Exited(status?.code().unwrap_or(-1)),
-        _ = tokio::time::sleep(timeout) => Outcome::Timeout,
-        _ = wait_for_cancel(cancel_client, cancel_url) => Outcome::Cancel,
-    };
-    let (code, kill_reason) = match outcome {
-        Outcome::Exited(c) => (c, None),
-        Outcome::Timeout => {
-            terminate_group(pid);
-            let status = child.wait().await?;
-            (status.code().unwrap_or(-1), Some("timeout"))
+        let r1 = tokio::spawn(read_stream(
+            stdout,
+            sink.clone(),
+            "stdout",
+            cfg.secrets.clone(),
+            raw_file.clone(),
+        ));
+        let r2 = tokio::spawn(read_stream(
+            stderr,
+            sink.clone(),
+            "stderr",
+            cfg.secrets.clone(),
+            raw_file.clone(),
+        ));
+
+        enum Outcome {
+            Exited(i32),
+            Timeout,
+            Cancel,
         }
-        Outcome::Cancel => {
-            // Stage 3.2: record cancellation in the normalized event stream
-            // before tearing down the process group.
-            sink.push(
-                EventKind::Cancel.to_event_type(),
-                json!({
-                    "kind": "cancel",
-                    "reason": "user_requested",
-                    "attempt_id": assignment.attempt_id
-                }),
-            )
-            .await;
-            terminate_group(pid);
-            let status = child.wait().await?;
-            (status.code().unwrap_or(-1), None)
+        let (code, kill_reason): (i32, Option<&'static str>) = {
+            let outcome = tokio::select! {
+                status = child.wait() => Outcome::Exited(status?.code().unwrap_or(-1)),
+                _ = tokio::time::sleep(timeout) => Outcome::Timeout,
+                _ = wait_for_cancel(cancel_client, cancel_url.clone()) => Outcome::Cancel,
+            };
+            match outcome {
+                Outcome::Exited(c) => (c, None),
+                Outcome::Timeout => {
+                    terminate_group(pid);
+                    let status = child.wait().await?;
+                    (status.code().unwrap_or(-1), Some("timeout"))
+                }
+                Outcome::Cancel => {
+                    sink.push(
+                        EventKind::Cancel.to_event_type(),
+                        json!({
+                            "kind": "cancel",
+                            "reason": "user_requested",
+                            "attempt_id": assignment.attempt_id
+                        }),
+                    )
+                    .await;
+                    terminate_group(pid);
+                    let status = child.wait().await?;
+                    (status.code().unwrap_or(-1), None)
+                }
+            }
+        };
+
+        let _ = r1.await;
+        let _ = r2.await;
+        sink.flush().await;
+        if code == 0 && sink.adapter_event_count() == 0 {
+            tracing::warn!(
+                attempt_id = %assignment.attempt_id,
+                "adapter exited 0 but produced no stdout/stderr events; task output may be empty (silent agent?)"
+            );
         }
+        last_code = code;
+        last_kill_reason = kill_reason;
+
+        // Agent failed (non-zero exit): no fixable validation to feed back; stop.
+        if code != 0 {
+            break false;
+        }
+        // Validate; if it passes we're done. If it fails and a retry is left,
+        // feed the validation error back into the prompt and re-spawn.
+        if let Some(cmd) = &assignment.validation_command {
+            let v = run_validation(&workdir, cmd, &sink).await;
+            let fail = match &v {
+                Ok(vcode) => *vcode != 0,
+                Err(e) => {
+                    tracing::error!("validation failed to run: {e}");
+                    true
+                }
+            };
+            if fail {
+                if round < retries {
+                    let log = tokio::fs::read_to_string(&validation_log)
+                        .await
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| "(no validation output)".into());
+                    tracing::info!(attempt_id = %assignment.attempt_id, round, "validation failed; feeding error back to agent");
+                    sink.push(
+                        EventKind::Log.to_event_type(),
+                        json!({ "kind": "feedback", "round": round, "retrying": true }),
+                    )
+                    .await;
+                    prompt = format!(
+                        "{orig}\n\nValidation failed (round {round}):\n```\n{log}\n```\nFix the code so the validation passes.",
+                        orig = assignment.prompt
+                    );
+                    round += 1;
+                    continue;
+                }
+                break false;
+            }
+        }
+        break true;
     };
-    let _ = r1.await;
-    let _ = r2.await;
-    sink.flush().await;
-    // A silent agent that exits 0 without producing any output yields a task
-    // that looks "succeeded" but is empty (e.g. opencode emitted nothing for a
-    // run). Surface it so ops can notice the missing output.
-    if code == 0 && sink.adapter_event_count() == 0 {
-        tracing::warn!(
-            attempt_id = %assignment.attempt_id,
-            "adapter exited 0 but produced no stdout/stderr events; task output may be empty (silent agent?)"
-        );
-    }
     flusher.abort();
 
     let node_name = cfg.node_name.clone();
-    let workdir = ws.path.clone();
     let patch_path = workdir.join("changes.patch");
-    let validation_log = workdir.join("validation.log");
     let commit_sha =
         tokio::task::spawn_blocking(move || git::finalize_workspace(ws, node_name.as_str()))
             .await??;
 
-    // Validation runs only when the agent itself succeeded (Stage 3.3); the
-    // diff is already committed so it survives a validation failure.
-    let mut error_code: Option<String> = if code == 0 {
-        None
-    } else {
-        // A killed attempt reports why: timeout is distinct from a generic
-        // agent failure (so dashboards/queries can tell them apart).
-        Some(kill_reason.unwrap_or("agent_failed").into())
-    };
-    if code == 0 {
-        if let Some(cmd) = &assignment.validation_command {
-            match run_validation(&workdir, cmd, &sink).await {
-                Ok(vcode) if vcode != 0 => error_code = Some("validation_failed".into()),
-                Err(e) => {
-                    tracing::error!("validation failed to run: {e}");
-                    error_code = Some("validation_failed".into());
-                }
-                _ => {}
-            }
+    let code = last_code;
+    let error_code: Option<String> = if code == 0 {
+        if validation_passed {
+            None
+        } else {
+            Some("validation_failed".into())
         }
-    }
+    } else {
+        Some(last_kill_reason.unwrap_or("agent_failed").into())
+    };
 
     // Upload produced artifacts (changes.patch for git tasks; validation.log;
     // raw adapter output as a format-change safety net, Stage 3.1).
