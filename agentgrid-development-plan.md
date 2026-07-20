@@ -68,7 +68,7 @@
 - [x] Приоритет доставки: completion/state > permission/terminal events > ordinary logs > artifacts; логи не могут вытеснить terminal state (completions = отдельный споил, идемпотентный)
 - [x] Проверять HTTP status всех node→CP запросов (сейчас проверяется только transport error)
 - [x] Retry с exponential backoff + jitter; резюме по sequence
-- [ ] Ограничения: RAM buffer 1–4 МБ; лимиты spool задаются per attempt и per node; backpressure + truncation с меткой `output_truncated` (status/error/result/approval не удалять)
+- [x] Ограничения: RAM buffer 1–4 МБ; лимиты spool задаются per attempt и per node; backpressure + truncation с меткой `output_truncated` (status/error/result/approval не удалять)
 - [x] `CompleteAttemptRequest`: durable retry + idempotency (повторный complete того же attempt — no-op)
 - [x] Artifact upload: retry, проверка response status, идемпотентность per name
 - [x] Recovery: после рестарта daemon обнаружить незавершённые attempts и непустой outbox → досылка/reconciliation с control plane (completions redelivered на старте; events redelivered при следующем запуске попытки)

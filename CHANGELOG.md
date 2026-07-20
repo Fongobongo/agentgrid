@@ -61,6 +61,10 @@ complete; the two-container E2E run is the release validation gate.
 ### Added (gateway — chat front-end, Stage 9.3)
 - New crate `crates/gateway` (`agentgrid-gateway`): a chat bridge that lets an operator drive the grid from a phone. A `ChatProvider` trait with one implementation — Telegram, via raw `reqwest` calls to the Bot API `getUpdates`/`sendMessage` long-polling (no chat-client crate). Commands proxy to the control-plane HTTP API: `/nodes`, `/tasks`, `/run <repo> <adapter> <prompt...>`, `/show <id>`, `/logs <id>`, `/cancel <id>`, `/help`. Auth is an allowlist of numeric chat ids (`AGENTGRID_GATEWAY_ADMINS`); chats off the list are ignored. The control-plane URL + a user JWT come from `AGENTGRID_SERVER` / `AGENTGRID_GATEWAY_TOKEN`. Discord and WhatsApp sit behind the same trait but are **not implemented yet** — WhatsApp especially has no easy open bot API (the Business API is gated/heavy); both are honestly deferred rather than stubbed. Covered by `tests::fmt_*` (the pure formatting/dispatch helpers); live bot wiring needs a real Telegram token.
 
+### Added (node — event backpressure + `output_truncated`, Stage 2.1)
+
+- `EventSink` now caps its RAM buffer per attempt at `AGENTGRID_EVENT_BUF_BYTES` (default 4 MiB). Once over the cap, ordinary log/usage events (`stdout`/`stderr`/`metric`) are dropped and exactly one `output_truncated` status notice is emitted; terminal-state events (`status`/`result`/`error`) and `tool` calls are never dropped, so logs can't starve terminal state. The budget is released as the flusher drains. Covered by `event_sink_drops_logs_over_cap_but_keeps_terminal_state`.
+
 ### Added (cp ops metrics — checkpoint duration + SQLITE_BUSY, Stage 2.5)
 
 - `/metrics` now exposes `agentgrid_sqlite_checkpoint_ms` (last `wal_checkpoint(TRUNCATE)` duration) and `agentgrid_sqlite_busy_total` (cumulative SQLITE_BUSY/locked-class failures observed during checkpoints). `wal_checkpoint` now times itself and counts busy/locked errors distinctly so they surface in metrics rather than only logs.

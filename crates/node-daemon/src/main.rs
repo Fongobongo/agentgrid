@@ -336,6 +336,11 @@ struct EventSink {
     // send attempt and removed only after the CP acks the batch, so a daemon
     // kill no longer drops the in-flight tail.
     outbox: Arc<outbox::EventOutbox>,
+    /// Stage 2.1: approximate RAM bytes pending in `buf` (backpressure).
+    buf_bytes: AtomicU64,
+    /// Stage 2.1: latched once an `output_truncated` notice has been emitted,
+    // so a chatty agent produces one truncation notice, not one per dropped line.
+    truncated_warned: std::sync::atomic::AtomicBool,
 }
 
 impl EventSink {
@@ -354,6 +359,8 @@ impl EventSink {
             client,
             server,
             outbox,
+            buf_bytes: AtomicU64::new(0),
+            truncated_warned: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -368,7 +375,36 @@ impl EventSink {
     }
 
     async fn push(&self, ty: EventType, payload: serde_json::Value) {
+        // Stage 2.1 backpressure: ordinary log/usage events are dropped (with a
+        // single `output_truncated` notice) once the RAM buffer exceeds the per-
+        // attempt cap, so a chatty agent can't wedge the node. Terminal state
+        // (status/result/error) and tool calls are never dropped.
+        let droppable = matches!(
+            ty,
+            EventType::Stdout | EventType::Stderr | EventType::Metric
+        );
+        if droppable {
+            let cap = std::env::var("AGENTGRID_EVENT_BUF_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(4 * 1024 * 1024);
+            let cur = self.buf_bytes.load(Ordering::Relaxed);
+            if cur >= cap {
+                if !self
+                    .truncated_warned
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    tracing::warn!(
+                        attempt_id = %self.attempt_id,
+                        cap, "output truncated: event buffer over cap; dropping further logs"
+                    );
+                    self.emit_truncated_notice(cap).await;
+                }
+                return;
+            }
+        }
         let seq = self.next.fetch_add(1, Ordering::SeqCst);
+        let approx_bytes = payload.to_string().len() as u64;
         let ev = IncomingEvent {
             sequence: seq,
             r#type: ty,
@@ -380,16 +416,44 @@ impl EventSink {
         if let Err(e) = self.outbox.push(&ev) {
             tracing::warn!(attempt_id = %self.attempt_id, "outbox push failed: {e}");
         }
+        self.buf_bytes.fetch_add(approx_bytes, Ordering::Relaxed);
         self.buf.lock().await.push_back(ev);
         if self.buf.lock().await.len() >= 50 {
             self.notify.notify_one();
         }
     }
 
+    async fn emit_truncated_notice(&self, cap: u64) {
+        let seq = self.next.fetch_add(1, Ordering::SeqCst);
+        let ev = IncomingEvent {
+            sequence: seq,
+            r#type: EventType::Status,
+            payload: serde_json::json!({
+                "event": "output_truncated",
+                "reason": "event buffer over cap",
+                "cap_bytes": cap,
+            }),
+        };
+        if let Err(e) = self.outbox.push(&ev) {
+            tracing::warn!(attempt_id = %self.attempt_id, "outbox push (truncation) failed: {e}");
+        }
+        self.buf.lock().await.push_back(ev);
+        self.notify.notify_one();
+    }
+
     async fn flush(&self) {
         let batch: Vec<IncomingEvent> = std::mem::take(&mut *self.buf.lock().await)
             .into_iter()
             .collect();
+        if !batch.is_empty() {
+            // Stage 2.1: release the RAM budget these events held so backpressure
+            // resets as the flusher drains.
+            let freed: u64 = batch
+                .iter()
+                .map(|e| e.payload.to_string().len() as u64)
+                .sum();
+            self.buf_bytes.fetch_sub(freed, Ordering::Relaxed);
+        }
         if batch.is_empty() {
             return;
         }
@@ -1553,6 +1617,37 @@ mod tests {
     fn test_outbox(attempt_id: &str) -> Arc<outbox::EventOutbox> {
         let dir = std::env::temp_dir().join(format!("ag-outbox-test-{}", uuid::Uuid::new_v4()));
         Arc::new(outbox::EventOutbox::open(&dir, attempt_id).unwrap())
+    }
+
+    #[tokio::test]
+    async fn event_sink_drops_logs_over_cap_but_keeps_terminal_state() {
+        // Stage 2.1: backpressure. A chatty agent's stdout/stderr are dropped
+        // once the RAM buffer exceeds the cap; status/result/error are never
+        // dropped, and exactly one `output_truncated` notice is emitted.
+        std::env::set_var("AGENTGRID_EVENT_BUF_BYTES", "64");
+        let sink = EventSink::new(
+            "a1".into(),
+            reqwest::Client::new(),
+            "http://x".into(),
+            test_outbox("a1"),
+        );
+        // Each line ~ 100 bytes; 64-byte cap overflows after the first.
+        for _ in 0..50 {
+            sink.push(EventType::Stdout, serde_json::json!({ "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }))
+                .await;
+        }
+        // A terminal-state event must still be accepted despite the overflow.
+        sink.push(EventType::Result, serde_json::json!({ "ok": true }))
+            .await;
+        let buf = sink.buf.lock().await;
+        let has_result = buf.iter().any(|e| e.r#type == EventType::Result);
+        let truncation_notices = buf
+            .iter()
+            .filter(|e| e.payload.get("event").and_then(|v| v.as_str()) == Some("output_truncated"))
+            .count();
+        assert!(has_result, "terminal-state event must survive truncation");
+        assert_eq!(truncation_notices, 1, "exactly one output_truncated notice");
+        std::env::remove_var("AGENTGRID_EVENT_BUF_BYTES");
     }
 
     #[test]
