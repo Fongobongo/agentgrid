@@ -82,8 +82,8 @@
 - [x] Test: секрет из `AGENTGRID_SECRETS` не появляется в events, artifacts, validation.log, changes.patch
 - [x] Вынести `agent-raw-output.log` из worktree (в attempt dir вне git) либо добавить в `.git/info/exclude`
 - [x] Test: `agent-raw-output.log` и `validation.log` отсутствуют в commit и patch
-- [ ] Валидация artifact name: safe basename, запрет `..` и absolute paths; запись через descriptor-relative API (`openat`/`cap-std`, `O_NOFOLLOW`) вместо одной лишь canonicalize-проверки
-- [ ] Adversarial tests: `../x`, `/etc/passwd`, symlink в worktree, symlink-swap/TOCTOU
+- [x] Валидация artifact name: safe basename, запрет `..` и absolute paths; запись через descriptor-relative API (`openat`/`cap-std`, `O_NOFOLLOW`) вместо одной лишь canonicalize-проверки
+- [x] Adversarial tests: `../x`, `/etc/passwd`, symlink в worktree, symlink-swap/TOCTOU
 - [x] Credential file: atomic create + rename, mode `0600`
 - [ ] Binary-safe artifact API: streaming upload/download, hash + size + media type (замена UTF-8 JSON body)
 

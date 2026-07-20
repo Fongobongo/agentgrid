@@ -1204,6 +1204,12 @@ async fn get_artifact(
     State(state): State<Arc<AppState>>,
     Path((task_id, name)): Path<(String, String)>,
 ) -> Result<String, StatusCode> {
+    // Stage 2.2: a crafted name (../, absolute, ...) must not traverse out of
+    // the artifact root via store::read_artifact's join. Reject as 404 so a
+    // denial does not disclose whether the task/artifact exists.
+    if !is_safe_artifact_name(&name) {
+        return Err(StatusCode::NOT_FOUND);
+    }
     match state.store.read_artifact(&task_id, &name).await {
         Ok(Some(s)) => Ok(s),
         Ok(None) => Err(StatusCode::NOT_FOUND),

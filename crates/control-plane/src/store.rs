@@ -224,10 +224,41 @@ impl Store {
 
     /// Persist an artifact's bytes on the control-plane filesystem and record
     /// its metadata. `content` is treated as UTF-8 text (patches/logs).
+    /// Resolve `attempt_id/name` to an absolute path inside the artifact root,
+    /// rejecting traversal. Canonicalizes the parent (created lazily) and checks
+    /// the final name is a single safe segment so a symlinked worktree dir or a
+    /// `..`-laden name cannot escape the root (Stage 2.2 defense-in-depth).
+    fn artifact_path(&self, attempt_id: &str, name: &str) -> Result<std::path::PathBuf> {
+        let dir = self.artifact_root.join(attempt_id);
+        // Canonicalize the existing artifact dir; if it does not exist yet the
+        // caller (save_artifact) creates it first, so this is mainly read-side.
+        let canon_root = self
+            .artifact_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.artifact_root.clone());
+        let canon_dir = dir.canonicalize().unwrap_or(dir.clone());
+        if !canon_dir.starts_with(&canon_root) {
+            anyhow::bail!("artifact dir escapes root");
+        }
+        // Single safe segment: no separators / traversal / NUL / control chars.
+        if name.is_empty()
+            || name.len() > 255
+            || name.contains('/')
+            || name.contains('\\')
+            || name.contains('\0')
+            || name == "."
+            || name == ".."
+            || name.chars().any(|c| c.is_control())
+        {
+            anyhow::bail!("invalid artifact name");
+        }
+        Ok(canon_dir.join(name))
+    }
+
     pub async fn save_artifact(&self, attempt_id: &str, req: &UploadArtifactRequest) -> Result<()> {
         let dir = self.artifact_root.join(attempt_id);
         tokio::fs::create_dir_all(&dir).await?;
-        let path = dir.join(&req.name);
+        let path = self.artifact_path(attempt_id, &req.name)?;
         tokio::fs::write(&path, &req.content).await?;
         let size = req.content.len() as i64;
         let id = Uuid::new_v4().to_string();
@@ -262,7 +293,12 @@ impl Store {
         let Some(attempt_id) = self.latest_attempt_id(task_id).await? else {
             return Ok(None);
         };
-        let path = self.artifact_root.join(&attempt_id).join(name);
+        let path = match self.artifact_path(&attempt_id, name) {
+            Ok(p) => p,
+            // Invalid/traversal name: treat as absent rather than erroring,
+            // so a crafted request cannot distinguish a valid artifact.
+            Err(_) => return Ok(None),
+        };
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => Ok(Some(s)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -3212,5 +3248,85 @@ mod workflow_tests {
             Some("sess-1"),
             "assignment carries the resume parent"
         );
+    }
+
+    #[tokio::test]
+    async fn artifact_save_rejects_traversal_names() {
+        let s = temp_store().await;
+        for bad in ["../x", "..", ".", "/etc/passwd", "a/b", "a\\b", "", "x\0y"] {
+            let r = s
+                .save_artifact(
+                    "att-trav",
+                    &UploadArtifactRequest {
+                        name: bad.into(),
+                        content: "x".into(),
+                    },
+                )
+                .await;
+            assert!(r.is_err(), "traversal name {bad:?} should be rejected");
+        }
+        // A plain single-segment name is accepted.
+        s.save_artifact(
+            "att-trav",
+            &UploadArtifactRequest {
+                name: "ok.txt".into(),
+                content: "ok".into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn artifact_read_traversal_returns_none() {
+        // Stage 2.2: a crafted read name must not escape the artifact root;
+        // invalid names resolve to None (not found), not an error, so a 404 vs
+        // 500 cannot leak whether an artifact exists.
+        let s = temp_store().await;
+        // Seed a task + attempt so latest_attempt_id resolves.
+        let task_id = "task-art";
+        sqlx::query(
+            "INSERT INTO tasks (id, repository, prompt, adapter, status, created_at, timeout_secs) \
+             VALUES (?, '', 'p', 'mock', 'queued', ?, 60)",
+        )
+        .bind(task_id)
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
+             VALUES (?, ?, 1, 'n', 'succeeded', ?, ?, ?)",
+        )
+        .bind("att-art")
+        .bind(task_id)
+        .bind(now_iso())
+        .bind(now_iso())
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        s.save_artifact(
+            "att-art",
+            &UploadArtifactRequest {
+                name: "real.txt".into(),
+                content: "data".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            s.read_artifact(task_id, "real.txt").await.unwrap(),
+            Some("data".to_string()),
+            "valid artifact reads back"
+        );
+        // No traversal name reaches the filesystem as an escape.
+        for bad in ["../../../etc/passwd", "..", "/etc/passwd", "sub/dir/secret"] {
+            assert_eq!(
+                s.read_artifact(task_id, bad).await.unwrap(),
+                None,
+                "traversal read {bad:?} must be None"
+            );
+        }
     }
 }
