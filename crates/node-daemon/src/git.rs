@@ -10,11 +10,28 @@
 //! plane cannot inject a shell command. Tokens are validated as defense-in-depth
 //! (Stage 2.3).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use agentgrid_common::Assignment;
 use anyhow::{Context, Result};
+
+/// Per-repo in-process lock (Stage 2.3): the shared clone's `fetch` +
+/// `checkout -B` + `worktree add` are serialized per repository so two
+/// parallel attempts of one repo cannot race the clone state. Each attempt
+/// still gets its own worktree, so agent work runs concurrently.
+static REPO_LOCKS: OnceLock<Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn repo_lock(repo: &str) -> std::sync::Arc<Mutex<()>> {
+    let map = REPO_LOCKS.get_or_init(Mutex::default);
+    let mut guard = map.lock().unwrap();
+    guard
+        .entry(repo.to_string())
+        .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
+        .clone()
+}
 
 pub struct Workspace {
     /// Directory the adapter runs in.
@@ -123,6 +140,11 @@ pub fn prepare_workspace(
     let db = assignment.default_branch.as_str();
     let gurl = assignment.git_url.as_str();
     let repo = assignment.repository.as_str();
+
+    // Stage 2.3: serialize shared-clone mutations (fetch / checkout -B /
+    // worktree add) per repository across concurrent attempts.
+    let _repo_arc = repo_lock(repo);
+    let _repo_guard = _repo_arc.lock().unwrap();
 
     // Stage 8: if a fixed base_commit is requested, every attempt of this step
     // starts from that exact commit (parallel workers share it). Best-effort
@@ -403,6 +425,69 @@ mod tests {
             !patch.contains("SECRET"),
             "secret leaked into patch: {patch}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parallel_prep_same_repo_does_not_race() {
+        // Stage 2.3: two concurrent attempts of one repository must not corrupt
+        // the shared clone (fetch / checkout -B / worktree add serialize per repo).
+        let dir = std::env::temp_dir().join(format!("ag-git-par-{}", uuid::Uuid::new_v4()));
+        let origin = dir.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(origin.join("base.txt"), "base").unwrap();
+        git(&origin, &["add", "-A"]).unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        let repos = dir.join("repos");
+        let ws_root = dir.join("ws");
+        let url = origin.to_str().unwrap().to_string();
+        let mut handles = vec![];
+        for n in 0..4u32 {
+            let repos = repos.clone();
+            let ws_root = ws_root.clone();
+            let url = url.clone();
+            handles.push(std::thread::spawn(move || {
+                let a = Assignment {
+                    attempt_id: format!("att-{n}"),
+                    task_id: format!("task-{n}"),
+                    repository: "repo".into(),
+                    prompt: "x".into(),
+                    adapter: "mock".into(),
+                    number: 1,
+                    timeout_secs: 60,
+                    git_url: url,
+                    default_branch: "main".into(),
+                    validation_command: None,
+                    base_commit: None,
+                    parent_acp_session_id: None,
+                };
+                prepare_workspace(&repos, &ws_root, &a)
+            }));
+        }
+        let mut ok = 0;
+        for h in handles {
+            if let Ok(ws) = h.join().unwrap() {
+                assert!(ws.is_git, "worktree should be a git worktree");
+                assert!(ws.path.exists(), "worktree path must exist");
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, 4, "all parallel prepares must succeed");
         std::fs::remove_dir_all(&dir).ok();
     }
 

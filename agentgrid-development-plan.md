@@ -92,8 +92,8 @@
 - [x] Убрать все `sh -c` из `git.rs` и `probe_adapter`; каждый арг��мент через `Command::arg`
 - [x] Строгие типы/валидация: repository slug, branch/ref, adapter id (`[a-z0-9-_]`, длина)
 - [x] Adversarial tests: пробелы, кавычки, `;`, `$()`, `..` в git_url/repo name/branch
-- [ ] Per-repository async lock + file lock: fetch, checkout, `worktree add`, cleanup сериализованы
-- [ ] Test: два параллельных attempts одного repo не ломают clone state
+- [x] Per-repository async lock + file lock: fetch, checkout, `worktree add`, cleanup сериализованы
+- [x] Test: два параллельных attempts одного repo не ломают clone state
 - [ ] Убрать `checkout -B` в shared clone → bare mirror либо detached ref; worktree от зафиксированного commit
 - [x] Добавить `base_commit` в `Assignment`; фиксировать его при fetch
 - [ ] Worktree/branch cleanup: retention 24h, фоновая job, `git worktree prune`, reconciliation при старте
