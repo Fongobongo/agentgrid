@@ -360,9 +360,10 @@
 - [x] `Assignment.parent_acp_session_id`; node: `session/new` с `parent_session_id` для resume.
 - [x] cp: в conversation append — брать последний attempt's session_id как parent (`Store::last_conversation_acp_session`). Resume = оптимизация (агент не пере-обрабатывает историю), не correctness: conversations уже композят историю в prompt.
 
-### 11.6 Run viewer с DAG (3) (из open-multi-agent) — [ ] (web UI)
+### 11.6 Run viewer с DAG (3) (из open-multi-agent) — done (minimal)
 
-- [ ] Observability UI: DAG задач/шагов + span waterfall. У нас уже есть workflow projection + metrics — визуализировать в `web/`.
+- [x] Observability UI: список run'ов (`#/workflows`) + детальная страница run'а (`#/workflow/<id>`) с DAG шагов (слои по глубине `depends_on`), статусы/verdict/role/node/attempts/error_code, автопoлл, кнопка cancel. Под `GET /v1/workflow-runs` + `/v1/workflow-runs/{id}/projection`.
+- [ ] Span waterfall (timeline по времени) — follow-up; текущая node view — layered DAG, не по времени.
 
 ---
 

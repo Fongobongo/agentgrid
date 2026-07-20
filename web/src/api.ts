@@ -138,6 +138,47 @@ export function revokeNode(id: string) {
   return req('DELETE', `/v1/nodes/${id}`);
 }
 
+export interface WorkflowRun {
+  id: string;
+  template_id: string;
+  status: string;
+  created_at: string;
+  finished_at: string | null;
+  context?: string | null;
+  repository?: string | null;
+  base_commit?: string | null;
+}
+
+export interface StepProjection {
+  step_id: string;
+  role: string;
+  status: string;
+  depends_on: string[];
+  requested_node_id?: string | null;
+  task_id?: string | null;
+  node_id?: string | null;
+  attempts: number;
+  verdict: string;
+  error_code?: string | null;
+}
+
+export interface WorkflowProjection {
+  run: WorkflowRun;
+  steps: StepProjection[];
+}
+
+export function listWorkflowRuns() {
+  return getJson<WorkflowRun[]>('/v1/workflow-runs');
+}
+
+export function getWorkflowProjection(id: string) {
+  return getJson<WorkflowProjection>(`/v1/workflow-runs/${id}/projection`);
+}
+
+export function cancelWorkflowRun(id: string) {
+  return req('POST', `/v1/workflow-runs/${id}/cancel`, {});
+}
+
 export function cancelTask(id: string) {
   return req('POST', `/v1/tasks/${id}/cancel`, {});
 }
