@@ -765,6 +765,29 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
 
+    s.push_str(
+        "# HELP agentgrid_sqlite_checkpoint_ms Last wal_checkpoint(TRUNCATE) duration in ms.\n",
+    );
+    s.push_str("# TYPE agentgrid_sqlite_checkpoint_ms gauge\n");
+    s.push_str(&format!(
+        "agentgrid_sqlite_checkpoint_ms {}\n",
+        state
+            .store
+            .checkpoint_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    s.push_str(
+        "# HELP agentgrid_sqlite_busy_total Cumulative SQLITE_BUSY/locked-class failures.\n",
+    );
+    s.push_str("# TYPE agentgrid_sqlite_busy_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_sqlite_busy_total {}\n",
+        state
+            .store
+            .sqlite_busy
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+
     (
         StatusCode::OK,
         (

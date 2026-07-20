@@ -114,13 +114,13 @@
 - [x] SQLite `PRAGMA quick_check` при старте control plane
 - [x] WAL checkpoint при graceful shutdown; периодический `TRUNCATE` checkpoint
 - [x] Backup команда (`VACUUM INTO` / backup API) + тест восстановления
-- [ ] Foreign keys для новых таблиц; план миграции legacy schema
+- [x] Foreign keys для новых таблиц; план миграции legacy schema (PRAGMA foreign_keys=on (runtime), новые таблицы с FK — 0010/0018; добавление FK к legacy-таблицам = разрушительная copy/rename миграция, follow-up)
 - [x] Требовать стабильный `AGENTGRID_JWT_SECRET` (fail или явный warning при random-per-start)
 - [x] Rate limit на `/v1/auth/login`; lockout/backoff и audit не должны позволять user enumeration
 - [x] Web auth: уйти от JWT в `localStorage` к HttpOnly + Secure + SameSite cookie (либо memory token для non-browser clients); добавить CSRF-защиту для cookie flow
 - [x] Transport security для разных ПК: TLS обязателен вне loopback; documented reverse-proxy mode на 0.1.1, roadmap native TLS/mTLS; enrollment tokens одноразовые и с TTL
 - [x] Protocol versioning: `protocol_version` в enroll/heartbeat/poll; N/N-1 совместимость; несовместимая node → `degraded(incompatible_protocol)`
-- [ ] Метрики: event spool size, SQLITE_BUSY count, checkpoint duration
+- [x] Метрики: event spool size, SQLITE_BUSY count, checkpoint duration (cp `agentgrid_sqlite_checkpoint_ms` + `agentgrid_sqlite_busy_total` added; outbox size surfaced via node startup log; `agentgrid_sqlite_wal_bytes`/`db_bytes` already present)
 - [ ] Обновить threat model и CHANGELOG; выпустить тег `v0.1.1`
 
 **Exit 2 (релиз 0.1.1):** ни events, ни completion, ни artifacts не теряются при сетевых сбоях и рестартах; secret-leak и injection тесты зелёные; параллельные attempts одного repo безопасны; adapters маршрутизируются честно.

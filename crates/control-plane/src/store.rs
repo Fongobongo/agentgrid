@@ -37,6 +37,10 @@ pub struct Store {
     /// assignments (Stage 2.5 ops). Wrapped in Arc so `Store` can derive Clone.
     pub(crate) scheduler_latency_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) scheduler_assignments: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Stage 2.5 ops: last `PRAGMA wal_checkpoint(TRUNCATE)` duration in ms.
+    pub(crate) checkpoint_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Stage 2.5 ops: cumulative count of `SQLITE_BUSY`-class failures.
+    pub(crate) sqlite_busy: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn now_iso() -> String {
@@ -157,6 +161,8 @@ impl Store {
             artifact_root,
             scheduler_latency_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scheduler_assignments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            checkpoint_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sqlite_busy: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -1574,10 +1580,29 @@ impl Store {
 
     /// Truncate the WAL into the main database (Stage 2.5 ops).
     pub async fn wal_checkpoint(&self) -> Result<()> {
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        let start = std::time::Instant::now();
+        let res = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&self.pool)
-            .await?;
-        Ok(())
+            .await;
+        let dur = start.elapsed().as_millis() as u64;
+        self.checkpoint_ms
+            .store(dur, std::sync::atomic::Ordering::Relaxed);
+        match res {
+            Ok(_) => {
+                tracing::debug!(dur_ms = dur, "wal checkpoint");
+                Ok(())
+            }
+            Err(e) => {
+                // Count SQLITE_BUSY-class failures distinctly so they surface in
+                // metrics rather than only in logs.
+                let msg = format!("{e}");
+                if msg.to_lowercase().contains("busy") || msg.to_lowercase().contains("locked") {
+                    self.sqlite_busy
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(e.into())
+            }
+        }
     }
 
     /// Compact copy of the database for backup/restore rehearsal (Stage 2.5 ops).
