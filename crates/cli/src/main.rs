@@ -340,6 +340,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         timeout_secs: a.timeout,
         validation_command: a.validate,
         base_commit: None,
+        parent_acp_session_id: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))

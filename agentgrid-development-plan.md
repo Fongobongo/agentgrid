@@ -354,11 +354,11 @@
 - [x] ACP path: раньше вообще не бегал validation (баг) — теперь `finalize_workspace` + `run_validation` после `drive_acp_session`, перед report_complete. Feedback-loop на ACP = follow-up (structure differs).
 - [ ] Опц.: роутинг review-comments/merge-conflicts (нужен GitHub integration).
 
-### 11.5 Resume session (2) — [ ] (крупная, cp migration)
+### 11.5 Resume session (2) — done
 
-- [ ] Колонка `acp_session_id` в attempts (migration) + node репортит session_id из `session/new`.
-- [ ] `Assignment.parent_acp_session_id`; node: `session/new` с `parent_session_id` для resume.
-- [ ] cp: в conversation append — брать последний attempt's session_id как parent. Conversations уже композят историю в prompt → resume = оптимизация (агент не пере-обрабатывает), не correctness.
+- [x] Колонка `acp_session_id` в attempts (migration `0019`) + node репортит session_id из `session/new` (через `CompleteAttemptRequest.acp_session_id`).
+- [x] `Assignment.parent_acp_session_id`; node: `session/new` с `parent_session_id` для resume.
+- [x] cp: в conversation append — брать последний attempt's session_id как parent (`Store::last_conversation_acp_session`). Resume = оптимизация (агент не пере-обрабатывает историю), не correctness: conversations уже композят историю в prompt.
 
 ### 11.6 Run viewer с DAG (3) (из open-multi-agent) — [ ] (web UI)
 

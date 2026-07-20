@@ -205,6 +205,7 @@ impl<'a> ControlPlane<'a> {
             timeout_secs: None,
             validation_command: None,
             base_commit: None,
+            parent_acp_session_id: None,
         };
         let r = self.post("/v1/tasks").json(&req).send().await?;
         let status = r.status();

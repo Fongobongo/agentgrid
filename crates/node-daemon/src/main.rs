@@ -439,6 +439,9 @@ async fn read_stream<R: AsyncRead + Unpin>(
 struct AcpResult {
     success: bool,
     error_code: Option<String>,
+    /// ACP session id from `session/new`, reported back so the control plane
+    /// can resume it on a follow-up task (Stage 11.5).
+    session_id: Option<String>,
 }
 
 /// Stage 5: drive an ACP agent over stdio (JSON-RPC 2.0). Spawns
@@ -464,6 +467,7 @@ async fn drive_acp_session(
                 return Ok(AcpResult {
                     success: false,
                     error_code: Some("infrastructure_failed".into()),
+                    session_id: None,
                 });
             }
         },
@@ -506,6 +510,7 @@ async fn drive_acp_session(
         return Ok(AcpResult {
             success: false,
             error_code: Some("infrastructure_failed".into()),
+            session_id: None,
         });
     }
     let session_id = match acp
@@ -515,7 +520,7 @@ async fn drive_acp_session(
             cwd: ws_path.to_string_lossy().into_owned(),
             prompt: None,
             mcp: Value::Null,
-            parent_session_id: None,
+            parent_session_id: assignment.parent_acp_session_id.clone(),
         })
         .await
     {
@@ -526,6 +531,7 @@ async fn drive_acp_session(
             return Ok(AcpResult {
                 success: false,
                 error_code: Some("infrastructure_failed".into()),
+                session_id: None,
             });
         }
     };
@@ -586,18 +592,18 @@ async fn drive_acp_session(
     let timeout = Duration::from_secs(assignment.timeout_secs.max(1));
     let outcome = tokio::select! {
         res = &mut prompt => match res {
-            Ok(_) => AcpResult { success: true, error_code: None },
-            Err(e) => AcpResult { success: false, error_code: Some(format!("agent_error: {e}")) },
+            Ok(_) => AcpResult { success: true, error_code: None, session_id: Some(session_id.clone()) },
+            Err(e) => AcpResult { success: false, error_code: Some(format!("agent_error: {e}")), session_id: Some(session_id.clone()) },
         },
         _ = wait_for_cancel(cancel_client, cancel_url) => {
             acp.session_cancel(SessionCancelParams { session_id: session_id.clone() }).await.ok();
             let _ = child.wait().await;
-            AcpResult { success: false, error_code: Some("cancelled".into()) }
+            AcpResult { success: false, error_code: Some("cancelled".into()), session_id: Some(session_id.clone()) }
         }
         _ = tokio::time::sleep(timeout) => {
             terminate_group(pid);
             let _ = child.wait().await;
-            AcpResult { success: false, error_code: Some("timeout".into()) }
+            AcpResult { success: false, error_code: Some("timeout".into()), session_id: Some(session_id.clone()) }
         }
     };
     stream_task.abort();
@@ -731,6 +737,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             exit_code,
             commit_sha,
             error_code,
+            res.session_id.clone(),
         )
         .await;
         return Ok(());
@@ -766,6 +773,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
                 127,
                 None,
                 Some("infrastructure_failed".into()),
+                None,
             )
             .await;
             return Ok(());
@@ -994,6 +1002,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         code,
         commit_sha,
         error_code,
+        None,
     )
     .await;
     Ok(())
@@ -1150,12 +1159,14 @@ async fn report_complete(
     exit_code: i32,
     commit_sha: Option<String>,
     error_code: Option<String>,
+    acp_session_id: Option<String>,
 ) {
     let url = format!("{}/v1/node/attempts/{}/complete", server, attempt_id);
     let req = CompleteAttemptRequest {
         exit_code,
         commit_sha,
         error_code,
+        acp_session_id,
     };
     // Stage 2.1: completion is terminal and must be delivered; retry transient
     // and 5xx failures with backoff. After the cap we give up (the control
@@ -1617,6 +1628,7 @@ mod tests {
             default_branch: String::new(),
             validation_command: None,
             base_commit: None,
+            parent_acp_session_id: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1634,6 +1646,11 @@ mod tests {
         .unwrap();
         assert!(res.success, "ACP session should succeed");
         assert_eq!(res.error_code, None);
+        assert_eq!(
+            res.session_id.as_deref(),
+            Some("sess-fake-1"),
+            "session_id from session/new is reported back (Stage 11.5)"
+        );
         assert!(
             sink.adapter_event_count() >= 2,
             "two session/update events should stream; got {}",

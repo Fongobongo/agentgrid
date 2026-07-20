@@ -245,6 +245,9 @@ pub struct CreateTaskRequest {
     /// (Stage 8: shared base_commit). `None` => branch from `default_branch`.
     #[serde(default)]
     pub base_commit: Option<String>,
+    /// Optional ACP session id to resume (Stage 11.5). `None` => fresh session.
+    #[serde(default)]
+    pub parent_acp_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -272,6 +275,10 @@ pub struct TaskView {
     /// task was pinned to one. `None` => branched from `default_branch`.
     #[serde(default)]
     pub base_commit: Option<String>,
+    /// ACP session id to resume (Stage 11.5), if this task should continue a
+    /// prior ACP session. `None` => a fresh session.
+    #[serde(default)]
+    pub parent_acp_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -324,6 +331,10 @@ pub struct Assignment {
     /// Optional exact commit the node should check out (Stage 8 base_commit).
     #[serde(default)]
     pub base_commit: Option<String>,
+    /// Optional ACP session id the node should resume via `session/new`
+    /// `parent_session_id` (Stage 11.5). `None` => a fresh session.
+    #[serde(default)]
+    pub parent_acp_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,6 +469,10 @@ pub struct CompleteAttemptRequest {
     /// Distinct failure category: `agent_failed` vs `validation_failed` etc.
     #[serde(default)]
     pub error_code: Option<String>,
+    /// ACP session id returned by `session/new`, so the control plane can offer
+    /// it as `parent_acp_session_id` for a follow-up task (Stage 11.5).
+    #[serde(default)]
+    pub acp_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -628,6 +643,7 @@ mod tests {
             timeout_secs: None,
             validation_command: None,
             base_commit: None,
+            parent_acp_session_id: None,
         };
         assert_eq!(round_trip(&req), req);
 
@@ -653,6 +669,7 @@ mod tests {
                 default_branch: String::new(),
                 validation_command: None,
                 base_commit: None,
+                parent_acp_session_id: None,
             }),
         };
         assert_eq!(round_trip(&pr), pr);

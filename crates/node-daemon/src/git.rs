@@ -210,6 +210,7 @@ mod tests {
             default_branch: default_branch.into(),
             validation_command: None,
             base_commit: None,
+            parent_acp_session_id: None,
         }
     }
 

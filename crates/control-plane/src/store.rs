@@ -522,8 +522,8 @@ impl Store {
         let now = now_iso();
         let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
         sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, status, created_at, timeout_secs, validation_command) \
-             VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, status, created_at, timeout_secs, validation_command) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
         )
         .bind(&id)
         .bind(&req.repository)
@@ -531,6 +531,7 @@ impl Store {
         .bind(&req.adapter)
         .bind(&req.requested_node_id)
         .bind(&req.base_commit)
+        .bind(&req.parent_acp_session_id)
         .bind(&now)
         .bind(timeout_secs)
         .bind(&req.validation_command)
@@ -549,12 +550,13 @@ impl Store {
             error_code: None,
             requested_node_id: req.requested_node_id.clone(),
             base_commit: req.base_commit.clone(),
+            parent_acp_session_id: req.parent_acp_session_id.clone(),
         })
     }
 
     pub async fn list_tasks(&self) -> Result<Vec<TaskView>> {
         let rows = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id \
              FROM tasks ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -564,7 +566,7 @@ impl Store {
 
     pub async fn show_task(&self, id: &str) -> Result<Option<TaskView>> {
         let row = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id \
              FROM tasks WHERE id = ?",
         )
         .bind(id)
@@ -756,6 +758,26 @@ impl Store {
             .collect())
     }
 
+    /// Stage 11.5: the most recent ACP session id produced by a finished task
+    /// in this conversation, so the next task can resume it. `None` when there
+    /// is no resumable session (first turn, or the prior attempt was not ACP).
+    pub async fn last_conversation_acp_session(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT a.acp_session_id AS sid \
+             FROM conversation_messages m \
+             JOIN attempts a ON a.task_id = m.task_id \
+             WHERE m.conversation_id = ? AND a.acp_session_id IS NOT NULL \
+             ORDER BY m.seq DESC LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| r.try_get::<Option<String>, _>("sid").ok().flatten()))
+    }
+
     pub async fn list_nodes(&self) -> Result<Vec<NodeView>> {
         let rows = sqlx::query(
             "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb \
@@ -798,7 +820,7 @@ impl Store {
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
         let mut tx = self.pool.begin().await?;
         let cands = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, created_at FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC",
         )
@@ -813,6 +835,8 @@ impl Store {
             let timeout_secs: i64 = c.try_get("timeout_secs")?;
             let task_validation: Option<String> = c.try_get("validation_command")?;
             let base_commit: Option<String> = c.try_get("base_commit").ok().flatten();
+            let parent_acp_session_id: Option<String> =
+                c.try_get("parent_acp_session_id").ok().flatten();
             let created_at: String = c.try_get("created_at")?;
 
             // Resolve repository git info (absent for plain-dir tasks).
@@ -905,6 +929,7 @@ impl Store {
                 default_branch,
                 validation_command: task_validation.or(validation_command),
                 base_commit,
+                parent_acp_session_id,
             }));
         }
 
@@ -1142,6 +1167,13 @@ impl Store {
         if let Some(sha) = &req.commit_sha {
             sqlx::query("UPDATE attempts SET commit_sha = ? WHERE id = ?")
                 .bind(sha)
+                .bind(attempt_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(sid) = &req.acp_session_id {
+            sqlx::query("UPDATE attempts SET acp_session_id = ? WHERE id = ?")
+                .bind(sid)
                 .bind(attempt_id)
                 .execute(&mut *tx)
                 .await?;
@@ -1645,6 +1677,7 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         error_code: r.try_get("error_code").unwrap_or_default(),
         requested_node_id: r.try_get("requested_node_id").unwrap_or_default(),
         base_commit: r.try_get("base_commit").unwrap_or_default(),
+        parent_acp_session_id: r.try_get("parent_acp_session_id").unwrap_or_default(),
     }
 }
 
@@ -2394,6 +2427,7 @@ impl Store {
                                                 .base_commit
                                                 .clone()
                                                 .or_else(|| run.base_commit.clone()),
+                                            parent_acp_session_id: None,
                                         };
                                         let tv = self.create_task(&req).await?;
                                         self.set_role_run_task(&step.id, &tv.id).await?;
@@ -2448,6 +2482,7 @@ impl Store {
                                 .base_commit
                                 .clone()
                                 .or_else(|| run.base_commit.clone()),
+                            parent_acp_session_id: None,
                         };
                         let tv = self.create_task(&req).await?;
                         self.set_role_run_task(&step.id, &tv.id).await?;
@@ -2693,6 +2728,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
+                acp_session_id: None,
             },
         )
         .await
@@ -2709,6 +2745,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             },
         )
         .await
@@ -2745,6 +2782,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("merge_conflict".into()),
+                acp_session_id: None,
             },
         )
         .await
@@ -2842,6 +2880,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
+                acp_session_id: None,
             },
         )
         .await
@@ -2883,6 +2922,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             },
         )
         .await
@@ -2986,6 +3026,7 @@ mod workflow_tests {
             timeout_secs: Some(60),
             validation_command: None,
             base_commit: None,
+            parent_acp_session_id: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -3079,5 +3120,97 @@ mod workflow_tests {
         s.reconcile_on_startup().await.unwrap();
         let audits = s.list_audit(None, 100).await.unwrap();
         assert!(audits.iter().any(|a| a.action == "startup_reconcile"));
+    }
+
+    #[tokio::test]
+    async fn acp_session_resume_links_conversation_turns() {
+        // Stage 11.5: a finished turn's acp_session_id should be the parent of
+        // the next turn's task assignment, so the agent resumes instead of
+        // re-reading the transcript.
+        let s = temp_store().await;
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "n".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec![String::new()],
+            max_concurrency: 2,
+            agent_version: "test".into(),
+            protocol_version: None,
+        };
+        let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+
+        let conv = s.create_conversation("mock", "").await.unwrap();
+
+        // Turn 1: a task with no resume parent.
+        let t1 = s
+            .create_task(&CreateTaskRequest {
+                prompt: "hello".into(),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: Some(60),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+            })
+            .await
+            .unwrap();
+        s.append_conversation_message(&conv.id, "user", "hello", Some(&t1.id))
+            .await
+            .unwrap();
+        let a1 = s.try_assign(&node_id).await.unwrap().expect("assign t1");
+        assert_eq!(a1.parent_acp_session_id, None, "first turn has no parent");
+        // Before completion, there is no resumable session.
+        assert_eq!(
+            s.last_conversation_acp_session(&conv.id).await.unwrap(),
+            None
+        );
+        s.complete_attempt(
+            &a1.attempt_id,
+            &CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+                acp_session_id: Some("sess-1".into()),
+            },
+        )
+        .await
+        .unwrap();
+        // After completion, the session is resumable.
+        assert_eq!(
+            s.last_conversation_acp_session(&conv.id).await.unwrap(),
+            Some("sess-1".to_string())
+        );
+
+        // Turn 2: the API handler would set parent = the resumable session.
+        let parent = s.last_conversation_acp_session(&conv.id).await.unwrap();
+        let t2 = s
+            .create_task(&CreateTaskRequest {
+                prompt: "again".into(),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: Some(60),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: parent,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            s.show_task(&t2.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .parent_acp_session_id,
+            Some("sess-1".to_string())
+        );
+        let a2 = s.try_assign(&node_id).await.unwrap().expect("assign t2");
+        assert_eq!(
+            a2.parent_acp_session_id.as_deref(),
+            Some("sess-1"),
+            "assignment carries the resume parent"
+        );
     }
 }

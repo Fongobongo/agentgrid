@@ -1147,6 +1147,16 @@ async fn append_conversation_message(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let prompt = compose_conversation_prompt(&history, &req.content);
+    // Stage 11.5: if a prior turn finished an ACP session, resume it so the
+    // agent does not re-process the transcript from scratch.
+    let parent_acp_session_id = state
+        .store
+        .last_conversation_acp_session(&id)
+        .await
+        .map_err(|e| {
+            tracing::warn!("last_conversation_acp_session failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let task_req = CreateTaskRequest {
         prompt,
         repository: conv.repository.clone(),
@@ -1155,6 +1165,7 @@ async fn append_conversation_message(
         timeout_secs: None,
         validation_command: None,
         base_commit: None,
+        parent_acp_session_id,
     };
     let task = state.store.create_task(&task_req).await.map_err(|e| {
         tracing::error!("create_task for conversation failed: {e}");

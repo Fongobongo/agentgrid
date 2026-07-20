@@ -85,6 +85,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         timeout_secs: None,
         validation_command: None,
         base_commit: None,
+        parent_acp_session_id: None,
     };
     let resp = app
         .clone()
@@ -153,6 +154,7 @@ async fn agent_session_opened_and_closed_on_complete() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             },
         )
         .await

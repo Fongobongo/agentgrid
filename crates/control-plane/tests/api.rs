@@ -155,6 +155,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         timeout_secs: None,
         validation_command: None,
         base_commit: None,
+        parent_acp_session_id: None,
     };
     let resp = app
         .clone()
@@ -278,6 +279,7 @@ async fn full_task_lifecycle() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
@@ -305,6 +307,7 @@ async fn failure_marks_task_failed() {
                 exit_code: 3,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
@@ -333,6 +336,7 @@ async fn validation_failure_must_not_report_success() {
         timeout_secs: None,
         validation_command: Some("false".into()),
         base_commit: None,
+        parent_acp_session_id: None,
     };
     let resp = app
         .clone()
@@ -384,6 +388,7 @@ async fn validation_failure_must_not_report_success() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: Some("validation_failed".into()),
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
@@ -427,6 +432,7 @@ async fn cancel_queued_marks_cancelled() {
         timeout_secs: None,
         validation_command: None,
         base_commit: None,
+        parent_acp_session_id: None,
     };
     let resp = app
         .clone()
@@ -486,6 +492,7 @@ async fn cancel_running_then_node_confirms_cancelled() {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
@@ -513,6 +520,7 @@ async fn retry_failed_task_reques() {
                 exit_code: 3,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
@@ -664,6 +672,7 @@ async fn artifact_upload_and_read() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
@@ -766,6 +775,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 timeout_secs: None,
                 validation_command: None,
                 base_commit: None,
+                parent_acp_session_id: None,
             })
             .unwrap(),
             None,
@@ -791,6 +801,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 timeout_secs: None,
                 validation_command: None,
                 base_commit: None,
+                parent_acp_session_id: None,
             })
             .unwrap(),
             Some(&token),
@@ -809,6 +820,7 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         timeout_secs: None,
         validation_command: None,
         base_commit: None,
+        parent_acp_session_id: None,
     };
     let resp = app
         .clone()
@@ -931,6 +943,7 @@ async fn oversized_prompt_returns_413() {
         timeout_secs: None,
         validation_command: None,
         base_commit: None,
+        parent_acp_session_id: None,
     };
     let resp = app
         .clone()
@@ -950,6 +963,7 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         timeout_secs: None,
         validation_command: None,
         base_commit: None,
+        parent_acp_session_id: None,
     };
     let resp = app
         .clone()
@@ -1323,6 +1337,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
@@ -1360,6 +1375,7 @@ async fn complete_on_lost_attempt_is_idempotent() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
@@ -1714,6 +1730,7 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
                         exit_code: 0,
                         commit_sha: None,
                         error_code: None,
+                        acp_session_id: None,
                     })
                     .unwrap(),
                     &cred,
@@ -1815,6 +1832,7 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                acp_session_id: None,
             })
             .unwrap(),
             &cred,
