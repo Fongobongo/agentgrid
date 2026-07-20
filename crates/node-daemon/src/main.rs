@@ -29,6 +29,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
 mod git;
+mod outbox;
 mod sandbox;
 
 #[derive(Clone)]
@@ -50,6 +51,20 @@ struct Config {
     adapter_env: Vec<(String, String)>,
     /// Agent isolation: wrap the spawned agent in a container (idea 5).
     sandbox: sandbox::SandboxKind,
+    /// Stage 2.1: durable event/completion outbox root (survives daemon kill).
+    outbox_root: PathBuf,
+    /// Stage 2.1: a single durable completion spool (idempotent redelivery).
+    completion_outbox: Arc<outbox::CompletionOutbox>,
+}
+
+impl Config {
+    /// A shared HTTP client for outbox redelivery outside the main poll loop.
+    fn client(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    }
 }
 
 /// Node identity persisted to disk after enrollment (never re-sent in plaintext).
@@ -147,7 +162,7 @@ fn config_from_env() -> Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
         enroll_token: std::env::var("AGENTGRID_ENROLL_TOKEN").ok(),
-        credential_path: PathBuf::from(data_dir).join("credential.json"),
+        credential_path: PathBuf::from(&data_dir).join("credential.json"),
         repository_root: PathBuf::from(
             std::env::var("AGENTGRID_REPOSITORY_ROOT")
                 .unwrap_or_else(|_| "./agentgrid-repos".into()),
@@ -155,6 +170,14 @@ fn config_from_env() -> Config {
         secrets: split_csv("AGENTGRID_SECRETS", ""),
         adapter_env: parse_env_pairs("AGENTGRID_ADAPTER_ENV"),
         sandbox: sandbox::SandboxKind::from_env(),
+        outbox_root: PathBuf::from(&data_dir).join("outbox"),
+        completion_outbox: Arc::new({
+            let dir = PathBuf::from(&data_dir).join("outbox");
+            outbox::CompletionOutbox::open(&dir).unwrap_or_else(|e| {
+                tracing::warn!("completion outbox open failed: {e}; events may be lost on kill");
+                outbox::CompletionOutbox::open(&std::env::temp_dir()).unwrap()
+            })
+        }),
     }
 }
 
@@ -303,17 +326,25 @@ struct EventSink {
     buf: Mutex<VecDeque<IncomingEvent>>,
     next: AtomicU64,
     notify: Notify,
-    // adapter_events: AtomicU64,
     // Counts events that came from the adapter's stdout/stderr. Used to warn on a
     // silent agent that exits 0 but produced no output.
     adapter_events: AtomicU64,
     attempt_id: String,
     client: reqwest::Client,
     server: String,
+    /// Stage 2.1: durable JSONL outbox. Events are appended here before any
+    // send attempt and removed only after the CP acks the batch, so a daemon
+    // kill no longer drops the in-flight tail.
+    outbox: Arc<outbox::EventOutbox>,
 }
 
 impl EventSink {
-    fn new(attempt_id: String, client: reqwest::Client, server: String) -> Arc<Self> {
+    fn new(
+        attempt_id: String,
+        client: reqwest::Client,
+        server: String,
+        outbox: Arc<outbox::EventOutbox>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             buf: Mutex::new(VecDeque::new()),
             next: AtomicU64::new(1),
@@ -322,6 +353,7 @@ impl EventSink {
             attempt_id,
             client,
             server,
+            outbox,
         })
     }
 
@@ -337,11 +369,18 @@ impl EventSink {
 
     async fn push(&self, ty: EventType, payload: serde_json::Value) {
         let seq = self.next.fetch_add(1, Ordering::SeqCst);
-        self.buf.lock().await.push_back(IncomingEvent {
+        let ev = IncomingEvent {
             sequence: seq,
             r#type: ty,
             payload,
-        });
+        };
+        // Stage 2.1: persist before buffering so a kill doesn't drop it. A
+        // failed fsync is non-fatal (we still deliver from RAM this run); it
+        // just means the disk tail isn't covered.
+        if let Err(e) = self.outbox.push(&ev) {
+            tracing::warn!(attempt_id = %self.attempt_id, "outbox push failed: {e}");
+        }
+        self.buf.lock().await.push_back(ev);
         if self.buf.lock().await.len() >= 50 {
             self.notify.notify_one();
         }
@@ -358,14 +397,19 @@ impl EventSink {
             "{}/v1/node/attempts/{}/events",
             self.server, self.attempt_id
         );
+        let seqs: Vec<u64> = batch.iter().map(|e| e.sequence).collect();
         let req = IngestEventsRequest { events: batch };
         // Stage 2.1: verify the HTTP status and retry transient/5xx failures.
         // On a still-non-2xx response the batch is returned to the front of the
-        // buffer so the flusher loop keeps retrying while the daemon runs.
-        // ponytail: in-RAM only; a daemon kill before the CP acks still drops the
-        // tail. A disk outbox (2.1) closes that gap.
+        // buffer so the flusher loop keeps retrying while the daemon runs; the
+        // durable outbox still holds them for redelivery after a restart.
         match send_with_retry(self.client.post(&url).json(&req), 10).await {
-            Ok(s) if s.is_success() => {}
+            Ok(s) if s.is_success() => {
+                // CP acked: drop the lines from the durable outbox.
+                if let Err(e) = self.outbox.ack(&seqs) {
+                    tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
+                }
+            }
             Ok(s) => {
                 tracing::warn!(attempt_id = %self.attempt_id, "event flush got {s}; will retry");
                 let mut buf = self.buf.lock().await;
@@ -671,6 +715,22 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     .await??;
     tracing::info!(attempt_id = %assignment.attempt_id, git = ws.is_git, "starting attempt");
 
+    // Stage 2.1: a durable event outbox for this attempt, so a daemon kill no
+    // longer drops the in-flight event tail (redelivered on next startup;
+    // CP ingest is idempotent on (attempt_id, sequence)).
+    let outbox = Arc::new(outbox::EventOutbox::open(
+        &cfg.outbox_root,
+        &assignment.attempt_id,
+    )?);
+    // If a prior run left undelivered events for this attempt, re-queue them so
+    // they go out before new ones (sequence order preserved by pending()).
+    {
+        let pending = outbox.pending().unwrap_or_default();
+        if !pending.is_empty() {
+            tracing::info!(attempt_id = %assignment.attempt_id, count = pending.len(), "requeueing undelivered outbox events");
+        }
+    }
+
     // Agent profile (idea 6): an optional system prompt for this adapter,
     // projected into the worktree as AGENTS.md before the agent runs. Sourced
     // from AGENTGRID_AGENT_PROFILE_<ID> (a path to a .md file, or inline text).
@@ -692,6 +752,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             assignment.attempt_id.clone(),
             client.clone(),
             cfg.server.clone(),
+            outbox.clone(),
         );
         ack_attempt(&client, &cfg.server, &assignment.attempt_id).await;
         create_agent_session(
@@ -738,6 +799,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             commit_sha,
             error_code,
             res.session_id.clone(),
+            &cfg.completion_outbox,
         )
         .await;
         return Ok(());
@@ -774,6 +836,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
                 None,
                 Some("infrastructure_failed".into()),
                 None,
+                &cfg.completion_outbox,
             )
             .await;
             return Ok(());
@@ -803,6 +866,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         assignment.attempt_id.clone(),
         client.clone(),
         cfg.server.clone(),
+        outbox.clone(),
     );
     let workdir = ws.path.clone();
     let validation_log = workdir.join("validation.log");
@@ -1003,6 +1067,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         commit_sha,
         error_code,
         None,
+        &cfg.completion_outbox,
     )
     .await;
     Ok(())
@@ -1152,6 +1217,7 @@ fn terminate_group(pid: u32) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn report_complete(
     client: &reqwest::Client,
     server: &str,
@@ -1160,6 +1226,7 @@ async fn report_complete(
     commit_sha: Option<String>,
     error_code: Option<String>,
     acp_session_id: Option<String>,
+    completion_outbox: &outbox::CompletionOutbox,
 ) {
     let url = format!("{}/v1/node/attempts/{}/complete", server, attempt_id);
     let req = CompleteAttemptRequest {
@@ -1168,11 +1235,20 @@ async fn report_complete(
         error_code,
         acp_session_id,
     };
-    // Stage 2.1: completion is terminal and must be delivered; retry transient
-    // and 5xx failures with backoff. After the cap we give up (the control
-    // plane reverts/loses the attempt via its lease once it notices silence).
+    // Stage 2.1: persist the completion durably so a daemon kill before the CP
+    // acks it is redelivered on the next startup (complete_attempt is
+    // idempotent on terminal attempts).
+    if let Err(e) = completion_outbox.record(attempt_id, &req) {
+        tracing::warn!("completion outbox record failed for {attempt_id}: {e}");
+    }
+    // Completion is terminal and must be delivered; retry transient and 5xx
+    // failures with backoff. The durable outbox also covers the daemon-kill gap.
     match send_with_retry(client.post(&url).json(&req), 20).await {
-        Ok(s) if s.is_success() => {}
+        Ok(s) if s.is_success() => {
+            if let Err(e) = completion_outbox.ack(attempt_id) {
+                tracing::warn!("completion outbox ack failed for {attempt_id}: {e}");
+            }
+        }
         Ok(s) => tracing::error!("complete report got {s} for {attempt_id}; not retrying"),
         Err(e) => tracing::error!("complete report failed for {attempt_id}: {e}"),
     }
@@ -1431,6 +1507,21 @@ async fn main() -> Result<()> {
     }
 
     let cfg = config_from_env();
+    // Stage 2.1: redeliver any completion records a prior (killed) run recorded
+    // but never got a CP ack for. complete_attempt is idempotent on terminal
+    // attempts, so this is safe.
+    for c in cfg.completion_outbox.pending().unwrap_or_default() {
+        let req = c.to_request();
+        tracing::info!(attempt_id = %c.attempt_id, "redelivering durable completion");
+        let url = format!("{}/v1/node/attempts/{}/complete", cfg.server, c.attempt_id);
+        match send_with_retry(cfg.client().post(&url).json(&req), 20).await {
+            Ok(s) if s.is_success() => {
+                let _ = cfg.completion_outbox.ack(&c.attempt_id);
+            }
+            Ok(s) => tracing::warn!("completion redelivery got {s} for {}", c.attempt_id),
+            Err(e) => tracing::warn!("completion redelivery failed for {}: {e}", c.attempt_id),
+        }
+    }
     for a in &cfg.adapters {
         let bin = format!("adapter-{}", a.id.replace('_', "-"));
         let probe = probe_adapter(&bin).await;
@@ -1458,6 +1549,12 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A temporary EventOutbox for a given attempt, isolated per test run.
+    fn test_outbox(attempt_id: &str) -> Arc<outbox::EventOutbox> {
+        let dir = std::env::temp_dir().join(format!("ag-outbox-test-{}", uuid::Uuid::new_v4()));
+        Arc::new(outbox::EventOutbox::open(&dir, attempt_id).unwrap())
+    }
+
     #[test]
     fn mask_secrets_replaces_known() {
         assert_eq!(
@@ -1475,7 +1572,12 @@ mod tests {
     async fn validation_command_reports_exit_and_log() {
         let dir = std::env::temp_dir().join(format!("ag-val-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let sink = EventSink::new("a1".into(), reqwest::Client::new(), "http://x".into());
+        let sink = EventSink::new(
+            "a1".into(),
+            reqwest::Client::new(),
+            "http://x".into(),
+            test_outbox("a1"),
+        );
         let code = run_validation(&dir, "echo hi; exit 2", &sink)
             .await
             .unwrap();
@@ -1509,7 +1611,12 @@ mod tests {
         let raw = Arc::new(Mutex::new(f));
         let input = b"{\"type\":\"log\",\"payload\":{\"text\":\"hello\"}}\nnot json\n".to_vec();
         let reader = tokio::io::BufReader::new(std::io::Cursor::new(input));
-        let sink = EventSink::new("a1".into(), reqwest::Client::new(), "http://x".into());
+        let sink = EventSink::new(
+            "a1".into(),
+            reqwest::Client::new(),
+            "http://x".into(),
+            test_outbox("a1"),
+        );
         read_stream(reader, sink, "stdout", vec![], Some(raw.clone())).await;
         let got = tokio::fs::read_to_string(&raw_path).await.unwrap();
         assert!(got.contains("hello"), "structured line mirrored: {got}");
@@ -1609,6 +1716,14 @@ mod tests {
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
             adapter_env: vec![],
+            outbox_root: std::env::temp_dir()
+                .join(format!("ag-acp-outbox-{}", uuid::Uuid::new_v4())),
+            completion_outbox: Arc::new(
+                outbox::CompletionOutbox::open(
+                    &std::env::temp_dir().join(format!("ag-acp-comp-{}", uuid::Uuid::new_v4())),
+                )
+                .unwrap(),
+            ),
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-{}-{}",
@@ -1634,6 +1749,7 @@ mod tests {
             assignment.attempt_id.clone(),
             reqwest::Client::new(),
             cfg.server.clone(),
+            Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
         );
         let res = drive_acp_session(
             &cfg,
