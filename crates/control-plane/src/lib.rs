@@ -45,6 +45,44 @@ struct Claims {
     exp: usize,
 }
 
+/// Stage 2.5: the cookie name carrying the session JWT, set HttpOnly so the
+/// browser cannot read it (no XSS token theft) with SameSite=Strict (CSRF
+/// guard). `Secure` is added only when `AGENTGRID_COOKIE_SECURE=1` so local
+/// plaintext dev keeps working.
+const AUTH_COOKIE: &str = "agentgrid_token";
+
+/// Extract a session JWT from a request: an `Authorization: Bearer` header
+/// (non-browser clients: CLI, gateway, node) or the `agentgrid_token` cookie
+/// (browser fetch with `credentials: include`).
+fn auth_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    if let Some(h) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+    {
+        return Some(h.to_string());
+    }
+    headers
+        .get(header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|c| {
+            c.split(';')
+                .map(|p| p.trim())
+                .find_map(|p| p.strip_prefix(&format!("{AUTH_COOKIE}=")))
+        })
+        .map(|s| s.to_string())
+}
+
+/// Build a `Set-Cookie` header value for a freshly-issued session JWT.
+fn auth_cookie_header(token: &str) -> String {
+    let secure = std::env::var("AGENTGRID_COOKIE_SECURE").as_deref() == Ok("1");
+    let mut v = format!("{AUTH_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200");
+    if secure {
+        v.push_str("; Secure");
+    }
+    v
+}
+
 pub struct AppState {
     pub store: Store,
     assignment_notify: Arc<Notify>,
@@ -225,6 +263,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/auth/setup", post(auth_setup))
         .route("/v1/auth/login", post(auth_login))
+        .route("/v1/auth/logout", post(auth_logout))
         .route("/v1/policy/evaluate", post(evaluate_policy))
         .route("/v1/admin/backup", post(admin_backup))
         .route("/v1/nodes", get(list_nodes))
@@ -377,7 +416,7 @@ fn user_protected(path: &str) -> bool {
     if path.starts_with("/v1/node/") {
         return false;
     }
-    if path == "/v1/auth/login" || path == "/v1/auth/setup" {
+    if path == "/v1/auth/login" || path == "/v1/auth/setup" || path == "/v1/auth/logout" {
         return false;
     }
     true
@@ -400,13 +439,7 @@ async fn require_user_auth(
             .map(|c| c == 0)
             .unwrap_or(true);
         if !open {
-            match req
-                .headers()
-                .get(header::AUTHORIZATION)
-                .and_then(|h| h.to_str().ok())
-                .and_then(|h| h.strip_prefix("Bearer "))
-                .and_then(|t| state.verify_token(t))
-            {
+            match auth_token_from_headers(req.headers()).and_then(|t| state.verify_token(&t)) {
                 Some(u) => {
                     req.extensions_mut().insert(AuthedUser { username: u });
                 }
@@ -420,7 +453,7 @@ async fn require_user_auth(
 async fn auth_setup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SetupRequest>,
-) -> Result<(StatusCode, Json<LoginResponse>), StatusCode> {
+) -> Result<(StatusCode, HeaderMap, Json<LoginResponse>), StatusCode> {
     if req.username.is_empty() || req.password.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -446,13 +479,19 @@ async fn auth_setup(
         .store
         .audit("user", Some(&req.username), "user.create", None, None)
         .await;
-    Ok((StatusCode::CREATED, Json(LoginResponse { token })))
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        header::HeaderValue::from_str(&auth_cookie_header(&token))
+            .unwrap_or_else(|_| header::HeaderValue::from_static("")),
+    );
+    Ok((StatusCode::CREATED, headers, Json(LoginResponse { token })))
 }
 
 async fn auth_login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<(HeaderMap, Json<LoginResponse>), StatusCode> {
     // Stage 2.5: brute-force protection. Fail closed to 429 on budget
     // exhaustion; the generic error avoids user enumeration.
     {
@@ -484,7 +523,27 @@ async fn auth_login(
         .store
         .audit("user", Some(&req.username), "login", None, None)
         .await;
-    Ok(Json(LoginResponse { token }))
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        header::HeaderValue::from_str(&auth_cookie_header(&token))
+            .unwrap_or_else(|_| header::HeaderValue::from_static("")),
+    );
+    Ok((headers, Json(LoginResponse { token })))
+}
+
+async fn auth_logout() -> (HeaderMap, StatusCode) {
+    // Clear the session cookie regardless of auth state (idempotent logout).
+    let mut v = format!("{AUTH_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    if std::env::var("AGENTGRID_COOKIE_SECURE").as_deref() == Ok("1") {
+        v.push_str("; Secure");
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        header::HeaderValue::from_str(&v).unwrap_or_else(|_| header::HeaderValue::from_static("")),
+    );
+    (headers, StatusCode::OK)
 }
 
 async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {

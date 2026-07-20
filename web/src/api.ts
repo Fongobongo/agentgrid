@@ -1,16 +1,19 @@
-// API client for the agentgrid control plane (Stage 4.3).
+// API client for the agentgrid control plane (Stage 2.5 cookie auth).
+// The JWT travels in an HttpOnly + SameSite=Strict cookie set by /v1/auth/login
+// (and /setup); all requests send `credentials: include` so the cookie rides
+// along. No token is stored in localStorage (XSS-safe). An in-memory flag tracks
+// whether the browser is authed so the UI can show the login screen.
 
-const TOKEN_KEY = 'agentgrid_token';
+let authed = false;
+export function isAuthed(): boolean { return authed; }
+export function markAuthed() { authed = true; }
+export function markUnauthed() { authed = false; }
 
-export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
-}
-export function setToken(t: string) {
-  localStorage.setItem(TOKEN_KEY, t);
-}
-export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY);
-}
+// Backwards-compatible names retained from the old localStorage API (callers use
+// markAuthed/markUnauthed now); kept as no-ops so imports don't break.
+export function getToken(): string | null { return null; }
+export function setToken(_t: string) { markAuthed(); }
+export function clearToken() { markUnauthed(); }
 
 export interface TaskView {
   id: string;
@@ -76,14 +79,19 @@ export class ApiError extends Error {
 
 async function req(method: string, path: string, body?: unknown): Promise<Response> {
   const headers: Record<string, string> = {};
-  const t = getToken();
-  if (t) headers['Authorization'] = `Bearer ${t}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  return fetch(path, {
+  const r = await fetch(path, {
     method,
     headers,
+    credentials: 'include',
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (r.status === 401 && !path.startsWith('/v1/auth/')) {
+    // Cookie expired/invalid: drop the in-memory auth flag and reload to login.
+    markUnauthed();
+    if (typeof window !== 'undefined') window.location.reload();
+  }
+  return r;
 }
 
 export async function getJson<T>(path: string): Promise<T> {
@@ -99,11 +107,16 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 export function login(username: string, password: string) {
-  return postJson<{ token: string }>('/v1/auth/login', { username, password });
+  return postJson<{ token: string }>('/v1/auth/login', { username, password }).then((r) => { markAuthed(); return r; });
 }
 
 export function setup(username: string, password: string) {
-  return postJson<{ token: string }>('/v1/auth/setup', { username, password });
+  return postJson<{ token: string }>('/v1/auth/setup', { username, password }).then((r) => { markAuthed(); return r; });
+}
+
+export function logout() {
+  // Clear the HttpOnly cookie server-side; the browser cannot read/delete it directly.
+  return fetch('/v1/auth/logout', { method: 'POST', credentials: 'include' }).finally(() => markUnauthed());
 }
 
 export function createTask(body: unknown) {
@@ -220,11 +233,10 @@ export function streamTask(
 
   const run = async () => {
     if (closed) return;
-    const t = getToken();
     try {
       const r = await fetch(
         `/v1/tasks/${taskId}/events/stream?after_sequence=${lastSeq}`,
-        { headers: t ? { Authorization: `Bearer ${t}` } : {} },
+        { credentials: 'include' },
       );
       if (!r.ok || !r.body) throw new ApiError(r.status, `stream -> ${r.status}`);
       backoff = 500;

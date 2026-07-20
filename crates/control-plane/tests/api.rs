@@ -844,6 +844,81 @@ async fn eligibility_empty_pool() {
     assert_eq!(elig.no_eligible_nodes, vec!["no nodes registered"]);
 }
 
+/// Stage 2.5: login sets an HttpOnly + SameSite=Strict session cookie, and a
+/// request carrying that cookie (no Authorization header) is authenticated.
+#[tokio::test]
+async fn login_sets_cookie_and_cookie_auths() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    assert_eq!(
+        auth_setup(&app, "alice", "secret").await,
+        StatusCode::CREATED
+    );
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/auth/login",
+            serde_json::to_string(
+                &serde_json::json!({ "username": "alice", "password": "secret" }),
+            )
+            .unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    // Extract the agentgrid_token cookie value from Set-Cookie.
+    let set_cookie = resp
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .expect("login must set a Set-Cookie header")
+        .to_string();
+    assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
+    assert!(
+        set_cookie.contains("SameSite=Strict"),
+        "cookie must be SameSite=Strict"
+    );
+    let cookie_val = set_cookie
+        .split(';')
+        .find(|p| p.trim().starts_with("agentgrid_token="))
+        .unwrap()
+        .trim();
+    // The body still returns a token for non-browser clients (backwards compat).
+    let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    // A request with only the cookie (no Authorization header) is authorized.
+    let authed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/tasks")
+                .header("content-type", "application/json")
+                .header(axum::http::header::COOKIE, cookie_val)
+                .body(Body::from(
+                    serde_json::to_string(&CreateTaskRequest {
+                        prompt: "x".into(),
+                        repository: "demo".into(),
+                        adapter: "mock".into(),
+                        requested_node_id: None,
+                        timeout_secs: None,
+                        validation_command: None,
+                        base_commit: None,
+                        parent_acp_session_id: None,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        authed.status(),
+        StatusCode::CREATED,
+        "cookie must authenticate"
+    );
+}
+
 /// Stage 2.4: missing adapter filter is reported per node.
 #[tokio::test]
 async fn eligibility_missing_adapter() {

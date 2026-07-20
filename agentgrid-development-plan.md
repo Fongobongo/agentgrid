@@ -117,7 +117,7 @@
 - [ ] Foreign keys для новых таблиц; план миграции legacy schema
 - [x] Требовать стабильный `AGENTGRID_JWT_SECRET` (fail или явный warning при random-per-start)
 - [x] Rate limit на `/v1/auth/login`; lockout/backoff и audit не должны позволять user enumeration
-- [ ] Web auth: уйти от JWT в `localStorage` к HttpOnly + Secure + SameSite cookie (либо memory token для non-browser clients); добавить CSRF-защиту для cookie flow
+- [x] Web auth: уйти от JWT в `localStorage` к HttpOnly + Secure + SameSite cookie (либо memory token для non-browser clients); добавить CSRF-защиту для cookie flow
 - [x] Transport security для разных ПК: TLS обязателен вне loopback; documented reverse-proxy mode на 0.1.1, roadmap native TLS/mTLS; enrollment tokens одноразовые и с TTL
 - [x] Protocol versioning: `protocol_version` в enroll/heartbeat/poll; N/N-1 совместимость; несовместимая node → `degraded(incompatible_protocol)`
 - [ ] Метрики: event spool size, SQLITE_BUSY count, checkpoint duration
