@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.1] — correctness & security hardening (pre-release; gate pending)
+
+Stage 1–2 hardening of the 0.1.0 MVP: truthful statuses / outcome model, lost-node
+recovery, explicit ack, scheduler fairness (Stage 1); durable node outbox, secret
++ artifact safety, git isolation, adapter registry, operational hardening (Stage 2).
+A full threat model is in `docs/decisions/threat-model.md`. Punch list of exit criteria
+in `agentgrid-development-plan.md` (Gate A).
+
+> Tag `v0.1.1` is **not yet cut**: the Gate A release gate requires the E2E
+> `network-disconnect` / `kill -9 daemon` runs to pass three times and an upgrade
+> guide 0.1.0 → 0.1.1. This entry documents what landed; the tag follows once the
+> E2E gate passes.
+
+Key changes delivered in this push (see the detailed entries under `[Unreleased]`):
+
+- Outcome model distinct from agent exit code; `validation_failed`/`timeout`/
+  `node_lost`/`infrastructure_failed` error codes; cancel always yields `cancelled`.
+- Lost-node recovery: non-terminal attempts → `lost` atomically; capacity released;
+  idempotent completion redelivery.
+- Explicit `POST /v1/node/attempts/{id}/ack` + `ack_deadline`; lease decoupled from
+  output ingest; N/N-1 compatibility for legacy nodes.
+- Scheduler: oldest-eligible-task (no head-of-line blocking), `requested_node_id`
+  honored, scheduler latency metric.
+- Durable node JSONL outbox (events + completions); startup redelivery; idempotent
+  complete redelivery. (RAM/spool size limits + `output_truncated` + E2E pending.)
+- Safety: secret masking in all paths, agent logs excluded from commit/diff,
+  artifact-name traversal guard on GET + defense-in-depth `Store::artifact_path`.
+- Git: per-repo in-process lock serializes shared-clone mutations; `sh -c` removed;
+  token + URL validation; adversarial tests.
+- Adapter registry: probed adapters on heartbeat, `assignment.adapter` enforced.
+- Ops: WAL checkpoint + backup, `quick_check` at boot, stable-JWT-secret requirement,
+  login rate limit + audit (no user enumeration), protocol versioning, disk-space
+  `degraded`, checkpoint-duration + `SQLITE_BUSY` metrics.
+- Web auth: HttpOnly + SameSite=Strict session cookie (no JWT in `localStorage`);
+  `POST /v1/auth/logout`; CSRF mitigated via SameSite=Strict.
+
+Not yet closed (carried forward): binary-safe streaming artifact API +
+descriptor-relative (`openat`/`O_NOFOLLOW`) writes; SQLite outbox, outbox size
+limits / `output_truncated` backpressure, artifacts-in-spool; E2E `network
+disconnect` / `kill -9 daemon`; legacy-schema FK migration; bare-mirror shared
+clone / cross-process repo lock.
+
 ## [0.3.0] — 2026-07-17
 
 Stage 8 distributed multi-agent workflows. See the `Added (Stage 8 …)` entries
