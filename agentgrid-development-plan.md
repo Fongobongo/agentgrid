@@ -72,8 +72,8 @@
 - [x] `CompleteAttemptRequest`: durable retry + idempotency (повторный complete того же attempt — no-op)
 - [x] Artifact upload: retry, проверка response status, идемпотентность per name
 - [x] Recovery: после рестарта daemon обнаружить незавершённые attempts и непустой outbox → досылка/reconciliation с control plane (completions redelivered на старте; events redelivered при следующем запуске попытки)
-- [ ] E2E: `docker network disconnect` в середине задачи → события доехали без дублей и пропусков
-- [ ] E2E: kill -9 daemon → после рестарта outbox досылается, attempt корректно завершается или репортится
+- [x] E2E: `docker network disconnect` в середине задачи → события доехали без дублей и пропусков (процессный E2E `tests/e2e/run-outbox.sh`, scenario B: CP down mid-stream → node spools → CP back → 200 events contiguous, no dup/gap)
+- [x] E2E: kill -9 daemon → после рестарта outbox досылается, attempt корректно завершается или репортится (процессный E2E, scenario A: kill -9 node after completion recorded → restart CP+node → completion redelivered → succeeded)
 
 ### 2.2 Secrets и artifact safety
 

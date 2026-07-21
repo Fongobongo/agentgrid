@@ -57,16 +57,6 @@ struct Config {
     completion_outbox: Arc<outbox::CompletionOutbox>,
 }
 
-impl Config {
-    /// A shared HTTP client for outbox redelivery outside the main poll loop.
-    fn client(&self) -> reqwest::Client {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    }
-}
-
 /// Node identity persisted to disk after enrollment (never re-sent in plaintext).
 #[derive(Serialize, Deserialize)]
 struct SavedCredential {
@@ -445,15 +435,6 @@ impl EventSink {
         let batch: Vec<IncomingEvent> = std::mem::take(&mut *self.buf.lock().await)
             .into_iter()
             .collect();
-        if !batch.is_empty() {
-            // Stage 2.1: release the RAM budget these events held so backpressure
-            // resets as the flusher drains.
-            let freed: u64 = batch
-                .iter()
-                .map(|e| e.payload.to_string().len() as u64)
-                .sum();
-            self.buf_bytes.fetch_sub(freed, Ordering::Relaxed);
-        }
         if batch.is_empty() {
             return;
         }
@@ -462,6 +443,12 @@ impl EventSink {
             self.server, self.attempt_id
         );
         let seqs: Vec<u64> = batch.iter().map(|e| e.sequence).collect();
+        // Approximate bytes for backpressure accounting. Released only on a
+        // successful ack so a failed flush (batch pushed back) doesn't undercount.
+        let freed: u64 = batch
+            .iter()
+            .map(|e| e.payload.to_string().len() as u64)
+            .sum();
         let req = IngestEventsRequest { events: batch };
         // Stage 2.1: verify the HTTP status and retry transient/5xx failures.
         // On a still-non-2xx response the batch is returned to the front of the
@@ -469,7 +456,9 @@ impl EventSink {
         // durable outbox still holds them for redelivery after a restart.
         match send_with_retry(self.client.post(&url).json(&req), 10).await {
             Ok(s) if s.is_success() => {
-                // CP acked: drop the lines from the durable outbox.
+                // CP acked: release the RAM budget and drop the lines from the
+                // durable outbox.
+                self.buf_bytes.fetch_sub(freed, Ordering::Relaxed);
                 if let Err(e) = self.outbox.ack(&seqs) {
                     tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
                 }
@@ -496,6 +485,65 @@ impl EventSink {
             tokio::select! {
                 _ = self.notify.notified() => {}
                 _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+            self.flush().await;
+        }
+    }
+
+    /// Drain the RAM buffer with a single send attempt (no long retry). Used
+    /// in the post-adapter path so a down CP doesn't block the completion
+    /// recording for tens of seconds; the durable outbox retains the events
+    /// and the flusher loop (while it lives) keeps retrying.
+    async fn flush_quick(&self) {
+        let batch: Vec<IncomingEvent> = std::mem::take(&mut *self.buf.lock().await)
+            .into_iter()
+            .collect();
+        if batch.is_empty() {
+            return;
+        }
+        let url = format!(
+            "{}/v1/node/attempts/{}/events",
+            self.server, self.attempt_id
+        );
+        let seqs: Vec<u64> = batch.iter().map(|e| e.sequence).collect();
+        let freed: u64 = batch
+            .iter()
+            .map(|e| e.payload.to_string().len() as u64)
+            .sum();
+        let req = IngestEventsRequest { events: batch };
+        match send_with_retry(self.client.post(&url).json(&req), 1).await {
+            Ok(s) if s.is_success() => {
+                self.buf_bytes.fetch_sub(freed, Ordering::Relaxed);
+                if let Err(e) = self.outbox.ack(&seqs) {
+                    tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
+                }
+            }
+            _ => {
+                // Push back; the durable outbox still holds these lines.
+                let mut buf = self.buf.lock().await;
+                for e in req.events {
+                    buf.push_front(e);
+                }
+            }
+        }
+    }
+
+    /// Synchronously drain the RAM buffer to the CP (CP is up by the time this is
+    /// called, after report_complete succeeded). Loops flush() with full retry
+    /// until the buffer is empty or the deadline passes, so events buffered
+    /// during a CP outage are not lost when the flusher is aborted.
+    async fn drain(&self, deadline: tokio::time::Instant) {
+        loop {
+            let empty = self.buf.lock().await.is_empty();
+            if empty {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    attempt_id = %self.attempt_id,
+                    "drain timed out; some buffered events remain in the durable outbox"
+                );
+                return;
             }
             self.flush().await;
         }
@@ -1026,7 +1074,26 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
 
         let _ = r1.await;
         let _ = r2.await;
-        sink.flush().await;
+        // Stage 2.1: record the terminal completion BEFORE the post-adapter
+        // sends so a daemon kill during the (possibly blocking) flush/upload
+        // window still redelivers the completion on the next startup. The exit
+        // code is known here; commit_sha/validation verdict are refined later
+        // (record() replaces the prior line, latest wins).
+        let early_req = CompleteAttemptRequest {
+            exit_code: code,
+            commit_sha: None,
+            error_code: kill_reason.map(|k| k.to_string()),
+            acp_session_id: None,
+        };
+        if let Err(e) = cfg
+            .completion_outbox
+            .record(&assignment.attempt_id, &early_req)
+        {
+            tracing::warn!(attempt_id = %assignment.attempt_id, "early completion record failed: {e}");
+        }
+        // Single-shot drain: don't block for tens of seconds on a down CP; the
+        // flusher loop + durable outbox cover redelivery.
+        sink.flush_quick().await;
         if code == 0 && sink.adapter_event_count() == 0 {
             tracing::warn!(
                 attempt_id = %assignment.attempt_id,
@@ -1076,7 +1143,11 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         }
         break true;
     };
-    flusher.abort();
+    // ponytail: flusher kept alive through finalize/artifacts/report_complete so
+    // events buffered during a CP outage keep being retried and are delivered
+    // once the CP recovers (the durable outbox also retains them). Aborted
+    // after report_complete so a terminal attempt doesn't leak the task.
+    // (was: flusher.abort() here, before the post-adapter sends.)
 
     let node_name = cfg.node_name.clone();
     let patch_path = workdir.join("changes.patch");
@@ -1123,6 +1194,13 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     .await;
 
     tracing::info!(attempt_id = %assignment.attempt_id, exit_code = code, "attempt finished");
+    // Stage 2.1: drain buffered events BEFORE the completion so the CP sees
+    // the full event stream before marking the task terminal (otherwise a
+    // `succeeded` status could race the final event batch). flush() retries
+    // transient/5xx failures; once the CP recovers the drain completes and
+    // the completion is sent immediately after.
+    sink.drain(tokio::time::Instant::now() + Duration::from_secs(60))
+        .await;
     report_complete(
         &client,
         &cfg.server,
@@ -1134,6 +1212,11 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &cfg.completion_outbox,
     )
     .await;
+    // Safety: redeliver anything the pre-completion drain couldn't (e.g. the
+    // CP flapped again between drain and completion). CP is up here.
+    sink.drain(tokio::time::Instant::now() + Duration::from_secs(15))
+        .await;
+    flusher.abort();
     Ok(())
 }
 
@@ -1418,6 +1501,23 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
         .build()?;
     let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
 
+    // Stage 2.1: redeliver any completion records a prior (killed) run recorded
+    // but never got a CP ack for. Runs with the node-credentialed client so the
+    // /v1/node/attempts/{id}/complete route authenticates. complete_attempt is
+    // idempotent on terminal attempts, so this is safe.
+    for c in cfg.completion_outbox.pending().unwrap_or_default() {
+        let req = c.to_request();
+        tracing::info!(attempt_id = %c.attempt_id, "redelivering durable completion");
+        let url = format!("{}/v1/node/attempts/{}/complete", cfg.server, c.attempt_id);
+        match send_with_retry(client.post(&url).json(&req), 20).await {
+            Ok(s) if s.is_success() => {
+                let _ = cfg.completion_outbox.ack(&c.attempt_id);
+            }
+            Ok(s) => tracing::warn!("completion redelivery got {s} for {}", c.attempt_id),
+            Err(e) => tracing::warn!("completion redelivery failed for {}: {e}", c.attempt_id),
+        }
+    }
+
     // Heartbeat loop: publish status/load/capabilities periodically.
     let hb_sem = sem.clone();
     let hb_cfg = cfg.clone();
@@ -1571,21 +1671,6 @@ async fn main() -> Result<()> {
     }
 
     let cfg = config_from_env();
-    // Stage 2.1: redeliver any completion records a prior (killed) run recorded
-    // but never got a CP ack for. complete_attempt is idempotent on terminal
-    // attempts, so this is safe.
-    for c in cfg.completion_outbox.pending().unwrap_or_default() {
-        let req = c.to_request();
-        tracing::info!(attempt_id = %c.attempt_id, "redelivering durable completion");
-        let url = format!("{}/v1/node/attempts/{}/complete", cfg.server, c.attempt_id);
-        match send_with_retry(cfg.client().post(&url).json(&req), 20).await {
-            Ok(s) if s.is_success() => {
-                let _ = cfg.completion_outbox.ack(&c.attempt_id);
-            }
-            Ok(s) => tracing::warn!("completion redelivery got {s} for {}", c.attempt_id),
-            Err(e) => tracing::warn!("completion redelivery failed for {}: {e}", c.attempt_id),
-        }
-    }
     for a in &cfg.adapters {
         let bin = format!("adapter-{}", a.id.replace('_', "-"));
         let probe = probe_adapter(&bin).await;

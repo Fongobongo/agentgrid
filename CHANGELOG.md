@@ -61,6 +61,31 @@ complete; the two-container E2E run is the release validation gate.
 ### Added (gateway — chat front-end, Stage 9.3)
 - New crate `crates/gateway` (`agentgrid-gateway`): a chat bridge that lets an operator drive the grid from a phone. A `ChatProvider` trait with one implementation — Telegram, via raw `reqwest` calls to the Bot API `getUpdates`/`sendMessage` long-polling (no chat-client crate). Commands proxy to the control-plane HTTP API: `/nodes`, `/tasks`, `/run <repo> <adapter> <prompt...>`, `/show <id>`, `/logs <id>`, `/cancel <id>`, `/help`. Auth is an allowlist of numeric chat ids (`AGENTGRID_GATEWAY_ADMINS`); chats off the list are ignored. The control-plane URL + a user JWT come from `AGENTGRID_SERVER` / `AGENTGRID_GATEWAY_TOKEN`. Discord and WhatsApp sit behind the same trait but are **not implemented yet** — WhatsApp especially has no easy open bot API (the Business API is gated/heavy); both are honestly deferred rather than stubbed. Covered by `tests::fmt_*` (the pure formatting/dispatch helpers); live bot wiring needs a real Telegram token.
 
+### Added (node — durable outbox hardening + E2E, Stage 2.1)
+
+- Fixed the startup completion-redelivery path: it was using an unauthenticated
+  client, so `/v1/node/attempts/{id}/complete` returned 401 and the redelivery
+  never acked. Moved redelivery into `poll_loop` after the credentialed client is
+  built.
+- Record the terminal completion to the durable outbox promptly when the
+  adapter exits (before the post-adapter event flush / artifact uploads, which
+  block on a down CP), so a daemon kill during that window still redelivers the
+  completion. `CompletionOutbox::record` is now idempotent per attempt (latest
+  wins, replacing any prior pending line).
+- Added `EventSink::flush_quick` (single-shot drain, no long retry) for the
+  post-adapter flush, and `EventSink::drain` (loop flush until buffer empty) run
+  before and after `report_complete`, so events buffered during a CP outage are
+  delivered before the task is marked terminal (and not lost when the flusher is
+  aborted). The flusher is now kept alive through `report_complete`.
+- Fixed `buf_bytes` backpressure accounting: released only on a successful ack
+  (a failed flush pushes the batch back), so the cap isn't effectively raised
+  during a prolonged outage.
+- Process-based E2E `tests/e2e/run-outbox.sh` (no Docker / disk-heavy build):
+  Scenario A — kill -9 node after the completion is durably recorded, restart
+  CP + node → completion redelivered → task succeeds. Scenario B — CP down
+  mid-stream, node spools events + completion, CP back → 200 events delivered
+  contiguous, no dup/gap. Both pass repeatedly.
+
 ### Added (node — event backpressure + `output_truncated`, Stage 2.1)
 
 - `EventSink` now caps its RAM buffer per attempt at `AGENTGRID_EVENT_BUF_BYTES` (default 4 MiB). Once over the cap, ordinary log/usage events (`stdout`/`stderr`/`metric`) are dropped and exactly one `output_truncated` status notice is emitted; terminal-state events (`status`/`result`/`error`) and `tool` calls are never dropped, so logs can't starve terminal state. The budget is released as the flusher drains. Covered by `event_sink_drops_logs_over_cap_but_keeps_terminal_state`.

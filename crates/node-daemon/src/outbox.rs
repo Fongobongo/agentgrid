@@ -155,8 +155,9 @@ impl CompletionOutbox {
         })
     }
 
-    /// Record a completion durably (idempotent: the latest line for an
-    /// attempt wins; the CP complete_attempt is idempotent on terminal state).
+    /// Record a completion durably (idempotent: replaces any existing line
+    /// for this attempt so the latest exit/error wins; the CP complete_attempt
+    /// is idempotent on terminal state).
     pub fn record(&self, attempt_id: &str, req: &CompleteAttemptRequest) -> Result<()> {
         let _g = self.file.lock().unwrap();
         let line = CompletionLine {
@@ -166,13 +167,32 @@ impl CompletionOutbox {
             error_code: req.error_code.clone(),
             acp_session_id: req.acp_session_id.clone(),
         };
+        // Dedupe: drop any prior pending line for this attempt so we don't
+        // redeliver a stale terminal state alongside the fresh one.
+        let mut survivors = String::new();
+        if let Ok(content) = std::fs::read_to_string(&self.path) {
+            for l in content.lines() {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<CompletionLine>(l) {
+                    Ok(c) if c.attempt_id == attempt_id => continue,
+                    _ => {
+                        survivors.push_str(l);
+                        survivors.push('\n');
+                    }
+                }
+            }
+        }
         let mut s = serde_json::to_string(&line)?;
         s.push('\n');
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open(&self.path)?;
+        f.write_all(survivors.as_bytes())?;
         f.write_all(s.as_bytes())?;
         f.sync_data()?;
         Ok(())
