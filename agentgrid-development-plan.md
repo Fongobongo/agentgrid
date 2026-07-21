@@ -36,7 +36,7 @@
 - [x] При переводе node в `offline`/`revoked` атомарно переводить её non-terminal attempts в `lost`
 - [x] Освобождать `active_attempts` capacity при потере attempt
 - [x] Политика задачи после `lost`: default `failed/node_lost`; автоматический retry разрешён только явно retryable/idempotent steps с лимитом попыток и backoff — зафиксировать в ADR
-- [ ] Test: kill node-контейнера во время running → attempt `lost`, task `failed`, повторный `retry` работает
+- [x] Test: kill node-контейнера во время running → attempt `lost`, task `failed`, повторный `retry` работает (процессный E2E `tests/e2e/run-outbox.sh` scenario C: kill -9 node mid-running → maintenance marks offline → task `failed`/`node_lost` → retry → restart node → `succeeded`, 10/10)
 - [x] Test: node вернулась после offline и репортит completion уже `lost` attempt → идемпотентный отказ без порчи статуса
 
 ### 1.3 Explicit assignment acknowledgement

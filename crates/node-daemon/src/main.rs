@@ -532,20 +532,45 @@ impl EventSink {
     /// called, after report_complete succeeded). Loops flush() with full retry
     /// until the buffer is empty or the deadline passes, so events buffered
     /// during a CP outage are not lost when the flusher is aborted.
-    async fn drain(&self, deadline: tokio::time::Instant) {
+    /// Drain directly from the durable outbox on disk, ignoring the RAM
+    /// buffer. Ground-truth recovery path: events an aborted flusher dropped
+    /// mid-flush (its local `req` is gone) are still on disk and get
+    /// redelivered here. Loops until the outbox is empty or the deadline
+    /// passes. The CP is up by the time this is called.
+    async fn drain_outbox(&self, deadline: tokio::time::Instant) {
+        let url = format!(
+            "{}/v1/node/attempts/{}/events",
+            self.server, self.attempt_id
+        );
         loop {
-            let empty = self.buf.lock().await.is_empty();
-            if empty {
-                return;
-            }
             if tokio::time::Instant::now() >= deadline {
                 tracing::warn!(
                     attempt_id = %self.attempt_id,
-                    "drain timed out; some buffered events remain in the durable outbox"
+                    "drain_outbox timed out; events remain on disk"
                 );
                 return;
             }
-            self.flush().await;
+            let pending = match self.outbox.pending() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(attempt_id = %self.attempt_id, "outbox read failed: {e}");
+                    return;
+                }
+            };
+            if pending.is_empty() {
+                return;
+            }
+            let batch: Vec<IncomingEvent> = pending.into_iter().collect();
+            let seqs: Vec<u64> = batch.iter().map(|e| e.sequence).collect();
+            let req = IngestEventsRequest { events: batch };
+            match send_with_retry(self.client.post(&url).json(&req), 10).await {
+                Ok(s) if s.is_success() => {
+                    if let Err(e) = self.outbox.ack(&seqs) {
+                        tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
+                    }
+                }
+                _ => return,
+            }
         }
     }
 }
@@ -1194,12 +1219,11 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     .await;
 
     tracing::info!(attempt_id = %assignment.attempt_id, exit_code = code, "attempt finished");
-    // Stage 2.1: drain buffered events BEFORE the completion so the CP sees
-    // the full event stream before marking the task terminal (otherwise a
-    // `succeeded` status could race the final event batch). flush() retries
-    // transient/5xx failures; once the CP recovers the drain completes and
-    // the completion is sent immediately after.
-    sink.drain(tokio::time::Instant::now() + Duration::from_secs(60))
+    // Stage 2.1: drain all pending events from the durable outbox BEFORE the
+    // completion so the CP sees the full event stream before marking the task
+    // terminal. Read from disk (ground truth), not RAM — an aborted flusher's
+    // in-flight batch is gone from RAM but still on disk here.
+    sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(60))
         .await;
     report_complete(
         &client,
@@ -1212,9 +1236,10 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &cfg.completion_outbox,
     )
     .await;
-    // Safety: redeliver anything the pre-completion drain couldn't (e.g. the
-    // CP flapped again between drain and completion). CP is up here.
-    sink.drain(tokio::time::Instant::now() + Duration::from_secs(15))
+    // Ground-truth redelivery: any events still on disk (e.g. the CP flapped
+    // again, or the pre-completion drain couldn't send) are delivered now.
+    // The CP is up (report_complete succeeded).
+    sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(15))
         .await;
     flusher.abort();
     Ok(())

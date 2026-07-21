@@ -1532,8 +1532,15 @@ impl Store {
     pub fn start_maintenance(&self) {
         let store = self.clone();
         tokio::spawn(async move {
+            // Tick every 15s: node-staleness is 30s, so a 15s cadence still
+            // marks a dead node offline within ~45s of its last heartbeat.
+            // Run the WAL checkpoint only every 4th tick (~60s): a checkpoint
+            // takes the writer briefly (TRUNCATE) and serializes against user
+            // BEGIN IMMEDIATE writes — running it every tick caused
+            // `database is locked` (SQLITE_BUSY) on retry_task under load.
+            let mut tick = 0u32;
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(15)).await;
                 let now = now_iso();
                 if let Err(e) = revert_expired_leases(&store.pool, &now).await {
                     tracing::warn!("lease maintenance failed: {e}");
@@ -1542,7 +1549,10 @@ impl Store {
                     tracing::warn!("node maintenance failed: {e}");
                 }
                 let _ = store.cleanup_artifacts(168).await;
-                let _ = store.wal_checkpoint().await;
+                tick = tick.wrapping_add(1);
+                if tick % 4 == 0 {
+                    let _ = store.wal_checkpoint().await;
+                }
             }
         });
     }

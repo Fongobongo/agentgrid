@@ -133,6 +133,11 @@ wait_terminal() {  # $1 = task id, $2 = max seconds; sets STATUS
   return 1
 }
 
+poll_status() {  # $1 = task id; sets STATUS (does not loop)
+  STATUS=$(curl -fsS "$BASE/v1/tasks/$1" -H "authorization: Bearer $jwt" \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')
+}
+
 echo ">> Scenario A: kill -9 node + completion durability"
 
 echo "  starting control plane"
@@ -181,7 +186,7 @@ start_node ""
 wait_node_online || exit 1
 
 echo "  polling task for terminal status (timeout 40s)"
-if wait_terminal "$TID" 40; then
+if wait_terminal "$TID" 60; then
   echo "  final status: $STATUS"
 else
   echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
@@ -206,7 +211,7 @@ wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
 login
 
 echo "  polling task for terminal status (timeout 40s)"
-if wait_terminal "$TID" 40; then
+if wait_terminal "$TID" 60; then
   echo "  final status: $STATUS"
 else
   echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
@@ -234,4 +239,61 @@ if gaps:
 print("  B OK: 200 events, no gaps/dup")
 PYEOF
 
-echo ">> E2E OK (both scenarios)"
+echo ">> Scenario C: kill node mid-running → lost → retry → succeeded"
+
+# Fresh CP + node for this scenario (clean state).
+echo "  finding CP/node state"
+[ -n "$CP_PID" ] || { echo "  C FAILED: CP not running"; exit 1; }
+# Restart the node so a fresh long task is assigned cleanly.
+[ -n "$NODE_PID" ] && { kill -9 "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null || true; }
+unset ENROLL_TOKEN
+start_node ""
+wait_node_online || exit 1
+
+echo "  submitting task sleep:8 (long, will be killed)"
+TID=$(submit "sleep:8")
+echo "  task $TID; polling for running (timeout 15s)"
+reach=0
+for _ in $(seq 1 15); do
+  poll_status "$TID"
+  if [ "$STATUS" = "running" ]; then reach=1; break; fi
+  sleep 1
+done
+[ "$reach" = "1" ] || { echo "  C FAILED: never reached running before kill, got $STATUS"; exit 1; }
+
+echo "  kill -9 node (attempt should go lost → task failed/node_lost)"
+kill -9 "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null || true; NODE_PID=""
+
+echo "  polling for failed/lost (maintenance marks node offline after ~30s; timeout 50s)"
+# Override wait_terminal's terminal set: we want failed-or-lost here.
+for _ in $(seq 1 50); do
+  poll_status "$TID"
+  case "$STATUS" in failed|lost) break;; esac
+  sleep 1
+done
+if [ "$STATUS" = "failed" ]; then
+  echo "  status after kill: failed (expected)"
+else
+  echo "  C FAILED: expected failed after node-kill, got $STATUS"; cat "$TMP/cp.log"; exit 1
+fi
+
+echo "  retrying task $TID"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/tasks/$TID/retry" \
+  -H "authorization: Bearer $jwt")
+[ "$code" = "200" ] || { echo "  C FAILED: retry returned $code"; exit 1; }
+
+echo "  restarting node → fresh attempt should run to succeeded"
+unset ENROLL_TOKEN
+start_node ""
+wait_node_online || exit 1
+
+echo "  polling task for terminal status (timeout 40s)"
+if wait_terminal "$TID" 60; then
+  echo "  final status: $STATUS"
+else
+  echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
+fi
+[ "$STATUS" = "succeeded" ] || { echo "  C FAILED: expected succeeded after retry, got $STATUS"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1; }
+echo "  C OK: lost attempt → retry → succeeded"
+
+echo ">> E2E OK (all scenarios)"

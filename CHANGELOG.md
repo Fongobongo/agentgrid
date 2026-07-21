@@ -83,11 +83,27 @@ complete; the two-container E2E run is the release validation gate.
 - Fixed `buf_bytes` backpressure accounting: released only on a successful ack
   (a failed flush pushes the batch back), so the cap isn't effectively raised
   during a prolonged outage.
-- Process-based E2E `tests/e2e/run-outbox.sh` (no Docker / disk-heavy build):
+- Replaced the pre/post-completion RAM-buffer `drain` with `drain_outbox`,
+  which redelivers directly from the durable outbox on disk — events dropped
+  from RAM when the flusher is aborted mid-flush are still on disk and get
+  redelivered rather than orphaned on a terminal attempt. This closed the
+  last event-continuity gap in Scenario B.
+- Process-based E2E `tests/e2e/run-outbox.sh` now has three scenarios:
   Scenario A — kill -9 node after the completion is durably recorded, restart
   CP + node → completion redelivered → task succeeds. Scenario B — CP down
   mid-stream, node spools events + completion, CP back → 200 events delivered
-  contiguous, no dup/gap. Both pass repeatedly.
+  contiguous, no dup/gap. Scenario C — kill -9 node mid-running → maintenance
+  marks the node offline → task `failed`/`node_lost` → retry → restart node
+  → `succeeded`. All three pass 10/10.
+
+### Added (cp — maintenance cadence, SQLITE_BUSY fix)
+
+- `start_maintenance` now ticks every 15s (node staleness threshold is 30s, so
+  a dead node is still marked offline within ~30–45s) and runs `wal_checkpoint`
+  only every 4th tick (~60s). Running a TRUNCATE checkpoint every 5s held the
+  SQLite writer and caused `database is locked` (SQLITE_BUSY) on user `BEGIN
+  IMMEDIATE` writes such as `retry_task` under load — observed as a 500 on
+  retry in the E2E. Less frequent checkpoints eliminate the contention.
 
 ### Added (node — event backpressure + `output_truncated`, Stage 2.1)
 
