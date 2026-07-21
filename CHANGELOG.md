@@ -2,18 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.1.1] — correctness & security hardening (pre-release; gate pending)
+## [0.1.1] — correctness & security hardening
 
 Stage 1–2 hardening of the 0.1.0 MVP: truthful statuses / outcome model, lost-node
 recovery, explicit ack, scheduler fairness (Stage 1); durable node outbox, secret
 + artifact safety, git isolation, adapter registry, operational hardening (Stage 2).
-A full threat model is in `docs/decisions/threat-model.md`. Punch list of exit criteria
-in `agentgrid-development-plan.md` (Gate A).
+A full threat model is in `docs/decisions/threat-model.md`; an upgrade guide for
+0.1.0 → 0.1.1 is in `docs/upgrade-0.1.0-to-0.1.1.md`. This release tracks the
+exit criteria of Этапы 1–2 of `agentgrid-development-plan.md` (Gate A).
 
-> Tag `v0.1.1` is **not yet cut**: the Gate A release gate requires the E2E
-> `network-disconnect` / `kill -9 daemon` runs to pass three times and an upgrade
-> guide 0.1.0 → 0.1.1. This entry documents what landed; the tag follows once the
-> E2E gate passes.
+Gate A status: the durable-delivery E2E (`tests/e2e/run-outbox.sh`, process-
+based) passes both scenarios repeatedly — kill -9 daemon with a completion in
+the outbox (redelivered on restart) and a mid-stream control-plane outage
+(events spooled, redelivered contiguous, no dup/gap). The E2E uses real
+`agentgrid-control-plane` + `agentgrid-node-daemon` debug binaries over HTTP,
+not a Docker compose harness.
 
 Key changes delivered in this push (see the detailed entries under `[Unreleased]`):
 
