@@ -900,9 +900,12 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         )
         .await;
         let res = drive_acp_session(&cfg, &client, &assignment, &ws.path, sink.clone()).await?;
-        // Keep the worktree path so validation can run against it; `ws` itself
-        // moves into finalize_workspace (which commits any diff).
+        // Stage 2.3: keep the per-attempt repo_dir/branch for cleanup after finalize takes ws.
         let workdir = ws.path.clone();
+        let cleanup_repo = ws.repo_dir.clone();
+        let cleanup_branch =
+            (ws.is_git && ws.branch.is_some()).then(|| ws.branch.clone().unwrap_or_default());
+        let cleanup_path = ws.path.clone();
         let node_name = cfg.node_name.clone();
         let commit_sha =
             tokio::task::spawn_blocking(move || git::finalize_workspace(ws, node_name.as_str()))
@@ -939,6 +942,17 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             &cfg.completion_outbox,
         )
         .await;
+        // Stage 2.3: reclaim the per-attempt worktree and branch now the attempt
+        // is terminal (prevents long-lived worktree/branch retention leaking disk).
+        tokio::task::spawn_blocking(move || {
+            git::cleanup_workspace(
+                &cleanup_path,
+                cleanup_repo.as_deref(),
+                cleanup_branch.as_deref(),
+            )
+        })
+        .await
+        .ok();
         return Ok(());
     }
 
@@ -1176,6 +1190,12 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
 
     let node_name = cfg.node_name.clone();
     let patch_path = workdir.join("changes.patch");
+    // Stage 2.3: keep the per-attempt repo_dir/branch so the worktree and its
+    // ref can be reclaimed after the attempt is terminal (finalize takes ws).
+    let cleanup_repo = ws.repo_dir.clone();
+    let cleanup_branch =
+        (ws.is_git && ws.branch.is_some()).then(|| ws.branch.clone().unwrap_or_default());
+    let cleanup_path = ws.path.clone();
     let commit_sha =
         tokio::task::spawn_blocking(move || git::finalize_workspace(ws, node_name.as_str()))
             .await??;
@@ -1242,6 +1262,18 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(15))
         .await;
     flusher.abort();
+    // Stage 2.3: reclaim the per-attempt worktree and branch now the attempt
+    // is terminal. Best-effort in a spawn_blocking so a stuck worktree never
+    // turns a successful attempt terminal.
+    tokio::task::spawn_blocking(move || {
+        git::cleanup_workspace(
+            &cleanup_path,
+            cleanup_repo.as_deref(),
+            cleanup_branch.as_deref(),
+        )
+    })
+    .await
+    .ok();
     Ok(())
 }
 
@@ -1709,6 +1741,28 @@ async fn main() -> Result<()> {
         }
     }
     tokio::fs::create_dir_all(&cfg.workspace_root).await?;
+    // Stage 2.3: reclaim workspace dirs + worktree gitlinks a prior (killed)
+    // run left behind. Default 24h retention; tune with
+    // AGENTGRID_WORKSPACE_RETENTION_HOURS (0 disables pruning).
+    let retention_h: u64 = std::env::var("AGENTGRID_WORKSPACE_RETENTION_HOURS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+    if retention_h > 0 {
+        tokio::task::spawn_blocking({
+            let ws = cfg.workspace_root.clone();
+            let repos = cfg.repository_root.clone();
+            move || {
+                git::prune_stale_workspaces(
+                    &ws,
+                    &repos,
+                    std::time::Duration::from_secs(retention_h * 3600),
+                )
+            }
+        })
+        .await
+        .ok();
+    }
     let cred = load_or_enroll(&cfg).await?;
     tracing::info!(
         node_id = %cred.node_id,

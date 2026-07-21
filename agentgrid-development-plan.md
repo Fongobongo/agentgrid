@@ -96,7 +96,7 @@
 - [x] Test: два параллельных attempts одного repo не ломают clone state
 - [ ] Убрать `checkout -B` в shared clone → bare mirror либо detached ref; worktree от зафиксированного commit
 - [x] Добавить `base_commit` в `Assignment`; фиксировать его при fetch
-- [ ] Worktree/branch cleanup: retention 24h, фоновая job, `git worktree prune`, reconciliation при старте
+- [x] Worktree/branch cleanup: graceful `git worktree remove --force` + `git branch -D` after each terminal attempt (ACP + mock + adapter-missing paths); startup reconciliation `prune_stale_workspaces` removes workspace dirs older than `AGENTGRID_WORKSPACE_RETENTION_HOURS` (default 24h, 0 disables) and `git worktree prune`s each repo. Background periodic job deferred (startup reconcile + per-attempt cleanup covers the common cases; a killed node's stale dirs are swept on next startup, not immediately)
 - [x] Artifacts retention на control plane (168h default) + фоновая очистка
 
 ### 2.4 Adapter registry

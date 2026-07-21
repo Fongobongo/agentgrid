@@ -243,6 +243,79 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
     Ok(Some(sha))
 }
 
+/// Remove the per-attempt worktree dir and (for git tasks) its branch after
+/// the attempt is done (Stage 2.3 worktree/branch cleanup). Best-effort: logs
+/// and swallows errors so a stuck worktree never turns a successful attempt
+/// terminal. For git tasks `git worktree remove --force` drops the worktree
+/// dir and its gitlink, and the branch delete (best-effort) reclaims the ref.
+/// The worktree dir is removed directly as a fallback if `worktree remove`
+/// left it behind — and as the only step for non-git tasks (plain dir).
+pub fn cleanup_workspace(
+    ws_path: &std::path::Path,
+    repo_dir: Option<&std::path::Path>,
+    branch: Option<&str>,
+) {
+    if let (Some(repo), Some(branch)) = (repo_dir, branch) {
+        if let Err(e) = (|| -> Result<()> {
+            git(
+                repo,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    ws_path.to_str().unwrap_or(""),
+                ],
+            )?;
+            let _ = Command::new("git")
+                .args(["branch", "-D", branch])
+                .current_dir(repo)
+                .status();
+            Ok(())
+        })() {
+            tracing::warn!(?ws_path, "worktree remove failed: {e}; falling back to rm");
+        }
+    }
+    if ws_path.exists() {
+        let _ = std::fs::remove_dir_all(ws_path);
+    }
+}
+
+/// Reclaim per-attempt workspace dirs and worktree gitlinks left by a prior
+/// daemon run that was killed before its graceful `cleanup_workspace` ran. A
+/// dir is removed only if its mtime is older than `retention` (so an in-flight
+/// attempt on a just-restarted node isn't swept). For each repo under
+/// `repository_root`, also runs `git worktree prune` to drop gitlinks whose
+/// worktrees no longer exist. Best-effort.
+pub fn prune_stale_workspaces(
+    workspace_root: &std::path::Path,
+    repository_root: &std::path::Path,
+    retention: std::time::Duration,
+) {
+    let cutoff = std::time::SystemTime::now() - retention;
+    if let Ok(entries) = std::fs::read_dir(workspace_root) {
+        for e in entries.flatten() {
+            if let Ok(md) = e.metadata() {
+                if md.is_dir() {
+                    if let Ok(mtime) = md.modified() {
+                        if mtime < cutoff {
+                            let p = e.path();
+                            tracing::info!(?p, "pruning stale workspace dir");
+                            let _ = std::fs::remove_dir_all(&p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(repository_root) {
+        for e in entries.flatten() {
+            if e.path().join(".git").exists() {
+                let _ = git(&e.path(), &["worktree", "prune"]);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +384,91 @@ mod tests {
         assert!(sha.is_some());
         let patch = std::fs::read_to_string(&patch_path).unwrap();
         assert!(patch.contains("new.txt"), "patch missing new file: {patch}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cleanup_workspace_removes_worktree_and_branch() {
+        let dir = std::env::temp_dir().join(format!("ag-git-cleanup-{}", uuid::Uuid::new_v4()));
+        let origin = dir.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(origin.join("base.txt"), "base").unwrap();
+        git(&origin, &["add", "-A"]).unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+        let a = make_assignment(origin.to_str().unwrap(), "main");
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a).unwrap();
+        assert!(ws.is_git);
+        let ws_path = ws.path.clone();
+        let repo_dir = ws.repo_dir.clone().unwrap();
+        let branch = ws.branch.clone().unwrap();
+        finalize_workspace(ws, "agent@agentgrid").unwrap();
+        assert!(ws_path.exists(), "worktree dir should exist before cleanup");
+        let branches_before = git_out(&repo_dir, &["branch", "--list"]).unwrap();
+        assert!(
+            branches_before.contains(&branch),
+            "branch missing: {branches_before}"
+        );
+        cleanup_workspace(&ws_path, Some(&repo_dir), Some(&branch));
+        assert!(
+            !ws_path.exists(),
+            "worktree dir should be gone after cleanup"
+        );
+        let branches_after = git_out(&repo_dir, &["branch", "--list"]).unwrap();
+        assert!(
+            !branches_after.contains(&branch),
+            "branch should be gone: {branches_after}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cleanup_workspace_plain_dir_no_git() {
+        let dir =
+            std::env::temp_dir().join(format!("ag-git-cleanup-plain-{}", uuid::Uuid::new_v4()));
+        let a = make_assignment("", "main");
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a).unwrap();
+        assert!(!ws.is_git);
+        let ws_path = ws.path.clone();
+        assert!(ws_path.exists());
+        cleanup_workspace(&ws_path, None, None);
+        assert!(!ws_path.exists(), "plain dir should be gone after cleanup");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_stale_workspaces_removes_old_keeps_fresh() {
+        let dir = std::env::temp_dir().join(format!("ag-prune-{}", uuid::Uuid::new_v4()));
+        let ws_root = dir.join("ws");
+        let repos = dir.join("repos");
+        std::fs::create_dir_all(&ws_root).unwrap();
+        // Stale dir: created now, but a 0s retention prunes everything older
+        // than 0 (i.e. mtime < now). Backdate by recreating after a short sleep
+        // so its mtime is strictly in the past relative to the cutoff.
+        let stale = ws_root.join("old-attempt");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        // Fresh dir: created right before prune, mtime is now.
+        let fresh = ws_root.join("fresh-attempt");
+        std::fs::create_dir_all(&fresh).unwrap();
+        // retention = 1s: `stale` (mtime ~1.2s ago) is older → pruned;
+        // `fresh` (mtime ~0s ago) is newer → kept.
+        prune_stale_workspaces(&ws_root, &repos, std::time::Duration::from_secs(1));
+        assert!(!stale.exists(), "stale dir should be pruned");
+        assert!(fresh.exists(), "fresh dir should be kept");
         std::fs::remove_dir_all(&dir).ok();
     }
 

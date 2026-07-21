@@ -105,6 +105,21 @@ complete; the two-container E2E run is the release validation gate.
   IMMEDIATE` writes such as `retry_task` under load — observed as a 500 on
   retry in the E2E. Less frequent checkpoints eliminate the contention.
 
+### Added (node — worktree/branch cleanup, Stage 2.3)
+
+- Every terminal attempt now reclaims its per-attempt worktree dir and branch:
+  `git worktree remove --force` plus `git branch -D` for git tasks, a plain
+  `rm -rf` for non-git tasks. Runs best-effort in `spawn_blocking` on both the
+  ACP and raw-adapter paths so a stuck worktree never turns a successful
+  attempt terminal. Previously these leaked disk every run.
+- Node startup now runs `prune_stale_workspaces`: removes workspace dirs older
+  than `AGENTGRID_WORKSPACE_RETENTION_HOURS` (default 24, 0 disables) and runs
+  `git worktree prune` per repo. This sweeps dirs a killed daemon left behind
+  (a `kill -9` skips the graceful cleanup); a periodic background job is
+  deferred since startup reconcile + per-attempt cleanup covers the common
+  cases. Covered by `cleanup_workspace_removes_worktree_and_branch`,
+  `cleanup_workspace_plain_dir_no_git`, `prune_stale_workspaces_removes_old_keeps_fresh`.
+
 ### Added (node — event backpressure + `output_truncated`, Stage 2.1)
 
 - `EventSink` now caps its RAM buffer per attempt at `AGENTGRID_EVENT_BUF_BYTES` (default 4 MiB). Once over the cap, ordinary log/usage events (`stdout`/`stderr`/`metric`) are dropped and exactly one `output_truncated` status notice is emitted; terminal-state events (`status`/`result`/`error`) and `tool` calls are never dropped, so logs can't starve terminal state. The budget is released as the flusher drains. Covered by `event_sink_drops_logs_over_cap_but_keeps_terminal_state`.
