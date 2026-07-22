@@ -383,3 +383,45 @@ pub struct WorkflowProjection {
     pub run: WorkflowRun,
     pub steps: Vec<StepProjection>,
 }
+
+/// Stage 13: a scheduled trigger that creates a `WorkflowRun` of a template
+/// on a fixed interval (seconds). A schedule carries the autonomy the runs
+/// execute under — `l4` is only allowed when the template also declares a
+/// command policy + budget (enforced at create time, Stage 13 follow-up: the
+/// budget check; this lands the schedule infra).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowSchedule {
+    pub id: String,
+    pub template_id: String,
+    /// Interval between runs in seconds (>=1).
+    pub interval_seconds: i64,
+    /// Autonomy level for the runs this schedule spawns (`l0`..`l4`).
+    #[serde(default = "default_autonomy_l2")]
+    pub autonomy: String,
+    /// ISO timestamp of the last run this schedule triggered, or empty.
+    #[serde(default)]
+    pub last_run_at: String,
+    /// Whether the schedule is active (false = paused).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// Body for `POST /v1/workflows/{tid}/schedules`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkflowScheduleCreate {
+    pub interval_seconds: i64,
+    #[serde(default = "default_autonomy_l2")]
+    pub autonomy: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_autonomy_l2() -> String {
+    "l2".into()
+}
+
+fn default_true() -> bool {
+    true
+}

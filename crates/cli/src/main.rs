@@ -357,6 +357,8 @@ enum WorkflowSub {
     Run(WorkflowRunArgs),
     /// Cancel a whole workflow run (and its non-terminal steps/tasks).
     Cancel(WorkflowCancelArgs),
+    /// Manage scheduled/recurring triggers for a workflow template (Stage 13).
+    Schedules(WorkflowSchedulesArgs),
 }
 
 #[derive(Args)]
@@ -382,6 +384,33 @@ struct WorkflowRunArgs {
     /// Optional run context JSON (overrides the template default).
     #[arg(long)]
     context: Option<String>,
+}
+
+#[derive(Args)]
+struct WorkflowSchedulesArgs {
+    id: String,
+    #[command(subcommand)]
+    action: SchedulesAction,
+}
+
+#[derive(Subcommand)]
+enum SchedulesAction {
+    /// List schedules for a template.
+    List,
+    /// Create a scheduled trigger.
+    Create {
+        /// Interval between runs in seconds (>=1).
+        #[arg(long)]
+        interval_seconds: i64,
+        /// Autonomy level l0..l4 (default l2).
+        #[arg(long, default_value = "l2")]
+        autonomy: String,
+        /// Start paused (default: enabled).
+        #[arg(long)]
+        paused: bool,
+    },
+    /// Delete a schedule.
+    Delete { sid: String },
 }
 
 #[tokio::main]
@@ -1273,6 +1302,7 @@ async fn cmd_workflow(
         WorkflowSub::Show(s) => cmd_workflow_show(client, base, s, json).await,
         WorkflowSub::Run(r) => cmd_workflow_run(client, base, r).await,
         WorkflowSub::Cancel(c) => cmd_workflow_cancel(client, base, c).await,
+        WorkflowSub::Schedules(s) => cmd_workflow_schedules(client, base, s).await,
     }
 }
 
@@ -1376,6 +1406,90 @@ async fn cmd_workflow_cancel(
     }
     println!("workflow run {} cancelled", a.id);
     Ok(())
+}
+
+async fn cmd_workflow_schedules(
+    client: &reqwest::Client,
+    base: &str,
+    a: WorkflowSchedulesArgs,
+) -> Result<()> {
+    use agentgrid_common::WorkflowSchedule;
+    match a.action {
+        SchedulesAction::List => {
+            let resp = client
+                .get(format!("{base}/v1/workflows/{}/schedules", a.id))
+                .send()
+                .await
+                .context("list schedules request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("list schedules failed ({})", resp.status());
+            }
+            let schedules: Vec<WorkflowSchedule> =
+                resp.json().await.context("bad schedule json")?;
+            if schedules.is_empty() {
+                println!("no schedules for {}", a.id);
+            }
+            for s in &schedules {
+                println!(
+                    "{:<12} interval={}s autonomy={} {} last={}",
+                    s.id,
+                    s.interval_seconds,
+                    s.autonomy,
+                    if s.enabled { "[on]" } else { "[off]" },
+                    if s.last_run_at.is_empty() {
+                        "-"
+                    } else {
+                        &s.last_run_at
+                    }
+                );
+            }
+            Ok(())
+        }
+        SchedulesAction::Create {
+            interval_seconds,
+            autonomy,
+            paused,
+        } => {
+            let body = serde_json::json!({
+                "interval_seconds": interval_seconds,
+                "autonomy": autonomy,
+                "enabled": !paused,
+            });
+            let resp = client
+                .post(format!("{base}/v1/workflows/{}/schedules", a.id))
+                .json(&body)
+                .send()
+                .await
+                .context("create schedule request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("create schedule failed ({})", resp.status());
+            }
+            let s: WorkflowSchedule = resp.json().await.context("bad schedule json")?;
+            println!(
+                "schedule {} created: interval={}s autonomy={} {}",
+                s.id,
+                s.interval_seconds,
+                s.autonomy,
+                if s.enabled { "[on]" } else { "[off]" }
+            );
+            Ok(())
+        }
+        SchedulesAction::Delete { sid } => {
+            let resp = client
+                .delete(format!("{base}/v1/workflows/{}/schedules/{}", a.id, sid))
+                .send()
+                .await
+                .context("delete schedule request failed")?;
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                anyhow::bail!("schedule {} not found", sid);
+            }
+            if !resp.status().is_success() {
+                anyhow::bail!("delete schedule failed ({})", resp.status());
+            }
+            println!("schedule {} deleted", sid);
+            Ok(())
+        }
+    }
 }
 
 #[derive(Args)]

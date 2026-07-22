@@ -1782,6 +1782,101 @@ async fn workflow_create_rejects_cycle_duplicate_self_dep() {
 }
 
 #[tokio::test]
+async fn workflow_schedule_fires_run_on_tick() {
+    // Stage 13: a schedule with a small interval creates a new run when the
+    // maintenance tick reaches its due time.
+    use agentgrid_common::{WorkflowScheduleCreate, WorkflowTemplate};
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+
+    // Create a template (simple single step).
+    let body = "name: sched\nsteps:\n  - id: a\n    prompt: x\n    role: worker\n";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/workflows")
+                .header("content-type", "application/yaml")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tpl: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    // Create a schedule with a 2s interval, enabled.
+    let create = serde_json::to_string(&WorkflowScheduleCreate {
+        interval_seconds: 2,
+        autonomy: "l2".into(),
+        enabled: true,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/v1/workflows/{}/schedules", tpl.id),
+            create,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let sched: agentgrid_common::WorkflowSchedule =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(sched.interval_seconds, 2);
+    assert!(sched.enabled);
+
+    // Initially: no runs.
+    assert!(state.store.list_workflow_runs().await.unwrap().is_empty());
+
+    // Tick with now = far future → due (last_run_at empty = due now).
+    let created = state
+        .store
+        .tick_workflow_schedules(1_000_000_000)
+        .await
+        .unwrap();
+    assert_eq!(created.len(), 1, "schedule should fire once");
+    let runs = state.store.list_workflow_runs().await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, created[0]);
+
+    // Advancing only 1s past last_run must NOT fire (interval is 2s).
+    let again = state
+        .store
+        .tick_workflow_schedules(1_000_000_001)
+        .await
+        .unwrap();
+    assert!(
+        again.is_empty(),
+        "schedule must not fire before interval elapses"
+    );
+
+    // Advancing 2s past last_run fires again.
+    let again2 = state
+        .store
+        .tick_workflow_schedules(1_000_000_002)
+        .await
+        .unwrap();
+    assert_eq!(again2.len(), 1, "schedule fires again after interval");
+
+    // Disabled schedules never fire.
+    state
+        .store
+        .delete_workflow_schedule(&sched.id)
+        .await
+        .unwrap();
+    let again3 = state
+        .store
+        .tick_workflow_schedules(9_999_999_999)
+        .await
+        .unwrap();
+    assert!(again3.is_empty(), "deleted schedule never fires");
+}
+
+#[tokio::test]
 async fn workflow_golden_architect_workers_integrator_verifier() {
     // Exit 7: architect -> 2 parallel workers -> integrator -> verifier runs
     // locally; the durable scheduler activates ready steps as Agentgrid tasks

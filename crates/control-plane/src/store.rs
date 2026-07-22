@@ -14,8 +14,8 @@ use agentgrid_common::{
     EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest,
     NodeEligibility, NodeStatus, NodeView, PollRequest, RepositoryView, SkillTrustView,
     TaskEligibility, TaskEvent, TaskStatus, TaskTransition, TaskView, UploadArtifactRequest,
-    WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowStep, WorkflowStepRun,
-    WorkflowStepStatus, WorkflowTemplate,
+    WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowSchedule, WorkflowScheduleCreate,
+    WorkflowStep, WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -46,6 +46,38 @@ pub struct Store {
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// Parse a profile autonomy string (`l0`..`l4`) into an `AutonomyLevel`.
+fn parse_autonomy_level(s: &str) -> Option<agentgrid_common::AutonomyLevel> {
+    serde_json::from_value(serde_json::Value::String(s.trim().to_ascii_lowercase())).ok()
+}
+
+/// Parse an RFC3339 timestamp into a unix epoch seconds.
+fn iso_to_unix(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.timestamp())
+}
+
+/// Format a unix epoch seconds as RFC3339 (UTC).
+fn unix_to_iso(unix: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_default()
+}
+
+/// Build a `WorkflowSchedule` from a row.
+fn schedule_from_row(r: &sqlx::sqlite::SqliteRow) -> WorkflowSchedule {
+    WorkflowSchedule {
+        id: r.try_get("id").unwrap_or_default(),
+        template_id: r.try_get("template_id").unwrap_or_default(),
+        interval_seconds: r.try_get("interval_seconds").unwrap_or(60),
+        autonomy: r.try_get("autonomy").unwrap_or_else(|_| "l2".to_string()),
+        last_run_at: r.try_get("last_run_at").unwrap_or_default(),
+        enabled: r.try_get::<i64, _>("enabled").unwrap_or(1) != 0,
+        created_at: r.try_get("created_at").unwrap_or_default(),
+    }
 }
 
 fn iso_plus_secs(secs: i64) -> String {
@@ -1516,6 +1548,10 @@ impl Store {
         // database file does not grow without bound.
         let _ = self.cleanup_artifacts(168).await;
         let _ = self.wal_checkpoint().await;
+        // Stage 13: fire any due scheduled-workflow triggers.
+        let _ = self
+            .tick_workflow_schedules(chrono::Utc::now().timestamp())
+            .await;
         Ok(())
     }
 
@@ -2427,6 +2463,130 @@ impl Store {
                     .filter(|s| !s.is_empty()),
             })
             .collect())
+    }
+
+    /// Stage 13: create a schedule that fires a `WorkflowRun` of
+    /// `template_id` every `interval_seconds` under `autonomy`. Fails if the
+    /// template doesn't exist.
+    pub async fn create_workflow_schedule(
+        &self,
+        template_id: &str,
+        body: &WorkflowScheduleCreate,
+    ) -> Result<WorkflowSchedule> {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workflow_templates WHERE id = ?")
+                .bind(template_id)
+                .fetch_one(&self.pool)
+                .await?;
+        if exists == 0 {
+            anyhow::bail!("unknown workflow template {template_id}");
+        }
+        if body.interval_seconds < 1 {
+            anyhow::bail!("interval_seconds must be >= 1");
+        }
+        if parse_autonomy_level(&body.autonomy).is_none() {
+            anyhow::bail!("unknown autonomy level: {}", body.autonomy);
+        }
+        let id = format!("wfsch-{}", Uuid::new_v4());
+        let now = now_iso();
+        sqlx::query(
+            "INSERT INTO workflow_schedules \
+             (id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at) \
+             VALUES (?, ?, ?, ?, '', ?, ?)",
+        )
+        .bind(&id)
+        .bind(template_id)
+        .bind(body.interval_seconds)
+        .bind(&body.autonomy)
+        .bind(if body.enabled { 1i64 } else { 0 })
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(WorkflowSchedule {
+            id,
+            template_id: template_id.into(),
+            interval_seconds: body.interval_seconds,
+            autonomy: body.autonomy.clone(),
+            last_run_at: String::new(),
+            enabled: body.enabled,
+            created_at: now,
+        })
+    }
+
+    /// List schedules (optionally for one template).
+    pub async fn list_workflow_schedules(
+        &self,
+        template_id: Option<&str>,
+    ) -> Result<Vec<WorkflowSchedule>> {
+        let rows = if let Some(tid) = template_id {
+            sqlx::query(
+                "SELECT id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at \
+                 FROM workflow_schedules WHERE template_id = ? ORDER BY created_at ASC",
+            )
+            .bind(tid)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at \
+                 FROM workflow_schedules ORDER BY created_at ASC",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.iter().map(schedule_from_row).collect())
+    }
+
+    /// Delete a schedule. Returns whether a schedule was deleted.
+    pub async fn delete_workflow_schedule(&self, id: &str) -> Result<bool> {
+        let affected = sqlx::query("DELETE FROM workflow_schedules WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(affected == 1)
+    }
+
+    /// Stage 13: for each enabled schedule whose interval has elapsed since
+    /// `last_run_at`, create a new `WorkflowRun` and stamp `last_run_at`.
+    /// Returns the created run ids (mostly for tests).
+    pub async fn tick_workflow_schedules(&self, now_unix: i64) -> Result<Vec<String>> {
+        let schedules = self.list_workflow_schedules(None).await?;
+        let mut created = Vec::new();
+        for s in schedules {
+            if !s.enabled {
+                continue;
+            }
+            // last_run_at stored as ISO; parse to a unix epoch. Empty = "due now".
+            let last = if s.last_run_at.is_empty() {
+                0
+            } else {
+                iso_to_unix(&s.last_run_at).unwrap_or(0)
+            };
+            if now_unix - last < s.interval_seconds {
+                continue;
+            }
+            // Create a fresh run; context/repo/commit come from the template
+            // defaults only if stored (Stage 13: per-schedule overrides are a
+            // follow-up; the MVP runs the template as-is).
+            let run = match self
+                .create_workflow_run(&s.template_id, None, None, None)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(schedule = %s.id, "tick skipped bad template: {e}");
+                    continue;
+                }
+            };
+            created.push(run.id);
+            sqlx::query("UPDATE workflow_schedules SET last_run_at = ? WHERE id = ?")
+                .bind(unix_to_iso(now_unix))
+                .bind(&s.id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(created)
     }
 
     pub async fn get_workflow_run_steps(&self, run_id: &str) -> Result<Vec<WorkflowStepRun>> {

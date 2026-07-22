@@ -4,7 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Added (profiles — secret requirements + adapter version, Stage 13)
+### Added (control-plane — scheduled/recurring workflows, Stage 13)
+
+- A workflow template now has scheduled triggers that fire a new `WorkflowRun`
+  on a fixed interval (MVP). Stage 13 recurring workflows:
+  - `WorkflowSchedule`/`WorkflowScheduleCreate` in `agentgrid-common`, migration
+    `0023_workflow_schedules.sql` (`workflow_schedules`: id, template_id,
+    interval_seconds, autonomy, last_run_at, enabled).
+  - Store: `create_workflow_schedule` (validates template + interval +
+    autonomy), `list_workflow_schedules`, `delete_workflow_schedule`,
+    `tick_workflow_schedules` (fires one run per due schedule, stamps
+    `last_run_at` as the passed unix epoch).
+  - Endpoints `POST/GET /v1/workflows/{tid}/schedules` and
+    `DELETE /v1/workflows/{tid}/schedules/{sid}`.
+  - `tick_maintenance` runs `tick_workflow_schedules(now)` so schedules fire as
+    part of the existing background loop.
+  - CLI `ag workflows schedules {list|create --interval-seconds N --autonomy lN
+    [--paused] |delete <sid>}`.
+  - Test: `workflow_schedule_fires_run_on_tick` (fire → skip within interval →
+    fire again after interval → deleted never fires).
+  - Follow-up: L4 autonomy requires command policy + budget (no budget infra
+    yet).
 
 - An agent profile now carries **secret requirements** (names only, never
   values) and an optional **adapter version** target, completing the node-side

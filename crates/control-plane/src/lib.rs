@@ -18,7 +18,7 @@ use agentgrid_common::{
     EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest, IngestEventsRequest,
     LoginRequest, LoginResponse, PollRequest, PollResponse, RepositoryView, SetupRequest,
     TaskEligibility, TaskView, UploadArtifactRequest, WorkflowProjection, WorkflowRun,
-    WorkflowRunWithSteps, WorkflowTemplate,
+    WorkflowRunWithSteps, WorkflowSchedule, WorkflowScheduleCreate, WorkflowTemplate,
 };
 use axum::{
     body::{Body, Bytes},
@@ -303,6 +303,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/workflows", post(create_workflow).get(list_workflows))
         .route("/v1/workflows/{id}", get(show_workflow))
         .route("/v1/workflows/{id}/runs", post(create_workflow_run))
+        .route(
+            "/v1/workflows/{id}/schedules",
+            post(create_workflow_schedule).get(list_workflow_schedules),
+        )
+        .route(
+            "/v1/workflows/{id}/schedules/{sid}",
+            delete(delete_workflow_schedule),
+        )
         .route("/v1/workflow-runs", get(list_workflow_runs))
         .route("/v1/workflow-runs/{id}", get(show_workflow_run))
         .route(
@@ -1156,6 +1164,50 @@ async fn create_workflow_run(
             tracing::error!("create_workflow_run failed: {e}");
             StatusCode::BAD_REQUEST
         })
+}
+
+/// Stage 13: create a scheduled trigger for a workflow template.
+async fn create_workflow_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<WorkflowScheduleCreate>,
+) -> Result<(StatusCode, Json<WorkflowSchedule>), StatusCode> {
+    state
+        .store
+        .create_workflow_schedule(&id, &req)
+        .await
+        .map(|s| (StatusCode::CREATED, Json(s)))
+        .map_err(|e| {
+            tracing::warn!("create_workflow_schedule failed: {e}");
+            StatusCode::BAD_REQUEST
+        })
+}
+
+async fn list_workflow_schedules(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Json<Vec<WorkflowSchedule>> {
+    match state.store.list_workflow_schedules(Some(&id)).await {
+        Ok(s) => Json(s),
+        Err(e) => {
+            tracing::error!("list_workflow_schedules failed: {e}");
+            Json(vec![])
+        }
+    }
+}
+
+async fn delete_workflow_schedule(
+    State(state): State<Arc<AppState>>,
+    Path((_id, sid)): Path<(String, String)>,
+) -> StatusCode {
+    match state.store.delete_workflow_schedule(&sid).await {
+        Ok(true) => StatusCode::NO_CONTENT,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("delete_workflow_schedule failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 async fn list_workflow_runs(State(state): State<Arc<AppState>>) -> Json<Vec<WorkflowRun>> {
