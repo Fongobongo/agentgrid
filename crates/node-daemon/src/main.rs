@@ -60,6 +60,10 @@ struct Config {
     /// short-circuit in `session/request_permission` (Allow/Deny) before the
     /// approval flow is reached.
     autonomy: AutonomyLevel,
+    /// Stage 13: cached adapter versions probed at startup (adapter id ->
+    /// installed version string, `None` = not detected). Used for the
+    /// capability check against a profile's `adapter_version`.
+    adapter_versions: std::collections::HashMap<String, Option<String>>,
 }
 
 /// Node identity persisted to disk after enrollment (never re-sent in plaintext).
@@ -174,6 +178,7 @@ fn config_from_env() -> Config {
             })
         }),
         autonomy: parse_autonomy(std::env::var("AGENTGRID_AUTONOMY").ok()),
+        adapter_versions: std::collections::HashMap::new(),
     }
 }
 
@@ -363,6 +368,30 @@ fn level_rank(l: AutonomyLevel) -> u8 {
         AutonomyLevel::L3 => 3,
         AutonomyLevel::L4 => 4,
     }
+}
+
+/// Stage 13: check an adapter's installed version against a profile's declared
+/// `adapter_version`. Returns `Some("infrastructure_failed")` when the profile
+/// declares a version and the installed adapter is missing or incompatible
+/// (major differs / unparseable) — fail-closed so an agent never runs against
+/// an adapter the profile wasn't written for. `None` when compatible or when
+/// the profile doesn't declare a version (no check).
+fn check_adapter_compatibility(
+    profile: Option<&agentgrid_common::AgentProfile>,
+    installed_version: Option<&str>,
+) -> Option<String> {
+    let p = profile?;
+    let declared = p.adapter_version.as_deref()?;
+    if !agentgrid_common::profile::versions_compatible(Some(declared), installed_version) {
+        tracing::error!(
+            profile = %p.id,
+            declared = declared,
+            installed = ?installed_version,
+            "profile/adapter version mismatch; refusing to run (fail-closed)"
+        );
+        return Some("infrastructure_failed".to_string());
+    }
+    None
 }
 
 /// Check a profile's declared secret requirements against the node env.
@@ -924,6 +953,20 @@ async fn drive_acp_session(
             session_id: None,
         });
     }
+    // Stage 13 capability check: the profile's declared adapter_version must
+    // be compatible with the installed adapter (cached probe from startup).
+    if let Some(code) = check_adapter_compatibility(
+        cp_profile.as_ref(),
+        cfg.adapter_versions
+            .get(&assignment.adapter)
+            .and_then(|v| v.as_deref()),
+    ) {
+        return Ok(AcpResult {
+            success: false,
+            error_code: Some(code),
+            session_id: None,
+        });
+    }
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stdin = child.stdin.take().expect("piped stdin");
@@ -1390,6 +1433,24 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     )
     .await;
     let flusher = tokio::spawn(sink.clone().run_flusher());
+
+    // Stage 13 capability check (legacy raw path): the profile's declared
+    // adapter_version is checked against the cached probe. On mismatch we only
+    // warn here — the ACP path enforces hard fail-closed; raw-path hard
+    // refuse would need plumbing a terminal exit through this loop, deferred.
+    if check_adapter_compatibility(
+        cp_profile.as_ref(),
+        cfg.adapter_versions
+            .get(&assignment.adapter)
+            .and_then(|v| v.as_deref()),
+    )
+    .is_some()
+    {
+        tracing::warn!(
+            attempt_id = %assignment.attempt_id,
+            "raw path: profile/adapter version mismatch (ACP path enforces fail-closed)"
+        );
+    }
 
     let mut round = 0usize;
     let validation_passed = loop {
@@ -2090,13 +2151,16 @@ async fn main() -> Result<()> {
         anyhow::bail!("refusing to run as root; set AGENTGRID_ALLOW_ROOT=1 to override");
     }
 
-    let cfg = config_from_env();
+    let mut cfg = config_from_env();
     for a in &cfg.adapters {
         let bin = format!("adapter-{}", a.id.replace('_', "-"));
         let probe = probe_adapter(&bin).await;
         if probe.found {
+            cfg.adapter_versions
+                .insert(a.id.clone(), probe.version.clone());
             tracing::info!(adapter = %a.id, version = ?probe.version, "adapter detected");
         } else {
+            cfg.adapter_versions.insert(a.id.clone(), None);
             tracing::warn!(
                 adapter = %a.id,
                 "adapter binary {bin} not found in PATH; node will report degraded until installed"
@@ -2526,6 +2590,41 @@ mod tests {
     }
 
     #[test]
+    fn check_adapter_compatibility_fails_on_major_mismatch() {
+        let p = |ver: Option<&str>| agentgrid_common::AgentProfile {
+            id: "x".into(),
+            revision: 1,
+            system_prompt: "".into(),
+            autonomy: "l2".into(),
+            memory_max: None,
+            cpu_quota: None,
+            tasks_max: None,
+            created_at: "".into(),
+            created_by: None,
+            active: true,
+            secret_requirements: vec![],
+            adapter_version: ver.map(|s| s.to_string()),
+        };
+        assert_eq!(
+            check_adapter_compatibility(Some(&p(Some("1.4.0"))), Some("2.0.0")),
+            Some("infrastructure_failed".to_string())
+        );
+        assert_eq!(
+            check_adapter_compatibility(Some(&p(Some("1.4.0"))), Some("1.0.0")),
+            None
+        );
+        assert_eq!(
+            check_adapter_compatibility(Some(&p(None)), Some("2.0.0")),
+            None
+        );
+        assert_eq!(
+            check_adapter_compatibility(Some(&p(Some("1.0.0"))), Some("garbage")),
+            Some("infrastructure_failed".to_string())
+        );
+        assert_eq!(check_adapter_compatibility(None, Some("1.0.0")), None);
+    }
+
+    #[test]
     fn check_profile_secrets_fail_closed_on_required_unset() {
         // Use a unique env name unlikely to be set in the test process.
         let unset = "AGENTGRID_TEST_UNSET_SECRET_XYZ";
@@ -2650,6 +2749,7 @@ mod tests {
                 .unwrap(),
             ),
             autonomy: AutonomyLevel::default(),
+            adapter_versions: Default::default(),
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-{}-{}",
@@ -2752,6 +2852,7 @@ mod tests {
                 .unwrap(),
             ),
             autonomy: AutonomyLevel::default(),
+            adapter_versions: Default::default(),
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-hang-{}-{}",

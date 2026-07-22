@@ -18,6 +18,10 @@ All notable changes to this project are documented in this file.
     compatible; `None` declared = no check; an unparseable installed version is
     fail-closed. The predicate is landed and tested; node-side enforcement
     (cached adapter probe) is a follow-up.
+    — **done**: `check_adapter_compatibility` in node uses cached
+    `cfg.adapter_versions` (probed at startup); ACP path fail-closed refuse
+    (`infrastructure_failed`) on mismatch; raw path warns (deferred). Tests:
+    `check_adapter_compatibility_fails_on_major_mismatch`.
   - Migration `0022_profile_secrets_caps.sql` adds the columns.
   - CLI `ag profiles create --secret-required ENV --secret-optional ENV
     --adapter-version 1.4.0`.
