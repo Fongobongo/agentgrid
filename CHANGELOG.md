@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (node — apply profile autonomy + resource limits, Stage 13)
+
+- The node now applies the active agent profile's autonomy and resource
+  ceilings, not just the system prompt:
+  - `effective_autonomy` takes the **stricter** of the node's configured
+    `cfg.autonomy` and the profile's autonomy — a server-side profile can
+    tighten an agent, never raise its ceiling (fail-closed). An unknown /
+    empty profile autonomy is ignored.
+  - `profile_limits` maps `memory_max` / `cpu_quota` / `tasks_max` from the
+    profile onto `ResourceLimits` in the `SpawnRequest` (negatives/zero → no
+    ceiling; `None` profile → `ResourceLimits::default()`). The process
+    backend still reports `enforced_limits=false` (capability honesty); this
+    lands the wiring + payload so a real cgroup backend can enforce them.
+- Covered by `effective_autonomy_takes_stricter_level`,
+  `profile_limits_maps_positive_ceilings` (plus the existing
+  `fetch_agent_profile_*`).
+
 ### Added (node — profile fetch from CP + DAG validation, Stage 13 / ADR 0004)
 
 - Node now fetches the active agent profile revision from the control plane

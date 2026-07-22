@@ -301,17 +301,16 @@ fn agent_profile(adapter_id: &str) -> Option<String> {
 }
 
 /// Stage 13: fetch the active agent profile revision for `adapter_id` from the
-/// control plane. Returns the system prompt text; on any error or when no
-/// active profile exists, falls back to the env-based [`agent_profile`] so the
-/// node keeps working without a configured profile server-side. The autonomy +
-/// resource limits from the profile are intentionally not applied here yet —
-/// wiring `AgentProfile.autonomy` into `cfg.autonomy` and `ResourceLimits` into
-/// `SpawnRequest.limits` is a follow-up; this lands the fetch path first.
+/// control plane. Returns the full profile (system prompt + autonomy +
+/// resource limits); on any error or when no active profile exists, falls back
+/// to the env-based [`agent_profile`] so the node keeps working without a
+/// configured profile server-side. Caller applies autonomy (if parseable +
+/// stricter than cfg) and resource limits to the `SpawnRequest`.
 async fn fetch_agent_profile(
     client: &reqwest::Client,
     server: &str,
     adapter_id: &str,
-) -> Option<String> {
+) -> Option<agentgrid_common::AgentProfile> {
     let resp = client
         .get(format!("{server}/v1/profiles/{}", adapter_id))
         .send()
@@ -321,10 +320,72 @@ async fn fetch_agent_profile(
         return None;
     }
     let revs: Vec<agentgrid_common::AgentProfile> = resp.json().await.ok()?;
-    revs.into_iter()
-        .find(|p| p.active)
-        .map(|p| p.system_prompt)
-        .filter(|s| !s.is_empty())
+    revs.into_iter().find(|p| p.active)
+}
+
+/// Parse a profile autonomy string ("l0".."l4") into an `AutonomyLevel`, or
+/// `None` if unknown/empty. Used to override `cfg.autonomy` server-side.
+fn parse_autonomy_str(s: &str) -> Option<AutonomyLevel> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "l0" => Some(AutonomyLevel::L0),
+        "l1" => Some(AutonomyLevel::L1),
+        "l2" => Some(AutonomyLevel::L2),
+        "l3" => Some(AutonomyLevel::L3),
+        "l4" => Some(AutonomyLevel::L4),
+        _ => None,
+    }
+}
+
+/// Effective autonomy is the stricter of the node's configured autonomy and the
+/// profile's autonomy (when the profile specifies one). A profile can never
+/// *raise* the node operator's configured ceiling (fail-closed), only tighten.
+fn effective_autonomy(
+    cfg_level: AutonomyLevel,
+    profile: Option<&agentgrid_common::AgentProfile>,
+) -> AutonomyLevel {
+    match profile.and_then(|p| parse_autonomy_str(&p.autonomy)) {
+        Some(p_level) => {
+            if level_rank(p_level) < level_rank(cfg_level) {
+                p_level
+            } else {
+                cfg_level
+            }
+        }
+        None => cfg_level,
+    }
+}
+
+fn level_rank(l: AutonomyLevel) -> u8 {
+    match l {
+        AutonomyLevel::L0 => 0,
+        AutonomyLevel::L1 => 1,
+        AutonomyLevel::L2 => 2,
+        AutonomyLevel::L3 => 3,
+        AutonomyLevel::L4 => 4,
+    }
+}
+
+/// Map an agent profile's resource ceilings onto `ResourceLimits`. Profile
+/// fields are `i64`; negatives are ignored (no ceiling). The process backend
+/// does not enforce these yet (reports `enforced_limits=false`) — wiring is
+/// forward-looking and stays cheap for compliance feedback.
+fn profile_limits(
+    profile: Option<&agentgrid_common::AgentProfile>,
+) -> agentgrid_adapters::ResourceLimits {
+    match profile {
+        Some(p) => agentgrid_adapters::ResourceLimits {
+            memory_max: p
+                .memory_max
+                .and_then(|m| if m > 0 { Some(m as u64) } else { None }),
+            cpu_quota_percent: p
+                .cpu_quota
+                .and_then(|c| if c > 0 { Some(c as u32) } else { None }),
+            tasks_max: p
+                .tasks_max
+                .and_then(|t| if t > 0 { Some(t as u32) } else { None }),
+        },
+        None => agentgrid_adapters::ResourceLimits::default(),
+    }
 }
 
 /// Stage 9.2: discover skills in the worktree + user home, keep only the ones
@@ -820,11 +881,14 @@ async fn drive_acp_session(
     }
     // Forward the agent profile as an env hint for agents that read it.
     // Stage 13: prefer the control-plane active profile; fall back to env.
-    let profile_text = fetch_agent_profile(client, &cfg.server, &assignment.adapter)
-        .await
+    let cp_profile = fetch_agent_profile(client, &cfg.server, &assignment.adapter).await;
+    let profile_text = cp_profile
+        .as_ref()
+        .map(|p| p.system_prompt.clone())
+        .filter(|s| !s.is_empty())
         .or_else(|| agent_profile(&assignment.adapter));
-    if let Some(text) = profile_text {
-        cmd.env("AGENTGRID_SYSTEM_PROMPT", &text);
+    if let Some(text) = &profile_text {
+        cmd.env("AGENTGRID_SYSTEM_PROMPT", text);
     }
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
@@ -885,7 +949,7 @@ async fn drive_acp_session(
     let acp2 = acp.clone();
     let client2 = client.clone();
     let server2 = cfg.server.clone();
-    let autonomy = cfg.autonomy;
+    let autonomy = effective_autonomy(cfg.autonomy, cp_profile.as_ref());
     let stream_task = tokio::spawn(async move {
         while let Some(msg) = notif.recv().await {
             match msg {
@@ -1119,12 +1183,18 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     // Agent profile (idea 6): an optional system prompt for this adapter,
     // projected into the worktree as AGENTS.md before the agent runs. Sourced
     // from AGENTGRID_AGENT_PROFILE_<ID> (a path to a .md file, or inline text).
-    if let Some(text) = fetch_agent_profile(&client, &cfg.server, &assignment.adapter)
-        .await
-        .or_else(|| agent_profile(&assignment.adapter))
-    {
+    // Stage 13: prefer the control-plane active profile (full: prompt +
+    // autonomy + resource limits); fall back to env for the system prompt
+    // (env sources are text-only, no autonomy/limits).
+    let cp_profile = fetch_agent_profile(&client, &cfg.server, &assignment.adapter).await;
+    let prompt_text: Option<String> = cp_profile
+        .as_ref()
+        .map(|p| p.system_prompt.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| agent_profile(&assignment.adapter));
+    if let Some(text) = &prompt_text {
         let p = ws.path.join("AGENTS.md");
-        let _ = tokio::fs::write(&p, &text).await;
+        let _ = tokio::fs::write(&p, text).await;
     }
 
     // Stage 5: ACP adapters are driven over JSON-RPC 2.0 (stdio), not stdout
@@ -1296,7 +1366,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             attempt_id: assignment.attempt_id.clone(),
             timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
             env: cfg.adapter_env.clone(),
-            limits: agentgrid_adapters::ResourceLimits::default(),
+            limits: profile_limits(cp_profile.as_ref()),
         };
         let bp = match agentgrid_adapters::ProcessBackend.spawn(req) {
             Ok(b) => b,
@@ -2313,8 +2383,12 @@ mod tests {
         ]"#;
         let server = dummy_profile_server(body).await;
         let client = reqwest::Client::new();
-        let prompt = fetch_agent_profile(&client, &server, "claude").await;
-        assert_eq!(prompt.as_deref(), Some("v1 active"));
+        let p = fetch_agent_profile(&client, &server, "claude").await;
+        assert_eq!(
+            p.as_ref().map(|p| p.system_prompt.as_str()),
+            Some("v1 active")
+        );
+        assert_eq!(p.as_ref().map(|p| p.autonomy.as_str()), Some("l2"));
     }
 
     #[tokio::test]
@@ -2330,13 +2404,87 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_agent_profile_none_on_empty_prompt() {
-        // An active revision with an empty prompt filters out (no env hint to set).
+        // An active revision with an empty prompt: fetch still returns the
+        // profile (the caller filters empty prompts before projecting).
         let body = r#"[
             {"id":"claude","revision":1,"system_prompt":"","autonomy":"l2","memory_max":null,"cpu_quota":null,"tasks_max":null,"created_at":"","created_by":null,"active":true}
         ]"#;
         let server = dummy_profile_server(body).await;
         let client = reqwest::Client::new();
-        assert_eq!(fetch_agent_profile(&client, &server, "claude").await, None);
+        let p = fetch_agent_profile(&client, &server, "claude").await;
+        assert_eq!(p.as_ref().map(|p| p.system_prompt.as_str()), Some(""));
+    }
+
+    #[test]
+    fn effective_autonomy_takes_stricter_level() {
+        // Profile autonomy stricter than cfg wins; looser is ignored.
+        let prof = |a: &str| agentgrid_common::AgentProfile {
+            id: "x".into(),
+            revision: 1,
+            system_prompt: "".into(),
+            autonomy: a.into(),
+            memory_max: None,
+            cpu_quota: None,
+            tasks_max: None,
+            created_at: "".into(),
+            created_by: None,
+            active: true,
+        };
+        // cfg L4, profile L1 → L1 (profile tightens).
+        assert_eq!(
+            effective_autonomy(AutonomyLevel::L4, Some(&prof("l1"))),
+            AutonomyLevel::L1
+        );
+        // cfg L2, profile L4 → L2 (profile can't raise).
+        assert_eq!(
+            effective_autonomy(AutonomyLevel::L2, Some(&prof("l4"))),
+            AutonomyLevel::L2
+        );
+        // cfg L3, no profile → L3.
+        assert_eq!(
+            effective_autonomy(AutonomyLevel::L3, None),
+            AutonomyLevel::L3
+        );
+        // cfg L2, profile bogus autonomy → cfg L2.
+        assert_eq!(
+            effective_autonomy(AutonomyLevel::L2, Some(&prof("zz"))),
+            AutonomyLevel::L2
+        );
+        // cfg L2, profile L2 → L2.
+        assert_eq!(
+            effective_autonomy(AutonomyLevel::L2, Some(&prof("l2"))),
+            AutonomyLevel::L2
+        );
+    }
+
+    #[test]
+    fn profile_limits_maps_positive_ceilings() {
+        let prof = |mem: i64, cpu: i64, tasks: i64| agentgrid_common::AgentProfile {
+            id: "x".into(),
+            revision: 1,
+            system_prompt: "".into(),
+            autonomy: "l2".into(),
+            memory_max: Some(mem),
+            cpu_quota: Some(cpu),
+            tasks_max: Some(tasks),
+            created_at: "".into(),
+            created_by: None,
+            active: true,
+        };
+        let l = profile_limits(Some(&prof(536870912, 50, 100)));
+        assert_eq!(l.memory_max, Some(536870912));
+        assert_eq!(l.cpu_quota_percent, Some(50));
+        assert_eq!(l.tasks_max, Some(100));
+        // Negatives/zero ignored.
+        let l = profile_limits(Some(&prof(-1, 0, -100)));
+        assert_eq!(l.memory_max, None);
+        assert_eq!(l.cpu_quota_percent, None);
+        assert_eq!(l.tasks_max, None);
+        // None profile → default.
+        assert_eq!(
+            profile_limits(None),
+            agentgrid_adapters::ResourceLimits::default()
+        );
     }
 
     #[tokio::test]
