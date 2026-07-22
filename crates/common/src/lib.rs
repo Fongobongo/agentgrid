@@ -66,6 +66,7 @@ pub enum EventType {
 }
 
 pub mod approval;
+pub mod cluster;
 pub mod context;
 pub mod skills_trust;
 mod state_machine;
@@ -73,6 +74,7 @@ mod state_machine;
 pub use approval::{
     next_approval, ApprovalEvent, ApprovalStatus, ApprovalView, InvalidApprovalTransition,
 };
+pub use cluster::{probe_decision, ClusterHandle, ClusterStep, ProbedExecutor};
 pub use context::{cache_key_for, ContextError, ContextPack, ContextProvider, NoopContextProvider};
 pub use skills_trust::SkillTrustView;
 pub use state_machine::{

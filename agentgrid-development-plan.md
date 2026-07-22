@@ -321,9 +321,9 @@
 
 ## Этап 10 — 0.4 Zeroshot integration (1 неделя spike + hardening)
 
-- [ ] ADR: ownership worktree/cancel — инвариант **1 Agentgrid Attempt = 1 Zeroshot Cluster**
-- [ ] Capability provider: обнаружение zeroshot + версии/требований (Docker)
-- [ ] Adapter: cluster lifecycle (create/resume/stop/kill), маппинг логов/событий в `AgentEventEnvelope`
+- [x] ADR: ownership worktree/cancel — инвариант **1 Agentgrid Attempt = 1 Zeroshot Cluster** — `docs/decisions/0002-zeroshot-ownership.md` (lifecycle attempt-scoped, cancel total, orphan reclaim, retry=new cluster, results artifacts, credentials local).
+- [x] Capability provider: обнаружение zeroshot + версии/требований (Docker) — контракт `ProbedExecutor` + чистая `probe_decision(runtime_present, executor_version, required_prefix, executor_present)` в `agentgrid-common::cluster`; node не заявляет `zeroshot` task, если probe отрицательный (fail-closed capability). Реальная shell-out probe (`which docker`, `zeroshot --version`) в ноде — follow-up.
+- [ ] Adapter: cluster lifecycle (create/resume/stop/kill), маппинг логов/событий в `AgentEventEnvelope` — `ClusterStep` enum + `ClusterHandle` заложены; реальный Zeroshot impl (shelles) — follow-up (нужен binary).
 - [ ] Export результатов cluster как artifacts
 - [ ] Маппинг executor/verifier ролей Zeroshot ↔ Agentgrid RoleRun
 - [ ] Security review Docker mounts (не прокидывать credentials хоста)

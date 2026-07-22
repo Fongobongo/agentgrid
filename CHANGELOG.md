@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (zeroshot — ownership ADR + capability probe contract, Stage 10)
+
+- **ADR 0002: Zeroshot ownership** (`docs/decisions/0002-zeroshot-ownership.md`)
+  fixes the lifecycle invariant: **1 Agentgrid attempt = 1 Zeroshot cluster**, 1:1.
+  Cancel kills the whole cluster, a daemon kill reclaims orphans (kill only — no
+  resume across a Zeroshot boundary), retry = newer cluster; results are exported
+  as artifacts; `cluster_id` piggybacks on `session_id`; host credentials never
+  mount through (Stage 12 backend policy).
+- New `agentgrid-common::cluster` contract: `ProbedExecutor` (capability probe:
+  is the container runtime present, the executor binary present, its version
+  pinned?) and a pure `probe_decision(runtime_present, executor_version,
+  required_prefix, executor_present)` a node uses to decide whether it can serve
+  a `zeroshot` task — fail-closed: a negative probe means the node does **not**
+  claim it (same capability-honesty discipline as the wrapper-adapter boundary,
+  Stage 9.1). `ClusterStep`/`ClusterHandle` model the create/kill lifecycle;
+  the concrete Zeroshot adapter (shelling out to the Zeroshot CLI) is a later
+  spike. Covered by `cluster::tests::probe_*`.
+- Follow-ups: real shell-out probe (`which docker`, `zeroshot --version`) in the
+  node, the create/stream/kill adapter impl, artifact export, role mapping, the
+  Docker-mount security rereview, the verified profile, and the one-task E2E —
+  all gated on the Zeroshot binary landing.
+
 ### Added (context — CTX provider contract + prompt injection, Stage 11)
 
 - New `ContextProvider` contract in `agentgrid-common` (`context` module):
