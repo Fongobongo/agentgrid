@@ -1239,7 +1239,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         let mut error_code = res.error_code;
         if exit_code == 0 {
             if let Some(cmd) = &assignment.validation_command {
-                match run_validation(&workdir, cmd, &sink).await {
+                match run_validation(&workdir, cmd, &sink, &cfg.secrets).await {
                     Ok(vcode) if vcode != 0 => {
                         exit_code = vcode;
                         error_code = Some("validation_failed".into());
@@ -1471,7 +1471,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         // Validate; if it passes we're done. If it fails and a retry is left,
         // feed the validation error back into the prompt and re-spawn.
         if let Some(cmd) = &assignment.validation_command {
-            let v = run_validation(&workdir, cmd, &sink).await;
+            let v = run_validation(&workdir, cmd, &sink, &cfg.secrets).await;
             let fail = match &v {
                 Ok(vcode) => *vcode != 0,
                 Err(e) => {
@@ -1601,7 +1601,12 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
 
 /// Run the post-agent validation command in the worktree, streaming its output
 /// as events and writing `validation.log`. Returns the command exit code.
-async fn run_validation(workdir: &std::path::Path, command: &str, sink: &EventSink) -> Result<i32> {
+async fn run_validation(
+    workdir: &std::path::Path,
+    command: &str,
+    sink: &EventSink,
+    secrets: &[String],
+) -> Result<i32> {
     let mut child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(format!("{command} 2>&1"))
@@ -1612,8 +1617,10 @@ async fn run_validation(workdir: &std::path::Path, command: &str, sink: &EventSi
     let mut log = String::new();
     let mut lines = BufReader::new(stdout).lines();
     while let Some(line) = lines.next_line().await? {
-        sink.push(EventType::Stdout, json!({ "text": line })).await;
-        log.push_str(&line);
+        let masked = mask_secrets(&line, secrets);
+        sink.push(EventType::Stdout, json!({ "text": masked }))
+            .await;
+        log.push_str(&masked);
         log.push('\n');
     }
     let status = child.wait().await?;
@@ -1654,7 +1661,7 @@ async fn upload_if_exists(
 
 /// Poll the control plane until cancellation is requested for this attempt.
 /// Replace any known secret substring with `***` (Stage 3.4).
-fn mask_secrets(line: &str, secrets: &Vec<String>) -> String {
+fn mask_secrets(line: &str, secrets: &[String]) -> String {
     let mut s = line.to_string();
     for sec in secrets {
         if !sec.is_empty() {
@@ -2230,12 +2237,12 @@ mod tests {
     #[test]
     fn mask_secrets_replaces_known() {
         assert_eq!(
-            mask_secrets("token=abc123", &vec!["abc123".to_string()]),
+            mask_secrets("token=abc123", &["abc123".to_string()]),
             "token=***"
         );
-        assert_eq!(mask_secrets("noop", &vec!["abc123".to_string()]), "noop");
+        assert_eq!(mask_secrets("noop", &["abc123".to_string()]), "noop");
         assert_eq!(
-            mask_secrets("a secret b", &vec!["secret".to_string()]),
+            mask_secrets("a secret b", &["secret".to_string()]),
             "a *** b"
         );
     }
@@ -2250,12 +2257,37 @@ mod tests {
             "http://x".into(),
             test_outbox("a1"),
         );
-        let code = run_validation(&dir, "echo hi; exit 2", &sink)
+        let code = run_validation(&dir, "echo hi; exit 2", &sink, &[])
             .await
             .unwrap();
         assert_eq!(code, 2);
         let log = std::fs::read_to_string(dir.join("validation.log")).unwrap();
         assert!(log.contains("hi"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn validation_command_masks_secrets_in_output_and_log() {
+        // Audit 22.1.1: a secret that appears in validation stdout must be
+        // masked in BOTH the streamed events and the validation.log artifact.
+        let dir = std::env::temp_dir().join(format!("ag-valmsk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sink = EventSink::new(
+            "a2".into(),
+            reqwest::Client::new(),
+            "http://x".into(),
+            test_outbox("a2"),
+        );
+        let secrets = vec!["sk-LEAK-12345".to_string()];
+        let cmd = "printf 'token=sk-LEAK-12345 line\n'; exit 0";
+        let code = run_validation(&dir, cmd, &sink, &secrets).await.unwrap();
+        assert_eq!(code, 0);
+        let log = std::fs::read_to_string(dir.join("validation.log")).unwrap();
+        assert!(
+            !log.contains("sk-LEAK-12345"),
+            "secret leaked into validation.log: {log}"
+        );
+        assert!(log.contains("***"), "masked marker missing: {log}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2299,11 +2331,11 @@ mod tests {
     #[test]
     fn mask_secrets_replaces_known_substring() {
         assert_eq!(
-            mask_secrets("token=sk-12345 and more", &vec!["sk-12345".to_string()]),
+            mask_secrets("token=sk-12345 and more", &["sk-12345".to_string()]),
             "token=*** and more"
         );
         // No secrets configured -> unchanged.
-        assert_eq!(mask_secrets("nothing", &vec![]), "nothing");
+        assert_eq!(mask_secrets("nothing", &[]), "nothing");
     }
 
     #[test]

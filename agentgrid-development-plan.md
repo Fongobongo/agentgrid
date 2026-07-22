@@ -497,10 +497,10 @@
 
 ### Обязательные regression-тесты по аудиту (из раздела 22.1.1 спеки)
 
-- [ ] Validation failed + agent exit 0 → итог `failed/validation_failed`, не `succeeded`
+- [x] Validation failed + agent exit 0 → итог `failed/validation_failed`, не `succeeded` — покрыто `validation_failure_must_not_report_success` (Stage 1.1).
 - [ ] Сеть недоступна во время attempt → events/completion/artifacts доезжают после восстановления
 - [ ] `kill -9` node-daemon посреди attempt → после рестарта нет потерянных completions, нет зависших `running`
-- [ ] Секрет в stdout/stderr/validation output → замаскирован во всех путях, включая fallback и artifacts
+- [x] Секрет в stdout/stderr/validation output → замаскирован во всех путях, включая fallback и artifacts — stdout/stderr masked через `mask_secrets`; validation output теперь masked в стриме events + `validation.log` (`run_validation(secrets)`). Покрыто `validation_command_masks_secrets_in_output_and_log`. [ ] секреты в artifacts (validation.log как `validation` artifact-name path-traversal) — см. artifact path-traversal (покрыт path-guard; masking лог артефактов follow-up если конкретный артефакт сохраняет raw).
 - [ ] `agent-raw-output.log` не попадает в git-коммит и в patch
 - [x] Artifact name `../../etc/passwd` → отклонён, запись только внутри artifact root
 - [x] Repo slug/branch/URL с shell-метасимволами → нет выполнения произвольных команд — покрыто `rejects_injection_in_repo_branch_or_url` (+ `validate_token`/`validate_git_url`, git args без shell).

@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed (node — mask secrets in validation output, audit 22.1.1)
+
+- `run_validation` now masks configured secrets in BOTH the streamed events
+  and the `validation.log` artifact — before, validation stdout could leak a
+  secret that `AGENTGRID_SECRETS` was supposed to redact (stdout/stderr were
+  already masked via `mask_secrets`; validation output was not).
+- `mask_secrets` signature relaxed to `&[String]` (was `&Vec<String>`).
+- Covered by `validation_command_masks_secrets_in_output_and_log` (asserts the
+  secret is absent from `validation.log` and `***` is present). Existing
+  `validation_command_reports_exit_and_log` and `mask_secrets_*` updated.
+- Regression backlog ticked (already covered): `validation_failure_must_not_
+  report_success` (validation failed + exit 0 → `failed/validation_failed`).
+
 ### Added (common — RSS budget probe, audit 22.1.1)
 
 - `agentgrid_common::rss::current_rss()` reads `/proc/self/status` `VmRSS:`
