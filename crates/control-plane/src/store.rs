@@ -2114,8 +2114,8 @@ impl Store {
         .await?;
         sqlx::query(
             "INSERT INTO agent_profiles \
-             (id, revision, system_prompt, autonomy, memory_max, cpu_quota, tasks_max, created_at, created_by) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, revision, system_prompt, autonomy, memory_max, cpu_quota, tasks_max, created_at, created_by, secret_requirements, adapter_version) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(next)
@@ -2126,6 +2126,8 @@ impl Store {
         .bind(body.tasks_max)
         .bind(&now)
         .bind(created_by)
+        .bind(serde_json::to_string(&body.secret_requirements).unwrap_or_else(|_| "[]".into()))
+        .bind(&body.adapter_version)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -2151,6 +2153,7 @@ impl Store {
         let row = sqlx::query(
             "SELECT p.id, p.revision, p.system_prompt, p.autonomy, p.memory_max, \
                     p.cpu_quota, p.tasks_max, p.created_at, p.created_by, \
+                    p.secret_requirements, p.adapter_version,\
                     (a.active_revision IS NOT NULL) AS active \
              FROM agent_profiles p \
              LEFT JOIN agent_profiles_active a ON a.id = p.id AND a.active_revision = p.revision \
@@ -2168,6 +2171,7 @@ impl Store {
         let rows = sqlx::query(
             "SELECT p.id, p.revision, p.system_prompt, p.autonomy, p.memory_max, \
                     p.cpu_quota, p.tasks_max, p.created_at, p.created_by, \
+                    p.secret_requirements, p.adapter_version,\
                     (a.active_revision = p.revision) AS active \
              FROM agent_profiles p \
              LEFT JOIN agent_profiles_active a ON a.id = p.id \
@@ -2191,6 +2195,12 @@ impl Store {
 }
 
 fn profile_from_row(r: &sqlx::sqlite::SqliteRow) -> AgentProfile {
+    let secret_requirements: Vec<agentgrid_common::SecretRequirement> = serde_json::from_str(
+        r.try_get::<String, _>("secret_requirements")
+            .as_deref()
+            .unwrap_or("[]"),
+    )
+    .unwrap_or_default();
     AgentProfile {
         id: r.try_get("id").unwrap_or_default(),
         revision: r.try_get("revision").unwrap_or(0),
@@ -2202,6 +2212,8 @@ fn profile_from_row(r: &sqlx::sqlite::SqliteRow) -> AgentProfile {
         created_at: r.try_get("created_at").unwrap_or_default(),
         created_by: r.try_get("created_by").ok(),
         active: r.try_get::<bool, _>("active").unwrap_or(false),
+        secret_requirements,
+        adapter_version: r.try_get("adapter_version").ok(),
     }
 }
 

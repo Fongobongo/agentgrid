@@ -223,6 +223,15 @@ struct ProfileCreateArgs {
     /// Max tasks (PIDs).
     #[arg(long)]
     tasks_max: Option<i64>,
+    /// Required secret env name (repeatable; names only, never values).
+    #[arg(long = "secret-required", value_name = "ENV")]
+    secret_required: Vec<String>,
+    /// Optional secret env name (repeatable; warn-only if unset).
+    #[arg(long = "secret-optional", value_name = "ENV")]
+    secret_optional: Vec<String>,
+    /// Adapter version this profile targets (SemVer; major must match).
+    #[arg(long)]
+    adapter_version: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1045,12 +1054,21 @@ async fn cmd_profiles(client: &reqwest::Client, base: &str, a: ProfilesArgs) -> 
         }
         ProfilesAction::Create(a) => {
             let id = a.id.clone();
+            let mut secret_requirements = Vec::new();
+            for e in &a.secret_required {
+                secret_requirements.push(serde_json::json!({ "env": e, "required": true }));
+            }
+            for e in &a.secret_optional {
+                secret_requirements.push(serde_json::json!({ "env": e, "required": false }));
+            }
             let body = serde_json::json!({
                 "system_prompt": a.system_prompt,
                 "autonomy": a.autonomy,
                 "memory_max": a.memory_max,
                 "cpu_quota": a.cpu_quota,
                 "tasks_max": a.tasks_max,
+                "secret_requirements": secret_requirements,
+                "adapter_version": a.adapter_version,
             });
             let resp = client
                 .post(format!("{base}/v1/profiles/{}", a.id))

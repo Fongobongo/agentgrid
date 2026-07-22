@@ -365,6 +365,29 @@ fn level_rank(l: AutonomyLevel) -> u8 {
     }
 }
 
+/// Check a profile's declared secret requirements against the node env.
+/// Returns `Some("infrastructure_failed")` if a required secret is unset
+/// (fail-closed: refuse to run); `None` if all required secrets are present or
+/// the profile is absent. Optional secrets only emit a warn (not returned).
+fn check_profile_secrets(profile: Option<&agentgrid_common::AgentProfile>) -> Option<String> {
+    let p = profile?;
+    for req in &p.secret_requirements {
+        if std::env::var_os(&req.env).is_none() {
+            if req.required {
+                tracing::error!(
+                    profile = %p.id,
+                    secret = %req.env,
+                    "required profile secret unset; refusing to run (fail-closed)"
+                );
+                return Some("infrastructure_failed".to_string());
+            } else {
+                tracing::warn!(profile = %p.id, secret = %req.env, "optional profile secret unset");
+            }
+        }
+    }
+    None
+}
+
 /// Map an agent profile's resource ceilings onto `ResourceLimits`. Profile
 /// fields are `i64`; negatives are ignored (no ceiling). The process backend
 /// does not enforce these yet (reports `enforced_limits=false`) — wiring is
@@ -889,6 +912,17 @@ async fn drive_acp_session(
         .or_else(|| agent_profile(&assignment.adapter));
     if let Some(text) = &profile_text {
         cmd.env("AGENTGRID_SYSTEM_PROMPT", text);
+    }
+    // Stage 13 secret-ref sync: required secrets must be set in the node env
+    // before the agent starts. A missing required secret is fail-closed —
+    // refuse to run (infrastructure_failed) rather than launch an agent that
+    // will silently fail its first tool call. Optional secrets only warn.
+    if let Some(code) = check_profile_secrets(cp_profile.as_ref()) {
+        return Ok(AcpResult {
+            success: false,
+            error_code: Some(code),
+            session_id: None,
+        });
     }
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
@@ -2461,6 +2495,8 @@ mod tests {
             created_at: "".into(),
             created_by: None,
             active: true,
+            secret_requirements: vec![],
+            adapter_version: None,
         };
         // cfg L4, profile L1 → L1 (profile tightens).
         assert_eq!(
@@ -2490,6 +2526,54 @@ mod tests {
     }
 
     #[test]
+    fn check_profile_secrets_fail_closed_on_required_unset() {
+        // Use a unique env name unlikely to be set in the test process.
+        let unset = "AGENTGRID_TEST_UNSET_SECRET_XYZ";
+        std::env::remove_var(unset);
+        let p = |reqs: Vec<agentgrid_common::SecretRequirement>| agentgrid_common::AgentProfile {
+            id: "x".into(),
+            revision: 1,
+            system_prompt: "".into(),
+            autonomy: "l2".into(),
+            memory_max: None,
+            cpu_quota: None,
+            tasks_max: None,
+            created_at: "".into(),
+            created_by: None,
+            active: true,
+            secret_requirements: reqs,
+            adapter_version: None,
+        };
+        // Required unset → fail-closed.
+        let code = check_profile_secrets(Some(&p(vec![agentgrid_common::SecretRequirement {
+            env: unset.into(),
+            required: true,
+        }])));
+        assert_eq!(code.as_deref(), Some("infrastructure_failed"));
+        // Optional unset → None (warn only, not a refuse).
+        assert_eq!(
+            check_profile_secrets(Some(&p(vec![agentgrid_common::SecretRequirement {
+                env: unset.into(),
+                required: false,
+            }]))),
+            None
+        );
+        // Required and set → None (run allowed).
+        let set = "AGENTGRID_TEST_SET_SECRET_XYZ";
+        std::env::set_var(set, "v");
+        assert_eq!(
+            check_profile_secrets(Some(&p(vec![agentgrid_common::SecretRequirement {
+                env: set.into(),
+                required: true,
+            }]))),
+            None
+        );
+        std::env::remove_var(set);
+        // No profile → None.
+        assert_eq!(check_profile_secrets(None), None);
+    }
+
+    #[test]
     fn profile_limits_maps_positive_ceilings() {
         let prof = |mem: i64, cpu: i64, tasks: i64| agentgrid_common::AgentProfile {
             id: "x".into(),
@@ -2502,6 +2586,8 @@ mod tests {
             created_at: "".into(),
             created_by: None,
             active: true,
+            secret_requirements: vec![],
+            adapter_version: None,
         };
         let l = profile_limits(Some(&prof(536870912, 50, 100)));
         assert_eq!(l.memory_max, Some(536870912));

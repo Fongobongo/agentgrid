@@ -78,7 +78,7 @@ pub use approval::{
 };
 pub use cluster::{probe_decision, ClusterHandle, ClusterStep, ProbedExecutor};
 pub use context::{cache_key_for, ContextError, ContextPack, ContextProvider, NoopContextProvider};
-pub use profile::{ActivateProfile, AgentProfile, AgentProfileCreate};
+pub use profile::{ActivateProfile, AgentProfile, AgentProfileCreate, SecretRequirement};
 pub use skills_trust::SkillTrustView;
 pub use state_machine::{
     next_attempt_status, next_task_status, AttemptTransition, InvalidTransition, TaskTransition,

@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (profiles — secret requirements + adapter version, Stage 13)
+
+- An agent profile now carries **secret requirements** (names only, never
+  values) and an optional **adapter version** target, completing the node-side
+  sync contract (Stage 13):
+  - `SecretRequirement { env, required }` — a profile declares which secret env
+    names it needs; the node checks its own env at apply time. A **required**
+    secret that's unset is fail-closed: the node refuses to run the agent
+    (`infrastructure_failed`) rather than launch one that will silently fail
+    its first tool call. An **optional** unset secret only warns.
+  - `versions_compatible(declared, installed)` — equal SemVer major is
+    compatible; `None` declared = no check; an unparseable installed version is
+    fail-closed. The predicate is landed and tested; node-side enforcement
+    (cached adapter probe) is a follow-up.
+  - Migration `0022_profile_secrets_caps.sql` adds the columns.
+  - CLI `ag profiles create --secret-required ENV --secret-optional ENV
+    --adapter-version 1.4.0`.
+  - Tests: `agent_profile_carries_secret_requirements_and_version` (CP),
+    `check_profile_secrets_fail_closed_on_required_unset` (node),
+    `profile::tests::{secret_requirement_is_name_only_no_value,
+    profile_carries_secret_requirements_and_adapter_version,
+    adapter_version_compatible_when_equal_major}`.
+
 ### Added (cp — SSE resume + event id, audit 22.1.1)
 
 - `events_stream` now emits the SSE `id:` field (the event sequence) and an

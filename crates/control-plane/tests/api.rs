@@ -2699,3 +2699,72 @@ async fn agent_profile_revisions_immutable_and_roll_back() {
     .unwrap();
     assert_eq!(list, vec!["claude".to_string()]);
 }
+
+#[tokio::test]
+async fn agent_profile_carries_secret_requirements_and_version() {
+    // Stage 13: a profile revision stores secret requirements (names only,
+    // never values) + adapter_version; they round-trip through the CP store.
+    use agentgrid_common::{ActivateProfile, AgentProfileCreate, SecretRequirement};
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+
+    let body = serde_json::to_string(&AgentProfileCreate {
+        system_prompt: "be brief".into(),
+        autonomy: "l3".into(),
+        memory_max: None,
+        cpu_quota: None,
+        tasks_max: None,
+        secret_requirements: vec![
+            SecretRequirement {
+                env: "ANTHROPIC_API_KEY".into(),
+                required: true,
+            },
+            SecretRequirement {
+                env: "OPTIONAL_TOKEN".into(),
+                required: false,
+            },
+        ],
+        adapter_version: Some("1.4.0".into()),
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/v1/profiles/claude", body, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rev: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let rev_no = rev["revision"].as_i64().unwrap();
+
+    // Activate + fetch.
+    let _ = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/profiles/claude/activate",
+            serde_json::to_string(&ActivateProfile { revision: rev_no }).unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    let revs: Vec<agentgrid_common::AgentProfile> = serde_json::from_slice(
+        &to_bytes(
+            app.clone()
+                .oneshot(get_q("/v1/profiles/claude"))
+                .await
+                .unwrap()
+                .into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    let p = revs.iter().find(|p| p.revision == rev_no).unwrap();
+    assert_eq!(p.secret_requirements.len(), 2);
+    assert_eq!(p.secret_requirements[0].env, "ANTHROPIC_API_KEY");
+    assert!(p.secret_requirements[0].required);
+    assert_eq!(p.secret_requirements[1].env, "OPTIONAL_TOKEN");
+    assert!(!p.secret_requirements[1].required);
+    assert_eq!(p.adapter_version.as_deref(), Some("1.4.0"));
+}
