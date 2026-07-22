@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (cp — SSE resume + event id, audit 22.1.1)
+
+- `events_stream` now emits the SSE `id:` field (the event sequence) and an
+  `event: task-event` type, and seeds the `after` cursor from the
+  `Last-Event-ID` header on reconnect — so a browser that auto-reconnects
+  resumes after the last delivered sequence (no gaps, no duplicates). An
+  explicit `after_sequence` query still wins. Extracted to `sse_resume_after`
+  (pure) and covered by `sse_tests::resume_*` (query/header/max/none/garbage).
+- Regression-backlog ticked (already covered): `agent-raw-output.log` excluded
+  from git commit/patch (`.git/info/exclude` + `finalize_workspace` assert),
+  and two parallel attempts of one repo don't race git
+  (`parallel_prep_same_repo_does_not_race`).
+
 ### Fixed (node — mask secrets in validation output, audit 22.1.1)
 
 - `run_validation` now masks configured secrets in BOTH the streamed events

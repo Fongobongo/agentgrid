@@ -1539,16 +1539,35 @@ fn is_safe_artifact_name(name: &str) -> bool {
     name.chars().all(|c| !c.is_control())
 }
 
+/// Resolve the SSE `after` cursor for a reconnect: `Last-Event-ID` header
+/// (browser default) seeds it, but an explicit query `after_sequence` wins.
+/// Either way the next poll starts after the last delivered sequence, so a
+/// reconnect reads no gaps and no duplicates.
+fn sse_resume_after(after_sequence: u64, last_event_id: Option<&axum::http::HeaderValue>) -> u64 {
+    let last = last_event_id
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    match last {
+        Some(last) => after_sequence.max(last),
+        None => after_sequence,
+    }
+}
+
 async fn events_stream(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     Query(q): Query<EventsQuery>,
+    headers: HeaderMap,
 ) -> axum::response::sse::Sse<
     impl Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
 > {
     use axum::response::sse::{Event, Sse};
     use std::time::Duration;
-    let mut after = q.after_sequence;
+    // SSE reconnect resume: `Last-Event-ID` header (browser default on
+    // reconnect) seeds `after`, but an explicit `after_sequence` query wins
+    // (lets a client force a different point). This gives no gaps/no dups:
+    // the next poll starts after the last delivered sequence.
+    let mut after = sse_resume_after(q.after_sequence, headers.get("Last-Event-ID"));
     let stream = async_stream::stream! {
         loop {
             match state.store.get_events(&task_id, after).await {
@@ -1556,7 +1575,15 @@ async fn events_stream(
                     for e in events {
                         after = after.max(e.sequence);
                         if let Ok(data) = serde_json::to_string(&e) {
-                            yield Ok(Event::default().data(data));
+                            // Set the SSE `id:` field to the sequence so a
+                            // browser will send `Last-Event-ID` on reconnect;
+                            // the `after_sequence` query is the explicit path.
+                            yield Ok(
+                                Event::default()
+                                    .event("task-event")
+                                    .id(e.sequence.to_string())
+                                    .data(data),
+                            );
                         }
                     }
                 }
@@ -2031,5 +2058,42 @@ mod tls_tests {
     #[test]
     fn load_tls_acceptor_missing_file_errors() {
         assert!(load_tls_acceptor("/no/such/cert.pem", "/no/such/key.pem").is_err());
+    }
+}
+
+#[cfg(test)]
+mod sse_tests {
+    use super::sse_resume_after;
+
+    fn header(v: &str) -> axum::http::HeaderValue {
+        axum::http::HeaderValue::from_str(v).unwrap()
+    }
+
+    #[test]
+    fn resume_uses_query_when_higher_than_header() {
+        // Explicit query wins over Last-Event-ID when query is newer.
+        assert_eq!(sse_resume_after(5, Some(&header("2"))), 5);
+    }
+
+    #[test]
+    fn resume_uses_header_when_higher_than_query() {
+        // Last-Event-ID promotes a reconnect that started at 0 up to last seq.
+        assert_eq!(sse_resume_after(0, Some(&header("7"))), 7);
+    }
+
+    #[test]
+    fn resume_takes_max_of_both() {
+        assert_eq!(sse_resume_after(3, Some(&header("3"))), 3);
+    }
+
+    #[test]
+    fn resume_without_header_is_query() {
+        assert_eq!(sse_resume_after(9, None), 9);
+    }
+
+    #[test]
+    fn resume_ignores_non_numeric_header() {
+        // A garbage Last-Event-ID falls back to the query (no gaps, no dup).
+        assert_eq!(sse_resume_after(4, Some(&header("garbage"))), 4);
     }
 }

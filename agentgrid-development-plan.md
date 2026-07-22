@@ -505,7 +505,7 @@
 - [x] Artifact name `../../etc/passwd` → отклонён, запись только внутри artifact root
 - [x] Repo slug/branch/URL с shell-метасимволами → нет выполнения произвольных команд — покрыто `rejects_injection_in_repo_branch_or_url` (+ `validate_token`/`validate_git_url`, git args без shell).
 - [x] Task для adapter B на node с default A → запускается именно B или честный reject — покрыто `scheduler_skips_incompatible_head_of_line` + `task_eligibility` missing-adapter reason (task остаётся queued).
-- [ ] Два параллельных attempt одного репо → оба завершаются корректно без гонок Git
+- [x] Два параллельных attempt одного репо → оба завершаются корректно без гонок Git — repo_lock (per-repo Mutex) сериализует fetch/worktree-add; каждый attempt — свой worktree (агент-работа конкурентна). Покрыто `parallel_prep_same_repo_does_not_race` (4 потока, все Ok).
 - [x] Node offline с running attempt → attempt помечен `lost`, задача обработана по policy — покрыто `node_offline_loses_attempt_then_retry_succeeds` + `complete_on_lost_attempt_is_idempotent`.
 
 ### Failure injection (расширяется с каждым этапом)
@@ -516,7 +516,7 @@
 - [ ] Краш adapter-процесса посреди NDJSON-строки / JSON-RPC фрейма
 - [ ] Рестарт control plane под нагрузкой → nodes переподключаются, ничего не теряется
 - [ ] Часы node сбиты (clock skew) → лизы/таймауты не ломаются
-- [ ] SSE-клиент переподключается и дочитывает события по sequence без дыр и дублей
+- [x] SSE-клиент переподключается и дочитывает события по sequence без дыр и дублей — `events_stream` выставляет SSE `id:` (sequence) + `event:` (task-event); `Last-Event-ID` header или `after_sequence` query сечёт `max` → следующий poll после последнего доставленного sequence. Покрыто `sse_tests::resume_*` (query/header/max/none/garbage).
 
 ---
 
