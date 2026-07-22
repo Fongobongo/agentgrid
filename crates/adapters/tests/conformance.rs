@@ -16,6 +16,7 @@ async fn mock_adapter_start_stream_collect() {
         attempt_id: "attempt-conform".into(),
         timeout: Duration::from_secs(10),
         env: vec![],
+        limits: Default::default(),
     };
     let mut bp = ProcessBackend.spawn(req).unwrap();
     let mut out = String::new();

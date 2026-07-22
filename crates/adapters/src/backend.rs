@@ -19,6 +19,37 @@ pub struct SpawnRequest {
     pub attempt_id: String,
     pub timeout: Duration,
     pub env: Vec<(String, String)>,
+    /// Stage 12: optional resource limits the backend should apply if it can.
+    /// A backend that cannot enforce a limit (e.g. `ProcessBackend` without a
+    /// cgroup scope) reports [`BackendProcess::enforced_limits`] = `false` so
+    /// profiles honestly reflect the isolation level.
+    pub limits: ResourceLimits,
+}
+
+/// Resource ceiling an attempt's agent must not exceed (Stage 12). Maps to
+/// cgroups v2 / systemd transient scope knobs on Linux; other backends apply
+/// what they can and claim only that.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Max RSS in bytes (systemd `MemoryMax=` / cgroup `memory.max`).
+    pub memory_max: Option<u64>,
+    /// CPU quota as a percentage of one core (systemd `CPUQuota=`; 200 = 2 cores).
+    pub cpu_quota_percent: Option<u32>,
+    /// Max tasks (PIDs) in the cgroup (systemd `TasksMax=`).
+    pub tasks_max: Option<u32>,
+}
+
+/// Why an attempt's agent terminated, as classified by the backend (Stage 12).
+/// Lets the node map an exit to an `error_code` (`resource_limit` for a hit
+/// ceiling) without each backend re-implementing the heuristic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendOutcome {
+    /// Exited normally (success is the caller's job).
+    Exited { code: Option<i32> },
+    /// Killed by `signal` (e.g. SIGTERM/SIGKILL from cancel or timeout).
+    Killed { signal: i32 },
+    /// A resource ceiling was hit (OOM, task limit). Node → `resource_limit`.
+    ResourceLimit { reason: String },
 }
 
 /// A running agent process: its stdout/stderr streams (for event streaming)
@@ -30,6 +61,45 @@ pub struct BackendProcess {
     pub stderr: ChildStderr,
     pub pid: u32,
     pub timeout: Duration,
+    /// Whether the backend actually enforced [`SpawnRequest::limits`]. A native
+    /// `ProcessBackend` reports `false` (no cgroup); a cgroup/container backend
+    /// reports `true`. Profiles use this to refuse a strict run on a backend
+    /// that can't enforce.
+    pub enforced_limits: bool,
+}
+
+/// Classify a child's raw exit status into a [`BackendOutcome`]. Used by every
+/// backend; Linux backends additionally set `ResourceLimit` when the cgroup
+/// reports an OOM kill, but the signal path is shared.
+pub fn classify_exit(status: std::process::ExitStatus) -> BackendOutcome {
+    if let Some(code) = status.code() {
+        return BackendOutcome::Exited { code: Some(code) };
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            // SIGKILL is the common OOM-killer signal; a cgroup-aware backend
+            // upgrades this to ResourceLimit when it can prove the limit fired.
+            return BackendOutcome::Killed { signal: sig };
+        }
+    }
+    BackendOutcome::Exited { code: None }
+}
+
+impl BackendOutcome {
+    /// Map an outcome to the control-plane `error_code` string. `None` = no
+    /// error (success path); a backend that proved a resource ceiling hit yields
+    /// `resource_limit` (Stage 12).
+    pub fn error_code(&self) -> Option<String> {
+        match self {
+            BackendOutcome::Exited { code: Some(0) } => None,
+            BackendOutcome::Exited { code: Some(c) } => Some(format!("agent_failed:exit {c}")),
+            BackendOutcome::Exited { code: None } => Some("agent_failed".into()),
+            BackendOutcome::Killed { signal } => Some(format!("agent_failed:killed by {signal}")),
+            BackendOutcome::ResourceLimit { reason } => Some(format!("resource_limit:{reason}")),
+        }
+    }
 }
 
 /// Contract for spawning an attempt's agent process (Stage 3.2).
@@ -66,6 +136,7 @@ impl ExecutionBackend for ProcessBackend {
             stderr,
             pid,
             timeout: req.timeout,
+            enforced_limits: false,
         })
     }
 }
@@ -83,6 +154,7 @@ mod tests {
             attempt_id: "t".into(),
             timeout: Duration::from_secs(5),
             env: vec![],
+            limits: ResourceLimits::default(),
         }
     }
 
@@ -103,5 +175,45 @@ mod tests {
         assert!(ProcessBackend
             .spawn(req("/no/such/adapter-binary"))
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn process_backend_does_not_enforce_limits() {
+        // ProcessBackend has no cgroup; it must admit enforced_limits=false so
+        // profiles honestly refuse a strict run (Stage 12 capability-honesty).
+        let mut bp = ProcessBackend.spawn(req("true")).unwrap();
+        assert!(!bp.enforced_limits);
+        let _ = bp.child.wait().await;
+    }
+
+    #[test]
+    fn classify_exit_maps_cleanup() {
+        // Normal exit → Exited with the code.
+        let s = std::process::Command::new("true").status().unwrap();
+        assert!(matches!(
+            classify_exit(s),
+            BackendOutcome::Exited { code: Some(0) }
+        ));
+        // Non-zero exit is still Exited (not Killed).
+        let s = std::process::Command::new("false").status().unwrap();
+        assert!(matches!(classify_exit(s), BackendOutcome::Exited { code: Some(c) } if c != 0));
+    }
+
+    #[test]
+    fn outcome_error_code_distinguishes_resource_limit() {
+        // Success → no error code.
+        assert_eq!(BackendOutcome::Exited { code: Some(0) }.error_code(), None);
+        // Resource limit → error_code starts with resource_limit (:reason).
+        let out = BackendOutcome::ResourceLimit {
+            reason: "oom".into(),
+        }
+        .error_code();
+        assert!(out.as_deref().unwrap().starts_with("resource_limit"));
+        // A plain crash stays agent_failed, not resource_limit.
+        assert!(BackendOutcome::Exited { code: Some(127) }
+            .error_code()
+            .as_deref()
+            .unwrap()
+            .contains("agent_failed"));
     }
 }

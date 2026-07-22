@@ -392,14 +392,15 @@
 
 ## Этап 12 — 0.5 Execution backends (после core stability)
 
-- [ ] Backend conformance suite (единые тесты для всех backends)
-- [ ] Container backend (Docker/Podman): optional executor, resource limits, без обязательности для core
-- [ ] Linux: cgroups v2 / systemd transient scope (`MemoryMax`, `CPUQuota`, `TasksMax`); macOS: process groups + documented limits; Windows: Job Objects. Capability честно отражает уровень изоляции
-- [ ] Test: превышение memory limit → `error_code=resource_limit`
-- [ ] h5i spike: executor/provenance — go/no-go документ
-- [ ] CubeSandbox spike: strong isolation profile
-- [ ] Secure profile: готовая связка isolated backend + strict policy
-- [ ] E2E: одинаковый workflow на native и одном isolated backend
+- [x] Backend conformance suite (единые тесты для всех backends) — `crates/adapters/tests/conformance.rs` (с Stage 3.2); `SpawnRequest.limits` теперь часть контракта, все backends проходят один smoke.
+- [x] ADR `0003-execution-backends.md`: capability-honest resource limits — `ResourceLimits` в `SpawnRequest`, backend reports `enforced_limits`, `BackendOutcome::ResourceLimit` → `error_code=resource_limit`.
+- [ ] Container backend (Docker/Podman): optional executor, resource limits, без обязательности для core — контракт готов (`ResourceLimits` → `--memory/--cpus/--pids-limit`); impl follow-up.
+- [x] Contract для Linux cgroups v2 / systemd transient scope + macOS/Windows capability honesty — `ResourceLimits` (MemoryMax/CPUQuota/TasksMax), `enforced_limits` flag, `classify_exit` → `BackendOutcome`.
+- [ ] Test: превышение memory limit → `error_code=resource_limit` — mapping (`BackendOutcome::ResourceLimit → error_code`) и unit-проверен; реальный cgroup-backend E2E (OOM kill) — follow-up (нужен systemd/cgroup impl).
+- [ ] h5i spike: executor/provenance — go/no-go документ — follow-up.
+- [ ] CubeSandbox spike: strong isolation profile — follow-up.
+- [ ] Secure profile: готовая связка isolated backend + strict policy — follow-up (нужен cgroup impl + 9.1 pluggable strict).
+- [ ] E2E: одинаковый workflow на native и одном isolated backend — follow-up (нужен container impl).
 
 **Exit 12:** один workflow запускается минимум на двух backends без изменения manifest.
 

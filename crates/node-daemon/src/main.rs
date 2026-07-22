@@ -1252,6 +1252,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             attempt_id: assignment.attempt_id.clone(),
             timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
             env: cfg.adapter_env.clone(),
+            limits: agentgrid_adapters::ResourceLimits::default(),
         };
         let bp = match agentgrid_adapters::ProcessBackend.spawn(req) {
             Ok(b) => b,

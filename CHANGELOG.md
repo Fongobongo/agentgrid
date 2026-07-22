@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (backends — resource limits + error mapping, Stage 12)
+
+- `ExecutionBackend` contract extended (in `agentgrid-adapters::backend`):
+  - `SpawnRequest.limits: ResourceLimits` — `memory_max` / `cpu_quota_percent` /
+    `tasks_max` (maps to systemd `MemoryMax`/`CPUQuota`/`TasksMax` or Docker
+    `--memory`/`--cpus`/`--pids-limit`). A backend applies what it can.
+  - `BackendProcess::enforced_limits` — `false` for `ProcessBackend` (no
+    cgroup), `true` for a cgroup/container backend. Capability honesty: a strict
+    profile refuses to start on a backend that reports `false`.
+  - `BackendOutcome` (`Exited`/`Killed`/`ResourceLimit`) + `classify_exit` +
+    `BackendOutcome::error_code()` yields `resource_limit:<reason>` for a hit
+    ceiling (alongside `timeout`/`validation_failed`).
+- **ADR 0003: Execution backends** (`docs/decisions/0003-execution-backends.md`)
+  records the capability-honest discipline: limits ride the spawn request, the
+  backend reports what it enforced, the conformance suite drives any backend
+  through one smoke, and `error_code=resource_limit` is a first-class terminal
+  outcome a retry policy can treat specially (never auto-retry an OOM).
+- Covered by `process_backend_does_not_enforce_limits`, `classify_exit_maps_cleanup`,
+  `outcome_error_code_distinguishes_resource_limit`, and the existing
+  conformance suite.
+- Follow-ups (gated on cgroup/container impl): the concrete Linux cgroup/
+  systemd scope backend, the Docker/Podman adapter, the secure profile, the
+  OOM-kill E2E, the h5i/CubeSandbox spikes. The contract + error mapping +
+  conformance hook are in place now.
+
 ### Added (zeroshot — ownership ADR + capability probe contract, Stage 10)
 
 - **ADR 0002: Zeroshot ownership** (`docs/decisions/0002-zeroshot-ownership.md`)

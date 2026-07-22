@@ -22,7 +22,10 @@
 //! result | error`. Unknown types fall back to `Stdout` (raw log) per spec 3.1.
 
 mod backend;
-pub use backend::{BackendProcess, ExecutionBackend, ProcessBackend, SpawnRequest};
+pub use backend::{
+    classify_exit, BackendOutcome, BackendProcess, ExecutionBackend, ProcessBackend,
+    ResourceLimits, SpawnRequest,
+};
 
 use agentgrid_common::{EventKind, EventType};
 use serde::{Deserialize, Serialize};
