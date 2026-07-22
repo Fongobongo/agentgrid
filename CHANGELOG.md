@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (context — CTX provider contract + prompt injection, Stage 11)
+
+- New `ContextProvider` contract in `agentgrid-common` (`context` module):
+  `ContextPack` carries the repo digest + metrics (`bytes_in`/`bytes_out`/
+  `index_ms`/`cache_hit`), `cache_key_for(repo, base_commit, provider_version,
+  config_hash)` is the canonical cache key, and `NoopContextProvider` is the
+  graceful fallback (empty pack, never re-indexes). The first real impl is CTX
+  (an external repo indexer); it plugs in behind the same trait without touching
+  callers.
+- Node daemon: `compose_context_block` builds a pack for the attempt's
+  `(repository, base_commit)` via the configured provider (Noop by default) and
+  appends `pack.body` to the prompt before the skills block; a `context_pack`
+  status event streams the before/after bytes + cache-hit metrics. An empty pack
+  (Noop) or any provider error emits nothing and never blocks the task.
+- Covered by `context::tests::noop_is_empty_and_cached` and
+  `context::tests::cache_key_is_deterministic`.
+- Follow-ups: the real CTX-binary probe + an on-disk repo-index cache (atomic
+  publish, quota/eviction) so a repeated attempt on the same key skips
+  re-indexing — the Stage 11 exit criterion. The trait, key shape, injection
+  point, and metrics are ready; only the indexer impl is missing.
+
 ### Added (node — skill discovery wired into the prompt, Stage 9.2)
 
 - The node daemon now discovers skills in the attempt worktree

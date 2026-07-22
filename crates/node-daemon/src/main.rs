@@ -17,9 +17,9 @@ use agentgrid_adapters::{to_event_type, AdapterEvent, ExecutionBackend};
 use agentgrid_common::{
     policy::{AutonomyLevel, BuiltinPolicyProvider, PolicyDecision},
     AdapterCapability, AgentEventEnvelope, ApprovalStatus, ApprovalView, Assignment, CancelState,
-    CompleteAttemptRequest, CreateAgentSessionRequest, EnrollRequest, EnrollResponse, EventKind,
-    EventType, HeartbeatRequest, IncomingEvent, IngestEventsRequest, NodeStatus, PollRequest,
-    PollResponse, UploadArtifactRequest,
+    CompleteAttemptRequest, ContextProvider, CreateAgentSessionRequest, EnrollRequest,
+    EnrollResponse, EventKind, EventType, HeartbeatRequest, IncomingEvent, IngestEventsRequest,
+    NodeStatus, NoopContextProvider, PollRequest, PollResponse, UploadArtifactRequest,
 };
 use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
@@ -337,6 +337,54 @@ async fn compose_skills_block(
             _ => return String::new(), // skills are a hint; don't block the task
         };
     render_trusted_skills_block(&discovered, &trusted_name)
+}
+
+/// Stage 11 (CTX): build a context pack for the attempt's repo+base_commit
+/// via the configured `ContextProvider` (default Noop → empty pack), append its
+/// body to the prompt, and stream a `context_pack` status event with the
+/// before/after bytes + cache-hit metrics. Any provider error is swallowed:
+/// the agent simply proceeds without a context digest (graceful fallback).
+///
+/// `ponytail:` single provider instance, no on-disk cache yet; the cache key
+/// is computed by the provider so a future CTX impl can consult a warm cache
+/// on disk and skip re-indexing (Stage 11 exit criterion).
+async fn compose_context_block(
+    provider: &dyn ContextProvider,
+    assignment: &Assignment,
+    sink: &Arc<EventSink>,
+) -> String {
+    let repo = assignment.repository.as_str();
+    let base = assignment.base_commit.as_deref().unwrap_or("");
+    let pack = match provider.build(repo, base) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                provider = provider.id(),
+                "context provider failed: {e}; falling back to no pack"
+            );
+            return String::new();
+        }
+    };
+    if pack.is_empty() {
+        return String::new();
+    }
+    // Metrics event: bytes_in/bytes_out/cache_hit/index_ms.
+    sink.push(
+        EventType::Status,
+        json!({
+            "kind": "context_pack",
+            "provider": pack.provider,
+            "repo": pack.repo,
+            "base_commit": pack.base_commit,
+            "cache_key": pack.cache_key,
+            "cache_hit": pack.cache_hit,
+            "bytes_in": pack.bytes_in,
+            "bytes_out": pack.bytes_out,
+            "index_ms": pack.index_ms,
+        }),
+    )
+    .await;
+    pack.body
 }
 
 /// Pure render of the trusted subset of discovered skills. Separated so it can
@@ -839,6 +887,10 @@ async fn drive_acp_session(
 
     let acp3 = acp.clone();
     let mut prompt_text = assignment.prompt.clone();
+    // Stage 11 (CTX): append a repo context pack (if a provider is configured).
+    // Noop by default → empty body → agent proceeds without a digest.
+    let ctx_provider = NoopContextProvider;
+    prompt_text.push_str(&compose_context_block(&ctx_provider, assignment, &sink).await);
     // Stage 9.2: append the operator-trusted skills discovered in this worktree
     // (fail-closed: untrusted skills are omitted, any lookup error = no block).
     prompt_text.push_str(&compose_skills_block(client, &cfg.server, ws_path).await);

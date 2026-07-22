@@ -379,14 +379,14 @@
 
 ## Этап 11 — 0.4 CTX context provider (1 неделя)
 
-- [ ] Trait/contract `ContextProvider`; CTX — первая реализация
-- [ ] Probe CTX как capability; graceful fallback без CTX
-- [ ] Repository-level index cache с ключом `(repo, base_commit, provider_version, config_hash)`; инкрементальное обновление после fetch; atomic publish и quota/eviction
-- [ ] Context pack как artifact + инжекция через MCP/prompt в session
-- [ ] Метрики: bytes до/после, время индексации, cache hit rate
-- [ ] E2E: OpenCode worker + CTX — повторный attempt не переиндексирует репозиторий
+- [x] Trait/contract `ContextProvider` (`ContextPack`, `cache_key_for`, `ContextError`); `NoopContextProvider` — graceful fallback (empty pack, cache_hit=true). В `agentgrid-common`.
+- [ ] Probe CTX как capability; graceful fallback без CTX — [x] fallback wired (Noop по умолчанию в node `compose_context_block`); [ ] реальный CTX-binary probe — follow-up (нужен external indexer).
+- [ ] Repository-level index cache с ключом `(repo, base_commit, provider_version, config_hash)` — [x] key helper `cache_key_for`; [ ] on-disk cache на node (atomic publish/quota/eviction) — follow-up, сейчас stateless (Noop не кеширует).
+- [x] Context pack как artifact + инжекция через MCP/prompt в session — node append'ит `pack.body` в prompt перед skills; метрики `context_pack` status-event (bytes_in/bytes_out/cache_hit/index_ms). Empty pack (Noop) → нет event.
+- [x] Метрики: bytes до/после, время индексации, cache hit rate — поля в `context_pack` event.
+- [ ] E2E: OpenCode worker + CTX — повторный attempt не переиндексирует репозиторий — follow-up (нужен реальный CTX impl + cache).
 
-**Exit 11:** worker получает компактный context pack без повторной индексации per attempt.
+**Exit 11:** worker получает компактный context pack без повторной индексации per attempt. — каркас готов (trait + Noop + prompt injection + метрики); реальный CTX provider + on-disk cache = follow-up.
 
 ---
 
