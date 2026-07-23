@@ -2493,6 +2493,54 @@ async fn create_workflow_accepts_yaml() {
 }
 
 #[tokio::test]
+async fn workflow_budget_round_trips_via_json_create_and_get() {
+    // Stage 13 Loop Engineering: a budget attached on create is persisted and
+    // returned on get (NULL stays NULL/None = unbounded).
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let body = serde_json::json!({
+        "name": "looped",
+        "steps": [{"id":"a","prompt":"hi","role":"architect"}],
+        "budget": {
+            "max_messages": 10,
+            "max_rounds": 5,
+            "max_repeated_handoffs": 3
+        }
+    })
+    .to_string();
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/workflows", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let b = created
+        .budget
+        .clone()
+        .expect("budget present on create response");
+    assert_eq!(b.max_messages, Some(10));
+    assert_eq!(b.max_repeated_handoffs, Some(3));
+    // Get round-trips.
+    let resp = app
+        .clone()
+        .oneshot(get_q(&format!("/v1/workflows/{}", created.id)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let fetched: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(fetched.budget, created.budget);
+    // Listing reflects it.
+    let resp = app.clone().oneshot(get_q("/v1/workflows")).await.unwrap();
+    let list: Vec<WorkflowTemplate> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(list[0].budget.is_some());
+}
+
+#[tokio::test]
 async fn cancel_workflow_run_handler_cancels() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
@@ -2510,6 +2558,7 @@ async fn cancel_workflow_run_handler_cancels() {
             max_attempts: None,
         }],
         context: None,
+        budget: None,
     };
     let r = app
         .clone()

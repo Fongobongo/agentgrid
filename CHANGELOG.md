@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (common — Loop Engineering budgets, Stage 13)
+
+- `WorkflowBudget` (max_messages / max_rounds / max_bytes / max_tokens /
+  max_cost_cents / max_wall_seconds / max_repeated_handoffs, all optional)
+  + `BudgetUsage` / `BudgetBreach` in `agentgrid-common`. Pure
+  `WorkflowBudget::check(&usage) -> Option<BudgetBreach>`: reports the first set
+  ceiling exceeded (strict `>`, so equal-to-limit is *not* a breach); unset
+  ceilings are unbounded. `max_repeated_handoffs` is the circuit breaker on
+  identical sequential handoffs.
+- `WorkflowTemplate.budget` and `CreateWorkflowRequest.budget`; migration
+  `0026_workflow_budget.sql` adds `budget_json TEXT` (NULL = unbounded).
+- Control plane persists and returns the budget on create/get/list, on both the
+  YAML and JSON `POST /v1/workflows` paths.
+- Tests: `budget_check_no_breach_when_unset_or_within`,
+  `budget_check_reports_first_breach`, `budget_round_trips_in_template_yaml`
+  (common); `workflow_budget_round_trips_via_json_create_and_get` (CP).
+- Follow-up: runtime enforcement in the scheduler/loop tick (park the run
+  `Blocked` on a breach + a repeated-handoff counter) needs scheduler-side
+  usage tracking and handoff history.
+
 ### Added (common — MCP server registry, Stage 13)
 
 - `McpServer`/`McpServerCreate` in `agentgrid-common`: an operator-managed

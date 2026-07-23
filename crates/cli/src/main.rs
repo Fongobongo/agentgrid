@@ -1428,6 +1428,7 @@ async fn cmd_workflow_create(
         name: a.name,
         steps,
         context: a.context,
+        budget: None,
     };
     let resp = client
         .post(format!("{base}/v1/workflows"))

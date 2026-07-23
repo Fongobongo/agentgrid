@@ -1137,6 +1137,7 @@ async fn create_workflow(
             name: t.name,
             steps: t.steps,
             context: None,
+            budget: t.budget,
         }
     } else {
         serde_json::from_slice(&body).map_err(|e| {
@@ -1151,6 +1152,7 @@ async fn create_workflow(
         id: String::new(),
         name: req.name.clone(),
         steps: req.steps.clone(),
+        budget: req.budget.clone(),
         created_at: String::new(),
     }
     .validate_dag()
@@ -1160,7 +1162,7 @@ async fn create_workflow(
     })?;
     state
         .store
-        .create_workflow_template(&req.name, &req.steps)
+        .create_workflow_template(&req.name, &req.steps, &req.budget)
         .await
         .map(|t| (StatusCode::CREATED, Json(t)))
         .map_err(|e| {

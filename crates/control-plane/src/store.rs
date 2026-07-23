@@ -14,8 +14,9 @@ use agentgrid_common::{
     EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, McpServer,
     McpServerCreate, NodeEligibility, NodeStatus, NodeView, PollRequest, RepositoryView,
     SkillTrustView, TaskEligibility, TaskEvent, TaskStatus, TaskTransition, TaskView,
-    UploadArtifactRequest, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowSchedule,
-    WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,
+    UploadArtifactRequest, WorkflowBudget, WorkflowRole, WorkflowRun, WorkflowRunStatus,
+    WorkflowSchedule, WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun, WorkflowStepStatus,
+    WorkflowTemplate,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -2204,6 +2205,15 @@ fn mcp_server_from_row(r: &sqlx::sqlite::SqliteRow) -> McpServer {
     }
 }
 
+/// Stage 13: decode the optional budget JSON column for a workflow template. A
+/// NULL column is preserved as `None` (unbounded) — never synthesized.
+fn workflow_budget_from_col(col: &str, r: &sqlx::sqlite::SqliteRow) -> Option<WorkflowBudget> {
+    r.try_get::<Option<String>, _>(col)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
 fn skill_trust_from_row(r: &sqlx::sqlite::SqliteRow) -> SkillTrustView {
     SkillTrustView {
         name: r.try_get("name").unwrap_or_default(),
@@ -2363,19 +2373,25 @@ impl Store {
         &self,
         name: &str,
         steps: &[WorkflowStep],
+        budget: &Option<WorkflowBudget>,
     ) -> Result<WorkflowTemplate> {
         crate::workflow::validate_workflow_dag(steps)
             .map_err(|e| anyhow::anyhow!("invalid workflow DAG: {e:?}"))?;
         let id = format!("wft-{}", Uuid::new_v4());
         let created_at = now_iso();
         let steps_json = serde_json::to_string(steps)?;
+        let budget_json = match budget {
+            Some(b) => Some(serde_json::to_string(b)?),
+            None => None,
+        };
         sqlx::query(
-            "INSERT INTO workflow_templates (id, name, steps_json, created_at) \
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO workflow_templates (id, name, steps_json, budget_json, created_at) \
+             VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(name)
         .bind(&steps_json)
+        .bind(&budget_json)
         .bind(&created_at)
         .execute(&self.pool)
         .await?;
@@ -2383,13 +2399,14 @@ impl Store {
             id,
             name: name.to_string(),
             steps: steps.to_vec(),
+            budget: budget.clone(),
             created_at,
         })
     }
 
     pub async fn get_workflow_template(&self, id: &str) -> Result<Option<WorkflowTemplate>> {
         let row = sqlx::query(
-            "SELECT id, name, steps_json, created_at FROM workflow_templates WHERE id = ?",
+            "SELECT id, name, steps_json, budget_json, created_at FROM workflow_templates WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -2399,13 +2416,14 @@ impl Store {
             name: r.try_get("name").unwrap_or_default(),
             steps: serde_json::from_str(&r.try_get::<String, _>("steps_json").unwrap_or_default())
                 .unwrap_or_default(),
+            budget: workflow_budget_from_col("budget_json", &r),
             created_at: r.try_get("created_at").unwrap_or_default(),
         }))
     }
 
     pub async fn list_workflow_templates(&self) -> Result<Vec<WorkflowTemplate>> {
         let rows = sqlx::query(
-            "SELECT id, name, steps_json, created_at FROM workflow_templates ORDER BY created_at ASC",
+            "SELECT id, name, steps_json, budget_json, created_at FROM workflow_templates ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -2418,6 +2436,7 @@ impl Store {
                     &r.try_get::<String, _>("steps_json").unwrap_or_default(),
                 )
                 .unwrap_or_default(),
+                budget: workflow_budget_from_col("budget_json", r),
                 created_at: r.try_get("created_at").unwrap_or_default(),
             })
             .collect())
@@ -3085,7 +3104,7 @@ mod workflow_tests {
     async fn rejects_invalid_dag_on_create() {
         let s = temp_store().await;
         let bad = vec![step("a", &["b"], WorkflowRole::Worker)];
-        assert!(s.create_workflow_template("x", &bad).await.is_err());
+        assert!(s.create_workflow_template("x", &bad, &None).await.is_err());
     }
 
     #[tokio::test]
@@ -3096,7 +3115,10 @@ mod workflow_tests {
             step("b", &["a"], WorkflowRole::Worker),
             step("c", &["a"], WorkflowRole::Verifier),
         ];
-        let tpl = s.create_workflow_template("build", &steps).await.unwrap();
+        let tpl = s
+            .create_workflow_template("build", &steps, &None)
+            .await
+            .unwrap();
         assert!(tpl.id.starts_with("wft-"));
         assert_eq!(tpl.steps.len(), 3);
 
@@ -3140,7 +3162,7 @@ mod workflow_tests {
         let s = temp_store().await;
         // Single ready step (no deps) -> first tick spawns its task.
         let tpl = s
-            .create_workflow_template("one", &[step("a", &[], WorkflowRole::Worker)])
+            .create_workflow_template("one", &[step("a", &[], WorkflowRole::Worker)], &None)
             .await
             .unwrap();
         let run = s
@@ -3173,7 +3195,10 @@ mod workflow_tests {
             retryable: None,
             max_attempts: None,
         }];
-        let tpl = s.create_workflow_template("pin", &steps).await.unwrap();
+        let tpl = s
+            .create_workflow_template("pin", &steps, &None)
+            .await
+            .unwrap();
         let run = s
             .create_workflow_run(&tpl.id, None, Some("demo"), None)
             .await
@@ -3193,7 +3218,10 @@ mod workflow_tests {
     async fn workflow_run_carries_base_commit() {
         let s = temp_store().await;
         let steps = vec![step("a", &[], WorkflowRole::Worker)];
-        let tpl = s.create_workflow_template("t", &steps).await.unwrap();
+        let tpl = s
+            .create_workflow_template("t", &steps, &None)
+            .await
+            .unwrap();
         let run = s
             .create_workflow_run(&tpl.id, None, Some("demo"), Some("deadbeef"))
             .await
@@ -3221,7 +3249,10 @@ mod workflow_tests {
             retryable: Some(true),
             max_attempts: Some(3),
         }];
-        let tpl = s.create_workflow_template("retry", &steps).await.unwrap();
+        let tpl = s
+            .create_workflow_template("retry", &steps, &None)
+            .await
+            .unwrap();
         let run = s
             .create_workflow_run(&tpl.id, None, Some("demo"), None)
             .await
@@ -3280,7 +3311,10 @@ mod workflow_tests {
     async fn integrator_failure_blocks_run_not_failed() {
         let s = temp_store().await;
         let steps = vec![step("a", &[], WorkflowRole::Integrator)];
-        let tpl = s.create_workflow_template("integ", &steps).await.unwrap();
+        let tpl = s
+            .create_workflow_template("integ", &steps, &None)
+            .await
+            .unwrap();
         let run = s
             .create_workflow_run(&tpl.id, None, Some("demo"), None)
             .await
@@ -3328,7 +3362,10 @@ mod workflow_tests {
     async fn approval_timeout_blocks_linked_step() {
         let s = temp_store().await;
         let steps = vec![step("a", &[], WorkflowRole::Architect)];
-        let tpl = s.create_workflow_template("ap", &steps).await.unwrap();
+        let tpl = s
+            .create_workflow_template("ap", &steps, &None)
+            .await
+            .unwrap();
         let run = s
             .create_workflow_run(&tpl.id, None, Some("demo"), None)
             .await
@@ -3379,7 +3416,10 @@ mod workflow_tests {
     async fn worker_failure_still_fails_run() {
         let s = temp_store().await;
         let steps = vec![step("a", &[], WorkflowRole::Worker)];
-        let tpl = s.create_workflow_template("w", &steps).await.unwrap();
+        let tpl = s
+            .create_workflow_template("w", &steps, &None)
+            .await
+            .unwrap();
         let run = s
             .create_workflow_run(&tpl.id, None, Some("demo"), None)
             .await
@@ -3422,7 +3462,10 @@ mod workflow_tests {
             step("arch", &[], WorkflowRole::Architect),
             step("work", &["arch"], WorkflowRole::Worker),
         ];
-        let tpl = s.create_workflow_template("p", &steps).await.unwrap();
+        let tpl = s
+            .create_workflow_template("p", &steps, &None)
+            .await
+            .unwrap();
         let run = s
             .create_workflow_run(&tpl.id, None, Some("demo"), None)
             .await
@@ -3582,7 +3625,10 @@ mod workflow_tests {
             retryable: None,
             max_attempts: None,
         }];
-        let t = s.create_workflow_template("t", &steps).await.unwrap();
+        let t = s
+            .create_workflow_template("t", &steps, &None)
+            .await
+            .unwrap();
         let run = s
             .create_workflow_run(&t.id, None, None, None)
             .await

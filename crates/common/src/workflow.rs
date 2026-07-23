@@ -63,6 +63,123 @@ pub enum RoleRunStatus {
     Cancelled,
 }
 
+/// Stage 13 Loop Engineering: a communication / execution budget attached to a
+/// workflow template. Enforced at run time by the scheduler / loop tick (a
+/// follow-up): when any ceiling is exceeded the run is parked `Blocked`
+/// (waits approval), not killed. `max_repeated_handoffs` is the circuit breaker
+/// threshold: if two consecutive steps hand off to each other more than this
+/// many times, the loop trips (repeated identical handoff = runaway).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_messages: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wall_seconds: Option<u64>,
+    /// Circuit breaker: max identical sequential handoffs before trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_repeated_handoffs: Option<u32>,
+}
+
+impl WorkflowBudget {
+    /// Pure check: does `usage` exceed any set ceiling? Returns the first
+    /// ceiling breached (so the caller can park the run `Blocked`). `None` =
+    /// within budget. Unset ceilings are never breached (treated as unbounded).
+    pub fn check(&self, usage: &BudgetUsage) -> Option<BudgetBreach> {
+        if let Some(m) = self.max_messages {
+            if usage.messages > m {
+                return Some(BudgetBreach {
+                    field: "max_messages".into(),
+                    limit: m as u64,
+                    observed: usage.messages as u64,
+                });
+            }
+        }
+        if let Some(m) = self.max_rounds {
+            if usage.rounds > m {
+                return Some(BudgetBreach {
+                    field: "max_rounds".into(),
+                    limit: m as u64,
+                    observed: usage.rounds as u64,
+                });
+            }
+        }
+        if let Some(m) = self.max_bytes {
+            if usage.bytes > m {
+                return Some(BudgetBreach {
+                    field: "max_bytes".into(),
+                    limit: m,
+                    observed: usage.bytes,
+                });
+            }
+        }
+        if let Some(m) = self.max_tokens {
+            if usage.tokens > m {
+                return Some(BudgetBreach {
+                    field: "max_tokens".into(),
+                    limit: m,
+                    observed: usage.tokens,
+                });
+            }
+        }
+        if let Some(m) = self.max_cost_cents {
+            if usage.cost_cents > m {
+                return Some(BudgetBreach {
+                    field: "max_cost_cents".into(),
+                    limit: m,
+                    observed: usage.cost_cents,
+                });
+            }
+        }
+        if let Some(m) = self.max_wall_seconds {
+            if usage.wall_seconds > m {
+                return Some(BudgetBreach {
+                    field: "max_wall_seconds".into(),
+                    limit: m,
+                    observed: usage.wall_seconds,
+                });
+            }
+        }
+        if let Some(m) = self.max_repeated_handoffs {
+            if usage.repeated_handoffs > m {
+                return Some(BudgetBreach {
+                    field: "max_repeated_handoffs".into(),
+                    limit: m as u64,
+                    observed: usage.repeated_handoffs as u64,
+                });
+            }
+        }
+        None
+    }
+}
+
+/// Observed usage fed to `WorkflowBudget::check`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BudgetUsage {
+    pub messages: u32,
+    pub rounds: u32,
+    pub bytes: u64,
+    pub tokens: u64,
+    pub cost_cents: u64,
+    pub wall_seconds: u64,
+    pub repeated_handoffs: u32,
+}
+
+/// A single ceiling breach (which field fired + how far over).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetBreach {
+    pub field: String,
+    pub limit: u64,
+    pub observed: u64,
+}
+
 /// One node in a workflow DAG. `depends_on` lists other step ids that must
 /// finish before this step starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +217,8 @@ pub struct WorkflowTemplate {
     pub id: String,
     pub name: String,
     pub steps: Vec<WorkflowStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<WorkflowBudget>,
     #[serde(default)]
     pub created_at: String,
 }
@@ -203,6 +322,7 @@ steps:
             id: "t".into(),
             name: "x".into(),
             created_at: "".into(),
+            budget: None,
             steps: steps
                 .iter()
                 .map(|(id, deps)| WorkflowStep {
@@ -236,6 +356,93 @@ steps:
                 .validate_dag()
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn budget_check_no_breach_when_unset_or_within() {
+        // No ceiling set => unbounded, never breaches.
+        let b = WorkflowBudget::default();
+        assert_eq!(
+            b.check(&BudgetUsage {
+                messages: 999,
+                ..Default::default()
+            }),
+            None
+        );
+        // Within all set ceilings.
+        let b = WorkflowBudget {
+            max_messages: Some(10),
+            max_tokens: Some(5000),
+            max_repeated_handoffs: Some(3),
+            ..Default::default()
+        };
+        let u = BudgetUsage {
+            messages: 10,
+            tokens: 4999,
+            repeated_handoffs: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            b.check(&u),
+            None,
+            "equal-to-limit is NOT a breach (strict >)"
+        );
+    }
+
+    #[test]
+    fn budget_check_reports_first_breach() {
+        let b = WorkflowBudget {
+            max_messages: Some(5),
+            max_rounds: Some(2),
+            max_repeated_handoffs: Some(3),
+            ..Default::default()
+        };
+        // Only max_messages is over.
+        let u = BudgetUsage {
+            messages: 6,
+            rounds: 1,
+            repeated_handoffs: 1,
+            ..Default::default()
+        };
+        let breach = b.check(&u).expect("max_messages breached");
+        assert_eq!(breach.field, "max_messages");
+        assert_eq!(breach.limit, 5);
+        assert_eq!(breach.observed, 6);
+        // Circuit breaker trips on repeated handoffs over threshold.
+        let u = BudgetUsage {
+            messages: 1,
+            rounds: 1,
+            repeated_handoffs: 4,
+            ..Default::default()
+        };
+        let breach = b.check(&u).expect("circuit tripped");
+        assert_eq!(breach.field, "max_repeated_handoffs");
+        assert_eq!(breach.observed, 4);
+    }
+
+    #[test]
+    fn budget_round_trips_in_template_yaml() {
+        let yaml = r#"
+name: looped
+budget:
+  max_messages: 10
+  max_rounds: 5
+  max_repeated_handoffs: 3
+steps:
+  - id: a
+    prompt: hi
+    role: architect
+"#;
+        let t = WorkflowTemplate::from_yaml(yaml).expect("yaml parses");
+        let b = t.budget.clone().expect("budget present");
+        assert_eq!(b.max_messages, Some(10));
+        assert_eq!(b.max_rounds, Some(5));
+        assert_eq!(b.max_repeated_handoffs, Some(3));
+        assert!(b.max_tokens.is_none(), "unset ceilings stay unset");
+        // Re-serialize to JSON and back.
+        let json = serde_json::to_string(&t).unwrap();
+        let back: WorkflowTemplate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.budget, t.budget);
     }
 
     #[test]
@@ -332,6 +539,9 @@ pub struct CreateWorkflowRequest {
     /// Default shared context JSON for runs of this template (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// Stage 13 Loop Engineering: optional budget + circuit breaker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<WorkflowBudget>,
 }
 
 /// Request body for `POST /v1/workflows/{id}/runs`.

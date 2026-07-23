@@ -5,10 +5,10 @@ pub use policy::{
     PolicyVerdict, RiskClass,
 };
 pub use workflow::{
-    CreateWorkflowRequest, CreateWorkflowRunRequest, RoleRunStatus, StepProjection,
-    WorkflowProjection, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowRunWithSteps,
-    WorkflowSchedule, WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun, WorkflowStepStatus,
-    WorkflowTemplate,
+    BudgetBreach, BudgetUsage, CreateWorkflowRequest, CreateWorkflowRunRequest, RoleRunStatus,
+    StepProjection, WorkflowBudget, WorkflowProjection, WorkflowRole, WorkflowRun,
+    WorkflowRunStatus, WorkflowRunWithSteps, WorkflowSchedule, WorkflowScheduleCreate,
+    WorkflowStep, WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,
 };
 
 use serde::{Deserialize, Serialize};
