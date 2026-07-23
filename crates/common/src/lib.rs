@@ -5,7 +5,7 @@ pub use policy::{
     PolicyVerdict, RiskClass,
 };
 pub use workflow::{
-    compute_budget_usage, BudgetBreach, BudgetUsage, CreateWorkflowRequest,
+    compute_budget_usage, ratify_l4_schedule, BudgetBreach, BudgetUsage, CreateWorkflowRequest,
     CreateWorkflowRunRequest, RoleRunStatus, StepProjection, WorkflowBudget, WorkflowProjection,
     WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowRunWithSteps, WorkflowSchedule,
     WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,

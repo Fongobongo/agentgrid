@@ -1926,6 +1926,90 @@ async fn workflow_schedule_fires_run_on_tick() {
 }
 
 #[tokio::test]
+async fn l4_schedule_ratify_gate_refuses_without_budget_accepts_with() {
+    // Stage 13 L4 ratify: a fully-autonomous (l4) schedule is fail-closed
+    // unless the template declares a budget; l2 scheduling is unaffected by
+    // the gate.
+    use agentgrid_common::{
+        CreateWorkflowRequest, WorkflowRole, WorkflowScheduleCreate, WorkflowStep, WorkflowTemplate,
+    };
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+
+    // Template with NO budget.
+    let steps = vec![WorkflowStep {
+        id: "a".into(),
+        prompt: "p".into(),
+        depends_on: vec![],
+        role: WorkflowRole::Worker,
+        adapter: None,
+        requested_node_id: None,
+        base_commit: None,
+        retryable: None,
+        max_attempts: None,
+    }];
+    let body = serde_json::to_string(&CreateWorkflowRequest {
+        name: "t".into(),
+        steps,
+        context: None,
+        budget: None,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/v1/workflows", body, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tpl: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    // l4 schedule on the budgetless template is refused at create time.
+    let bad = serde_json::to_string(&WorkflowScheduleCreate {
+        interval_seconds: 60,
+        autonomy: "l4".into(),
+        enabled: true,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/v1/workflows/{}/schedules", tpl.id),
+            bad,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "l4 on a budgetless template must be fail-closed"
+    );
+
+    // l2 schedule is accepted (lower autonomy, no ratify gate).
+    let ok_l2 = serde_json::to_string(&WorkflowScheduleCreate {
+        interval_seconds: 60,
+        autonomy: "l2".into(),
+        enabled: true,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/v1/workflows/{}/schedules", tpl.id),
+            ok_l2,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "l2 passes the ratify gate"
+    );
+}
+
+#[tokio::test]
 async fn workflow_golden_architect_workers_integrator_verifier() {
     // Exit 7: architect -> 2 parallel workers -> integrator -> verifier runs
     // locally; the durable scheduler activates ready steps as Agentgrid tasks

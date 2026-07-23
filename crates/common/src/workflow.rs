@@ -487,6 +487,34 @@ steps:
     }
 
     #[test]
+    fn ratify_l4_schedule_requires_budget_and_passes_lower_autonomy() {
+        // A template with no budget: l4 schedule is refused (fail-closed),
+        // lower autonomy passes.
+        let no_budget = WorkflowTemplate {
+            id: "t".into(),
+            name: "x".into(),
+            steps: vec![],
+            budget: None,
+            created_at: "".into(),
+        };
+        assert!(ratify_l4_schedule(&no_budget, "l4").is_err());
+        assert!(ratify_l4_schedule(&no_budget, "l2").is_ok());
+        assert!(ratify_l4_schedule(&no_budget, "l0").is_ok());
+        // A template with a budget: l4 schedule is ratified.
+        let with_budget = WorkflowTemplate {
+            id: "t".into(),
+            name: "x".into(),
+            steps: vec![],
+            budget: Some(WorkflowBudget {
+                max_rounds: Some(5),
+                ..Default::default()
+            }),
+            created_at: "".into(),
+        };
+        assert!(ratify_l4_schedule(&with_budget, "l4").is_ok());
+    }
+
+    #[test]
     fn validate_dag_rejects_duplicate_ids() {
         let e = tmpl(&[("a", &[]), ("a", &[])]).validate_dag().unwrap_err();
         assert!(e.contains("duplicate step id"));
@@ -671,6 +699,30 @@ pub struct WorkflowScheduleCreate {
 
 fn default_autonomy_l2() -> String {
     "l2".into()
+}
+
+/// Stage 13 L4 ratify: an `l4` schedule is a fully-autonomous trigger that can
+/// run a workflow with no human in the loop. To keep the loop bounded we gate
+/// it on the template having declared a `WorkflowBudget` (catches runaway
+/// cost/rounds/wall) — and the node still routes the spawned tasks through the
+/// configured command policy (external provider / default fail-closed `Ask`).
+/// Returns `Ok(())` when ratify passes, `Err(reason)` otherwise. Non-l4
+/// schedules always pass (human can approve the lower-autonomy runs).
+/// ponytail: budget presence is the gating observable; the single secret id
+/// and command-policy wiring already live on the node, so we don't re-decide
+/// them here.
+pub fn ratify_l4_schedule(template: &WorkflowTemplate, autonomy: &str) -> Result<(), String> {
+    if autonomy != "l4" {
+        return Ok(());
+    }
+    if template.budget.is_none() {
+        return Err(
+            "l4 schedule requires the template to declare a budget; refuses to create a \
+             fully-autonomous trigger with no run budget"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn default_true() -> bool {

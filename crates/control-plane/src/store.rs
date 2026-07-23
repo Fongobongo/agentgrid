@@ -2592,6 +2592,15 @@ impl Store {
         if parse_autonomy_level(&body.autonomy).is_none() {
             anyhow::bail!("unknown autonomy level: {}", body.autonomy);
         }
+        // Stage 13 L4 ratify: a fully-autonomous (l4) schedule may only be
+        // created when the template carries a budget — fail-closed so an
+        // unbounded loop can never be set on a timer. Non-l4 passes (the
+        // lower-autonomy runs still route through the command policy).
+        if let Some(tpl) = self.get_workflow_template(template_id).await? {
+            if let Err(reason) = agentgrid_common::ratify_l4_schedule(&tpl, &body.autonomy) {
+                anyhow::bail!(reason);
+            }
+        }
         let id = format!("wfsch-{}", Uuid::new_v4());
         let now = now_iso();
         sqlx::query(

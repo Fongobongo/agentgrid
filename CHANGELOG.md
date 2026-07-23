@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (common — L4 schedule ratify gate, Stage 13)
+
+- Pure `agentgrid_common::ratify_l4_schedule(template, autonomy)`: a
+  fully-autonomous `l4` schedule is fail-closed unless the template declares a
+  `WorkflowBudget` (an unbounded loop must never be set on a timer). Non-l4
+  schedules always pass. The node still routes spawned tasks through the
+  configured command policy (external provider / default fail-closed `Ask`), so
+  the command-policy check is not re-decided here.
+- `Store::create_workflow_schedule` calls `ratify_l4_schedule` after the
+  autonomy parse; a violation fails the create (callers surface it as
+  `400 BAD_REQUEST` on `POST /v1/workflows/{tid}/schedules`).
+- Tests: `ratify_l4_schedule_requires_budget_and_passes_lower_autonomy`
+  (common), `l4_schedule_ratify_gate_refuses_without_budget_accepts_with` (CP).
+
 ### Added (control-plane — Loop Engineering budget enforcement, Stage 13)
 
 - `tick_workflow_run` now enforces a workflow template's budget. Each tick it
