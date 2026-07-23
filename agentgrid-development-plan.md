@@ -236,7 +236,7 @@
 - [ ] Communication budgets: maxMessages/maxRounds/maxBytes/maxTokens/maxCost/maxWallTime → при исчерпании `blocked`/approval; circuit breaker на повторяющиеся одинаковые handoff
 - [ ] Integrator step: слияние результатов в integration branch
 - [ ] Independent verifier: чистый workspace, без доступа к private transcripts workers; verdict с reproducible evidence
-- [ ] Repair rounds: ограниченное число; после лимита — эскалация человеку
+- [x] Repair rounds: ограниченное число (existing `retryable && attempts < max` → respawn); Stage 13 escalation — `retryable` step, исчерпавший `max_attempts`, эскалирует человеку (`step + run Blocked`), а не hard-fails (non-retryable worker fast-fails). Тест `retryable_step_exhausting_repair_budget_escalates_blocked`.
 - [x] Pause/resume/cancel всего run и отдельных steps
 - [x] UI/CLI: workflow graph + step timeline + verdicts (есть: WorkflowsList/Dag/WorkflowDetails с per-step verdict, role, node, attempts, error). [ ] сообщения (handoff transcripts) — follow-up (нужен message store). Stage 13 budget snapshot добавлен в projection (`WorkflowProjection.budget?: BudgetSnapshot{limits,usage,breach}`) + панель в WorkflowDetails (используемые/лимиты per field, breach подсветкой).
 - [x] Golden workflow test: architect → 2 параллельных worker → integrator → validation → verifier на mock adapters (детерминированно)

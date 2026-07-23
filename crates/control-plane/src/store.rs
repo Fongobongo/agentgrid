@@ -3065,6 +3065,22 @@ impl Store {
                                             WorkflowStepStatus::Blocked,
                                         )
                                         .await?;
+                                    } else if retryable {
+                                        // Stage 13 repair escalation: a
+                                        // `retryable` step opted into repair
+                                        // rounds ("repairable"), so exhausting
+                                        // `max_attempts` is not a hard run
+                                        // failure — it escalates to a human for
+                                        // repair resolution (`Blocked` rather
+                                        // than `Failed`). A non-retryable step
+                                        // fails fast below.
+                                        self.set_step_status(&step.id, WorkflowStepStatus::Blocked)
+                                            .await?;
+                                        self.set_role_run_status_by_step(
+                                            &step.id,
+                                            WorkflowStepStatus::Blocked,
+                                        )
+                                        .await?;
                                     } else {
                                         self.set_step_status(&step.id, WorkflowStepStatus::Failed)
                                             .await?;
@@ -3437,6 +3453,124 @@ mod workflow_tests {
             WorkflowRunStatus::Blocked,
             "run must be blocked, not failed"
         );
+    }
+
+    #[tokio::test]
+    async fn retryable_step_exhausting_repair_budget_escalates_blocked() {
+        // Stage 13 repair escalation: a `retryable` step that exhausts its
+        // `max_attempts` escalates to a human (run `Blocked`) instead of
+        // hard-failing the run. A non-retryable worker still fails fast.
+        let s = temp_store().await;
+        let steps_retry = vec![agentgrid_common::WorkflowStep {
+            id: "a".into(),
+            prompt: "do a".into(),
+            depends_on: vec![],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: Some(true),
+            max_attempts: Some(2),
+        }];
+        let tpl = s
+            .create_workflow_template("rep", &steps_retry, &None)
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let poll = agentgrid_common::PollRequest {
+            node_id: "n1".into(),
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            protocol_version: None,
+        };
+        s.register_or_touch_node(&poll).await.unwrap();
+
+        // attempt 1 -> fail
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &a1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 1,
+                commit_sha: None,
+                error_code: Some("agent_failed".into()),
+                acp_session_id: None,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        s.tick_workflow_run(&run.id).await.unwrap();
+        // attempt 2 -> fail (exhausts max_attempts=2)
+        let a2 = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &a2.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 1,
+                commit_sha: None,
+                error_code: Some("agent_failed".into()),
+                acp_session_id: None,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        s.tick_workflow_run(&run.id).await.unwrap();
+        // Repair budget exhausted -> step Blocked (escalation), run Blocked.
+        let rs = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(rs[0].status, WorkflowStepStatus::Blocked, "escalation");
+        let after = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            WorkflowRunStatus::Blocked,
+            "escalation parks the run"
+        );
+
+        // Sanity: a non-retryable worker fails the run outright on the first
+        // attempt (fast fail).
+        let steps_hard = vec![agentgrid_common::WorkflowStep {
+            id: "h".into(),
+            prompt: "do h".into(),
+            depends_on: vec![],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: Some(false),
+            max_attempts: Some(1),
+        }];
+        let tpl2 = s
+            .create_workflow_template("hard", &steps_hard, &None)
+            .await
+            .unwrap();
+        let run2 = s
+            .create_workflow_run(&tpl2.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        s.tick_workflow_run(&run2.id).await.unwrap();
+        let b1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &b1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 1,
+                commit_sha: None,
+                error_code: Some("agent_failed".into()),
+                acp_session_id: None,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+        s.tick_workflow_run(&run2.id).await.unwrap();
+        let rs2 = s.get_workflow_run_steps(&run2.id).await.unwrap();
+        assert_eq!(rs2[0].status, WorkflowStepStatus::Failed, "fast fail");
+        let after2 = s.get_workflow_run(&run2.id).await.unwrap().unwrap();
+        assert_eq!(after2.status, WorkflowRunStatus::Failed);
     }
 
     #[tokio::test]

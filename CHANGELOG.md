@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane — repair-budget escalation, Stage 13)
+
+- A `retryable` workflow step that exhausts `max_attempts` now escalates to a
+  human (`step Blocked` + run `Blocked`) instead of hard-failing the run. Only
+  a non-retryable worker fast-fails (`Failed`). The Integrator conflict policy
+  is unchanged. Integrates with `tick_workflow_run`'s transition path.
+- Test: `retryable_step_exhausting_repair_budget_escalates_blocked`.
+
 ### Added (control-plane — budget snapshot in workflow projection, Stage 13)
 
 - `WorkflowProjection.budget: Option<BudgetSnapshot>` exposes the run's
