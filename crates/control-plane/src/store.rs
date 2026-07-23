@@ -2936,6 +2936,10 @@ impl Store {
         let now = chrono::Utc::now().timestamp();
         let mut usage = agentgrid_common::compute_budget_usage(created_unix, task_count, now);
         usage.messages = self.workflow_message_count(run_id).await.unwrap_or(0);
+        // Stage 13: observe bytes + circuit breaker so the snapshot ceiling
+        // syncs with the tick enforcement path.
+        usage.bytes = self.workflow_message_bytes(run_id).await.unwrap_or(0);
+        usage.repeated_handoffs = self.workflow_repeated_handoffs(run_id).await.unwrap_or(0);
         let breach = bud.check(&usage);
         Ok(Some(agentgrid_common::BudgetSnapshot {
             limits: bud,
@@ -3209,6 +3213,58 @@ impl Store {
         Ok(n as u32)
     }
 
+    /// Stage 13 Loop Engineering: total payload byte length across all
+    /// orchestrator-emitted messages in a run — a coarse proxy for the
+    /// `max_bytes` ceiling until the adapter reports per-attempt counts.
+    pub async fn workflow_message_bytes(&self, run_id: &str) -> Result<u64> {
+        let n: Option<i64> = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(length(payload)), 0) FROM workflow_messages WHERE run_id = ?",
+        )
+        .bind(run_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n.unwrap_or(0) as u64)
+    }
+
+    /// Stage 13 Loop Engineering circuit breaker: the longest run of
+    /// *consecutive* messages that share the same `(from_step_id, to_step_id)`
+    /// pair, in `sequence` order. A tight handoff ping-pong between two steps
+    /// grows this streak until it trips `max_repeated_handoffs` (a runaway
+    /// loop). Auto-emitted broadcast `output` to `*` is skipped, since a
+    /// normal step-succeeded broadcast streak is a healthy flow and not a
+    /// solo ping-pong; only truly repeated step-to-step handoffs count.
+    pub async fn workflow_repeated_handoffs(&self, run_id: &str) -> Result<u32> {
+        let rows = sqlx::query(
+            "SELECT from_step_id, to_step_id FROM workflow_messages \
+             WHERE run_id = ? ORDER BY sequence ASC",
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut longest: u32 = 0;
+        let mut cur: u32 = 0;
+        let mut last: (Option<String>, Option<String>) = (None, None);
+        for r in rows {
+            let from: Option<String> = r.try_get("from_step_id").ok();
+            let to: Option<String> = r.try_get("to_step_id").ok();
+            // Skip broadcast outputs to `*` so a normal all-to-all broadcast
+            // streak never trips the breaker (see method doc).
+            if to.as_deref() == Some("*") {
+                cur = 0;
+                last = (from, to);
+                continue;
+            }
+            if last == (from.clone(), to.clone()) && cur > 0 {
+                cur += 1;
+            } else {
+                cur = 1;
+            }
+            longest = longest.max(cur);
+            last = (from, to);
+        }
+        Ok(longest)
+    }
+
     /// Current status of a task, if it exists.
     pub async fn get_task_status(&self, id: &str) -> Result<Option<TaskStatus>> {
         Ok(self.show_task(id).await?.map(|t| t.status))
@@ -3267,6 +3323,11 @@ impl Store {
                     let mut u =
                         agentgrid_common::compute_budget_usage(created_unix, task_count, now);
                     u.messages = self.workflow_message_count(run_id).await.unwrap_or(0);
+                    // Stage 13: observe bytes + circuit-breaker streak in the
+                    // enforcement path too (see workflow_run_budget_snapshot).
+                    u.bytes = self.workflow_message_bytes(run_id).await.unwrap_or(0);
+                    u.repeated_handoffs =
+                        self.workflow_repeated_handoffs(run_id).await.unwrap_or(0);
                     u
                 };
                 if let Some(breach) = bud.check(&usage) {
@@ -4627,5 +4688,128 @@ mod workflow_tests {
         s.tick_workflow_run(&run.id).await.unwrap();
         let s3 = s.get_workflow_run(&run.id).await.unwrap().unwrap();
         assert_eq!(s3.status, WorkflowRunStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn budget_bytes_enforced_from_message_payload_size() {
+        // Stage 13: `max_bytes` counts orchestrator-emitted payload bytes, so a
+        // handoff streak that pounds long payloads parks the run `Blocked`, and
+        // read-back reports the bytes + breach.
+        let s = temp_store().await;
+        let steps = vec![
+            step("a", &[], WorkflowRole::Worker),
+            step("b", &[], WorkflowRole::Worker),
+        ];
+        let budget = WorkflowBudget {
+            max_bytes: Some(5),
+            ..Default::default()
+        };
+        let tpl = s
+            .create_workflow_template("looped", &steps, &Some(budget))
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, None, None)
+            .await
+            .unwrap();
+        // Each emit appends a payload -- 6 bytes over the 5-byte ceiling.
+        s.emit_workflow_message(
+            &run.id,
+            "a",
+            "b",
+            agentgrid_common::AgentMessageKind::Output,
+            "hello!",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            s.workflow_message_bytes(&run.id).await.unwrap(),
+            6,
+            "byte count reflects payload length"
+        );
+        // tick sees bytes > max_bytes -> breach -> Blocked.
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let after = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            WorkflowRunStatus::Blocked,
+            "byte budget breach parks Blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_trips_on_repeated_step_to_step_handoffs() {
+        // Stage 13: a tight ping-pong of step->step handoffs with the same
+        // (from, to) pair trips the repeated-handoffs circuit breaker. A
+        // broadcast to `*` resets the streak (a step-succeeded broadcast to all
+        // downstream steps is a healthy flow, not a solo ping-pong).
+        let s = temp_store().await;
+        let steps = vec![
+            step("a", &[], WorkflowRole::Worker),
+            step("b", &[], WorkflowRole::Worker),
+        ];
+        let budget = WorkflowBudget {
+            max_repeated_handoffs: Some(2),
+            ..Default::default()
+        };
+        let tpl = s
+            .create_workflow_template("looped", &steps, &Some(budget))
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, None, None)
+            .await
+            .unwrap();
+        // a->b, a->b (streak 2) then broadcast a->* (streak reset, still 2).
+        for _ in 0..2 {
+            s.emit_workflow_message(
+                &run.id,
+                "a",
+                "b",
+                agentgrid_common::AgentMessageKind::Output,
+                "out",
+            )
+            .await
+            .unwrap();
+        }
+        s.emit_workflow_message(
+            &run.id,
+            "a",
+            "*",
+            agentgrid_common::AgentMessageKind::Output,
+            "broadcast",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            s.workflow_repeated_handoffs(&run.id).await.unwrap(),
+            2,
+            "streak is the longest consecutive same-pair run; broadcast resets"
+        );
+        // The check uses `>` (not `>=`), so streak=2 vs limit=2 is fine. Keep
+        // going to streak 3 to trip the breaker (3 > 2).
+        for _ in 0..3 {
+            s.emit_workflow_message(
+                &run.id,
+                "a",
+                "b",
+                agentgrid_common::AgentMessageKind::Output,
+                "out",
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            s.workflow_repeated_handoffs(&run.id).await.unwrap(),
+            3,
+            "streak grows past the breaker threshold"
+        );
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let after = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            WorkflowRunStatus::Blocked,
+            "repeated-handoffs breaker trips -> Blocked"
+        );
     }
 }

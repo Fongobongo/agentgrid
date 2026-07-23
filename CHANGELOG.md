@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane — Loop Engineering bytes + circuit breaker, Stage 13)
+
+- The workflow tick and the projection budget snapshot now observe the
+  `max_bytes` and `max_repeated_handoffs` ceilings (previously left at 0).
+  `Store::workflow_message_bytes` sums orchestrator-emitted payload lengths;
+  `Store::workflow_repeated_handoffs` reports the longest consecutive same
+  `(from_step_id, to_step_id)` handoff streak — broadcast outputs (`to: "*"`)
+  reset the streak (a step-succeeded broadcast is healthy, not a solo
+  ping-pong). A streak that exceeds the breaker parks the run `Blocked`.
+- Tests: `budget_bytes_enforced_from_message_payload_size`,
+  `circuit_breaker_trips_on_repeated_step_to_step_handoffs` (store).
+
 ### Added (control-plane + node-daemon + common — binary-safe artifact API, Stage 2.2)
 
 - Artifacts round-trip as raw bytes instead of UTF-8 JSON text, so binary
