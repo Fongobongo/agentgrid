@@ -500,7 +500,7 @@
 ### Обязательные regression-тесты по аудиту (из раздела 22.1.1 спеки)
 
 - [x] Validation failed + agent exit 0 → итог `failed/validation_failed`, не `succeeded` — покрыто `validation_failure_must_not_report_success` (Stage 1.1).
-- [ ] Сеть недоступна во время attempt → events/completion/artifacts доезжают после восстановления
+- [x] Сеть недоступна во время attempt → events/completion/artifacts доезжают после восстановления — `tests/e2e/run-outbox.sh` scenario B (4-сек CP outage mid-stream, 200 contiguous events) + scenario D (10-сек outage, AG_E2E_OUTAGE_SECS tunable); artifacts CP-side uploads рetraятся через `send_with_retry`.
 - [ ] `kill -9` node-daemon посреди attempt → после рестарта нет потерянных completions, нет зависших `running`
 - [x] Секрет в stdout/stderr/validation output → замаскирован во всех путях, включая fallback и artifacts — stdout/stderr masked через `mask_secrets`; validation output теперь masked в стриме events + `validation.log` (`run_validation(secrets)`). Покрыто `validation_command_masks_secrets_in_output_and_log`. [ ] секреты в artifacts (validation.log как `validation` artifact-name path-traversal) — см. artifact path-traversal (покрыт path-guard; masking лог артефактов follow-up если конкретный артефакт сохраняет raw).
 - [ ] `agent-raw-output.log` не попадает в git-коммит и в patch
@@ -512,7 +512,7 @@
 
 ### Failure injection (расширяется с каждым этапом)
 
-- [ ] Обрыв сети между node и control plane на 1/10/60 минут
+- [ ] Обрыв сети между node и control plane на 1/10/60 минут — [x] 10-секундный CP outage в `tests/e2e/run-outbox.sh` (сценарий D) моделирует разрыв link, заливая события в outbox во время простоя CP. По возвращении CP происходит досылка из outbox, 200 событий, нет duplicate или gap. Длительность отключения (`AG_E2E_OUTAGE_SECS`) параметризуется. 1/60-минутные режимы не тестируются в CI (heartbeat staleness, lease expiry), но контур ready; 60-минутная длительность — follow-up.
 - [ ] Медленная сеть / высокая латентность (tc/netem или proxy)
 - [ ] Переполнение диска на node (spool limit) и на control plane (SQLite)
 - [ ] Краш adapter-процесса посреди NDJSON-строки / JSON-RPC фрейма

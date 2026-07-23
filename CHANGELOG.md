@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (tests/e2e — variable CP-outage failure injection, Stage 2)
+
+- `tests/e2e/run-outbox.sh` Scenario D: a tunable (`AG_E2E_OUTAGE_SECS`,
+  default 10s) control-plane outage while the node stays alive and streams; on
+  CP return the durable outbox redelivers 200 events contiguously (no gap, no
+  dup). Models a hard network failure injection between node and CP, sized under
+  the ack/lease window.
+- New `stop_cp` helper stops the CP fast (SIGTERM → short grace → SIGKILL) so a
+  long-poll / graceful-shutdown does not stretch the outage past the lease.
+
 ### Added (control-plane + node-daemon — parallel ready steps / distinct worktrees, Stage 7.2)
 
 - Tests codify that two independent ready steps (same repository) activate in a

@@ -85,6 +85,22 @@ wait_ready() {
   return 1
 }
 
+# Stop the control plane fast: SIGTERM, then SIGKILL after a short grace so a
+# long-poll / graceful-shutdown does not stretch the outage window past the
+# ack/lease (the test simulates a hard network failure, not a polite drain).
+stop_cp() {
+  [ -n "$CP_PID" ] || return 0
+  kill "$CP_PID" 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    kill -0 "$CP_PID" 2>/dev/null || { CP_PID=""; return 0; }
+    sleep 0.2
+  done
+  kill -9 "$CP_PID" 2>/dev/null || true
+  # Reap the zombie so `wait` later does not block.
+  wait "$CP_PID" 2>/dev/null || true
+  CP_PID=""
+}
+
 login() {
   jwt=$(curl -fsS -X POST "$BASE/v1/auth/login" \
     -H 'content-type: application/json' \
@@ -156,7 +172,7 @@ echo "  task $TID assigned; waiting 2s for it to start"
 sleep 2
 
 echo "  stopping CP (so completion send fails → outbox)"
-kill "$CP_PID" 2>/dev/null; wait "$CP_PID" 2>/dev/null || true; CP_PID=""
+stop_cp
 
 # Wait deterministically until the adapter finishes and the node records the
 # completion to the durable outbox (the send to the now-down CP fails, so the
@@ -202,7 +218,7 @@ echo "  task $TID; waiting 1s for first 100 events to flush"
 sleep 1
 
 echo "  stopping CP for 4s (node spools second batch + completion)"
-kill "$CP_PID" 2>/dev/null; wait "$CP_PID" 2>/dev/null || true; CP_PID=""
+stop_cp
 sleep 4
 
 echo "  restarting CP (node alive → flush loop redelivers from outbox)"
@@ -237,6 +253,58 @@ if len(spam) != 200:
 if gaps:
     print("  B FAILED: sequence gaps:", gaps); raise SystemExit(1)
 print("  B OK: 200 events, no gaps/dup")
+PYEOF
+
+echo ">> Scenario D: variable CP outage (network failure injection), no dup/gap"
+# Failure injection: keep the CP down for AG_E2E_OUTAGE_SECS (default 10s)
+# while the node keeps streaming; on CP return the outbox must redeliver
+# contiguous events with no gap and no dup. The task is short (a few seconds)
+# so it finishes *during* the outage and its completion sits in the durable
+# completions spool; the outage window is sized so the ack/lease (30s) never
+# expires before the CP comes back (total elapsed < lease).
+OUTAGE="${AG_E2E_OUTAGE_SECS:-10}"
+echo "  submitting task spam+spam+sleep (200 events, short)"
+TID=$(submit $'spam:100\nspam:100\nsleep:3')
+echo "  task $TID; waiting 1s for the node to start it"
+sleep 1
+
+echo "  stopping CP for ${OUTAGE}s (node alive, spools)"
+stop_cp
+sleep "$OUTAGE"
+
+echo "  restarting CP (node alive → flush loop redelivers)"
+T_D0=$(date +%s)
+start_cp
+wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+T_D1=$(date +%s)
+echo "  CP restart took $((T_D1 - T_D0))s"
+login
+
+echo "  polling task for terminal status (timeout 60s)"
+if wait_terminal "$TID" 80; then
+  echo "  final status: $STATUS"
+else
+  echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
+fi
+[ "$STATUS" = "succeeded" ] || { echo "  D FAILED: expected succeeded, got $STATUS"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1; }
+
+echo "  checking event continuity (expect 200 spam, contiguous sequences)"
+sleep 2
+EVS=$(curl -fsS "$BASE/v1/tasks/$TID/events?after_sequence=0" -H "authorization: Bearer $jwt")
+python3 <<PYEOF
+import json
+evs = json.loads('''$EVS''') if '''$EVS'''.strip() else []
+seqs = sorted(e["sequence"] for e in evs)
+spam = [e for e in evs if e["payload"].get("text","").startswith("spam line")]
+print(f"  events={len(evs)} spam={len(spam)}")
+gaps = []
+for i in range(1,len(seqs)):
+    if seqs[i] != seqs[i-1]+1: gaps.append((seqs[i-1],seqs[i]))
+if len(spam) != 200:
+    print("  D FAILED: expected 200 spam events, got", len(spam)); raise SystemExit(1)
+if gaps:
+    print("  D FAILED: sequence gaps:", gaps); raise SystemExit(1)
+print("  D OK: 200 events, no gaps/dup after ${OUTAGE}s outage")
 PYEOF
 
 echo ">> Scenario C: kill node mid-running → lost → retry → succeeded"
