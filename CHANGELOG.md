@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (common + control-plane — typed AgentMessage mailbox, Stage 13)
+
+- Orchestrator-mediated typed inter-step messages (no free-form P2P).
+  - common: `AgentMessage { from_step_id, to_step_id, kind, payload }` with a
+    fixed `AgentMessageKind { Output, Plan, Note }` (no free-form kind — P2P
+    backdoor closed). Pure `render_handoff_block(prompt, &[msg]) -> String`
+    prepends a compact handoff block to the consuming step's prompt.
+  - Migration `0028_workflow_messages.sql`: `workflow_messages`, plus a
+    monotonic per-run `message_sequence`.
+  - Control plane: `emit_workflow_message`, `messages_for_step` (targeted or
+    broadcast `*`), and `workflow_message_count`. A step that succeeds has its
+    `output` message broadcast by the orchestrator; on the next pending step's
+    activation the matching messages render into the task prompt.
+  - `BudgetUsage.messages` is now observable on both the tick enforcement path
+    and the workflow projection snapshot.
+- Tests: `render_handoff_block_injects_typed_messages_and_passes_when_empty`,
+  `agent_message_kind_round_trips_snake_case` (common),
+  `typed_mailbox_emits_output_and_renders_handoff_block_in_pending_step_prompt`
+  (CP).
+
 ### Added (common + control-plane — architect plan expansion, Stage 13)
 
 - An architect workflow step can declare `expandable: Option<bool>`; when its

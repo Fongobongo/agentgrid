@@ -287,6 +287,86 @@ pub struct BudgetBreach {
     pub observed: u64,
 }
 
+/// Stage 13 typed AgentMessage mailbox: orchestrator-mediated messages between
+/// workflow steps (no free-form P2P). Only a small set of fixed kinds are
+/// allowed; the payload carries a compact structured summary, never a full
+/// transcript. The orchestrator emits an `output` message automatically when
+/// a step succeeds; a consuming step renders all matching messages into its
+/// prompt on activation.
+/// ponytail: free-form `event_type` would be a backdoor to P2P; keep a fixed
+/// enum and add a variant when a real use case appears.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub from_step_id: String,
+    /// `"*"` = broadcast to all downstream steps sharing the sender's run.
+    pub to_step_id: String,
+    pub kind: AgentMessageKind,
+    /// Compact structured summary (JSON object: {"summary":...}); already
+    /// masked/trusted by the orchestrator before reaching a consumer.
+    pub payload: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMessageKind {
+    /// Compact output summary emitted by the orchestrator when a step succeeds
+    /// (label + optional commit). The MVP never carries transcripts.
+    #[default]
+    Output,
+    /// A machine-readable plan (an `expandable` architect's plan).
+    Plan,
+    /// A free-form note the orchestrator captured on a fail/repair escalation.
+    Note,
+}
+
+impl AgentMessageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentMessageKind::Output => "output",
+            AgentMessageKind::Plan => "plan",
+            AgentMessageKind::Note => "note",
+        }
+    }
+}
+
+/// Stage 13: parse `AgentMessageKind` from a snake_case stored tag.
+/// ponytail: only used by the store's read path.
+impl std::str::FromStr for AgentMessageKind {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "output" => Ok(AgentMessageKind::Output),
+            "plan" => Ok(AgentMessageKind::Plan),
+            "note" => Ok(AgentMessageKind::Note),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Stage 13: render the messages a consuming step should see (its direct
+/// dependencies that are now `Succeeded`) as a compact handoff block to prepend
+/// to the step's prompt. Eliminates free-form P2P: the orchestrator mediates by
+/// rendering typed messages from already-succeeded deps only; empty khi there
+/// are none.
+/// ponytail: a single contiguous render function is a tiny test surface.
+pub fn render_handoff_block(prompt: &str, messages: &[AgentMessage]) -> String {
+    if messages.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = String::from("## Handoff from upstream steps\n");
+    for m in messages {
+        out.push_str(&format!(
+            "### `{}`: {}\n{}\n",
+            m.from_step_id,
+            m.kind.as_str(),
+            m.payload.trim()
+        ));
+    }
+    out.push('\n');
+    out.push_str(prompt);
+    out
+}
+
 /// Stage 13: compute a `BudgetUsage` snapshot from observable run state, for
 /// `WorkflowBudget::check`. The caller passes the run's `created_at` unix
 /// seconds (parse the RFC3339/ISO stored value), the count of tasks created so
@@ -664,6 +744,47 @@ steps:
   depends_on: [a]
 ";
         assert!(parse_plan_steps(cyc).is_err());
+    }
+
+    #[test]
+    fn render_handoff_block_injects_typed_messages_and_passes_when_empty() {
+        // No messages => prompt unchanged.
+        let out_empty = render_handoff_block("do work", &[]);
+        assert_eq!(out_empty, "do work");
+        // One output + one note => ordered block prepended.
+        let msgs = vec![
+            AgentMessage {
+                from_step_id: "arch".into(),
+                to_step_id: "*".into(),
+                kind: AgentMessageKind::Output,
+                payload: "summary: designed approach".into(),
+            },
+            AgentMessage {
+                from_step_id: "w1".into(),
+                to_step_id: "verifier".into(),
+                kind: AgentMessageKind::Note,
+                payload: "note: edge case X".into(),
+            },
+        ];
+        let out = render_handoff_block("do work", &msgs);
+        assert!(out.starts_with("## Handoff from upstream steps\n"));
+        assert!(out.contains("### `arch`: output"));
+        assert!(out.contains("summary: designed approach"));
+        assert!(out.contains("### `w1`: note"));
+        assert!(out.ends_with("do work"), "original prompt kept at the tail");
+    }
+
+    #[test]
+    fn agent_message_kind_round_trips_snake_case() {
+        for k in [
+            AgentMessageKind::Output,
+            AgentMessageKind::Plan,
+            AgentMessageKind::Note,
+        ] {
+            let s = k.as_str();
+            assert_eq!(s.parse::<AgentMessageKind>().unwrap(), k);
+        }
+        assert!("bogus".parse::<AgentMessageKind>().is_err());
     }
 
     #[test]

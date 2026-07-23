@@ -2868,7 +2868,8 @@ impl Store {
             .count() as u32;
         let created_unix = iso_to_unix(&run.created_at).unwrap_or(0);
         let now = chrono::Utc::now().timestamp();
-        let usage = agentgrid_common::compute_budget_usage(created_unix, task_count, now);
+        let mut usage = agentgrid_common::compute_budget_usage(created_unix, task_count, now);
+        usage.messages = self.workflow_message_count(run_id).await.unwrap_or(0);
         let breach = bud.check(&usage);
         Ok(Some(agentgrid_common::BudgetSnapshot {
             limits: bud,
@@ -3039,6 +3040,94 @@ impl Store {
         Ok(())
     }
 
+    /// Stage 13: append a typed `AgentMessage` from one step of a run to another
+    /// (or `"*"` to broadcast). The orchestrator publishes here, never an
+    /// agent. Allocates a monotonic per-run sequence.
+    async fn emit_workflow_message(
+        &self,
+        run_id: &str,
+        from_step_id: &str,
+        to_step_id: &str,
+        kind: agentgrid_common::AgentMessageKind,
+        payload: &str,
+    ) -> Result<()> {
+        let id = format!("wfm-{}", Uuid::new_v4());
+        let now = now_iso();
+        let mut tx = self.pool.begin().await?;
+        // Increment the per-run sequence atomically under the txn.
+        sqlx::query(
+            "UPDATE workflow_runs SET message_sequence = message_sequence + 1 WHERE id = ?",
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+        let seq: i64 =
+            sqlx::query_scalar("SELECT message_sequence FROM workflow_runs WHERE id = ?")
+                .bind(run_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query(
+            "INSERT INTO workflow_messages \
+             (id, run_id, from_step_id, to_step_id, kind, payload, sequence, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(run_id)
+        .bind(from_step_id)
+        .bind(to_step_id)
+        .bind(kind.as_str())
+        .bind(payload)
+        .bind(seq)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Stage 13: the typed messages a specific consuming step should see at
+    /// activation — the senders that produced an output and target this step
+    /// or broadcast (`"*"`). Ordered by the per-run sequence the emitter
+    /// stamped.
+    async fn messages_for_step(
+        &self,
+        run_id: &str,
+        step_id: &str,
+    ) -> Result<Vec<agentgrid_common::AgentMessage>> {
+        let rows = sqlx::query(
+            "SELECT from_step_id, to_step_id, kind, payload \
+             FROM workflow_messages WHERE run_id = ? AND (to_step_id = ? OR to_step_id = '*') \
+             ORDER BY sequence ASC",
+        )
+        .bind(run_id)
+        .bind(step_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let kind: agentgrid_common::AgentMessageKind =
+                    r.try_get::<String, _>("kind").ok()?.parse().ok()?;
+                Some(agentgrid_common::AgentMessage {
+                    from_step_id: r.try_get("from_step_id").unwrap_or_default(),
+                    to_step_id: r.try_get("to_step_id").unwrap_or_default(),
+                    kind,
+                    payload: r.try_get("payload").unwrap_or_default(),
+                })
+            })
+            .collect())
+    }
+
+    /// Stage 13: count of messages a run has emitted (for `BudgetUsage.messages`
+    /// observability + the `max_messages` budget proxy).
+    pub async fn workflow_message_count(&self, run_id: &str) -> Result<u32> {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_messages WHERE run_id = ?")
+            .bind(run_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(n as u32)
+    }
+
     /// Current status of a task, if it exists.
     pub async fn get_task_status(&self, id: &str) -> Result<Option<TaskStatus>> {
         Ok(self.show_task(id).await?.map(|t| t.status))
@@ -3093,7 +3182,12 @@ impl Store {
                     .count() as u32;
                 let created_unix = iso_to_unix(&run.created_at).unwrap_or(0);
                 let now = chrono::Utc::now().timestamp();
-                let usage = agentgrid_common::compute_budget_usage(created_unix, task_count, now);
+                let usage = {
+                    let mut u =
+                        agentgrid_common::compute_budget_usage(created_unix, task_count, now);
+                    u.messages = self.workflow_message_count(run_id).await.unwrap_or(0);
+                    u
+                };
                 if let Some(breach) = bud.check(&usage) {
                     tracing::warn!(
                         "workflow run {run_id} budget breach: {} (limit {}, observed {}); parking Blocked",
@@ -3135,6 +3229,22 @@ impl Store {
                                         WorkflowStepStatus::Succeeded,
                                     )
                                     .await?;
+                                    // Stage 13 typed mailbox: emit a compact
+                                    // `output` message broadcast to downstream
+                                    // consuming steps (the orchestrator-mediated
+                                    // handoff, not free-form P2P).
+                                    let _ = self
+                                        .emit_workflow_message(
+                                            run_id,
+                                            &step.step_id,
+                                            "*",
+                                            agentgrid_common::AgentMessageKind::Output,
+                                            &format!(
+                                                "step `{}` succeeded; task {task_id}",
+                                                step.step_id
+                                            ),
+                                        )
+                                        .await;
                                     // Stage 13 plan expansion: an
                                     // `expandable` architect step that emitted
                                     // a plan (its winning attempt carried one)
@@ -3244,8 +3354,20 @@ impl Store {
                         status_by_id.get(d.as_str()) == Some(&WorkflowStepStatus::Succeeded)
                     });
                     if ready {
+                        // Stage 13 typed mailbox: render the orchestrator-mediated
+                        // handoff block from upstream steps into this step's
+                        // prompt (only direct deps + broadcasts emitted so far).
+                        let msgs = self
+                            .messages_for_step(run_id, &step.step_id)
+                            .await
+                            .unwrap_or_default();
+                        let prompt = if msgs.is_empty() {
+                            step.prompt.clone()
+                        } else {
+                            agentgrid_common::render_handoff_block(&step.prompt, &msgs)
+                        };
                         let req = CreateTaskRequest {
-                            prompt: step.prompt.clone(),
+                            prompt,
                             repository: repo.clone(),
                             adapter: step
                                 .adapter

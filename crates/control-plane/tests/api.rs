@@ -2026,12 +2026,11 @@ async fn architect_expandable_plan_pauses_planready_then_approve_expands_steps()
     // Approving the plan (`POST /v1/workflow-runs/{id}/approve-plan`) parses
     // the plan into new worker steps and resumes the run (Running).
     use agentgrid_common::{
-        CompleteAttemptRequest, CreateWorkflowRequest, WorkflowProjection, WorkflowRole,
-        WorkflowStep, WorkflowTemplate,
+        CompleteAttemptRequest, CreateWorkflowRequest, WorkflowRole, WorkflowStep, WorkflowTemplate,
     };
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state.clone());
-    let (node_id, cred) = enroll(&app, "plan-node", vec!["mock".into()], vec!["*".into()]).await;
+    let (node_id, _cred) = enroll(&app, "plan-node", vec!["mock".into()], vec!["*".into()]).await;
 
     // Template: a single expandable architect step.
     let steps = vec![WorkflowStep {
@@ -2135,6 +2134,125 @@ async fn architect_expandable_plan_pauses_planready_then_approve_expands_steps()
 
     // Sanity: approving twice fails closed (run already resumed).
     assert!(state.store.approve_workflow_plan(&run.id).await.is_err());
+}
+
+#[tokio::test]
+async fn typed_mailbox_emits_output_and_renders_handoff_block_in_pending_step_prompt() {
+    // Stage 13 typed AgentMessage mailbox: when a step succeeds, the
+    // orchestrator emits an `output` message broadcast; the next pending step
+    // (its consumer) renders the handoff block into its task prompt on
+    // activation. The rendered prompt carries the upstream step's id + kind.
+    use agentgrid_common::{
+        CompleteAttemptRequest, CreateWorkflowRequest, WorkflowRole, WorkflowStep, WorkflowTemplate,
+    };
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, _cred) =
+        enroll(&app, "mailbox-node", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Template: a -> b (b depends on a).
+    let steps = vec![
+        WorkflowStep {
+            id: "a".into(),
+            prompt: "do A".into(),
+            depends_on: vec![],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: None,
+            max_attempts: None,
+            expandable: None,
+        },
+        WorkflowStep {
+            id: "b".into(),
+            prompt: "do B".into(),
+            depends_on: vec!["a".into()],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: None,
+            max_attempts: None,
+            expandable: None,
+        },
+    ];
+    let body = serde_json::to_string(&CreateWorkflowRequest {
+        name: "mailbox".into(),
+        steps,
+        context: None,
+        budget: None,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/v1/workflows", body, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tpl: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let run = state
+        .store
+        .create_workflow_run(&tpl.id, None, Some("demo"), None)
+        .await
+        .unwrap();
+
+    // Tick: step a activates.
+    state.store.tick_workflow_run(&run.id).await.unwrap();
+    let a1 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state
+        .store
+        .complete_attempt(
+            &a1.attempt_id,
+            &CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+                acp_session_id: None,
+                plan: None,
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Tick: a succeeds and emits its `output` message; b activates.
+    state.store.tick_workflow_run(&run.id).await.unwrap();
+    // Tick again so b actually starts (a's success is observed on this tick;
+    // b then becomes ready and is scheduled on the next tick).
+    state.store.tick_workflow_run(&run.id).await.unwrap();
+    let steps_run = state.store.get_workflow_run_steps(&run.id).await.unwrap();
+    let b = steps_run.iter().find(|s| s.step_id == "b").unwrap();
+    assert_eq!(b.status, agentgrid_common::WorkflowStepStatus::Running);
+    // One typed output message was emitted for a.
+    assert_eq!(
+        state.store.workflow_message_count(&run.id).await.unwrap(),
+        1,
+        "step a succeeded => one output message"
+    );
+    // The consuming task b's prompt was rendered with the handoff block.
+    let b_task_id = state
+        .store
+        .get_workflow_run_projection(&run.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .steps
+        .into_iter()
+        .find(|s| s.step_id == "b")
+        .unwrap()
+        .task_id
+        .unwrap();
+    let tv = state.store.show_task(&b_task_id).await.unwrap().unwrap();
+    assert!(
+        tv.prompt.contains("## Handoff from upstream steps"),
+        "b's prompt has the handoff block: {}",
+        tv.prompt
+    );
+    assert!(
+        tv.prompt.contains("### `a`: output"),
+        "handoff labels the upstream sender a"
+    );
 }
 
 #[tokio::test]
