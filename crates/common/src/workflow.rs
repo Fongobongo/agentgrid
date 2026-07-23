@@ -180,6 +180,28 @@ pub struct BudgetBreach {
     pub observed: u64,
 }
 
+/// Stage 13: compute a `BudgetUsage` snapshot from observable run state, for
+/// `WorkflowBudget::check`. The caller passes the run's `created_at` unix
+/// seconds (parse the RFC3339/ISO stored value), the count of tasks created so
+/// far (one per step attempt = one round), and the current tick's unix time.
+/// `messages`/`bytes`/`tokens`/`cost`/`repeated_handoffs` are left at 0 by
+/// default — the caller sets them when the scheduler can observe them. The
+/// `wall_seconds` proxy is `now - created_at`.
+/// ponytail: rounds = task attempts is a coarse proxy for loop iterations; fine
+/// until the adapter reports per-attempt message/token counts.
+pub fn compute_budget_usage(created_at_unix: i64, task_count: u32, now_unix: i64) -> BudgetUsage {
+    let wall = if now_unix > created_at_unix {
+        (now_unix - created_at_unix) as u64
+    } else {
+        0
+    };
+    BudgetUsage {
+        rounds: task_count,
+        wall_seconds: wall,
+        ..Default::default()
+    }
+}
+
 /// One node in a workflow DAG. `depends_on` lists other step ids that must
 /// finish before this step starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,6 +465,25 @@ steps:
         let json = serde_json::to_string(&t).unwrap();
         let back: WorkflowTemplate = serde_json::from_str(&json).unwrap();
         assert_eq!(back.budget, t.budget);
+    }
+
+    #[test]
+    fn compute_budget_usage_wall_and_rounds_proxy() {
+        // Wall is now - created_at; rounds = task attempts.
+        let u = compute_budget_usage(1000, 4, 1015);
+        assert_eq!(u.wall_seconds, 15);
+        assert_eq!(u.rounds, 4);
+        assert_eq!(u.messages, 0, "messages proxy not yet observed");
+        // Negative delta clamps to 0 (clock skew / badly set created_at).
+        assert_eq!(compute_budget_usage(2000, 1, 1999).wall_seconds, 0);
+        // Feeding that usage into a budget with a tight wall_seconds ceiling
+        // trips at the proxy boundary.
+        let b = WorkflowBudget {
+            max_wall_seconds: Some(10),
+            ..Default::default()
+        };
+        assert!(b.check(&compute_budget_usage(1000, 1, 1015)).is_some());
+        assert!(b.check(&compute_budget_usage(1000, 1, 1009)).is_none());
     }
 
     #[test]

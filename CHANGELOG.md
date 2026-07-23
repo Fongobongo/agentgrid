@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane — Loop Engineering budget enforcement, Stage 13)
+
+- `tick_workflow_run` now enforces a workflow template's budget. Each tick it
+  fetches the template's `WorkflowBudget`, computes a coarse `BudgetUsage`
+  snapshot via the pure `agentgrid_common::compute_budget_usage(created_at_unix,
+  task_count, now_unix)` (`wall_seconds = now - created_at`, `rounds = count of
+  step instances past Pending`), and parks the run `Blocked` on the first
+  ceiling breach (`budget.check()`). `Blocked` is terminal-until-approval, so
+  the loop stops starting new steps.
+- New pure helper `agentgrid_common::compute_budget_usage`.
+- Tests: `compute_budget_usage_wall_and_rounds_proxy` (common),
+  `budget_enforcement_parks_run_blocked_on_rounds_breach` (CP store).
+- Follow-up: the messages/bytes/tokens/cost proxies and the
+  `max_repeated_handoffs` circuit breaker need per-attempt adapter
+  observation + handoff history.
+
 ### Added (common — Loop Engineering budgets, Stage 13)
 
 - `WorkflowBudget` (max_messages / max_rounds / max_bytes / max_tokens /

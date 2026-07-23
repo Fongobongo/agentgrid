@@ -2913,6 +2913,41 @@ impl Store {
             self.set_workflow_run_status(run_id, WorkflowRunStatus::Running, None)
                 .await?;
         }
+        // Stage 13 Loop Engineering: budget enforcement. Fetch the template's
+        // budget (if any), compute a coarse usage snapshot from observable
+        // state (wall = now - created_at, rounds = sum of step attempts = task
+        // starts), and park the run `Blocked` on the first ceiling breach.
+        // `Blocked` is terminal-until-human-approval (the loop stops starting
+        // new steps); cost/messages/tokens/handoffs stay 0 until the adapter
+        // reports per-attempt counts (a follow-up).
+        if let Ok(Some(tpl)) = self.get_workflow_template(&run.template_id).await {
+            if let Some(bud) = &tpl.budget {
+                let steps_pre = self.get_workflow_run_steps(run_id).await?;
+                // ponytail: rounds = count of step instances that have already
+                // started a task (anything past `Pending`). A coarse proxy for
+                // loop iterations until the adapter reports per-attempt counts.
+                let task_count = steps_pre
+                    .iter()
+                    .filter(|s| s.status != WorkflowStepStatus::Pending)
+                    .count() as u32;
+                let created_unix = iso_to_unix(&run.created_at).unwrap_or(0);
+                let now = chrono::Utc::now().timestamp();
+                let usage = agentgrid_common::compute_budget_usage(created_unix, task_count, now);
+                if let Some(breach) = bud.check(&usage) {
+                    tracing::warn!(
+                        "workflow run {run_id} budget breach: {} (limit {}, observed {}); parking Blocked",
+                        breach.field, breach.limit, breach.observed
+                    );
+                    self.set_workflow_run_status(
+                        run_id,
+                        WorkflowRunStatus::Blocked,
+                        Some(&now_iso()),
+                    )
+                    .await?;
+                    return Ok(vec![]);
+                }
+            }
+        }
         let steps = self.get_workflow_run_steps(run_id).await?;
         let status_by_id: std::collections::HashMap<&str, WorkflowStepStatus> = steps
             .iter()
@@ -3863,5 +3898,72 @@ mod workflow_tests {
                 "traversal read {bad:?} must be None"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn budget_enforcement_parks_run_blocked_on_rounds_breach() {
+        // Stage 13 Loop Engineering: a template with `max_rounds = 0` allows
+        // zero step starts past the budget. The first tick starts both root
+        // steps (both ready, no deps); the next tick's pre-check then finds
+        // rounds >= 1 > 0 => breach => run `Blocked`, and a further tick stays
+        // Blocked (terminal-until-approval).
+        let s = temp_store().await;
+        let steps = vec![
+            step("a", &[], WorkflowRole::Worker),
+            step("b", &[], WorkflowRole::Worker),
+        ];
+        let budget = WorkflowBudget {
+            max_rounds: Some(0),
+            ..Default::default()
+        };
+        let tpl = s
+            .create_workflow_template("looped", &steps, &Some(budget))
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, None, None)
+            .await
+            .unwrap();
+        // First tick: runsatе both root steps (no deps). Rounds is 0 at the
+        // pre-check (nothing past Pending yet), so no breach this tick.
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let s1 = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(
+            s1.status,
+            WorkflowRunStatus::Running,
+            "first tick starts steps; budget not yet breached"
+        );
+        let started = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(
+            started
+                .iter()
+                .filter(|s| s.status == WorkflowStepStatus::Running)
+                .count(),
+            2,
+            "both root steps started on the first tick"
+        );
+
+        // Second tick pre-checks the budget: two steps past Pending =>
+        // rounds=2 > 0 => breach => run Blocked.
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let s2 = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(
+            s2.status,
+            WorkflowRunStatus::Blocked,
+            "budget breach parks Blocked"
+        );
+        let after = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .filter(|s| s.status == WorkflowStepStatus::Running)
+                .count(),
+            2,
+            "started steps remain Running; no further activity on the blocked run"
+        );
+        // A further tick stays Blocked (terminal-until-approval).
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let s3 = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(s3.status, WorkflowRunStatus::Blocked);
     }
 }
