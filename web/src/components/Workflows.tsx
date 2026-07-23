@@ -4,6 +4,7 @@ import {
   WorkflowRun,
   WorkflowProjection,
   StepProjection,
+  BudgetSnapshot,
   listWorkflowRuns,
   getWorkflowProjection,
   cancelWorkflowRun,
@@ -172,7 +173,49 @@ export function WorkflowDetails({ runId }: { runId: string }) {
         </div>
         {err && <div className="error">{err}</div>}
       </div>
+      {(proj.budget || run.status.toLowerCase()==="blocked") && proj.budget && <BudgetBlock snap={proj.budget} />}
       <Dag proj={proj} />
+    </div>
+  );
+}
+
+function BudgetBlock({ snap }: { snap: BudgetSnapshot }) {
+  const limits = snap.limits;
+  const rows: { name: string; lim: number; used: number }[] = (
+    [
+      ['max_messages', limits.max_messages ?? -1, snap.usage.messages],
+      ['max_rounds', limits.max_rounds ?? -1, snap.usage.rounds],
+      ['max_bytes', limits.max_bytes ?? -1, snap.usage.bytes],
+      ['max_tokens', limits.max_tokens ?? -1, snap.usage.tokens],
+      ['max_cost_cents', limits.max_cost_cents ?? -1, snap.usage.cost_cents],
+      ['max_wall_seconds', limits.max_wall_seconds ?? -1, snap.usage.wall_seconds],
+      ['max_repeated_handoffs', limits.max_repeated_handoffs ?? -1, snap.usage.repeated_handoffs],
+    ] as [string, number, number][]
+  )
+    .filter((r) => r[1] >= 0)
+    .map((r) => ({ name: r[0], lim: r[1], used: r[2] }));
+  if (rows.length === 0) return null;
+  return (
+    <div className={`wf-budget ${snap.breach ? 'err' : ''}`}>
+      <h3>Budget</h3>
+      {snap.breach && (
+        <div className="wf-breach">BREACH: {snap.breach.field} = {snap.breach.observed} {'>'} {snap.breach.limit}</div>
+      )}
+      <table className="budget-table">
+        <thead><tr><th>limit</th><th>used</th></tr></thead>
+        <tbody>
+          {rows.map((r) => {
+            const ratio = r.lim > 0 ? r.used / r.lim : 0;
+            const over = r.used > r.lim;
+            return (
+              <tr key={r.name} className={over ? 'err' : ratio > 0.8 ? 'warn' : ''}>
+                <td className="mono">{r.name}</td>
+                <td className="mono">{r.used} {'/'} {r.lim}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

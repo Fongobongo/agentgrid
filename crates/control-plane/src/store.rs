@@ -2821,6 +2821,43 @@ impl Store {
         Ok(Some(agentgrid_common::WorkflowProjection {
             run,
             steps: out,
+            budget: self.workflow_run_budget_snapshot(run_id).await?,
+        }))
+    }
+
+    /// Stage 13: build the `BudgetSnapshot` for a run, if its template declares
+    /// a `WorkflowBudget`. Mirrors the enforcement path in `tick_workflow_run`:
+    /// usage is computed from observable state (wall + task-started rounds),
+    /// and `budget.check()` produces the first breach (if any).
+    async fn workflow_run_budget_snapshot(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<agentgrid_common::BudgetSnapshot>> {
+        let run = match self.get_workflow_run(run_id).await? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let tpl = match self.get_workflow_template(&run.template_id).await? {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let bud = match tpl.budget {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let steps = self.get_workflow_run_steps(run_id).await?;
+        let task_count = steps
+            .iter()
+            .filter(|s| s.status != WorkflowStepStatus::Pending)
+            .count() as u32;
+        let created_unix = iso_to_unix(&run.created_at).unwrap_or(0);
+        let now = chrono::Utc::now().timestamp();
+        let usage = agentgrid_common::compute_budget_usage(created_unix, task_count, now);
+        let breach = bud.check(&usage);
+        Ok(Some(agentgrid_common::BudgetSnapshot {
+            limits: bud,
+            usage,
+            breach,
         }))
     }
 
@@ -3558,6 +3595,63 @@ mod workflow_tests {
         assert_eq!(work.role, WorkflowRole::Worker);
         assert!(work.task_id.is_some(), "worker task should be spawned");
         assert_eq!(work.node_id, None, "worker not assigned yet");
+    }
+
+    #[tokio::test]
+    async fn workflow_projection_surfaces_budget_snapshot_when_template_has_budget() {
+        // Stage 13 Loop Engineering: a projection of a run whose template
+        // declares a budget carries a `BudgetSnapshot` with the observable
+        // usage and a breach once a ceiling is exceeded. A template with no
+        // budget yields no snapshot.
+        let s = temp_store().await;
+        let steps = vec![step("a", &[], WorkflowRole::Worker)];
+        // No budget -> snapshot is None.
+        let tpl_none = s
+            .create_workflow_template("nobud", &steps, &None)
+            .await
+            .unwrap();
+        let run_none = s
+            .create_workflow_run(&tpl_none.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let proj_none = s
+            .get_workflow_run_projection(&run_none.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(proj_none.budget.is_none(), "no budget => no snapshot");
+
+        // With max_rounds = 0 the first tick starts the single root step
+        // (rounds pre-checked at 0), and the second tick breaches.
+        let budget = WorkflowBudget {
+            max_rounds: Some(0),
+            ..Default::default()
+        };
+        let tpl = s
+            .create_workflow_template("looped", &steps, &Some(budget))
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        s.tick_workflow_run(&run.id).await.unwrap();
+        // Snapshot mid-run before the breach fires: no breach yet.
+        let mid = s
+            .get_workflow_run_projection(&run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let snap = mid.budget.expect("budget template -> snapshot present");
+        assert_eq!(snap.limits.max_rounds, Some(0));
+        assert_eq!(snap.usage.rounds, 1, "one task started => rounds=1");
+        // Rounds=1 > 0 => breach.
+        assert!(snap.breach.is_some(), "rounds 1 > 0 must breach");
+        assert_eq!(snap.breach.as_ref().unwrap().field, "max_rounds");
+        // Tick again parks the run Blocked (enforcement path).
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let after = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(after.status, WorkflowRunStatus::Blocked);
     }
 
     #[tokio::test]

@@ -197,9 +197,42 @@ export interface StepProjection {
   error_code?: string | null;
 }
 
+export interface BudgetUsage {
+  messages: number;
+  rounds: number;
+  bytes: number;
+  tokens: number;
+  cost_cents: number;
+  wall_seconds: number;
+  repeated_handoffs: number;
+}
+
+export interface BudgetBreach {
+  field: string;
+  limit: number;
+  observed: number;
+}
+
+export interface WorkflowBudget {
+  max_messages?: number | null;
+  max_rounds?: number | null;
+  max_bytes?: number | null;
+  max_tokens?: number | null;
+  max_cost_cents?: number | null;
+  max_wall_seconds?: number | null;
+  max_repeated_handoffs?: number | null;
+}
+
+export interface BudgetSnapshot {
+  limits: WorkflowBudget;
+  usage: BudgetUsage;
+  breach: BudgetBreach | null;
+}
+
 export interface WorkflowProjection {
   run: WorkflowRun;
   steps: StepProjection[];
+  budget?: BudgetSnapshot | null;
 }
 
 export function listWorkflowRuns() {

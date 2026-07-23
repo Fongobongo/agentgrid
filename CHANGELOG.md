@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane — budget snapshot in workflow projection, Stage 13)
+
+- `WorkflowProjection.budget: Option<BudgetSnapshot>` exposes the run's
+  Loop Engineering budget state (limits + observable usage + first breach) so
+  clients/UIs can render live budget health. Mirrors the enforcement path in
+  `tick_workflow_run` (wall = now - created_at, rounds = count of steps past
+  `Pending`). None when the template declares no budget.
+- New `agentgrid_common::BudgetSnapshot { limits, usage, breach }`.
+- Web UI `WorkflowDetails` now renders a Budget panel (per-field used/limit,
+  breach highlighted) from the snapshot.
+- Test: `workflow_projection_surfaces_budget_snapshot_when_template_has_budget`.
+
 ### Added (common — L4 schedule ratify gate, Stage 13)
 
 - Pure `agentgrid_common::ratify_l4_schedule(template, autonomy)`: a

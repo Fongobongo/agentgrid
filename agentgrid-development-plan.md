@@ -238,7 +238,7 @@
 - [ ] Independent verifier: чистый workspace, без доступа к private transcripts workers; verdict с reproducible evidence
 - [ ] Repair rounds: ограниченное число; после лимита — эскалация человеку
 - [x] Pause/resume/cancel всего run и отдельных steps
-- [ ] UI/CLI: workflow graph, step timeline, сообщения, verdicts
+- [x] UI/CLI: workflow graph + step timeline + verdicts (есть: WorkflowsList/Dag/WorkflowDetails с per-step verdict, role, node, attempts, error). [ ] сообщения (handoff transcripts) — follow-up (нужен message store). Stage 13 budget snapshot добавлен в projection (`WorkflowProjection.budget?: BudgetSnapshot{limits,usage,breach}`) + панель в WorkflowDetails (используемые/лимиты per field, breach подсветкой).
 - [x] Golden workflow test: architect → 2 параллельных worker → integrator → validation → verifier на mock adapters (детерминированно)
 
 **Exit 7:** сценарий architect → parallel workers → integrator → verifier проходит локально на одной машине; бесконечные циклы невозможны по бюджетам.

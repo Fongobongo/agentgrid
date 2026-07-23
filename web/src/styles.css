@@ -273,4 +273,13 @@ button.link {
 .wf-meta { display: flex; gap: 10px; font-size: 0.8rem; color: var(--muted); }
 .wf-line { font-size: 0.8rem; color: var(--muted); }
 .wf-line.err { color: var(--bad); }
+.wf-budget { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.wf-budget h3 { margin: 0 0 8px; font-size: 1rem; }
+.wf-budget.err { border-left: 3px solid var(--bad); }
+.wf-breach { color: var(--bad); font-weight: 600; margin-bottom: 8px; }
+.budget-table { width: auto; font-size: 0.85rem; }
+.budget-table th, .budget-table td { padding: 4px 12px; }
+.budget-table th { text-align: left; color: var(--muted); font-weight: 500; }
+.budget-table tr.warn td { color: var(--warn); }
+.budget-table tr.err td { color: var(--bad); font-weight: 600; }
 .wf-empty, .empty { color: var(--muted); }

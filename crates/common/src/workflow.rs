@@ -656,11 +656,25 @@ pub struct StepProjection {
     pub error_code: Option<String>,
 }
 
+/// Live projection of a workflow run's Loop Engineering budget state: the
+/// raw ceiling limits (if any), the observable usage fed to the check, and the
+/// first ceiling breach (if the budget is tripped). `None` limits = unbounded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BudgetSnapshot {
+    pub limits: WorkflowBudget,
+    pub usage: BudgetUsage,
+    pub breach: Option<BudgetBreach>,
+}
+
 /// Live projection of a workflow run for external (ACP) clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowProjection {
     pub run: WorkflowRun,
     pub steps: Vec<StepProjection>,
+    /// Stage 13: budget snapshot for the run's template, if the template
+    /// declares a `WorkflowBudget`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<BudgetSnapshot>,
 }
 
 /// Stage 13: a scheduled trigger that creates a `WorkflowRun` of a template
