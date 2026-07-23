@@ -21,6 +21,106 @@ pub enum WorkflowRole {
     Verifier,
 }
 
+/// Stage 13: a machine-readable plan emitted by an `expandable` architect
+/// step, parsed into the worker steps the run should expand into on approval.
+/// Only the structural subset needed for a WorkflowStep (`id`, `prompt`,
+/// `depends_on`, `role`, optional `adapter`/`requested_node_id`/`retryable`/
+/// `max_attempts`); unknown fields are ignored so the architect writer can
+/// attach metadata. The architect step itself is NOT re-added here — the
+/// caller keeps the original architect step succeeded and only inserts these
+/// new worker steps as the run's remaining DAG.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PlanStep {
+    id: String,
+    prompt: String,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    role: PlanRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retryable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_attempts: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PlanRole {
+    Architect,
+    #[default]
+    Worker,
+    Reviewer,
+    Integrator,
+    Verifier,
+}
+
+impl From<PlanRole> for WorkflowRole {
+    fn from(r: PlanRole) -> Self {
+        match r {
+            PlanRole::Architect => WorkflowRole::Architect,
+            PlanRole::Worker => WorkflowRole::Worker,
+            PlanRole::Reviewer => WorkflowRole::Reviewer,
+            PlanRole::Integrator => WorkflowRole::Integrator,
+            PlanRole::Verifier => WorkflowRole::Verifier,
+        }
+    }
+}
+
+/// Stage 13: parse a machine-readable plan (YAML or JSON array of steps) into
+/// validated `WorkflowStep`s. Returns the first structural violation as a
+/// named error string, or the steps on success. Both YAML and JSON arrays are
+/// accepted at the same API field — YAML dovetails with the existing
+/// workflow-template language.
+/// ponytail: splitting `serde_yaml` out for the architect's free-form plan is
+/// speculative; reuse the canonical YAML deserializer via serde for both forms.
+pub fn parse_plan_steps(plan: &str) -> Result<Vec<WorkflowStep>, String> {
+    if plan.trim().is_empty() {
+        return Err("plan is empty".into());
+    }
+    let parsed: Vec<PlanStep> = if plan.trim_start().starts_with('[') {
+        serde_json::from_str(plan).map_err(|e| format!("json parse: {e}"))?
+    } else {
+        serde_yaml::from_str(plan).map_err(|e| format!("yaml parse: {e}"))?
+    };
+    if parsed.is_empty() {
+        return Err("plan declares no steps".into());
+    }
+    let steps: Vec<WorkflowStep> = parsed
+        .into_iter()
+        .map(|p| WorkflowStep {
+            id: p.id,
+            prompt: p.prompt,
+            depends_on: p.depends_on,
+            role: WorkflowRole::from(p.role),
+            adapter: p.adapter,
+            requested_node_id: p.requested_node_id,
+            retryable: p.retryable,
+            max_attempts: p.max_attempts,
+            // Stage 13: per-step base_commit is not part of an architect's
+            // generated plan (the plan inherits the run's base_commit).
+            base_commit: None,
+            // Expanded worker steps are not themselves plan producers.
+            expandable: Some(false),
+        })
+        .collect();
+    // Re-validate the expanded DAG (no cycles, unique ids, no orphan deps).
+    // Validate against only the new steps — the plan is the *full* set of
+    // remaining steps, not added to the architect step.
+    let tmp = WorkflowTemplate {
+        id: "__plan__".into(),
+        name: "__plan__".into(),
+        steps: steps.clone(),
+        budget: None,
+        created_at: "".into(),
+    };
+    tmp.validate_dag()?;
+    Ok(steps)
+}
+
 /// Lifecycle of a workflow run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +134,13 @@ pub enum WorkflowRunStatus {
     /// Run is stuck awaiting human/repair resolution (e.g. an integrator
     /// merge conflict); it is terminal-but-not-failed (Stage 8 conflict policy).
     Blocked,
+    /// Stage 13 plan expansion: an `expandable` architect step finished
+    /// and produced a machine-readable plan (YAML/JSON) of the worker steps to
+    /// run. The run pauses here pending a human's explicit approval
+    /// (`POST /v1/workflow-runs/{id}/approve-plan`); once approved the plan is
+    /// expanded into new workflow steps and the run resumes. Terminal-until-approval,
+    /// like `Blocked`.
+    PlanReady,
 }
 
 /// Lifecycle of an individual step within a run.
@@ -230,6 +337,12 @@ pub struct WorkflowStep {
     /// Max attempts including the first; default 1 (no retry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<u32>,
+    /// Stage 13 plan expansion: when set on an Architect step, the
+    /// architect's emitted plan (YAML/JSON) ends a run in `PlanReady`, and the
+    /// plan is expanded into new steps on approval
+    /// (`POST /v1/workflow-runs/{id}/approve-plan`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expandable: Option<bool>,
 }
 
 /// A reusable workflow definition (the DAG).
@@ -357,6 +470,7 @@ steps:
                     base_commit: None,
                     retryable: None,
                     max_attempts: None,
+                    expandable: None,
                 })
                 .collect(),
         }
@@ -515,6 +629,44 @@ steps:
     }
 
     #[test]
+    fn parse_plan_steps_yaml_and_json_round_trip() {
+        // YAML plan (one worker, one verifier depending on it).
+        let yaml = "\
+- id: w
+  prompt: do work
+  role: worker
+- id: v
+  prompt: verify
+  depends_on: [w]
+  role: verifier
+";
+        let steps = parse_plan_steps(yaml).expect("yaml plan parses");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].id, "w");
+        assert_eq!(steps[0].role, WorkflowRole::Worker);
+        assert_eq!(steps[1].depends_on, vec!["w".to_string()]);
+        assert_eq!(steps[1].role, WorkflowRole::Verifier);
+        // JSON array form parses the same.
+        let json = r#"[{"id":"a","prompt":"p","role":"worker"}]
+"#;
+        let s = parse_plan_steps(json).expect("json plan parses");
+        assert_eq!(s[0].id, "a");
+        // Empty plan is rejected.
+        assert!(parse_plan_steps("").is_err());
+        assert!(parse_plan_steps("[]").is_err());
+        // Cyclic plan is rejected (validate_dag runs on the parsed steps).
+        let cyc = "\
+- id: a
+  role: worker
+  depends_on: [b]
+- id: b
+  role: worker
+  depends_on: [a]
+";
+        assert!(parse_plan_steps(cyc).is_err());
+    }
+
+    #[test]
     fn validate_dag_rejects_duplicate_ids() {
         let e = tmpl(&[("a", &[]), ("a", &[])]).validate_dag().unwrap_err();
         assert!(e.contains("duplicate step id"));
@@ -593,6 +745,9 @@ pub struct WorkflowStepRun {
     /// Max attempts including the first (Stage 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<u32>,
+    /// Stage 13 plan expansion flag (mirrors `WorkflowStep.expandable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expandable: Option<bool>,
     /// Attempts made so far for this step (Stage 8).
     #[serde(default)]
     pub attempts: u32,

@@ -281,6 +281,7 @@ async fn full_task_lifecycle() {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -310,6 +311,7 @@ async fn failure_marks_task_failed() {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -337,6 +339,7 @@ async fn completion_propagates_provenance() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                plan: None,
                 provenance: Some(agentgrid_common::ProvenanceRecord {
                     originator: "entire".into(),
                     external_id: "proj-42".into(),
@@ -433,6 +436,7 @@ async fn validation_failure_must_not_report_success() {
                 error_code: Some("validation_failed".into()),
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -538,6 +542,7 @@ async fn cancel_running_then_node_confirms_cancelled() {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -567,6 +572,7 @@ async fn retry_failed_task_reques() {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -720,6 +726,7 @@ async fn artifact_upload_and_read() {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -1461,6 +1468,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -1500,6 +1508,7 @@ async fn complete_on_lost_attempt_is_idempotent() {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -1947,6 +1956,7 @@ async fn l4_schedule_ratify_gate_refuses_without_budget_accepts_with() {
         base_commit: None,
         retryable: None,
         max_attempts: None,
+        expandable: None,
     }];
     let body = serde_json::to_string(&CreateWorkflowRequest {
         name: "t".into(),
@@ -2007,6 +2017,124 @@ async fn l4_schedule_ratify_gate_refuses_without_budget_accepts_with() {
         StatusCode::CREATED,
         "l2 passes the ratify gate"
     );
+}
+
+#[tokio::test]
+async fn architect_expandable_plan_pauses_planready_then_approve_expands_steps() {
+    // Stage 13 plan expansion: an `expandable` architect step that emits a
+    // plan (via CompleteAttemptRequest.plan) pauses the run in `PlanReady`.
+    // Approving the plan (`POST /v1/workflow-runs/{id}/approve-plan`) parses
+    // the plan into new worker steps and resumes the run (Running).
+    use agentgrid_common::{
+        CompleteAttemptRequest, CreateWorkflowRequest, WorkflowProjection, WorkflowRole,
+        WorkflowStep, WorkflowTemplate,
+    };
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "plan-node", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Template: a single expandable architect step.
+    let steps = vec![WorkflowStep {
+        id: "arch".into(),
+        prompt: "design".into(),
+        depends_on: vec![],
+        role: WorkflowRole::Architect,
+        adapter: None,
+        requested_node_id: None,
+        base_commit: None,
+        retryable: None,
+        max_attempts: None,
+        expandable: Some(true),
+    }];
+    let body = serde_json::to_string(&CreateWorkflowRequest {
+        name: "plan".into(),
+        steps,
+        context: None,
+        budget: None,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/v1/workflows", body, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tpl: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let run = state
+        .store
+        .create_workflow_run(&tpl.id, None, Some("demo"), None)
+        .await
+        .unwrap();
+
+    // Tick: architect step activates a task.
+    state.store.tick_workflow_run(&run.id).await.unwrap();
+    let assign = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    // Architect succeeds WITH a plan (2 worker steps, one depending on the other).
+    let plan = r#"- id: w1
+  prompt: build
+  role: worker
+- id: w2
+  prompt: test
+  depends_on: [w1]
+  role: verifier
+"#;
+    state
+        .store
+        .complete_attempt(
+            &assign.attempt_id,
+            &CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+                acp_session_id: None,
+                plan: Some(plan.into()),
+                provenance: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Tick: architect step succeeds + run pauses PlanReady.
+    state.store.tick_workflow_run(&run.id).await.unwrap();
+    let paused = state
+        .store
+        .get_workflow_run(&run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        paused.status,
+        agentgrid_common::WorkflowRunStatus::PlanReady,
+        "expandable architect pauses the run in PlanReady"
+    );
+    // The pending plan is exposed on the run row.
+    let pending_plan = state.store.get_workflow_run_plan(&run.id).await.unwrap();
+    assert!(pending_plan.is_some(), "plan stamped on the run");
+
+    // Approve: parse + insert steps + resume Running.
+    state.store.approve_workflow_plan(&run.id).await.unwrap();
+    let after = state
+        .store
+        .get_workflow_run(&run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.status,
+        agentgrid_common::WorkflowRunStatus::Running,
+        "approval resumes the run"
+    );
+    // Expanded steps exist: arch succeeded, w1 pending, w2 pending.
+    let steps_after = state.store.get_workflow_run_steps(&run.id).await.unwrap();
+    let ids: Vec<&str> = steps_after.iter().map(|s| s.step_id.as_str()).collect();
+    assert!(ids.contains(&"arch"), "original architect step kept");
+    assert!(
+        ids.contains(&"w1") && ids.contains(&"w2"),
+        "plan steps expanded"
+    );
+
+    // Sanity: approving twice fails closed (run already resumed).
+    assert!(state.store.approve_workflow_plan(&run.id).await.is_err());
 }
 
 #[tokio::test]
@@ -2100,6 +2228,7 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
                         error_code: None,
                         acp_session_id: None,
                         provenance: None,
+                        plan: None,
                     })
                     .unwrap(),
                     &cred,
@@ -2203,6 +2332,7 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             })
             .unwrap(),
             &cred,
@@ -2640,6 +2770,7 @@ async fn cancel_workflow_run_handler_cancels() {
             base_commit: None,
             retryable: None,
             max_attempts: None,
+            expandable: None,
         }],
         context: None,
         budget: None,

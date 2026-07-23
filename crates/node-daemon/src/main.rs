@@ -1608,6 +1608,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             commit_sha: None,
             error_code: kill_reason.map(|k| k.to_string()),
             acp_session_id: None,
+            plan: None,
             provenance: assignment.provenance.clone().or_else(provenance_from_env),
         };
         if let Err(e) = cfg
@@ -1933,6 +1934,7 @@ async fn report_complete(
         commit_sha,
         error_code,
         acp_session_id,
+        plan: None,
         provenance,
     };
     // Stage 2.1: persist the completion durably so a daemon kill before the CP

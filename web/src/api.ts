@@ -247,6 +247,10 @@ export function cancelWorkflowRun(id: string) {
   return req('POST', `/v1/workflow-runs/${id}/cancel`, {});
 }
 
+export function approveWorkflowPlan(id: string) {
+  return req('POST', `/v1/workflow-runs/${id}/approve-plan`, {});
+}
+
 export function cancelTask(id: string) {
   return req('POST', `/v1/tasks/${id}/cancel`, {});
 }

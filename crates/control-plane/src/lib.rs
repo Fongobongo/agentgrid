@@ -324,6 +324,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(workflow_run_projection),
         )
         .route("/v1/workflow-runs/{id}/tick", post(tick_workflow_run))
+        .route("/v1/workflow-runs/{id}/plan", get(workflow_run_plan))
+        .route(
+            "/v1/workflow-runs/{id}/approve-plan",
+            post(approve_workflow_plan_handler),
+        )
         .route(
             "/v1/workflow-runs/{id}/cancel",
             post(cancel_workflow_run_handler),
@@ -579,6 +584,61 @@ async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+async fn workflow_run_plan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<agentgrid_common::WorkflowProjection>, StatusCode> {
+    // Stage 13: exposes the pending plan on a `PlanReady` run (the projection
+    // already carries `run.status`); the bare plan text is the architect's
+    // emitted YAML/JSON — read-only so an operator can inspect before approving.
+    let _ = state.store.get_workflow_run_plan(&id).await;
+    match state.store.get_workflow_run_projection(&id).await {
+        Ok(Some(p)) => Ok(Json(p)),
+        // 404 if the run doesn't exist; the plan field lives on the projection.
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn approve_workflow_plan_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<agentgrid_common::WorkflowRunWithSteps>, StatusCode> {
+    match state.store.approve_workflow_plan(&id).await {
+        Ok(()) => {
+            // Wake the scheduler so the freshly-expanded steps assign.
+            state.assignment_notify.notify_waiters();
+            match state.store.get_workflow_run(&id).await {
+                Ok(Some(r)) => {
+                    let steps = state
+                        .store
+                        .get_workflow_run_steps(&id)
+                        .await
+                        .unwrap_or_default();
+                    Ok(Json(agentgrid_common::WorkflowRunWithSteps {
+                        run: r,
+                        steps,
+                    }))
+                }
+                Ok(None) => Err(StatusCode::NOT_FOUND),
+                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
+        Err(e) => {
+            tracing::warn!("approve_workflow_plan failed for {id}: {e}");
+            // Wrong-state / bad-plan => 409, missing run => 404, other => 500.
+            let msg = e.to_string();
+            if msg.contains("unknown workflow run") || msg.contains("no plan to approve") {
+                Err(StatusCode::NOT_FOUND)
+            } else if msg.contains("is not awaiting plan approval") || msg.contains("plan") {
+                Err(StatusCode::CONFLICT)
+            } else {
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
     }
 }
 

@@ -5,11 +5,11 @@ pub use policy::{
     PolicyVerdict, RiskClass,
 };
 pub use workflow::{
-    compute_budget_usage, ratify_l4_schedule, BudgetBreach, BudgetSnapshot, BudgetUsage,
-    CreateWorkflowRequest, CreateWorkflowRunRequest, RoleRunStatus, StepProjection, WorkflowBudget,
-    WorkflowProjection, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowRunWithSteps,
-    WorkflowSchedule, WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun, WorkflowStepStatus,
-    WorkflowTemplate,
+    compute_budget_usage, parse_plan_steps, ratify_l4_schedule, BudgetBreach, BudgetSnapshot,
+    BudgetUsage, CreateWorkflowRequest, CreateWorkflowRunRequest, RoleRunStatus, StepProjection,
+    WorkflowBudget, WorkflowProjection, WorkflowRole, WorkflowRun, WorkflowRunStatus,
+    WorkflowRunWithSteps, WorkflowSchedule, WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun,
+    WorkflowStepStatus, WorkflowTemplate,
 };
 
 use serde::{Deserialize, Serialize};
@@ -490,6 +490,13 @@ pub struct CompleteAttemptRequest {
     /// it as `parent_acp_session_id` for a follow-up task (Stage 11.5).
     #[serde(default)]
     pub acp_session_id: Option<String>,
+    /// Stage 13 plan expansion: an `expandable` architect step may emit a
+    /// machine-readable plan (YAML/JSON, an array of worker steps). Persisted on
+    /// the attempt row; when the architect step succeeds, the run pauses in
+    /// `PlanReady` and awaits approval before the plan is parsed (via
+    /// `parse_plan_steps`) and expanded into new workflow steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
     /// Stage 13: optional provenance record — an external id that links
     /// this attempt's outcome back to the system that requested it
     /// (Entire/h5i/Guild). Carried through to the attempt row so operators

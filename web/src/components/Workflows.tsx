@@ -8,6 +8,7 @@ import {
   listWorkflowRuns,
   getWorkflowProjection,
   cancelWorkflowRun,
+  approveWorkflowPlan,
 } from '../api';
 
 // Stage 11.6: workflow run viewer with a DAG. Layers are computed by
@@ -155,6 +156,10 @@ export function WorkflowDetails({ runId }: { runId: string }) {
     cancelWorkflowRun(runId).then(load).catch((e) => setErr(String(e)));
   };
 
+  const approve = () => {
+    approveWorkflowPlan(runId).then(load).catch((e) => setErr(String(e)));
+  };
+
   if (err && !proj) return <div className="error">{err}</div>;
   if (!proj) return <div className="loading">loading…</div>;
 
@@ -167,7 +172,10 @@ export function WorkflowDetails({ runId }: { runId: string }) {
           <span className={`badge ${statusClass(run.status)}`}>{run.status}</span>
           {run.repository && <span className="badge">repo: {run.repository}</span>}
           {run.base_commit && <span className="badge mono">base: {run.base_commit.slice(0, 8)}</span>}
-          {!(run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled' || run.status === 'blocked') && (
+          {run.status.toLowerCase() === 'plan_ready' && (
+            <button className="navbtn" onClick={approve}>Approve plan</button>
+          )}
+          {!(run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled' || run.status === 'blocked' || run.status === 'plan_ready') && (
             <button className="navbtn danger" onClick={cancel}>Cancel</button>
           )}
         </div>

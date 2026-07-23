@@ -261,6 +261,7 @@ impl CompletionLine {
             // Provenance is not durable beyond this redelivery (outbox stores
             // only the outcome); the CP already persisted the original record
             // from the first delivery, so no need to store it again.
+            plan: None,
             provenance: None,
         }
     }
@@ -332,6 +333,7 @@ mod tests {
             commit_sha: Some("abc".into()),
             error_code: None,
             acp_session_id: Some("sess-1".into()),
+            plan: None,
             provenance: None,
         };
         co.record("att-9", &req).unwrap();

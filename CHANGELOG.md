@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (common + control-plane — architect plan expansion, Stage 13)
+
+- An architect workflow step can declare `expandable: Option<bool>`; when its
+  winning attempt completes with a `CompleteAttemptRequest.plan` (YAML or JSON
+  array of worker steps), the workflow tick pauses the run in a new terminal
+  `WorkflowRunStatus::PlanReady`. The plan is stamped on the run row
+  (`workflow_runs.plan`) so it outlives the attempt.
+- New `agentgrid_common::parse_plan_steps(plan) -> Result<Vec<WorkflowStep>>`
+  (pure): parses YAML/JSON, runs `validate_dag` on the resulting steps; rejects
+  empty/cyclic plans.
+- Migration `0027_plan_expansion.sql` adds `attempts.plan`,
+  `workflow_steps.expandable`, `workflow_runs.plan`.
+- API: `GET /v1/workflow-runs/{id}/plan` (projection incl. plan-ready status),
+  `POST /v1/workflow-runs/{id}/approve-plan` (parse + insert expanded steps
+  + resume Running; fail-closed 409 if not PlanReady / bad plan).
+- Web UI renders an "Approve plan" button on a `PlanReady` run and an
+  approveable-status popover.
+- Tests: `parse_plan_steps_yaml_and_json_round_trip` (common),
+  `architect_expandable_plan_pauses_planready_then_approve_expands_steps` (CP).
+
 ### Added (control-plane — repair-budget escalation, Stage 13)
 
 - A `retryable` workflow step that exhausts `max_attempts` now escalates to a

@@ -101,6 +101,7 @@ mod tests {
             base_commit: None,
             retryable: None,
             max_attempts: None,
+            expandable: None,
         }
     }
 

@@ -1272,6 +1272,16 @@ impl Store {
             .bind(attempt_id)
             .execute(&mut *tx)
             .await?;
+        // Stage 13 plan expansion: persist the architect's machine-readable
+        // plan when provided (used by the workflow tick to pause the run in
+        // `PlanReady` pending approval).
+        if let Some(plan) = &req.plan {
+            sqlx::query("UPDATE attempts SET plan = ? WHERE id = ?")
+                .bind(plan)
+                .bind(attempt_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         // Normalize the failure category onto the task so the UI/CLI can show
         // WHY it failed without joining the producing attempt.
         let task_error_code: Option<String> = match task_target {
@@ -2475,8 +2485,8 @@ impl Store {
             let depends_json = serde_json::to_string(&step.depends_on)?;
             sqlx::query(
                 "INSERT INTO workflow_steps \
-                 (id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, base_commit, retryable, max_attempts, attempts, status, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                 (id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, base_commit, retryable, max_attempts, attempts, status, created_at, expandable) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
             )
             .bind(&step_run_id)
             .bind(&run_id)
@@ -2491,6 +2501,7 @@ impl Store {
             .bind(step.max_attempts.map(|m| m as i64))
             .bind(0i64)
             .bind(&created_at)
+            .bind(step.expandable.map(|b| if b { 1i64 } else { 0 }))
             .execute(&mut *tx)
             .await?;
             let role_run_id = format!("wrr-{}", Uuid::new_v4());
@@ -2705,7 +2716,7 @@ impl Store {
 
     pub async fn get_workflow_run_steps(&self, run_id: &str) -> Result<Vec<WorkflowStepRun>> {
         let rows = sqlx::query(
-            "SELECT id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, base_commit, retryable, max_attempts, attempts, status, created_at \
+            "SELECT id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, base_commit, retryable, max_attempts, attempts, status, created_at, expandable \
              FROM workflow_steps WHERE run_id = ? ORDER BY created_at ASC",
         )
         .bind(run_id)
@@ -2751,6 +2762,11 @@ impl Store {
                 attempts: r.try_get::<i64, _>("attempts").unwrap_or(0) as u32,
                 status: from_snake(&r.try_get::<String, _>("status").unwrap_or_default())
                     .unwrap_or(agentgrid_common::WorkflowStepStatus::Pending),
+                expandable: r
+                    .try_get::<Option<i64>, _>("expandable")
+                    .ok()
+                    .flatten()
+                    .map(|v| v != 0),
                 created_at: r.try_get("created_at").unwrap_or_default(),
             })
             .collect())
@@ -2925,6 +2941,104 @@ impl Store {
         Ok(row.and_then(|r| r.try_get::<Option<String>, _>("task_id").ok().flatten()))
     }
 
+    /// Stage 13: the most recent attempt's emitted plan (if any) for a task.
+    /// Used to copy an architect's plan onto the run row when the step
+    /// succeeds.
+    async fn attempt_plan_for_task(&self, task_id: &str) -> Result<Option<String>> {
+        let row =
+            sqlx::query("SELECT plan FROM attempts WHERE task_id = ? ORDER BY number DESC LIMIT 1")
+                .bind(task_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row
+            .and_then(|r| r.try_get::<Option<String>, _>("plan").ok().flatten())
+            .filter(|s| !s.is_empty()))
+    }
+
+    /// Stage 13: stamp a pending plan onto the run row (read on approval).
+    async fn set_workflow_run_plan(&self, run_id: &str, plan: &str) -> Result<()> {
+        sqlx::query("UPDATE workflow_runs SET plan = ? WHERE id = ?")
+            .bind(plan)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Stage 13: read the pending plan awaiting approval for a run.
+    pub async fn get_workflow_run_plan(&self, run_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT plan FROM workflow_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .and_then(|r| r.try_get::<Option<String>, _>("plan").ok().flatten())
+            .filter(|s| !s.is_empty()))
+    }
+
+    /// Stage 13: expand a `PlanReady` run's plan into new workflow steps and
+    /// resume the run. Parses the plan via `agentgrid_common::parse_plan_steps`,
+    /// inserts the steps as the run's remaining DAG (the architect step stays
+    /// `Succeeded`), and flips the run back to `Running`. Fails closed on any
+    /// parse/insert error: the run stays `PlanReady` for the operator.
+    pub async fn approve_workflow_plan(&self, run_id: &str) -> Result<()> {
+        let run = self
+            .get_workflow_run(run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("unknown workflow run {run_id}"))?;
+        if run.status != WorkflowRunStatus::PlanReady {
+            anyhow::bail!(
+                "run is not awaiting plan approval (status = {:?})",
+                run.status
+            );
+        }
+        let plan = self
+            .get_workflow_run_plan(run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no plan to approve for run {run_id}"))?;
+        let steps = agentgrid_common::parse_plan_steps(&plan).map_err(anyhow::Error::msg)?;
+        let now = now_iso();
+        let mut tx = self.pool.begin().await?;
+        for step in &steps {
+            let step_run_id = format!("wfs-{}", Uuid::new_v4());
+            let depends_json = serde_json::to_string(&step.depends_on)?;
+            sqlx::query(
+                "INSERT INTO workflow_steps \
+                 (id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, base_commit, retryable, max_attempts, attempts, status, created_at, expandable) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, NULL)",
+            )
+            .bind(&step_run_id)
+            .bind(run_id)
+            .bind(&step.id)
+            .bind(&step.prompt)
+            .bind(&depends_json)
+            .bind(role_str(step.role))
+            .bind(&step.adapter)
+            .bind(step.requested_node_id.as_deref())
+            .bind(step.base_commit.as_deref())
+            .bind(step.retryable.map(|b| if b { 1i64 } else { 0 }))
+            .bind(step.max_attempts.map(|m| m as i64))
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+            let role_run_id = format!("wrr-{}", Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO role_runs (id, step_run_id, role, task_id, status, created_at) \
+                 VALUES (?, ?, ?, NULL, 'pending', ?)",
+            )
+            .bind(&role_run_id)
+            .bind(&step_run_id)
+            .bind(role_str(step.role))
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        self.set_workflow_run_status(run_id, WorkflowRunStatus::Running, None)
+            .await?;
+        Ok(())
+    }
+
     /// Current status of a task, if it exists.
     pub async fn get_task_status(&self, id: &str) -> Result<Option<TaskStatus>> {
         Ok(self.show_task(id).await?.map(|t| t.status))
@@ -2952,6 +3066,7 @@ impl Store {
                 | WorkflowRunStatus::Failed
                 | WorkflowRunStatus::Cancelled
                 | WorkflowRunStatus::Blocked
+                | WorkflowRunStatus::PlanReady
         ) {
             return Ok(vec![]);
         }
@@ -3020,6 +3135,33 @@ impl Store {
                                         WorkflowStepStatus::Succeeded,
                                     )
                                     .await?;
+                                    // Stage 13 plan expansion: an
+                                    // `expandable` architect step that emitted
+                                    // a plan (its winning attempt carried one)
+                                    // pauses the run in `PlanReady` pending a
+                                    // human's approval to expand the plan into
+                                    // steps. The plan is stamped onto the run
+                                    // row so it outlives the attempt.
+                                    let expandable = step.expandable.unwrap_or(false)
+                                        && step.role == WorkflowRole::Architect;
+                                    if expandable {
+                                        if let Some(pid) =
+                                            self.attempt_plan_for_task(&task_id).await?
+                                        {
+                                            self.set_workflow_run_plan(run_id, &pid).await?;
+                                            self.set_workflow_run_status(
+                                                run_id,
+                                                WorkflowRunStatus::PlanReady,
+                                                None,
+                                            )
+                                            .await?;
+                                            // Pause the loop: the run is now
+                                            // awaiting approval — don't fall
+                                            // through to the all-term branch
+                                            // (which would mark it Succeeded).
+                                            return Ok(created);
+                                        }
+                                    }
                                 }
                                 TaskStatus::Failed => {
                                     // Stage 8 lost-step recovery: a side-effectful
@@ -3194,6 +3336,7 @@ mod workflow_tests {
             base_commit: None,
             retryable: None,
             max_attempts: None,
+            expandable: None,
         }
     }
 
@@ -3291,6 +3434,7 @@ mod workflow_tests {
             base_commit: None,
             retryable: None,
             max_attempts: None,
+            expandable: None,
         }];
         let tpl = s
             .create_workflow_template("pin", &steps, &None)
@@ -3345,6 +3489,7 @@ mod workflow_tests {
             base_commit: None,
             retryable: Some(true),
             max_attempts: Some(3),
+            expandable: None,
         }];
         let tpl = s
             .create_workflow_template("retry", &steps, &None)
@@ -3377,6 +3522,7 @@ mod workflow_tests {
                 error_code: Some("agent_failed".into()),
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             },
         )
         .await
@@ -3395,6 +3541,7 @@ mod workflow_tests {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             },
         )
         .await
@@ -3436,6 +3583,7 @@ mod workflow_tests {
                 error_code: Some("merge_conflict".into()),
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             },
         )
         .await
@@ -3471,6 +3619,7 @@ mod workflow_tests {
             base_commit: None,
             retryable: Some(true),
             max_attempts: Some(2),
+            expandable: None,
         }];
         let tpl = s
             .create_workflow_template("rep", &steps_retry, &None)
@@ -3501,6 +3650,7 @@ mod workflow_tests {
                 error_code: Some("agent_failed".into()),
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             },
         )
         .await
@@ -3516,6 +3666,7 @@ mod workflow_tests {
                 error_code: Some("agent_failed".into()),
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             },
         )
         .await
@@ -3543,6 +3694,7 @@ mod workflow_tests {
             base_commit: None,
             retryable: Some(false),
             max_attempts: Some(1),
+            expandable: None,
         }];
         let tpl2 = s
             .create_workflow_template("hard", &steps_hard, &None)
@@ -3562,6 +3714,7 @@ mod workflow_tests {
                 error_code: Some("agent_failed".into()),
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             },
         )
         .await
@@ -3659,6 +3812,7 @@ mod workflow_tests {
                 error_code: Some("agent_failed".into()),
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             },
         )
         .await
@@ -3705,6 +3859,7 @@ mod workflow_tests {
                 error_code: None,
                 acp_session_id: None,
                 provenance: None,
+                plan: None,
             },
         )
         .await
@@ -3896,6 +4051,7 @@ mod workflow_tests {
             base_commit: None,
             retryable: None,
             max_attempts: None,
+            expandable: None,
         }];
         let t = s
             .create_workflow_template("t", &steps, &None)
@@ -4016,6 +4172,7 @@ mod workflow_tests {
                 error_code: None,
                 acp_session_id: Some("sess-1".into()),
                 provenance: None,
+                plan: None,
             },
         )
         .await
