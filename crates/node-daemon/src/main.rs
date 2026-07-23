@@ -19,7 +19,7 @@ use agentgrid_common::{
     AdapterCapability, AgentEventEnvelope, ApprovalStatus, ApprovalView, Assignment, CancelState,
     CompleteAttemptRequest, ContextProvider, CreateAgentSessionRequest, EnrollRequest,
     EnrollResponse, EventKind, EventType, HeartbeatRequest, IncomingEvent, IngestEventsRequest,
-    NodeStatus, NoopContextProvider, PollRequest, PollResponse, UploadArtifactRequest,
+    NodeStatus, NoopContextProvider, PollRequest, PollResponse,
 };
 use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
@@ -1796,6 +1796,9 @@ async fn run_validation(
 }
 
 /// Upload a local file as an artifact if it exists (idempotent per name).
+/// Stage 2.2 binary-safe path: the file bytes go up as the raw request body
+/// (not UTF-8 JSON), with the name and media type in headers, so binary diffs
+/// and non-text artifacts round-trip without corruption.
 async fn upload_if_exists(
     client: &reqwest::Client,
     server: &str,
@@ -1803,17 +1806,18 @@ async fn upload_if_exists(
     name: &str,
     path: &std::path::Path,
 ) {
-    if let Ok(content) = tokio::fs::read_to_string(path).await {
-        let req = UploadArtifactRequest {
-            name: name.to_string(),
-            content,
-        };
+    if let Ok(bytes) = tokio::fs::read(path).await {
+        let media = artifact_media_type(name);
         // Stage 2.1: check the response status and retry transient failures;
         // the upload is idempotent per (attempt_id, name) on the control plane.
         match send_with_retry(
             client
-                .post(format!("{server}/v1/node/attempts/{attempt_id}/artifacts"))
-                .json(&req),
+                .post(format!(
+                    "{server}/v1/node/attempts/{attempt_id}/artifacts/raw"
+                ))
+                .header("x-artifact-name", name)
+                .header("x-artifact-media-type", media)
+                .body(bytes),
             10,
         )
         .await
@@ -1822,6 +1826,16 @@ async fn upload_if_exists(
             Ok(s) => tracing::warn!("artifact {name} upload got {s} for {attempt_id}"),
             Err(e) => tracing::warn!("artifact {name} upload failed: {e}"),
         }
+    }
+}
+
+/// Best-effort content type for a known artifact name; unknown names fall back
+/// to a binary-safe `application/octet-stream`.
+fn artifact_media_type(name: &str) -> &'static str {
+    match name {
+        "changes.patch" => "text/x-diff",
+        "validation.log" | "agent-raw-output.log" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 

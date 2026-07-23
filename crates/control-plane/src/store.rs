@@ -9,14 +9,14 @@ use std::time::Duration;
 
 use agentgrid_common::{
     next_approval, next_attempt_status, next_task_status, AgentProfile, AgentProfileCreate,
-    AgentSession, ApprovalEvent, ApprovalStatus, ApprovalView, Assignment, AttemptStatus,
-    AttemptTransition, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest,
-    EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, McpServer,
-    McpServerCreate, NodeEligibility, NodeStatus, NodeView, PollRequest, RepositoryView,
-    SkillTrustView, TaskEligibility, TaskEvent, TaskStatus, TaskTransition, TaskView,
-    UploadArtifactRequest, WorkflowBudget, WorkflowRole, WorkflowRun, WorkflowRunStatus,
-    WorkflowSchedule, WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun, WorkflowStepStatus,
-    WorkflowTemplate,
+    AgentSession, ApprovalEvent, ApprovalStatus, ApprovalView, ArtifactMeta, Assignment,
+    AttemptStatus, AttemptTransition, CompleteAttemptRequest, CreateRepositoryRequest,
+    CreateTaskRequest, EnrollRequest, EnrollResponse, EventType, HeartbeatRequest,
+    IngestEventsRequest, McpServer, McpServerCreate, NodeEligibility, NodeStatus, NodeView,
+    PollRequest, RepositoryView, SkillTrustView, TaskEligibility, TaskEvent, TaskStatus,
+    TaskTransition, TaskView, UploadArtifactRequest, WorkflowBudget, WorkflowRole, WorkflowRun,
+    WorkflowRunStatus, WorkflowSchedule, WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun,
+    WorkflowStepStatus, WorkflowTemplate,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -296,26 +296,92 @@ impl Store {
     }
 
     pub async fn save_artifact(&self, attempt_id: &str, req: &UploadArtifactRequest) -> Result<()> {
+        self.save_artifact_bytes(
+            attempt_id,
+            &req.name,
+            req.content.as_bytes(),
+            req.media_type.as_deref(),
+            req.sha256.as_deref(),
+        )
+        .await
+    }
+
+    /// Stage 2.2 binary-safe artifact write: raw bytes + optional media type
+    /// and hex SHA-256. Idempotent per (attempt_id, name). The legacy text
+    /// endpoint forwards here with `content.as_bytes()`.
+    pub async fn save_artifact_bytes(
+        &self,
+        attempt_id: &str,
+        name: &str,
+        bytes: &[u8],
+        media_type: Option<&str>,
+        sha256: Option<&str>,
+    ) -> Result<()> {
         let dir = self.artifact_root.join(attempt_id);
         tokio::fs::create_dir_all(&dir).await?;
-        let path = self.artifact_path(attempt_id, &req.name)?;
-        tokio::fs::write(&path, &req.content).await?;
-        let size = req.content.len() as i64;
+        let path = self.artifact_path(attempt_id, name)?;
+        tokio::fs::write(&path, bytes).await?;
+        let size = bytes.len() as i64;
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         sqlx::query(
-            "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at) \
-             VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT(attempt_id, name) DO UPDATE SET size_bytes = excluded.size_bytes, stored_at = excluded.stored_at",
+            "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at, media_type, sha256) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(attempt_id, name) DO UPDATE SET \
+                size_bytes = excluded.size_bytes, \
+                stored_at = excluded.stored_at, \
+                media_type = excluded.media_type, \
+                sha256 = excluded.sha256",
         )
         .bind(&id)
         .bind(attempt_id)
-        .bind(&req.name)
+        .bind(name)
         .bind(size)
         .bind(&now)
+        .bind(media_type)
+        .bind(sha256)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Read a stored artifact's metadata by task id + name (latest attempt).
+    pub async fn read_artifact_meta(
+        &self,
+        task_id: &str,
+        name: &str,
+    ) -> Result<Option<ArtifactMeta>> {
+        let Some(attempt_id) = self.latest_attempt_id(task_id).await? else {
+            return Ok(None);
+        };
+        let row = sqlx::query(
+            "SELECT size_bytes, media_type, sha256 FROM artifacts WHERE attempt_id = ? AND name = ?",
+        )
+        .bind(&attempt_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| ArtifactMeta {
+            size_bytes: r.try_get::<i64, _>("size_bytes").unwrap_or(0),
+            media_type: r.try_get::<Option<String>, _>("media_type").ok().flatten(),
+            sha256: r.try_get::<Option<String>, _>("sha256").ok().flatten(),
+        }))
+    }
+
+    /// Read a stored artifact's raw bytes by task id + name (latest attempt).
+    pub async fn read_artifact_bytes(&self, task_id: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        let Some(attempt_id) = self.latest_attempt_id(task_id).await? else {
+            return Ok(None);
+        };
+        let path = match self.artifact_path(&attempt_id, name) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        match tokio::fs::read(&path).await {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Resolve the latest attempt id for a task (artifacts are per-attempt).
@@ -4374,6 +4440,7 @@ mod workflow_tests {
                     &UploadArtifactRequest {
                         name: bad.into(),
                         content: "x".into(),
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -4385,6 +4452,7 @@ mod workflow_tests {
             &UploadArtifactRequest {
                 name: "ok.txt".into(),
                 content: "ok".into(),
+                ..Default::default()
             },
         )
         .await
@@ -4425,6 +4493,7 @@ mod workflow_tests {
             &UploadArtifactRequest {
                 name: "real.txt".into(),
                 content: "data".into(),
+                ..Default::default()
             },
         )
         .await
@@ -4442,6 +4511,55 @@ mod workflow_tests {
                 "traversal read {bad:?} must be None"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn artifact_binary_round_trip_preserves_bytes_media_and_hash() {
+        // Stage 2.2: non-UTF-8 artifacts (binary diffs, archives) must round trip
+        // byte-for-byte through the binary-safe endpoint, with the stored media
+        // type and caller-supplied hash read back unchanged.
+        let s = temp_store().await;
+        let task_id = "task-bart";
+        sqlx::query(
+            "INSERT INTO tasks (id, repository, prompt, adapter, status, created_at, timeout_secs) \
+             VALUES (?, '', 'p', 'mock', 'queued', ?, 60)",
+        )
+        .bind(task_id)
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
+             VALUES (?, ?, 1, 'n', 'succeeded', ?, ?, ?)",
+        )
+        .bind("att-bart")
+        .bind(task_id)
+        .bind(now_iso())
+        .bind(now_iso())
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        // 0xFF 0xFE 0x00 invalid as UTF-8; would be mangled by read_to_string.
+        let bytes: &[u8] = &[0xFFu8, 0xFEu8, 0x00u8, 0x01u8, 0x02u8];
+        let sha = "7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1e3c89e4f0a6f8e8d6f0e2c7b3";
+        s.save_artifact_bytes("att-bart", "blob.bin", bytes, Some("image/png"), Some(sha))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.read_artifact_bytes(task_id, "blob.bin").await.unwrap(),
+            Some(bytes.to_vec()),
+            "binary bytes must round trip unchanged"
+        );
+        let meta = s
+            .read_artifact_meta(task_id, "blob.bin")
+            .await
+            .unwrap()
+            .expect("meta present");
+        assert_eq!(meta.size_bytes, bytes.len() as i64);
+        assert_eq!(meta.media_type.as_deref(), Some("image/png"));
+        assert_eq!(meta.sha256.as_deref(), Some(sha));
     }
 
     #[tokio::test]

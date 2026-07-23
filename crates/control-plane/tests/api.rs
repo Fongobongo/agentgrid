@@ -738,6 +738,7 @@ async fn artifact_upload_and_read() {
     let art = UploadArtifactRequest {
         name: "changes.patch".into(),
         content: "diff --git a/x b/x".into(),
+        ..Default::default()
     };
     let resp = app
         .clone()
@@ -767,6 +768,56 @@ async fn artifact_upload_and_read() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     assert_eq!(body.as_ref(), b"diff --git a/x b/x".as_slice());
+}
+
+#[tokio::test]
+async fn artifact_binary_raw_upload_round_trips() {
+    // Stage 2.2: the raw endpoint stores arbitrary bytes + media type + hash,
+    // and GET returns them unchanged (would be corrupted via UTF-8 JSON).
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-braw", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:b.txt:b").await;
+    let payload: Vec<u8> = vec![0xFF, 0xFE, 0xFD, 0x00, 0x01, 0x02];
+    let sha = "deadbeef";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/node/attempts/{}/artifacts/raw",
+                    assign.attempt_id
+                ))
+                .header("authorization", format!("Bearer {cred}"))
+                .header("x-artifact-name", "blob.bin")
+                .header("x-artifact-media-type", "image/png")
+                .header("x-artifact-sha256", sha)
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/tasks/{}/artifacts/blob.bin", assign.task_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "image/png",
+        "stored media type must be served back"
+    );
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), payload.as_slice(), "binary bytes round trip");
 }
 
 #[tokio::test]
@@ -2690,6 +2741,7 @@ async fn artifact_name_validation_rejects_traversal() {
     let bad = UploadArtifactRequest {
         name: "../../etc/passwd".into(),
         content: "x".into(),
+        ..Default::default()
     };
     let resp = app
         .clone()
@@ -2700,6 +2752,7 @@ async fn artifact_name_validation_rejects_traversal() {
     let ok = UploadArtifactRequest {
         name: "out.txt".into(),
         content: "x".into(),
+        ..Default::default()
     };
     let resp2 = app
         .clone()
@@ -2768,6 +2821,7 @@ async fn artifact_get_rejects_traversal_name() {
     let up = UploadArtifactRequest {
         name: "real.txt".into(),
         content: "data".into(),
+        ..Default::default()
     };
     let resp = app
         .clone()

@@ -85,7 +85,7 @@
 - [x] Валидация artifact name: safe basename, запрет `..` и absolute paths; запись через descriptor-relative API (`openat`/`cap-std`, `O_NOFOLLOW`) вместо одной лишь canonicalize-проверки
 - [x] Adversarial tests: `../x`, `/etc/passwd`, symlink в worktree, symlink-swap/TOCTOU
 - [x] Credential file: atomic create + rename, mode `0600`
-- [ ] Binary-safe artifact API: streaming upload/download, hash + size + media type (замена UTF-8 JSON body)
+- [x] Binary-safe artifact API: streaming upload/download, hash + size + media type (замена UTF-8 JSON body)
 
 ### 2.3 Git isolation и injection
 

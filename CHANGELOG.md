@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane + node-daemon + common — binary-safe artifact API, Stage 2.2)
+
+- Artifacts round-trip as raw bytes instead of UTF-8 JSON text, so binary
+  diffs / archives / images are not corrupted. New node→CP endpoint
+  `POST /v1/node/attempts/{id}/artifacts/raw` carries the bytes as the body
+  and the name / optional media type / optional hex SHA-256 in headers;
+  idempotent per `(attempt_id, name)` as before.
+- common: `UploadArtifactRequest` gained optional `media_type`/`sha256`;
+  new `ArtifactMeta { size_bytes, media_type?, sha256? }`.
+- control-plane: `Store::save_artifact_bytes` / `read_artifact_bytes` /
+  `read_artifact_meta`; the legacy JSON upload forwards to the binary store.
+  `GET /v1/tasks/{id}/artifacts/{name}` now serves the stored content type
+  (default `application/octet-stream`) and the raw bytes.
+- Migration `0029_artifact_binary.sql` adds `media_type`/`sha256` columns.
+- node-daemon: `upload_if_exists` switched to the raw-bytes path with a
+  best-effort artifact media-type map.
+- Tests: `artifact_binary_round_trip_preserves_bytes_media_and_hash` (store),
+  `artifact_binary_raw_upload_round_trips` (api); existing text/upload and
+  traversal tests still pass.
+
 ### Added (common + control-plane — handoff packages reference commits, Stage 13)
 
 - Handoff messages now carry compact *references*, never full transcripts. New

@@ -591,10 +591,33 @@ pub struct TaskEligibility {
 }
 
 /// Upload a text artifact (e.g. `changes.patch`) from a node to the control plane.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Legacy text path: `content` is UTF-8 text. Binary artifacts (binary diffs,
+/// archives, images) must use the raw-bytes endpoint instead — a UTF-8 round
+/// trip corrupts them. `media_type`/`sha256` are optional metadata honoured by
+/// both paths so a downloader always gets the stored content type and a
+/// caller can verify integrity.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UploadArtifactRequest {
     pub name: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// Metadata for a stored artifact (binary-safe path). `size_bytes` is the raw
+/// byte length; `media_type` is the stored content type (default
+/// `application/octet-stream`); `sha256` is the hex SHA-256 of the bytes, if
+/// the uploader provided one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactMeta {
+    pub size_bytes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

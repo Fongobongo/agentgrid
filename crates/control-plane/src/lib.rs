@@ -299,6 +299,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(create_agent_session_handler),
         )
         .route("/v1/node/attempts/{id}/artifacts", post(upload_artifact))
+        .route(
+            "/v1/node/attempts/{id}/artifacts/raw",
+            post(upload_artifact_raw),
+        )
         .route("/v1/tasks/{id}/artifacts/{name}", get(get_artifact))
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations/{id}", get(show_conversation))
@@ -1647,15 +1651,28 @@ async fn list_conversation_messages(
 async fn get_artifact(
     State(state): State<Arc<AppState>>,
     Path((task_id, name)): Path<(String, String)>,
-) -> Result<String, StatusCode> {
+) -> Result<Response, StatusCode> {
     // Stage 2.2: a crafted name (../, absolute, ...) must not traverse out of
     // the artifact root via store::read_artifact's join. Reject as 404 so a
     // denial does not disclose whether the task/artifact exists.
     if !is_safe_artifact_name(&name) {
         return Err(StatusCode::NOT_FOUND);
     }
-    match state.store.read_artifact(&task_id, &name).await {
-        Ok(Some(s)) => Ok(s),
+    match state.store.read_artifact_bytes(&task_id, &name).await {
+        Ok(Some(bytes)) => {
+            // Stage 2.2: serve the stored content type (default
+            // `application/octet-stream` for binary artifacts) so non-text
+            // artifacts (binary diffs, archives) download correctly.
+            let mt = state
+                .store
+                .read_artifact_meta(&task_id, &name)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|m| m.media_type)
+                .unwrap_or_else(|| "application/octet-stream".into());
+            Ok(([(header::CONTENT_TYPE, mt.as_str())], Bytes::from(bytes)).into_response())
+        }
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
             tracing::error!("read_artifact failed: {e}");
@@ -1677,10 +1694,72 @@ async fn upload_artifact(
     if !is_safe_artifact_name(&req.name) {
         return StatusCode::BAD_REQUEST;
     }
-    match state.store.save_artifact(&attempt_id, &req).await {
+    match state
+        .store
+        .save_artifact_bytes(
+            &attempt_id,
+            &req.name,
+            req.content.as_bytes(),
+            req.media_type.as_deref(),
+            req.sha256.as_deref(),
+        )
+        .await
+    {
         Ok(()) => StatusCode::OK,
         Err(e) => {
             tracing::error!("save_artifact failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// Stage 2.2 binary-safe artifact upload: the request body is raw bytes (not
+/// UTF-8 JSON), with the artifact name, optional media type, and optional hex
+/// SHA-256 carried in headers. Idempotent per (attempt_id, name) on the store.
+/// The node uses this for `changes.patch` (binary diffs) and any non-text
+/// artifact; the legacy JSON endpoint stays for text-only clients.
+async fn upload_artifact_raw(
+    State(state): State<Arc<AppState>>,
+    Path(attempt_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    if body.len() > state.limits.artifact {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+    let name = match headers
+        .get("x-artifact-name")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+    {
+        Some(n) => n,
+        None => return StatusCode::BAD_REQUEST,
+    };
+    if !is_safe_artifact_name(&name) {
+        return StatusCode::BAD_REQUEST;
+    }
+    let media_type = headers
+        .get("x-artifact-media-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let sha256 = headers
+        .get("x-artifact-sha256")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    match state
+        .store
+        .save_artifact_bytes(
+            &attempt_id,
+            &name,
+            &body,
+            media_type.as_deref(),
+            sha256.as_deref(),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::OK,
+        Err(e) => {
+            tracing::error!("save_artifact_bytes failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
