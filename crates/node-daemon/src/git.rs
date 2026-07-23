@@ -648,14 +648,19 @@ mod tests {
             }));
         }
         let mut ok = 0;
+        let mut paths = std::collections::HashSet::new();
         for h in handles {
             if let Ok(ws) = h.join().unwrap() {
                 assert!(ws.is_git, "worktree should be a git worktree");
                 assert!(ws.path.exists(), "worktree path must exist");
+                // Stage 7.2: each parallel ready step gets its own worktree
+                // — paths must be distinct (no attempt reuses another).
+                assert!(paths.insert(ws.path.clone()), "duplicate worktree path");
                 ok += 1;
             }
         }
         assert_eq!(ok, 4, "all parallel prepares must succeed");
+        assert_eq!(paths.len(), 4, "four distinct worktrees");
         std::fs::remove_dir_all(&dir).ok();
     }
 

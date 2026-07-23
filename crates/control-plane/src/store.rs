@@ -4812,4 +4812,41 @@ mod workflow_tests {
             "repeated-handoffs breaker trips -> Blocked"
         );
     }
+
+    #[tokio::test]
+    async fn parallel_ready_steps_of_same_repo_activate_in_one_tick() {
+        // Stage 7.2: two independent (no deps) worker steps pointing at the
+        // same repository must be activated in a single tick — both get tasks
+        // queued (later run as independent worktrees under the per-repo lock).
+        // The push does NOT serialize the steps: each gets its own task_id and
+        // both are `Running`.
+        let s = temp_store().await;
+        let steps = vec![
+            step("a", &[], WorkflowRole::Worker),
+            step("b", &[], WorkflowRole::Worker),
+        ];
+        let tpl = s
+            .create_workflow_template("par", &steps, &None)
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, Some("repo-x"), None, None)
+            .await
+            .unwrap();
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 2, "both root steps activate in one tick");
+        let st = s.get_workflow_run_steps(&run.id).await.unwrap();
+        let running: Vec<_> = st
+            .iter()
+            .filter(|x| x.status == WorkflowStepStatus::Running)
+            .collect();
+        assert_eq!(running.len(), 2, "both steps Running");
+        // Each step has a distinct task_id (one worktree per step later).
+        let mut tasks = std::collections::HashSet::new();
+        for r in &running {
+            let t = s.step_task_id(&r.id).await.unwrap().unwrap();
+            assert!(tasks.insert(t), "distinct task per parallel step");
+        }
+        assert_eq!(tasks.len(), 2, "two distinct task ids");
+    }
 }

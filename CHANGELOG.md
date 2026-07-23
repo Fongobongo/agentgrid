@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane + node-daemon — parallel ready steps / distinct worktrees, Stage 7.2)
+
+- Tests codify that two independent ready steps (same repository) activate in a
+  single workflow tick, each getting its own distinct task_id — parallel
+  execution later runs as independent worktrees under the per-repo lock.
+  `parallel_ready_steps_of_same_repo_activate_in_one_tick` (CP store).
+- Node: `parallel_prep_same_repo_does_not_race` now also asserts four parallel
+  attempt preparations produce four distinct worktree paths.
+
 ### Added (control-plane — Loop Engineering bytes + circuit breaker, Stage 13)
 
 - The workflow tick and the projection budget snapshot now observe the
