@@ -11,11 +11,11 @@ use agentgrid_common::{
     next_approval, next_attempt_status, next_task_status, AgentProfile, AgentProfileCreate,
     AgentSession, ApprovalEvent, ApprovalStatus, ApprovalView, Assignment, AttemptStatus,
     AttemptTransition, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest,
-    EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest,
-    NodeEligibility, NodeStatus, NodeView, PollRequest, RepositoryView, SkillTrustView,
-    TaskEligibility, TaskEvent, TaskStatus, TaskTransition, TaskView, UploadArtifactRequest,
-    WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowSchedule, WorkflowScheduleCreate,
-    WorkflowStep, WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,
+    EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, McpServer,
+    McpServerCreate, NodeEligibility, NodeStatus, NodeView, PollRequest, RepositoryView,
+    SkillTrustView, TaskEligibility, TaskEvent, TaskStatus, TaskTransition, TaskView,
+    UploadArtifactRequest, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowSchedule,
+    WorkflowScheduleCreate, WorkflowStep, WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -2126,6 +2126,81 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(skill_trust_from_row).collect())
+    }
+
+    /// Stage 13: MCP server registry. Insert or replace a trusted server.
+    pub async fn upsert_mcp_server(&self, body: &McpServerCreate) -> Result<McpServer> {
+        let now = now_iso();
+        sqlx::query(
+            "INSERT INTO mcp_servers \
+             (id, name, command, args, env_requirements, enabled, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET \
+                 name = excluded.name, command = excluded.command, \
+                 args = excluded.args, env_requirements = excluded.env_requirements, \
+                 enabled = excluded.enabled",
+        )
+        .bind(&body.id)
+        .bind(&body.name)
+        .bind(&body.command)
+        .bind(serde_json::to_string(&body.args).unwrap_or_else(|_| "[]".into()))
+        .bind(serde_json::to_string(&body.env_requirements).unwrap_or_else(|_| "[]".into()))
+        .bind(if body.enabled { 1i64 } else { 0 })
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(self.get_mcp_server(&body.id).await?.unwrap())
+    }
+
+    pub async fn get_mcp_server(&self, id: &str) -> Result<Option<McpServer>> {
+        let row = sqlx::query(
+            "SELECT id, name, command, args, env_requirements, enabled, created_at \
+             FROM mcp_servers WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(mcp_server_from_row))
+    }
+
+    pub async fn list_mcp_servers(&self) -> Result<Vec<McpServer>> {
+        let rows = sqlx::query(
+            "SELECT id, name, command, args, env_requirements, enabled, created_at \
+             FROM mcp_servers ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(mcp_server_from_row).collect())
+    }
+
+    pub async fn delete_mcp_server(&self, id: &str) -> Result<bool> {
+        let affected = sqlx::query("DELETE FROM mcp_servers WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(affected == 1)
+    }
+}
+
+fn mcp_server_from_row(r: &sqlx::sqlite::SqliteRow) -> McpServer {
+    let args: Vec<String> =
+        serde_json::from_str(r.try_get::<String, _>("args").as_deref().unwrap_or("[]"))
+            .unwrap_or_default();
+    let env_requirements: Vec<String> = serde_json::from_str(
+        r.try_get::<String, _>("env_requirements")
+            .as_deref()
+            .unwrap_or("[]"),
+    )
+    .unwrap_or_default();
+    McpServer {
+        id: r.try_get("id").unwrap_or_default(),
+        name: r.try_get("name").unwrap_or_default(),
+        command: r.try_get("command").unwrap_or_default(),
+        args,
+        env_requirements,
+        enabled: r.try_get::<i64, _>("enabled").unwrap_or(1) != 0,
+        created_at: r.try_get("created_at").unwrap_or_default(),
     }
 }
 

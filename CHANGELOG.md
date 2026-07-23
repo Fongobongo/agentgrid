@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (common — MCP server registry, Stage 13)
+
+- `McpServer`/`McpServerCreate` in `agentgrid-common`: an operator-managed
+  registry of MCP stdio servers a profile may attach to a session. Carries the
+  spawn contract (id, command, args) + `env_requirements` (names only — values
+  resolved at spawn from the node env, the same Stage 13 secret-ref model) + an
+  `enabled` gate. Migration `0025_mcp_servers.sql`.
+- Control plane: `upsert/get/list/delete_mcp_server` + endpoints
+  `POST/GET /v1/mcp-servers` and `DELETE /v1/mcp-servers/{id}`.
+- Node `mcp_servers_payload(frame)` fetches the registry, keeps enabled servers,
+  projects `{servers:[...]}` into the ACP `session/new` `mcp` field —
+  fail-closed to `Null` when the CP is unreachable, and disabled servers are
+  dropped (so an agent never auto-spawns a server the operator didn't vet).
+- CLI `ag mcp {list|create|delete}`.
+- Tests: `mcp_server_registry_round_trips_and_gates_disabled` (CP),
+  `mcp_payload_projects_enabled_servers_and_drops_disabled` (node),
+  `server_round_trips_without_secret_values` (serde).
+- Follow-up: per-profile server subset + real stdio lifecycle/spawn + MCP
+  capability discovery (`mcp/list_tools`) need ACP adapter-side work.
+
 ### Added (common — provenance record, Stage 13)
 
 - `ProvenanceRecord {originator, external_id, optional label}` in

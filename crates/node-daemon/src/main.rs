@@ -370,6 +370,54 @@ fn level_rank(l: AutonomyLevel) -> u8 {
     }
 }
 
+/// Stage 13: build the MCP stdio-server block to forward into an ACP
+/// `session/new`. Fetches the operator-trusted MCP server registry from the
+/// control plane, keeps only `enabled` servers, and projects it as the JSON
+/// the ACP adapter consumes. `Value::Null` (or empty) when the CP is
+/// unreachable — the agent never *auto*-spawns an unregistered server.
+/// ponytail: all registry servers are operator-managed = trusted; per-profile
+/// server attachment (subset) is a follow-up.
+async fn mcp_servers_payload(client: &reqwest::Client, server: &str) -> serde_json::Value {
+    let resp = match client.get(format!("{server}/v1/mcp-servers")).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("mcp-servers fetch failed: {e}; session runs without MCP");
+            return Value::Null;
+        }
+    };
+    if !resp.status().is_success() {
+        return Value::Null;
+    }
+    let servers: Vec<agentgrid_common::McpServer> = match resp.json().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("mcp-servers decode failed: {e}");
+            return Value::Null;
+        }
+    };
+    let enabled: Vec<_> = servers.into_iter().filter(|s| s.enabled).collect();
+    if enabled.is_empty() {
+        return Value::Null;
+    }
+    // Project each server into a stdio spawn description (name + command +
+    // args). Env env_requirements are env var *names* the node resolves at
+    // spawn — sent as names so the adapter can check they're set in its env
+    // (the node forwards cfg.adapter_env into the spawn env separately).
+    let servers_json: Vec<serde_json::Value> = enabled
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.id,
+                "label": s.name,
+                "command": s.command,
+                "args": s.args,
+                "env_requirements": s.env_requirements,
+            })
+        })
+        .collect();
+    serde_json::json!({ "servers": servers_json })
+}
+
 /// Stage 13: build a `ProvenanceRecord` from the node env when an operator
 /// wants every run on this node tagged with its external origin
 /// (`AGENTGRID_PROVENANCE_ORIGINATOR` + `_EXTERNAL_ID`; `_LABEL` optional).
@@ -1011,13 +1059,14 @@ async fn drive_acp_session(
             session_id: None,
         });
     }
+    let mcp_payload = mcp_servers_payload(client, &cfg.server).await;
     let session_id = match acp
         .session_new(SessionNewParams {
             agent: assignment.adapter.clone(),
             model: None,
             cwd: ws_path.to_string_lossy().into_owned(),
             prompt: None,
-            mcp: Value::Null,
+            mcp: mcp_payload,
             parent_session_id: assignment.parent_acp_session_id.clone(),
         })
         .await
@@ -2566,6 +2615,31 @@ mod tests {
         let client = reqwest::Client::new();
         let p = fetch_agent_profile(&client, &server, "claude").await;
         assert_eq!(p.as_ref().map(|p| p.system_prompt.as_str()), Some(""));
+    }
+
+    #[tokio::test]
+    async fn mcp_payload_projects_enabled_servers_and_drops_disabled() {
+        // Stage 13: the sодо MCP棕 block includes enabled servers from the
+        // registry and excludes disabled ones; an unreachable CP yields Null.
+        let body = r#"[
+            {"id":"github","name":"GitHub","command":"mcp-github","args":["--ro"],"env_requirements":["GITHUB_TOKEN"],"enabled":true,"created_at":""},
+            {"id":"legacy","name":"Legacy","command":"mcp-old","args":[],"env_requirements":[],"enabled":false,"created_at":""}
+        ]"#;
+        let server = dummy_profile_server(body).await;
+        let client = reqwest::Client::new();
+        let val = mcp_servers_payload(&client, &server).await;
+        let servers = val.get("servers").expect("enabled servers present");
+        let arr = servers.as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            1,
+            "disabled server is dropped (fail-closed gate)"
+        );
+        assert_eq!(arr[0]["name"], "github");
+        assert_eq!(arr[0]["command"], "mcp-github");
+        // No secret value bytes leak through.
+        let text = val.to_string();
+        assert!(!text.contains("ghp_"), "no secret bytes: {text}");
     }
 
     #[test]

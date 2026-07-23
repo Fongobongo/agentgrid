@@ -2693,6 +2693,102 @@ async fn skill_trust_defaults_untrusted_then_round_trips() {
 }
 
 #[tokio::test]
+async fn mcp_server_registry_round_trips_and_gates_disabled() {
+    // Stage 13: an operator registers an MCP stdio server; it round-trips
+    // through the registry and a disabled server is still listed (operator
+    // can disable without deleting).
+    use agentgrid_common::{McpServer, McpServerCreate};
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+
+    let body = serde_json::to_string(&McpServerCreate {
+        id: "github".into(),
+        name: "GitHub".into(),
+        command: "mcp-github".into(),
+        args: vec!["--ro".into()],
+        env_requirements: vec!["GITHUB_TOKEN".into()],
+        enabled: true,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/v1/mcp-servers", body, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let srv: McpServer =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(srv.id, "github");
+    assert_eq!(srv.env_requirements, vec!["GITHUB_TOKEN".to_string()]);
+    assert!(srv.enabled);
+
+    // List reflects it.
+    let list: Vec<McpServer> = serde_json::from_slice(
+        &to_bytes(
+            app.clone()
+                .oneshot(get_q("/v1/mcp-servers"))
+                .await
+                .unwrap()
+                .into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].command, "mcp-github");
+
+    // Upsert (replace) disables it.
+    let body = serde_json::to_string(&McpServerCreate {
+        id: "github".into(),
+        name: "GitHub".into(),
+        command: "mcp-github".into(),
+        args: vec![],
+        env_requirements: vec![],
+        enabled: false,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/v1/mcp-servers", body, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let srv: McpServer =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(!srv.enabled, "upsert disabled the server");
+
+    // Delete.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/mcp-servers/github")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let list: Vec<McpServer> = serde_json::from_slice(
+        &to_bytes(
+            app.clone()
+                .oneshot(get_q("/v1/mcp-servers"))
+                .await
+                .unwrap()
+                .into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(list.is_empty());
+}
+
+#[tokio::test]
 async fn agent_profile_revisions_immutable_and_roll_back() {
     // Stage 13: a profile is a chain of immutable revisions; activating an
     // older revision rolls back without losing history.

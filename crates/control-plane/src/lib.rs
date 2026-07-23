@@ -16,9 +16,10 @@ use agentgrid_common::{
     CreateAgentSessionRequest, CreateConversationRequest, CreateRepositoryRequest,
     CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest, EnrollRequest,
     EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest, IngestEventsRequest,
-    LoginRequest, LoginResponse, PollRequest, PollResponse, RepositoryView, SetupRequest,
-    TaskEligibility, TaskView, UploadArtifactRequest, WorkflowProjection, WorkflowRun,
-    WorkflowRunWithSteps, WorkflowSchedule, WorkflowScheduleCreate, WorkflowTemplate,
+    LoginRequest, LoginResponse, McpServer, McpServerCreate, PollRequest, PollResponse,
+    RepositoryView, SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest,
+    WorkflowProjection, WorkflowRun, WorkflowRunWithSteps, WorkflowSchedule,
+    WorkflowScheduleCreate, WorkflowTemplate,
 };
 use axum::{
     body::{Body, Bytes},
@@ -269,6 +270,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/skills/{name}", get(get_skill_trust_handler))
         .route("/v1/skills/{name}/trust", post(trust_skill_handler))
         .route("/v1/skills/{name}/untrust", post(untrust_skill_handler))
+        .route(
+            "/v1/mcp-servers",
+            get(list_mcp_servers_handler).post(create_mcp_server_handler),
+        )
+        .route("/v1/mcp-servers/{id}", delete(delete_mcp_server_handler))
         .route("/v1/profiles", get(list_profiles_handler))
         .route("/v1/profiles/{id}", get(get_profile_handler))
         .route("/v1/profiles/{id}", post(create_profile_handler))
@@ -688,6 +694,48 @@ async fn untrust_skill_handler(
     Path(name): Path<String>,
 ) -> StatusCode {
     set_skill_trust(state, auth, &name, q.source.as_deref(), false).await
+}
+
+/// Stage 13: list all registered MCP servers.
+async fn list_mcp_servers_handler(State(state): State<Arc<AppState>>) -> Json<Vec<McpServer>> {
+    match state.store.list_mcp_servers().await {
+        Ok(s) => Json(s),
+        Err(e) => {
+            tracing::error!("list_mcp_servers failed: {e}");
+            Json(vec![])
+        }
+    }
+}
+
+/// Stage 13: register (or replace) an MCP server in the operator registry.
+async fn create_mcp_server_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<McpServerCreate>,
+) -> Result<Json<McpServer>, StatusCode> {
+    state
+        .store
+        .upsert_mcp_server(&req)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            tracing::warn!("create_mcp_server failed: {e}");
+            StatusCode::BAD_REQUEST
+        })
+}
+
+/// Stage 13: delete an MCP server from the registry.
+async fn delete_mcp_server_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    match state.store.delete_mcp_server(&id).await {
+        Ok(true) => StatusCode::NO_CONTENT,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("delete_mcp_server failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 async fn set_skill_trust(

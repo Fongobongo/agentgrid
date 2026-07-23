@@ -53,6 +53,8 @@ enum AgCommand {
     Approvals(ApprovalArgs),
     /// Manage skill trust decisions (fail-closed: untrusted until trusted).
     Skills(SkillsArgs),
+    /// Manage MCP server registry (Stage 13 stdio servers a profile attaches).
+    Mcp(McpArgs),
     /// Manage agent profiles (system prompt + autonomy + limits; immutable revisions).
     Profiles(ProfilesArgs),
     /// Start the control plane (standalone binary).
@@ -176,6 +178,35 @@ enum SkillsAction {
     Trust(SkillsNameArgs),
     /// Untrust a skill (fail-closed: the agent must not use it).
     Untrust(SkillsNameArgs),
+}
+
+#[derive(Args)]
+struct McpArgs {
+    #[command(subcommand)]
+    action: McpAction,
+}
+
+#[derive(Subcommand)]
+enum McpAction {
+    /// List registered MCP servers.
+    List,
+    /// Register or replace an MCP server in the operator registry.
+    Create {
+        id: String,
+        name: String,
+        command: String,
+        /// Args to pass (repeatable).
+        #[arg(long = "arg")]
+        args: Vec<String>,
+        /// Env var names the server requires (repeatable; values resolved at spawn).
+        #[arg(long = "env-requirement")]
+        env_requirements: Vec<String>,
+        /// Register as disabled (default enabled).
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// Delete a server.
+    Delete { id: String },
 }
 
 #[derive(Args)]
@@ -440,6 +471,7 @@ async fn main() -> Result<()> {
         AgCommand::Login(a) => cmd_login(&client, &base, a).await,
         AgCommand::Approvals(a) => cmd_approvals(&client, &base, a).await,
         AgCommand::Skills(a) => cmd_skills(&client, &base, a).await,
+        AgCommand::Mcp(a) => cmd_mcp(&client, &base, a).await,
         AgCommand::Profiles(a) => cmd_profiles(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
         AgCommand::Workflow(a) => cmd_workflow(&client, &base, a, cli.json).await,
@@ -1002,6 +1034,84 @@ async fn cmd_skills(client: &reqwest::Client, base: &str, a: SkillsArgs) -> Resu
         SkillsAction::Trust(a) => set_skill_trust(client, base, &a.name, &a.source, "trust").await,
         SkillsAction::Untrust(a) => {
             set_skill_trust(client, base, &a.name, &a.source, "untrust").await
+        }
+    }
+}
+
+async fn cmd_mcp(client: &reqwest::Client, base: &str, a: McpArgs) -> Result<()> {
+    use agentgrid_common::{McpServer, McpServerCreate};
+    match a.action {
+        McpAction::List => {
+            let resp = client
+                .get(format!("{base}/v1/mcp-servers"))
+                .send()
+                .await
+                .context("list mcp-servers request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("list mcp-servers failed ({})", resp.status());
+            }
+            let servers: Vec<McpServer> = resp.json().await.context("bad mcp json")?;
+            if servers.is_empty() {
+                println!("no MCP servers registered");
+            }
+            for s in &servers {
+                println!(
+                    "{:<12} {:<16} {:<16} {} args={} env=[{}]",
+                    s.id,
+                    s.name,
+                    s.command,
+                    if s.enabled { "[on]" } else { "[off]" },
+                    s.args.len(),
+                    s.env_requirements.join(",")
+                );
+            }
+            Ok(())
+        }
+        McpAction::Create {
+            id,
+            name,
+            command,
+            args,
+            env_requirements,
+            disabled,
+        } => {
+            let body = serde_json::to_string(&McpServerCreate {
+                id,
+                name,
+                command,
+                args,
+                env_requirements,
+                enabled: !disabled,
+            })
+            .unwrap();
+            let resp = client
+                .post(format!("{base}/v1/mcp-servers"))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .context("create mcp-server request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("create mcp-server failed ({})", resp.status());
+            }
+            let s: McpServer = resp.json().await.context("bad mcp json")?;
+            println!("mcp server {} registered: {}", s.id, s.name);
+            Ok(())
+        }
+        McpAction::Delete { id } => {
+            let resp = client
+                .delete(format!("{base}/v1/mcp-servers/{}", id))
+                .send()
+                .await
+                .context("delete mcp-server request failed")?;
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                anyhow::bail!("mcp server {} not found", id);
+            }
+            if !resp.status().is_success() {
+                anyhow::bail!("delete mcp-server failed ({})", resp.status());
+            }
+            println!("mcp server {} deleted", id);
+            Ok(())
         }
     }
 }
