@@ -280,6 +280,7 @@ async fn full_task_lifecycle() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,
@@ -308,6 +309,7 @@ async fn failure_marks_task_failed() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,
@@ -316,6 +318,47 @@ async fn failure_marks_task_failed() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
+}
+
+#[tokio::test]
+async fn completion_propagates_provenance() {
+    // Stage 13: a node tags a completion with an external-origin provenance
+    // record; the CP persists it on the attempt row.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-prov", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+                acp_session_id: None,
+                provenance: Some(agentgrid_common::ProvenanceRecord {
+                    originator: "entire".into(),
+                    external_id: "proj-42".into(),
+                    label: Some("nightly".into()),
+                }),
+            })
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Read the stored record directly from the store.
+    let stored: String = sqlx::query_scalar("SELECT provenance FROM attempts WHERE id = ?")
+        .bind(&assign.attempt_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    let p: agentgrid_common::ProvenanceRecord = serde_json::from_str(&stored).unwrap();
+    assert_eq!(p.originator, "entire");
+    assert_eq!(p.external_id, "proj-42");
+    assert_eq!(p.label.as_deref(), Some("nightly"));
 }
 
 #[tokio::test]
@@ -389,6 +432,7 @@ async fn validation_failure_must_not_report_success() {
                 commit_sha: None,
                 error_code: Some("validation_failed".into()),
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,
@@ -493,6 +537,7 @@ async fn cancel_running_then_node_confirms_cancelled() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,
@@ -521,6 +566,7 @@ async fn retry_failed_task_reques() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,
@@ -673,6 +719,7 @@ async fn artifact_upload_and_read() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,
@@ -1413,6 +1460,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,
@@ -1451,6 +1499,7 @@ async fn complete_on_lost_attempt_is_idempotent() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,
@@ -1966,6 +2015,7 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
                         commit_sha: None,
                         error_code: None,
                         acp_session_id: None,
+                        provenance: None,
                     })
                     .unwrap(),
                     &cred,
@@ -2068,6 +2118,7 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             })
             .unwrap(),
             &cred,

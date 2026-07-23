@@ -343,6 +343,7 @@ mod tests {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            provenance: None,
         }
     }
 
@@ -641,6 +642,7 @@ mod tests {
                     validation_command: None,
                     base_commit: None,
                     parent_acp_session_id: None,
+                    provenance: None,
                 };
                 prepare_workspace(&repos, &ws_root, &a)
             }));

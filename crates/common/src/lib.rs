@@ -319,7 +319,7 @@ pub struct PollRequest {
     pub protocol_version: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Assignment {
     pub attempt_id: String,
     pub task_id: String,
@@ -345,6 +345,10 @@ pub struct Assignment {
     /// `parent_session_id` (Stage 11.5). `None` => a fresh session.
     #[serde(default)]
     pub parent_acp_session_id: Option<String>,
+    /// Stage 13: optional external-origin provenance for this attempt, echoed
+    /// by the node back on the completion call so the CP persists it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -470,7 +474,7 @@ pub struct IngestEventsRequest {
     pub events: Vec<IncomingEvent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CompleteAttemptRequest {
     pub exit_code: i32,
     /// Commit SHA produced by the attempt, if it ran in a git worktree.
@@ -483,6 +487,26 @@ pub struct CompleteAttemptRequest {
     /// it as `parent_acp_session_id` for a follow-up task (Stage 11.5).
     #[serde(default)]
     pub acp_session_id: Option<String>,
+    /// Stage 13: optional provenance record — an external id that links
+    /// this attempt's outcome back to the system that requested it
+    /// (Entire/h5i/Guild). Carried through to the attempt row so operators
+    /// can trace a run back to its external origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceRecord>,
+}
+
+/// A provenance link between an attempt and the external system that
+/// originated it (Entire/h5i/Guild MCP). Only carries identifiers — never
+/// secrets — so it is safe to persist and surface in the UI/API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProvenanceRecord {
+    /// Which external system produced this run (`entire`/`h5i`/`guild`/...).
+    pub originator: String,
+    /// Opaque id in that system (e.g. a project/workflow id).
+    pub external_id: String,
+    /// Optional human-readable label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -680,6 +704,7 @@ mod tests {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                provenance: None,
             }),
         };
         assert_eq!(round_trip(&pr), pr);

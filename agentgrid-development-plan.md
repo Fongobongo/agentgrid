@@ -416,7 +416,7 @@
 - [x] Scheduled/recurring workflows с autonomy limits (L4 только с policy и budget) — MVP: `WorkflowSchedule`/`WorkflowScheduleCreate` в common, миграция `0023`, `workflow_schedules` таблица (id, template_id, interval_seconds, autonomy, last_run_at, enabled). Store: create/list/delete/tick_workflow_schedules. Endpoints `POST/GET /v1/workflows/{tid}/schedules` + `DELETE /v1/workflows/{tid}/schedules/{sid}`. `tick_maintenance` запускает due schedules (last_run_at + interval <= now). CLI `ag workflows schedules list/create/delete`. Autonomy валидируется (l0..l4); [ ] L4 ratify только с command policy+budget — follow-up (бюджета ещё нет). Тест `workflow_schedule_fires_run_on_tick` (fire/skip/again/delete).
 - [ ] Swarms plan import (локальные dependency-aware skills → WorkflowTemplate)
 - [ ] RTK/Headroom как optional output/context optimizers (без потери raw evidence)
-- [ ] Entire/h5i provenance provider (`ProvenanceRecord` с внешним id)
+- [x] Entire/h5i provenance provider (`ProvenanceRecord` с внешним id) — `ProvenanceRecord {originator, external_id, optional label}` в common (только идентификаторы, никогда секреты); CompleteAttemptRequest + Assignment несут его; node `provenance_from_env()` (env `AGENTGRID_PROVENANCE_ORIGINATOR|EXTERNAL_ID|LABEL`) + CP assignment.provenance override; CP persist в `attempts.provenance` (миграция `0024`); `CompleteAttemptRequest` derives Default. Покрыто `completion_propagates_provenance` (CP), `provenance_from_env_builds_record` (node). [ ] discover/emit из Entire/h5i/Guild MCP real systems — follow-up (требует external).
 - [ ] Guild shared memory MCP — optional profile
 
 **Exit 13:** профили синхронизируют одинаковое окружение agents/skills/MCP на всех ПК; регулярные workflow работают под бюджетами.

@@ -32,7 +32,7 @@ const ACK_DEADLINE_SECS: i64 = 30;
 
 #[derive(Clone)]
 pub struct Store {
-    pool: SqlitePool,
+    pub pool: SqlitePool,
     artifact_root: std::path::PathBuf,
     /// Observability: last scheduler latency (queued→assigned) in ms and total
     /// assignments (Stage 2.5 ops). Wrapped in Arc so `Store` can derive Clone.
@@ -1005,6 +1005,7 @@ impl Store {
                 validation_command: task_validation.or(validation_command),
                 base_commit,
                 parent_acp_session_id,
+                provenance: None,
             }));
         }
 
@@ -1260,6 +1261,16 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        // Stage 13: persist the external-origin provenance link when provided.
+        let provenance_json: Option<String> = match &req.provenance {
+            Some(p) => serde_json::to_string(p).ok(),
+            None => None,
+        };
+        sqlx::query("UPDATE attempts SET provenance = ? WHERE id = ?")
+            .bind(provenance_json)
+            .bind(attempt_id)
+            .execute(&mut *tx)
+            .await?;
         // Normalize the failure category onto the task so the UI/CLI can show
         // WHY it failed without joining the producing attempt.
         let task_error_code: Option<String> = match task_target {
@@ -3162,6 +3173,7 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
                 acp_session_id: None,
+                provenance: None,
             },
         )
         .await
@@ -3179,6 +3191,7 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             },
         )
         .await
@@ -3216,6 +3229,7 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("merge_conflict".into()),
                 acp_session_id: None,
+                provenance: None,
             },
         )
         .await
@@ -3314,6 +3328,7 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
                 acp_session_id: None,
+                provenance: None,
             },
         )
         .await
@@ -3356,6 +3371,7 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             },
         )
         .await
@@ -3606,6 +3622,7 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: Some("sess-1".into()),
+                provenance: None,
             },
         )
         .await

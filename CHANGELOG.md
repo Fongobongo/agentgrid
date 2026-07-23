@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (common — provenance record, Stage 13)
+
+- `ProvenanceRecord {originator, external_id, optional label}` in
+  `agentgrid-common`: a provenance link between an attempt and the external
+  system that originated it (Entire/h5i/Guild). Only identifiers — never
+  secrets — so safe to persist and surface in the UI/API.
+- `CompleteAttemptRequest` and `Assignment` now carry an optional
+  `ProvenanceRecord`; the node builds it from env
+  (`AGENTGRID_PROVENANCE_ORIGINATOR | _EXTERNAL_ID | _LABEL`) or echoes the
+  one the CP attached to the assignment. The CP persists it to
+  `attempts.provenance` (migration `0024_attempt_provenance.sql`).
+- `CompleteAttemptRequest` and `Assignment` now derive `Default` (cleaner
+  test fixtures).
+- Tests: `completion_propagates_provenance` (CP round-trip into attempts
+  row), `provenance_from_env_builds_record` (node env build).
+
 ### Added (control-plane — scheduled/recurring workflows, Stage 13)
 
 - A workflow template now has scheduled triggers that fire a new `WorkflowRun`

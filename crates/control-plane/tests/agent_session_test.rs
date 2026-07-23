@@ -155,6 +155,7 @@ async fn agent_session_opened_and_closed_on_complete() {
                 commit_sha: None,
                 error_code: None,
                 acp_session_id: None,
+                provenance: None,
             },
         )
         .await

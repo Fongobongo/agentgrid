@@ -370,6 +370,23 @@ fn level_rank(l: AutonomyLevel) -> u8 {
     }
 }
 
+/// Stage 13: build a `ProvenanceRecord` from the node env when an operator
+/// wants every run on this node tagged with its external origin
+/// (`AGENTGRID_PROVENANCE_ORIGINATOR` + `_EXTERNAL_ID`; `_LABEL` optional).
+/// `None` when the originator or external_id is unset — no provenance link.
+fn provenance_from_env() -> Option<agentgrid_common::ProvenanceRecord> {
+    let originator = std::env::var("AGENTGRID_PROVENANCE_ORIGINATOR").ok()?;
+    let external_id = std::env::var("AGENTGRID_PROVENANCE_EXTERNAL_ID").ok()?;
+    if originator.trim().is_empty() || external_id.trim().is_empty() {
+        return None;
+    }
+    Some(agentgrid_common::ProvenanceRecord {
+        originator,
+        external_id,
+        label: std::env::var("AGENTGRID_PROVENANCE_LABEL").ok(),
+    })
+}
+
 /// Stage 13: check an adapter's installed version against a profile's declared
 /// `adapter_version`. Returns `Some("infrastructure_failed")` when the profile
 /// declares a version and the installed adapter is missing or incompatible
@@ -1337,6 +1354,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             commit_sha,
             error_code,
             res.session_id.clone(),
+            assignment.provenance.clone().or_else(provenance_from_env),
             &cfg.completion_outbox,
         )
         .await;
@@ -1385,6 +1403,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
                 None,
                 Some("infrastructure_failed".into()),
                 None,
+                assignment.provenance.clone().or_else(provenance_from_env),
                 &cfg.completion_outbox,
             )
             .await;
@@ -1540,6 +1559,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             commit_sha: None,
             error_code: kill_reason.map(|k| k.to_string()),
             acp_session_id: None,
+            provenance: assignment.provenance.clone().or_else(provenance_from_env),
         };
         if let Err(e) = cfg
             .completion_outbox
@@ -1670,6 +1690,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         commit_sha,
         error_code,
         None,
+        assignment.provenance.clone().or_else(provenance_from_env),
         &cfg.completion_outbox,
     )
     .await;
@@ -1854,6 +1875,7 @@ async fn report_complete(
     commit_sha: Option<String>,
     error_code: Option<String>,
     acp_session_id: Option<String>,
+    provenance: Option<agentgrid_common::ProvenanceRecord>,
     completion_outbox: &outbox::CompletionOutbox,
 ) {
     let url = format!("{}/v1/node/attempts/{}/complete", server, attempt_id);
@@ -1862,6 +1884,7 @@ async fn report_complete(
         commit_sha,
         error_code,
         acp_session_id,
+        provenance,
     };
     // Stage 2.1: persist the completion durably so a daemon kill before the CP
     // acks it is redelivered on the next startup (complete_attempt is
@@ -2590,6 +2613,27 @@ mod tests {
     }
 
     #[test]
+    fn provenance_from_env_builds_record() {
+        let p = provenance_from_env();
+        assert_eq!(p, None);
+        std::env::set_var("AGENTGRID_PROVENANCE_ORIGINATOR", "entire");
+        std::env::set_var("AGENTGRID_PROVENANCE_EXTERNAL_ID", "proj-7");
+        std::env::remove_var("AGENTGRID_PROVENANCE_LABEL");
+        let r = provenance_from_env().expect("present when originator + external_id set");
+        assert_eq!(r.originator, "entire");
+        assert_eq!(r.external_id, "proj-7");
+        assert!(r.label.is_none());
+        std::env::set_var("AGENTGRID_PROVENANCE_LABEL", "nightly");
+        let r = provenance_from_env().unwrap();
+        assert_eq!(r.label.as_deref(), Some("nightly"));
+        // Missing external_id returns None even with originator set.
+        std::env::remove_var("AGENTGRID_PROVENANCE_EXTERNAL_ID");
+        assert_eq!(provenance_from_env(), None);
+        std::env::remove_var("AGENTGRID_PROVENANCE_ORIGINATOR");
+        std::env::remove_var("AGENTGRID_PROVENANCE_LABEL");
+    }
+
+    #[test]
     fn check_adapter_compatibility_fails_on_major_mismatch() {
         let p = |ver: Option<&str>| agentgrid_common::AgentProfile {
             id: "x".into(),
@@ -2770,6 +2814,7 @@ mod tests {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            provenance: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -2873,6 +2918,7 @@ mod tests {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            provenance: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
