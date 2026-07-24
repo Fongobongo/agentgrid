@@ -44,6 +44,22 @@ jobs:
       - run: npm run build
       - run: npm run lint
 
+  e2e-failinject:
+    name: e2e failure injection (process, no Docker)
+    runs-on: ubuntu-latest
+    needs: [rust]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build debug binaries
+        run: cargo build --workspace
+      - name: outbox durability (kill -9, CP outage, lost/retry)
+        run: bash tests/e2e/run-outbox.sh
+      - name: CP restart under load
+        run: bash tests/e2e/run-cp-restart.sh
+
   e2e:
     name: e2e (compose + 2 nodes + mock)
     runs-on: ubuntu-latest
