@@ -3142,10 +3142,14 @@ impl Store {
             return Ok(Vec::new());
         };
         let role: String = step_row.try_get("role").unwrap_or_default();
-        if role != "integrator" {
-            // Only integrator steps receive upstream commits to merge.
-            return Ok(Vec::new());
-        }
+        // Both Integrator and Verifier depend on upstream worker commits:
+        // Integrator cherry-picks *all* upstream worker commits to integrate
+        // them; Verifier (usually a single upstream worker) cherry-picks its
+        // single upstream worker commit so its worktree starts at the worker's
+        // tree on top of the base — letting it review/read the worker's change
+        // without ever seeing the worker's private transcripts (ADR: handoffs
+        // reference commits, not logs). Non-workflow / no-deps steps yield [].
+        let _ = role;
         let deps_json: String = step_row
             .try_get::<String, _>("depends_on")
             .unwrap_or_default();
@@ -4188,6 +4192,67 @@ mod workflow_tests {
             got,
             vec!["sha-worker-1".to_string(), "sha-worker-2".to_string()],
             "integrator carries upstream worker commit SHAs",
+        );
+    }
+
+    #[tokio::test]
+    async fn verifier_assignment_carries_upstream_worker_commit_for_isolation() {
+        // line 240: an independent verifier step should start from the worker's
+        // commit (so it can review the change) but never see the worker's
+        // private transcripts. Modeling: verifier's `upstream_commits` carries
+        // the worker's winning SHA (cherry-pick lands the worker tree on the
+        // verifier's base) — the handoff block only references the SHA + summary,
+        // never the transcript, so isolation holds by construction.
+        let s = temp_store().await;
+        let steps = vec![
+            step("w1", &[], WorkflowRole::Worker),
+            step("ver", &["w1"], WorkflowRole::Verifier),
+        ];
+        let tpl = s
+            .create_workflow_template("v", &steps, &None)
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let poll = agentgrid_common::PollRequest {
+            node_id: "n1".into(),
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            protocol_version: None,
+        };
+        s.register_or_touch_node(&poll).await.unwrap();
+
+        // Activate + complete the worker with a commit.
+        let _ = s.tick_workflow_run(&run.id).await.unwrap();
+        let a = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &a.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: Some("sha-worker-1".into()),
+                error_code: None,
+                acp_session_id: None,
+                provenance: None,
+                plan: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Two ticks to transition worker -> Succeeded and then activate verifier
+        // (deps are resolved from a snapshot taken at the top of each tick).
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let act = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(act.len(), 1, "verifier activates after worker succeeded");
+
+        let v = s.try_assign("n1").await.unwrap().unwrap();
+        assert_eq!(
+            v.upstream_commits,
+            vec!["sha-worker-1".to_string()],
+            "verifier carries the worker's winning commit SHA (no transcript)",
         );
     }
 

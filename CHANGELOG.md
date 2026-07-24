@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane — independent verifier workspace isolation, Stage 8 / line 240)
+
+- The independent verifier step now starts from the worker's tree without
+  ever touching the worker's private transcripts. By the Stage 13 ADR
+  (`HandoffPackage` references commits, not transcripts), `render_handoff_block`
+  already injects only summary + commit SHA; the verifier's worktree is its
+  own. The bridge to the tree was missing: `upstream_commits_for_task` now
+  carries the verifier's upstream worker SHA(s) (previously restricted to
+  the `integrator` role), and the node's `prepare_workspace` cherry-picks the
+  single upstream worker commit onto the verifier's base — so the verifier
+  starts at the worker's tree (can read the change for the verdict) but never
+  sees the worker's logs. Isolation holds by construction.
+- Test: `verifier_assignment_carries_upstream_worker_commit_for_isolation`.
+
 ### Added (common + control-plane + node-daemon — integrator integration branch, Stage 8 / line 239)
 
 - An integrator workflow step now lands its upstream workers' commits into

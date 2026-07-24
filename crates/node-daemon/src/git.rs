@@ -192,13 +192,21 @@ pub fn prepare_workspace(
             start_point,
         ],
     )?;
-    // Stage 8 / line 239: for an Integrator step, land upstream worker
-    // commits into this worktree as an integration branch before the agent
-    // runs. Each upstream SHA is fetched (best-effort, may already be in the
-    // mirror) and cherry-picked onto the new branch. A conflicting commit
-    // aborts the merge and surfaces to the integrator agent via a non-zero
-    // prep error; no partial state is committed (the worktree stays on the
-    // clean `start_point`).
+    // Stage 8 / line 239 / line 240: land upstream worker commits into
+    // this worktree before the agent runs.
+    //  - Integrator: cherry-pick *each* upstream worker commit so the worktree
+    //    starts from the integrated worker changes (an integration branch).
+    //  - Verifier: cherry-pick its (usually single) upstream worker commit so
+    //    the worktree starts at the worker's tree on top of the base — letting
+    //    the verifier read the worker's change for the verdict, without ever
+    //    seeing the worker's private transcripts (ADR: handoffs reference
+    //    commits, not logs; isolation holds because the worktree only has the
+    //    commit, never the worker's logs).
+    // Each upstream SHA is fetched (best-effort, may already be in the mirror)
+    // and cherry-picked onto the new branch. A conflicting commit aborts the
+    // cherry-pick and surfaces to the agent via a non-zero prep error; no
+    // partial state is committed (the worktree stays on the clean
+    // `start_point`).
     if !upstream_commits.is_empty() {
         for sha in upstream_commits {
             validate_token(sha)?;
