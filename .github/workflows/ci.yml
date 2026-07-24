@@ -59,6 +59,8 @@ jobs:
         run: bash tests/e2e/run-outbox.sh
       - name: CP restart under load
         run: bash tests/e2e/run-cp-restart.sh
+      - name: node disk-full fail-closed (spool limit)
+        run: bash tests/e2e/run-disk-full.sh
 
   e2e:
     name: e2e (compose + 2 nodes + mock)

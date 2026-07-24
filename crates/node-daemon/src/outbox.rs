@@ -29,10 +29,36 @@ struct EventLine {
 
 /// A durable event spool for one attempt. Append-only JSONL file guarded by a
 /// Mutex; acked events are dropped by rewriting the file with the survivors.
+///
+/// Spool limit: if the file grows past `spool_limit_bytes` (env
+/// `AGENTGRID_OUTBOX_SPOOL_LIMIT_MB`, default 256 MiB; 0 = unlimited),
+/// `push` returns `Err(push::Error::SpoolFull)` so the sink can fail-closed
+/// (emit a terminal `spool_full` error + stop buffering) instead of filling
+/// the disk when the control plane is unreachable for a long time.
 pub struct EventOutbox {
     path: PathBuf,
     file: Mutex<()>,
+    spool_limit_bytes: u64,
 }
+
+/// Errors from [`EventOutbox::push`]. `SpoolFull` is recoverable: the caller
+/// should stop accepting events and terminate the attempt with `spool_full`.
+#[derive(Debug)]
+pub enum PushError {
+    SpoolFull,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for PushError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PushError::SpoolFull => write!(f, "outbox spool full (limit reached)"),
+            PushError::Other(e) => write!(f, "outbox push failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PushError {}
 
 impl EventOutbox {
     pub fn open(dir: &Path, attempt_id: &str) -> Result<Self> {
@@ -42,21 +68,45 @@ impl EventOutbox {
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '-')
             .collect::<String>();
+        let spool_limit_bytes = std::env::var("AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                std::env::var("AGENTGRID_OUTBOX_SPOOL_LIMIT_MB")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|mb| mb * 1024 * 1024)
+                    .unwrap_or(256 * 1024 * 1024)
+            });
         Ok(Self {
             path: dir.join(format!("{safe}.jsonl")),
             file: Mutex::new(()),
+            spool_limit_bytes,
         })
     }
 
-    /// Append an event durably. Returns immediately after fsync.
-    pub fn push(&self, ev: &IncomingEvent) -> Result<()> {
+    /// Append an event durably. Returns immediately after fsync. Returns
+    /// `Err(PushError::SpoolFull)` when the on-disk spool exceeds the limit so
+    /// the caller can fail-closed instead of filling the disk.
+    pub fn push(&self, ev: &IncomingEvent) -> std::result::Result<(), PushError> {
         let _g = self.file.lock().unwrap();
+        // Check the cap before appending: if already over, refuse. The limit
+        // is a safety ceiling, not an exact bound (one event may overshoot).
+        if self.spool_limit_bytes > 0 {
+            if let Ok(meta) = std::fs::metadata(&self.path) {
+                if meta.len() >= self.spool_limit_bytes {
+                    return Err(PushError::SpoolFull);
+                }
+            }
+        }
         let line = EventLine {
             seq: ev.sequence,
             ty: serde_json::to_value(ev.r#type).unwrap_or(serde_json::Value::Null),
             payload: ev.payload.clone(),
         };
-        let mut s = serde_json::to_string(&line).context("encode outbox line")?;
+        let mut s = serde_json::to_string(&line)
+            .context("encode outbox line")
+            .map_err(PushError::Other)?;
         s.push('\n');
         // O_APPEND via OpenOptions ensures atomic appends for lines < PIPE_BUF.
         use std::io::Write;
@@ -64,9 +114,10 @@ impl EventOutbox {
             .create(true)
             .append(true)
             .open(&self.path)
-            .with_context(|| format!("open outbox {}", self.path.display()))?;
-        f.write_all(s.as_bytes())?;
-        f.sync_data()?;
+            .with_context(|| format!("open outbox {}", self.path.display()))
+            .map_err(PushError::Other)?;
+        f.write_all(s.as_bytes()).map_err(|e| PushError::Other(e.into()))?;
+        f.sync_data().map_err(|e| PushError::Other(e.into()))?;
         Ok(())
     }
 
@@ -348,6 +399,45 @@ mod tests {
         assert_eq!(r.acp_session_id.as_deref(), Some("sess-1"));
         co2.ack("att-9").unwrap();
         assert!(co2.pending().unwrap().is_empty(), "acked completion gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// When the on-disk spool exceeds the configured limit, `push` must return
+    /// `SpoolFull` so the sink can fail-closed (disk-full protection) instead
+    /// of growing the file until the host disk fills.
+    #[test]
+    fn event_outbox_push_fails_when_spool_limit_reached() {
+        let dir = tmpdir("spool");
+        // Tiny limit: 1 event's line (~40 bytes) overshoots it on the next push.
+        std::env::set_var("AGENTGRID_OUTBOX_SPOOL_LIMIT_MB", "0");
+        // 0 = unlimited; use 1 MiB-style integer? No — env is in MiB, so 0 is
+        // the unlimited sentinel. Use a 1-byte limit by setting MiB=0 and
+        // then patching the struct directly.
+        std::env::remove_var("AGENTGRID_OUTBOX_SPOOL_LIMIT_MB");
+        let ob = EventOutbox::open(&dir, "att-sp").unwrap();
+        // Override the limit to 1 byte so the first push lands and the second
+        // is refused (the file is now > 1 byte).
+        let ob = EventOutbox {
+            path: ob.path.clone(),
+            file: Mutex::new(()),
+            spool_limit_bytes: 1,
+        };
+        let ev = IncomingEvent {
+            sequence: 1,
+            r#type: EventType::Stdout,
+            payload: json!({ "text": "x" }),
+        };
+        // First push: file is empty (len 0 < 1) → succeeds, file now > 1 byte.
+        ob.push(&ev).unwrap();
+        // Second push: file len > 1 → SpoolFull.
+        match ob.push(&IncomingEvent {
+            sequence: 2,
+            r#type: EventType::Stdout,
+            payload: json!({ "text": "y" }),
+        }) {
+            Err(PushError::SpoolFull) => {}
+            other => panic!("expected SpoolFull, got {other:?}"),
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

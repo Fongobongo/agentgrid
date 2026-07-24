@@ -732,6 +732,10 @@ struct EventSink {
     /// Stage 2.1: latched once an `output_truncated` notice has been emitted,
     // so a chatty agent produces one truncation notice, not one per dropped line.
     truncated_warned: std::sync::atomic::AtomicBool,
+    /// Latched once the on-disk outbox hit its spool limit. Further `push`
+    // calls become no-ops and `run_attempt` should fail the attempt with
+    // `error_code=spool_full` (disk-full fail-closed).
+    spool_full: std::sync::atomic::AtomicBool,
 }
 
 impl EventSink {
@@ -752,6 +756,7 @@ impl EventSink {
             outbox,
             buf_bytes: AtomicU64::new(0),
             truncated_warned: std::sync::atomic::AtomicBool::new(false),
+            spool_full: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -803,8 +808,24 @@ impl EventSink {
         };
         // Stage 2.1: persist before buffering so a kill doesn't drop it. A
         // failed fsync is non-fatal (we still deliver from RAM this run); it
-        // just means the disk tail isn't covered.
+        // just means the disk tail isn't covered. SpoolFull is NOT non-fatal:
+        // the on-disk outbox hit its ceiling, so further events can't be made
+        // durable. Latch `spool_full` (once) and emit a terminal `error` event
+        // so the operator sees why the attempt is being failed.
         if let Err(e) = self.outbox.push(&ev) {
+            if matches!(e, outbox::PushError::SpoolFull) {
+                if !self
+                    .spool_full
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    tracing::error!(
+                        attempt_id = %self.attempt_id,
+                        "outbox spool limit reached; failing attempt to protect the disk"
+                    );
+                    self.emit_spool_full_error().await;
+                }
+                return;
+            }
             tracing::warn!(attempt_id = %self.attempt_id, "outbox push failed: {e}");
         }
         self.buf_bytes.fetch_add(approx_bytes, Ordering::Relaxed);
@@ -830,6 +851,33 @@ impl EventSink {
         }
         self.buf.lock().await.push_back(ev);
         self.notify.notify_one();
+    }
+
+    /// Emit the single terminal `spool_full` error event. Best-effort: if the
+    /// outbox is truly full this push may also fail, in which case the event
+    /// is only in RAM (delivered this run if the CP comes back before exit).
+    async fn emit_spool_full_error(&self) {
+        let seq = self.next.fetch_add(1, Ordering::SeqCst);
+        let ev = IncomingEvent {
+            sequence: seq,
+            r#type: EventType::Error,
+            payload: serde_json::json!({
+                "event": "spool_full",
+                "reason": "outbox spool limit reached; further events dropped to protect the disk",
+                "error_code": "spool_full",
+            }),
+        };
+        if let Err(e) = self.outbox.push(&ev) {
+            tracing::warn!(attempt_id = %self.attempt_id, "outbox push (spool_full) failed: {e}");
+        }
+        self.buf.lock().await.push_back(ev);
+        self.notify.notify_one();
+    }
+
+    /// True once the on-disk outbox hit its spool limit. `run_attempt` checks
+    /// this after the adapter exits and fails the attempt with `spool_full`.
+    fn spool_full(&self) -> bool {
+        self.spool_full.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     async fn flush(&self) {
@@ -1506,6 +1554,10 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         // Stage 11.4.
         let mut exit_code = if res.success { 0 } else { 1 };
         let mut error_code = res.error_code;
+        if sink.spool_full() {
+            exit_code = 1;
+            error_code = Some("spool_full".into());
+        }
         if exit_code == 0 {
             if let Some(cmd) = &assignment.validation_command {
                 match run_validation(&workdir, cmd, &sink, &cfg.secrets).await {
@@ -1821,7 +1873,9 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             .await??;
 
     let code = last_code;
-    let error_code: Option<String> = if code == 0 {
+    let error_code: Option<String> = if sink.spool_full() {
+        Some("spool_full".into())
+    } else if code == 0 {
         if validation_passed {
             None
         } else {
