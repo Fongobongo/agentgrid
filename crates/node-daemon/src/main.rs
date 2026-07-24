@@ -1301,8 +1301,9 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     let repo_root = cfg.repository_root.clone();
     let ws_root = cfg.workspace_root.clone();
     let prep_assignment = assignment.clone();
+    let upstream = assignment.upstream_commits.clone();
     let ws = tokio::task::spawn_blocking(move || {
-        git::prepare_workspace(&repo_root, &ws_root, &prep_assignment)
+        git::prepare_workspace(&repo_root, &ws_root, &prep_assignment, &upstream)
     })
     .await??;
     tracing::info!(attempt_id = %assignment.attempt_id, git = ws.is_git, "starting attempt");
@@ -2922,6 +2923,7 @@ mod tests {
             base_commit: None,
             parent_acp_session_id: None,
             provenance: None,
+            upstream_commits: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -3026,6 +3028,7 @@ mod tests {
             base_commit: None,
             parent_acp_session_id: None,
             provenance: None,
+            upstream_commits: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),

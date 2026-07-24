@@ -118,6 +118,7 @@ pub fn prepare_workspace(
     repository_root: &Path,
     workspace_root: &Path,
     assignment: &Assignment,
+    upstream_commits: &[String],
 ) -> Result<Workspace> {
     let ws = workspace_root.join(&assignment.attempt_id);
     std::fs::create_dir_all(&ws)?;
@@ -191,6 +192,51 @@ pub fn prepare_workspace(
             start_point,
         ],
     )?;
+    // Stage 8 / line 239: for an Integrator step, land upstream worker
+    // commits into this worktree as an integration branch before the agent
+    // runs. Each upstream SHA is fetched (best-effort, may already be in the
+    // mirror) and cherry-picked onto the new branch. A conflicting commit
+    // aborts the merge and surfaces to the integrator agent via a non-zero
+    // prep error; no partial state is committed (the worktree stays on the
+    // clean `start_point`).
+    if !upstream_commits.is_empty() {
+        for sha in upstream_commits {
+            validate_token(sha)?;
+            // Best-effort: ensure the commit object is present in the local
+            // mirror so cherry-pick can resolve it.
+            let _ = Command::new("git")
+                .args(["fetch", "origin", sha])
+                .current_dir(&repo_dir)
+                .status();
+        }
+        let ws_path = ws.to_str().unwrap_or("");
+        for sha in upstream_commits {
+            let cp = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=agentgrid",
+                    "-c",
+                    "user.email=agentgrid@agentgrid",
+                    "cherry-pick",
+                    sha,
+                ])
+                .current_dir(ws_path)
+                .output()?;
+            if !cp.status.success() {
+                // Abort the cherry-pick so the index is back to a clean state;
+                // the worktree branch is left at `start_point` (no worker
+                // commits partially merged), and the caller reports the error.
+                let _ = Command::new("git")
+                    .args(["cherry-pick", "--abort"])
+                    .current_dir(ws_path)
+                    .status();
+                anyhow::bail!(
+                    "integrator cherry-pick of upstream commit {sha} conflicted; \
+                     merged branches need manual resolution or non-conflicting workers"
+                );
+            }
+        }
+    }
     // Stage 2.2: keep agent-side logs and our own patch out of the commit / diff.
     // `.git/info/exclude` is per-worktree gitdir for linked worktrees, so this
     // scopes to this attempt only and does not touch the shared clone.
@@ -344,6 +390,7 @@ mod tests {
             base_commit: None,
             parent_acp_session_id: None,
             provenance: None,
+            upstream_commits: vec![],
         }
     }
 
@@ -352,7 +399,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ag-git-plain-{}", uuid::Uuid::new_v4()));
         let ws_root = dir.join("ws");
         let a = make_assignment("", "main");
-        let ws = prepare_workspace(&dir.join("repos"), &ws_root, &a).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &ws_root, &a, &[]).unwrap();
         assert!(!ws.is_git);
         assert!(ws.path.exists());
         assert!(finalize_workspace(ws, "n@x").unwrap().is_none());
@@ -383,7 +430,7 @@ mod tests {
         .unwrap();
 
         let a = make_assignment(origin.to_str().unwrap(), "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
         assert!(ws.is_git);
         // Agent writes a new file in the worktree.
         std::fs::write(ws.path.join("new.txt"), "hello").unwrap();
@@ -419,7 +466,7 @@ mod tests {
         )
         .unwrap();
         let a = make_assignment(origin.to_str().unwrap(), "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
         assert!(ws.is_git);
         let ws_path = ws.path.clone();
         let repo_dir = ws.repo_dir.clone().unwrap();
@@ -449,7 +496,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("ag-git-cleanup-plain-{}", uuid::Uuid::new_v4()));
         let a = make_assignment("", "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
         assert!(!ws.is_git);
         let ws_path = ws.path.clone();
         assert!(ws_path.exists());
@@ -524,7 +571,7 @@ mod tests {
 
         let mut a = make_assignment(origin.to_str().unwrap(), "main");
         a.base_commit = Some(c0.clone());
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
         assert!(ws.is_git);
         assert_eq!(ws.base_commit.as_deref(), Some(c0.as_str()));
         // worktree HEAD is the pinned commit, not the main tip
@@ -566,7 +613,7 @@ mod tests {
         .unwrap();
 
         let a = make_assignment(origin.to_str().unwrap(), "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
         // Agent writes a legit change plus the private logs node writes in-tree.
         std::fs::write(ws.path.join("new.txt"), "hello").unwrap();
         std::fs::write(ws.path.join("agent-raw-output.log"), "SECRET-RAW").unwrap();
@@ -643,8 +690,9 @@ mod tests {
                     base_commit: None,
                     parent_acp_session_id: None,
                     provenance: None,
+                    upstream_commits: vec![],
                 };
-                prepare_workspace(&repos, &ws_root, &a)
+                prepare_workspace(&repos, &ws_root, &a, &[])
             }));
         }
         let mut ok = 0;
@@ -665,6 +713,93 @@ mod tests {
     }
 
     #[test]
+    fn integrator_cherry_picks_nonconflicting_worker_commits() {
+        // Stage 8 / line 239: an integrator step's worktree lands each
+        // upstream worker's winning commit before the agent runs. We model
+        // two non-conflicting worker commits on separate worker branches off
+        // `origin/main`; the integrator's `upstream_commits` lists their SHAs,
+        // and the prepared worktree must contain both files (both commits
+        // cherry-picked onto the integrator branch).
+        let dir = std::env::temp_dir().join(format!("ag-git-integ-{}", uuid::Uuid::new_v4()));
+        let origin = dir.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(origin.join("base.txt"), "base").unwrap();
+        git(&origin, &["add", "-A"]).unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        // Worker 1: add file1 on its own branch off main.
+        git(&origin, &["checkout", "-q", "-b", "worker1"]).unwrap();
+        std::fs::write(origin.join("file1.txt"), "one").unwrap();
+        git(
+            &origin,
+            &["-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"],
+        )
+        .unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "worker1",
+            ],
+        )
+        .unwrap();
+        let sha1 = git_out(&origin, &["rev-parse", "worker1"]).unwrap();
+
+        // Worker 2: non-conflicting edit on its own branch off main.
+        git(&origin, &["checkout", "-q", "main"]).unwrap();
+        git(&origin, &["checkout", "-q", "-b", "worker2"]).unwrap();
+        std::fs::write(origin.join("file2.txt"), "two").unwrap();
+        git(
+            &origin,
+            &["-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"],
+        )
+        .unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "worker2",
+            ],
+        )
+        .unwrap();
+        let sha2 = git_out(&origin, &["rev-parse", "worker2"]).unwrap();
+
+        // Integrator prep with both worker SHAs.
+        let a = make_assignment(origin.to_str().unwrap(), "main");
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[sha1, sha2])
+            .expect("non-conflicting cherry-picks succeed");
+        assert!(ws.path.join("file1.txt").exists(), "worker1 commit landed");
+        assert!(ws.path.join("file2.txt").exists(), "worker2 commit landed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn rejects_injection_in_repo_branch_or_url() {
         let dir = std::env::temp_dir().join(format!("ag-git-inj-{}", uuid::Uuid::new_v4()));
         let repos = dir.join("repos");
@@ -673,26 +808,29 @@ mod tests {
 
         a.repository = "repo; rm -rf /".into();
         assert!(
-            prepare_workspace(&repos, &ws, &a).is_err(),
+            prepare_workspace(&repos, &ws, &a, &[]).is_err(),
             "repo injection"
         );
 
         a.repository = "repo".into();
         a.default_branch = "main; touch /tmp/pwn".into();
         assert!(
-            prepare_workspace(&repos, &ws, &a).is_err(),
+            prepare_workspace(&repos, &ws, &a, &[]).is_err(),
             "branch injection"
         );
 
         a.default_branch = "../escape".into();
         assert!(
-            prepare_workspace(&repos, &ws, &a).is_err(),
+            prepare_workspace(&repos, &ws, &a, &[]).is_err(),
             "branch traversal"
         );
 
         a.default_branch = "main".into();
         a.git_url = "$(curl evil)".into();
-        assert!(prepare_workspace(&repos, &ws, &a).is_err(), "url injection");
+        assert!(
+            prepare_workspace(&repos, &ws, &a, &[]).is_err(),
+            "url injection"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

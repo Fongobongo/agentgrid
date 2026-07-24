@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (common + control-plane + node-daemon — integrator integration branch, Stage 8 / line 239)
+
+- An integrator workflow step now lands its upstream workers' commits into
+  its worktree as an integration branch before the agent runs, instead of
+  the integrator agent doing the merge by hand.
+  - common: `Assignment.upstream_commits: Vec<String>` carries each upstream
+    worker's winning commit SHA (default empty, `skip_serializing_if = empty`,
+    backward compatible with legacy nodes).
+  - control-plane: `Store::upstream_commits_for_task` resolves an integrator
+    step's `depends_on` → each upstream worker step's task → the winning
+    attempt `commit_sha`, and fills the assignment at `try_assign`. Non-
+    workflow / non-integrator tasks and missing SHAs yield `[]` (best-effort,
+    no block).
+  - node-daemon: `prepare_workspace(..., upstream_commits)` cherry-picks each
+    SHA onto the integrator's fresh worktree branch (best-effort `git fetch`
+    so the object is present; token-validated SHAs as defense-in-depth). On a
+    conflict it aborts the cherry-pick and surfaces a non-zero prep error,
+    leaving the branch clean on `start_point` (no partial merge committed).
+- Tests: `integrator_assignment_carries_upstream_worker_commits` (CP store),
+  `integrator_cherry_picks_nonconflicting_worker_commits` (node git).
+
 ### Resolved (audit — regression-test checklist, Spec 22.1.1)
 
 - Marked three regression-test checkboxes as covered after re-auditing the

@@ -1059,6 +1059,7 @@ impl Store {
                 .await?;
             tx.commit().await?;
 
+            let upstream_commits = self.upstream_commits_for_task(&task_id).await?;
             return Ok(Some(Assignment {
                 attempt_id,
                 task_id,
@@ -1073,6 +1074,7 @@ impl Store {
                 base_commit,
                 parent_acp_session_id,
                 provenance: None,
+                upstream_commits,
             }));
         }
 
@@ -3114,6 +3116,78 @@ impl Store {
             .filter(|s| !s.is_empty()))
     }
 
+    /// Stage 8 / line 239: for an Integrator workflow step's task, resolve the
+    /// winning commit SHAs of its upstream dependency steps, so the node can
+    /// land them into the integrator's worktree as an integration branch.
+    /// Returns `[]` for plain (non-workflow) tasks and for steps without any
+    /// succeeded dependency. Best-effort: a missing commit SHA is skipped
+    /// (the integrator still runs, but with one fewer merged worker).
+    async fn upstream_commits_for_task(&self, task_id: &str) -> Result<Vec<String>> {
+        // 1. task_id -> role_runs.step_run_id (the integrator step run).
+        let this_step_run: Option<String> =
+            sqlx::query_scalar("SELECT step_run_id FROM role_runs WHERE task_id = ? LIMIT 1")
+                .bind(task_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(step_run_id) = this_step_run else {
+            return Ok(Vec::new()); // plain (non-workflow) task
+        };
+
+        // 2. step_run_id -> workflow_steps row (depends_on JSON + role).
+        let step_row = sqlx::query("SELECT depends_on, role FROM workflow_steps WHERE id = ?")
+            .bind(&step_run_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(step_row) = step_row else {
+            return Ok(Vec::new());
+        };
+        let role: String = step_row.try_get("role").unwrap_or_default();
+        if role != "integrator" {
+            // Only integrator steps receive upstream commits to merge.
+            return Ok(Vec::new());
+        }
+        let deps_json: String = step_row
+            .try_get::<String, _>("depends_on")
+            .unwrap_or_default();
+        let deps: Vec<String> = serde_json::from_str(&deps_json).unwrap_or_default();
+        if deps.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 3. For each dependency step_id -> find its run's task -> winning commit.
+        // `workflow_steps.step_id` is the template id (shared within the run),
+        // so resolve it via the same run as the integrator.
+        let run_id: String = sqlx::query_scalar("SELECT run_id FROM workflow_steps WHERE id = ?")
+            .bind(&step_run_id)
+            .fetch_one(&self.pool)
+            .await?;
+        let mut out = Vec::new();
+        for dep_step_id in deps {
+            // step run id for this dependency within the same run.
+            let dep_step_run: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM workflow_steps WHERE run_id = ? AND step_id = ? LIMIT 1",
+            )
+            .bind(&run_id)
+            .bind(&dep_step_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(dep_step_run) = dep_step_run else {
+                continue;
+            };
+            // task bound to that step run.
+            let dep_task: Option<String> =
+                sqlx::query_scalar("SELECT task_id FROM role_runs WHERE step_run_id = ? LIMIT 1")
+                    .bind(&dep_step_run)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            let Some(dep_task) = dep_task else { continue };
+            if let Some(sha) = self.attempt_commit_for_task(&dep_task).await? {
+                out.push(sha);
+            }
+        }
+        Ok(out)
+    }
+
     /// Stage 13: stamp a pending plan onto the run row (read on approval).
     async fn set_workflow_run_plan(&self, run_id: &str, plan: &str) -> Result<()> {
         sqlx::query("UPDATE workflow_runs SET plan = ? WHERE id = ?")
@@ -4027,6 +4101,93 @@ mod workflow_tests {
             run_got.status,
             WorkflowRunStatus::Blocked,
             "run must be blocked, not failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn integrator_assignment_carries_upstream_worker_commits() {
+        // line 239: an integrator step's assignment lists the winning commit
+        // SHAs of its dependency steps under `upstream_commits` so the node can
+        // land them as an integration branch. Modeled end-to-end in the store:
+        // two parallel workers complete with commit SHAs, then tick activates
+        // the integrator step; `try_assign` must surface both SHAs.
+        let s = temp_store().await;
+        let steps = vec![
+            step("w1", &[], WorkflowRole::Worker),
+            step("w2", &[], WorkflowRole::Worker),
+            step("int", &["w1", "w2"], WorkflowRole::Integrator),
+        ];
+        let tpl = s
+            .create_workflow_template("int", &steps, &None)
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let poll = agentgrid_common::PollRequest {
+            node_id: "n1".into(),
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 4,
+            protocol_version: None,
+        };
+        s.register_or_touch_node(&poll).await.unwrap();
+
+        // activate w1 + w2.
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 2, "both parallel workers activate");
+        let _ = created; // consume
+
+        // Complete worker 1 with a commit sha.
+        let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &a1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: Some("sha-worker-1".into()),
+                error_code: None,
+                acp_session_id: None,
+                provenance: None,
+                plan: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Complete worker 2 with a commit sha.
+        let a2 = s.try_assign("n1").await.unwrap().unwrap();
+        s.complete_attempt(
+            &a2.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: Some("sha-worker-2".into()),
+                error_code: None,
+                acp_session_id: None,
+                provenance: None,
+                plan: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Workers done. Each tick advances its own steps; deps only become
+        // visible to a pending integrator on the next tick (status_by_id is a
+        // snapshot at the top of the loop), so tick twice: first tick transitions
+        // workers `Running` -> `Succeeded`, second tick activates the integrator.
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let act = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(act.len(), 1, "integrator activates after workers succeeded");
+
+        // try_assign the integrator task and confirm upstream_commits is set.
+        let int_a = s.try_assign("n1").await.unwrap().unwrap();
+        let mut got = int_a.upstream_commits.clone();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["sha-worker-1".to_string(), "sha-worker-2".to_string()],
+            "integrator carries upstream worker commit SHAs",
         );
     }
 

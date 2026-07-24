@@ -353,6 +353,12 @@ pub struct Assignment {
     /// by the node back on the completion call so the CP persists it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ProvenanceRecord>,
+    /// Stage 8 / line 239: worker commit SHAs an Integrator step should land
+    /// into its worktree as an integration branch before the agent runs. Each
+    /// is an upstream worker's winning commit. Empty for non-integrator steps.
+    /// The node cherry-picks them in order (defense-in-depth: token-validated).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream_commits: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -755,6 +761,7 @@ mod tests {
                 base_commit: None,
                 parent_acp_session_id: None,
                 provenance: None,
+                upstream_commits: vec![],
             }),
         };
         assert_eq!(round_trip(&pr), pr);
