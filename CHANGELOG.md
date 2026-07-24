@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (cli — live lifecycle phase + colored `ag logs`)
+
+- `ag logs` now derives and prints a client-side lifecycle `Phase` (`starting |
+  working | blocked | done`) per iteration, orthogonal to the terminal
+  `AttemptStatus`. `working` follows tool/file/stdout events; `done` follows
+  `result`/`error` or terminal status; `blocked` overlays when a durable
+  approval is pending for the task (queried from the existing approvals table,
+  no store/migration change). Mirrors the herdr agent-state idea but computed
+  client-side from the events the control plane already emits.
+- Colored output (ANSI): tool cyan, stderr red, result green, error bright red,
+  status yellow; `--no-color` to disable.
+- Pretty event payload: `tool_call` → tool + input, `file_change` → op +
+  path, not just the `text` field.
+- Tests: `phase_from_event_lifecycle`, `paint_no_color_passthrough`.
+- Idea credited to [herdr](https://github.com/ogulcancelik/herdr)'s agent
+  lifecycle enum; a full-screen TUI (ratatui multi-task dashboard) is backlog,
+  YAGNI until operator-side ssh friction proves it.
+
 ### Added (node-daemon — per-agent native projection, Stage 11.3 / line 363)
 
 - The agent profile is now also projected into each adapter's native convention

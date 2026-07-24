@@ -364,6 +364,14 @@
 
 ### 11.4 Feedback-loop CI→agent (из AgentWrapper) — done
 
+### 11.5 `ag logs` live phase + colored output (из herdr lifecycle-state idea)
+
+- [x] Client-side lifecycle `Phase { Starting, Working, Blocked, Done }` derived from the event stream + pending-approval query (orthogonal to `AttemptStatus`); no store/migration change (events + approvals table already exist).
+- [x] Colored `ag logs` (ANSI: tool cyan, stderr red, result green, error bright red, status yellow; `--no-color` to disable).
+- [x] Pretty payload: `tool_call` → tool + input, `file_change` → op + path, not just `text`.
+- [x] Tests: `phase_from_event_lifecycle`, `paint_no_color_passthrough`.
+- [ ] Full-screen TUI (ratatui): multi-task dashboard, scrollable pane, live phase indicator — backlog. Trigger: operator working over ssh (no browser) needing simultaneous multi-task visibility beyond `ag logs --follow`. Not MVP; YAGNI until the friction is real.
+
 - [x] Wrapper path: spawn→select→finalize→validate обёрнуты в цикл. При провале `validation_command` (agent exit 0, validation fail) и остались retries (`AGENTGRID_FEEDBACK_RETRIES`, default 0=off) — re-spawn агента с prompt = оригинал + "\n\nValidation failed (round N):\n```\n<validation.log>\n```\nFix the code so the validation passes.". Worktree накапливает фиксы, commit один раз в конце. Все события (включая `feedback` event) под одним attempt. Backward compatible (retries=0).
 - [x] ACP path: раньше вообще не бегал validation (баг) — теперь `finalize_workspace` + `run_validation` после `drive_acp_session`, перед report_complete. Feedback-loop на ACP = follow-up (structure differs).
 - [ ] Опц.: роутинг review-comments/merge-conflicts (нужен GitHub integration).

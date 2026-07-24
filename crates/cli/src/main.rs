@@ -107,6 +107,52 @@ struct LogsArgs {
     /// Follow until the task reaches a terminal state.
     #[arg(long)]
     follow: bool,
+    /// Disable colored output. Default: color on.
+    #[arg(long)]
+    no_color: bool,
+}
+
+/// Render lifecycle phase derived from the event stream + pending approvals,
+/// orthogonal to the terminal `TaskStatus`. Mirrors the herdr agent-state idea
+/// (`idle | working | blocked | done`) but computed client-side from events
+/// the control plane already emits, so no store/migration change is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// No structured events yet seen (just stdout/stderr).
+    Starting,
+    /// Last structured event was a tool call / progress / file change.
+    Working,
+    /// A durable approval is pending for this task (or the stream says so).
+    Blocked,
+    /// Vertically terminal — set by callers once `TaskStatus` is terminal.
+    Done,
+}
+
+impl Phase {
+    fn label(self) -> &'static str {
+        match self {
+            Phase::Starting => "starting",
+            Phase::Working => "working",
+            Phase::Blocked => "blocked",
+            Phase::Done => "done",
+        }
+    }
+}
+
+const C_RESET: &str = "\x1b[0m";
+const C_GRAY: &str = "\x1b[90m";
+const C_RED: &str = "\x1b[31m";
+const C_CYAN: &str = "\x1b[36m";
+const C_YELLOW: &str = "\x1b[33m";
+const C_GREEN: &str = "\x1b[32m";
+const C_BOLD: &str = "\x1b[1m";
+
+fn paint(no_color: bool, code: &str, s: &str) -> String {
+    if no_color {
+        s.to_string()
+    } else {
+        format!("{code}{s}{C_RESET}")
+    }
 }
 
 #[derive(Args)]
@@ -551,7 +597,9 @@ async fn cmd_show(client: &reqwest::Client, base: &str, a: ShowArgs, json: bool)
 }
 
 async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<()> {
+    let nc = a.no_color;
     let mut after: u64 = 0;
+    let mut phase = Phase::Starting;
     loop {
         let resp = client
             .get(format!("{base}/v1/tasks/{}/events", a.task_id))
@@ -565,13 +613,31 @@ async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<(
                 let seq = e.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
                 after = after.max(seq);
                 let ty = e.get("type").and_then(|v| v.as_str()).unwrap_or("?");
-                let text = e
-                    .get("payload")
-                    .and_then(|p| p.get("text"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                println!("[{seq}] {ty}: {text}");
+                phase = phase_from_event(ty, e);
+                print_event(e, seq, ty, nc);
             }
+        }
+        // Stage TUI-idea: overlay a `blocked` phase when a durable approval is
+        // pending for this task (approvals live in their own table, not the
+        // event stream, so the stream alone never reports blocked).
+        if phase != Phase::Done && has_pending_approval(client, base, &a.task_id).await {
+            phase = Phase::Blocked;
+        }
+        if a.follow {
+            eprintln!(
+                "{} {}",
+                paint(nc, C_BOLD, "phase:"),
+                paint(
+                    nc,
+                    match phase {
+                        Phase::Blocked => C_YELLOW,
+                        Phase::Working => C_CYAN,
+                        Phase::Done => C_GREEN,
+                        _ => C_GRAY,
+                    },
+                    phase.label()
+                )
+            );
         }
         if !a.follow {
             break;
@@ -581,12 +647,111 @@ async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<(
                 status,
                 TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
             ) {
+                phase = Phase::Done;
                 break;
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+    if a.follow {
+        eprintln!(
+            "{} {}",
+            paint(nc, C_BOLD, "phase:"),
+            paint(
+                nc,
+                match phase {
+                    Phase::Blocked => C_YELLOW,
+                    Phase::Working => C_CYAN,
+                    Phase::Done => C_GREEN,
+                    _ => C_GRAY,
+                },
+                phase.label()
+            )
+        );
+    }
     Ok(())
+}
+
+fn phase_from_event(ty: &str, e: &serde_json::Value) -> Phase {
+    match ty {
+        "tool" | "tool_call" | "file_change" | "progress" | "stdout" | "stderr" => Phase::Working,
+        "result" => Phase::Done,
+        "error" => Phase::Done,
+        "status" => {
+            // a status event with a terminal-ish payload hints at done; deault Working.
+            if let Some(p) = e.get("payload") {
+                if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                    if t.contains("succeeded") || t.contains("failed") || t.contains("cancelled") {
+                        return Phase::Done;
+                    }
+                }
+            }
+            Phase::Working
+        }
+        _ => Phase::Starting,
+    }
+}
+
+fn print_event(e: &serde_json::Value, seq: u64, ty: &str, nc: bool) {
+    let payload = e.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+    let text = payload.get("text").and_then(|t| t.as_str()).unwrap_or("");
+    let line = match ty {
+        "stdout" => format!(
+            "{} {}",
+            paint(nc, C_GRAY, "stdout"),
+            paint(nc, C_GRAY, text)
+        ),
+        "stderr" => format!("{} {}", paint(nc, C_RED, "stderr"), paint(nc, C_RED, text)),
+        "tool" | "tool_call" => {
+            let tool = payload.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
+            let input = payload.get("input").and_then(|v| v.as_str()).unwrap_or("");
+            format!(
+                "{} {} {}",
+                paint(nc, C_CYAN, "tool"),
+                paint(nc, C_BOLD, tool),
+                input
+            )
+        }
+        "file_change" => {
+            let path = payload.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let op = payload
+                .get("op")
+                .and_then(|v| v.as_str())
+                .unwrap_or("change");
+            format!(
+                "{} {} {}",
+                paint(nc, C_CYAN, "file"),
+                paint(nc, C_BOLD, op),
+                path
+            )
+        }
+        "result" => format!("{} {}", paint(nc, C_GREEN, "result"), text),
+        "error" => format!("{} {}", paint(nc, C_RED, "error"), paint(nc, C_BOLD, text)),
+        "status" => format!("{} {}", paint(nc, C_YELLOW, "status"), text),
+        _ => format!("{} {}", paint(nc, C_GRAY, ty), text),
+    };
+    println!("{} {}", paint(nc, C_GRAY, &format!("[{seq}]")), line);
+}
+
+async fn has_pending_approval(client: &reqwest::Client, base: &str, task_id: &str) -> bool {
+    // Approvals are listed globally with a status filter; client filters by
+    // task_id. On any error, false (fail-open on display, not on enforcement).
+    let resp = match client
+        .get(format!("{base}/v1/approvals"))
+        .query(&[("status", "pending")])
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let views: Vec<serde_json::Value> = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    views
+        .iter()
+        .any(|v| v.get("task_id").and_then(|t| t.as_str()) == Some(task_id))
 }
 
 async fn current_status(client: &reqwest::Client, base: &str, task_id: &str) -> Result<TaskStatus> {
@@ -1690,5 +1855,34 @@ mod node_install_tests {
     fn wireguard_transport_not_implemented() {
         // ensured at the command layer; here we just confirm the variant exists
         let _ = Transport::Wireguard;
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn phase_from_event_lifecycle() {
+        assert_eq!(phase_from_event("tool_call", &json!({})), Phase::Working);
+        assert_eq!(phase_from_event("stdout", &json!({})), Phase::Working);
+        assert_eq!(phase_from_event("result", &json!({})), Phase::Done);
+        assert_eq!(phase_from_event("error", &json!({})), Phase::Done);
+        assert_eq!(
+            phase_from_event(
+                "status",
+                &json!({ "payload": { "text": "attempt succeeded" } })
+            ),
+            Phase::Done
+        );
+        assert_eq!(phase_from_event("status", &json!({})), Phase::Working);
+        assert_eq!(phase_from_event("weird", &json!({})), Phase::Starting);
+    }
+
+    #[test]
+    fn paint_no_color_passthrough() {
+        assert_eq!(paint(true, "\x1b[31m", "x"), "x");
+        assert!(paint(false, "\x1b[31m", "x").contains("\x1b[31m"));
     }
 }
