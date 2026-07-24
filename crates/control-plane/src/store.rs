@@ -1682,6 +1682,40 @@ impl Store {
         });
     }
 
+    /// Stage 13 / line 487: background workflow ticker — re-advance every
+    /// `Running` workflow run each interval so a CP restart (or a node
+    /// completing a step task out-of-band) does not leave a run hung in
+    /// `Running`. `tick_workflow_run` is idempotent (already-Running steps
+    /// are skipped, terminal runs no-op), so a second tick after restart
+    /// never duplicates steps or attempts. Best-effort: per-run failures are
+    /// logged and swallowed so one bad run does not stall the ticker.
+    pub fn start_workflow_ticker(&self) {
+        let store = self.clone();
+        let secs = std::env::var("AGENTGRID_WORKFLOW_TICK_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5);
+        tokio::spawn(async move {
+            // Drop the first sleep so a fresh boot picks up in-flight runs
+            // immediately (covers recovery after restart).
+            loop {
+                let ids = match store.running_workflow_run_ids().await {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        tracing::warn!("workflow ticker listing runs failed: {e}");
+                        Vec::new()
+                    }
+                };
+                for id in &ids {
+                    if let Err(e) = store.tick_workflow_run(id).await {
+                        tracing::warn!("workflow tick for run {id} failed: {e}");
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+            }
+        });
+    }
+
     /// Startup reconcile (durable execution): on cp boot, immediately revert
     /// expired leases and mark silent nodes offline so the scheduler starts
     /// from a consistent state instead of waiting for the first background
@@ -2671,7 +2705,22 @@ impl Store {
             .collect())
     }
 
-    /// Stage 13: create a schedule that fires a `WorkflowRun` of
+    /// Stage 8 / line 487: ids of workflow runs in the `Running` status — the
+    /// background workflow tick re-advances these each interval so a CP
+    /// restart (or a node completing a step task out-of-band) does not leave a
+    /// step hung in `Running` forever.
+    pub async fn running_workflow_run_ids(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT id FROM workflow_runs WHERE status = 'running' ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| r.try_get::<String, _>("id").unwrap_or_default())
+            .collect())
+    }
+
     /// `template_id` every `interval_seconds` under `autonomy`. Fails if the
     /// template doesn't exist.
     pub async fn create_workflow_schedule(
@@ -3720,6 +3769,83 @@ mod workflow_tests {
         // Second tick must not spawn another task (step already running).
         let again = s.tick_workflow_run(&run.id).await.unwrap();
         assert!(again.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_does_not_duplicate_in_flight_workflow_step_tasks() {
+        // line 487: a workflow run idempotently survives a "CP restart" — no
+        // duplicate steps and no duplicate tasks. Steps: tick activates the only
+        // ready step (a), printing its task id; a "restart" is modelled by
+        // re-asking `running_workflow_run_ids` + ticking again before the task
+        // finishes (must not re-spawn); then we complete a's task and confirm
+        // the second tick advances to run Succeeded with exactly one step task id.
+        let s = temp_store().await;
+        let tpl = s
+            .create_workflow_template("one-r", &[step("a", &[], WorkflowRole::Worker)], &None)
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 1, "tick spawns a single task");
+        let first_task = s
+            .step_task_id(&s.get_workflow_run_steps(&run.id).await.unwrap()[0].id)
+            .await
+            .unwrap();
+        assert!(first_task.is_some(), "task bound to the step");
+
+        // "CP restart": ticker re-lists in-flight runs and ticks; step is
+        // already Running, so no duplicate task id is recorded.
+        assert!(s
+            .running_workflow_run_ids()
+            .await
+            .unwrap()
+            .contains(&run.id));
+        let again = s.tick_workflow_run(&run.id).await.unwrap();
+        assert!(again.is_empty(), "restart tick does not re-spawn tasks");
+        let still_first = s
+            .step_task_id(&s.get_workflow_run_steps(&run.id).await.unwrap()[0].id)
+            .await
+            .unwrap();
+        assert_eq!(still_first, first_task, "step still bound to the same task");
+
+        // Node finishes the step task; tick advances the run to Succeeded with no new spawn.
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            agent_version: "test".into(),
+            protocol_version: None,
+        };
+        let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+        let a = s.try_assign(&node_id).await.unwrap().expect("assign");
+        s.complete_attempt(
+            &a.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+                acp_session_id: None,
+                provenance: None,
+                plan: None,
+            },
+        )
+        .await
+        .unwrap();
+        let post = s.tick_workflow_run(&run.id).await.unwrap();
+        assert!(post.is_empty(), "completion tick spawns no new tasks");
+        let run_got = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(
+            run_got.status,
+            WorkflowRunStatus::Succeeded,
+            "run succeeds when step done",
+        );
     }
 
     #[tokio::test]

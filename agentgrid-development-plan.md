@@ -484,7 +484,7 @@
 
 ### Gate C — перед 0.3
 
-- [ ] Workflow recovery после рестарта CP не создаёт дубли steps/attempts
+- [x] Workflow recovery после рестарта CP не создаёт дубли steps/attempts — background workflow ticker (`Store::start_workflow_ticker`, env `AGENTGRID_WORKFLOW_TICK_SECS`, default 5 s) перезапускает все `Running` runs каждый beat: `tick_workflow_run` идемптотент (уже-Running шаги skipped), так что рестарт = второй tick без новых шагов/задач. Покрыто `restart_does_not_duplicate_in_flight_workflow_step_tasks`.
 - [ ] Golden workflow детерминирован на mock; supervised real-agent E2E стабилен
 - [ ] Distributed transport для результатов работает как с shared Git remote, так и через patch/bundle artifacts
 

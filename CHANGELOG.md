@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane — background workflow ticker / restart recovery, Stage 13 / line 487)
+
+- Workflow runs no longer strand after a control-plane restart or when a
+  node finishes a step task out-of-band (no one calls
+  `POST /v1/workflow-runs/{id}/tick`). New `Store::start_workflow_ticker` runs
+  a background task that, every `AGENTGRID_WORKFLOW_TICK_SECS` (default 5 s),
+  lists all `Running` workflow runs via `running_workflow_run_ids` and calls
+  `tick_workflow_run` on each. Recovery is best-effort per-run (a failing run
+  is logged and skipped so one bad run cannot stall the ticker) and
+  drop-the-first-sleep so a fresh boot picks up in-flight runs immediately.
+- `tick_workflow_run` was already idempotent for in-flight steps (an
+  already-`Running` step is not re-activated), so restart re-progresses
+  runs without duplicating steps or tasks. Test:
+  `restart_does_not_duplicate_in_flight_workflow_step_tasks`.
+
 ### Added (common + control-plane + node-daemon — heartbeat skill auto-discovery, Stage 9.2)
 
 - The trust ledger now auto-fills from what nodes discover on disk, closing

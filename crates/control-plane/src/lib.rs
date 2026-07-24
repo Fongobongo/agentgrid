@@ -2203,6 +2203,9 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
         tracing::warn!("startup reconcile failed: {e}");
     }
     state.store.start_maintenance();
+    // Stage 13 / line 487: re-advance in-flight workflow runs so a CP restart
+    // does not strand them; idempotent, best-effort per run.
+    state.store.start_workflow_ticker();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let app = build_router(state.clone());
     match (
