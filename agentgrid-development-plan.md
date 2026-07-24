@@ -142,7 +142,7 @@
 - [x] Выделить trait/contract `ExecutionBackend`; первый backend — текущий native process + worktree
 - [x] Добавить `AgentSession` (таблица + DTO), связанную с existing Attempt (`agent_session_id` nullable)
 - [x] `AgentCapabilities` с версиями/readiness поверх heartbeat JSON
-- [ ] Conformance suite: fixtures для mock/claude/opencode (prepare/start/stream/cancel/collect)
+- [x] Conformance suite: fixtures для mock/claude/opencode (prepare/start/stream/cancel/collect) — `crates/adapters/tests/conformance.rs` rewritten as a parameterized fixture table: one `AdapterFixture` row per adapter, two contract stages (`start_stream_collect`: launch → emit events → exit 0; `start_cancel`: launch a long prompt turn → kill the process group → reap within 5s grace). Mock wired and passing; claude/opencode registered as `#[ignore]`d rows (need real binaries + API keys) that surface but don't gate CI. Adding a new adapter = one fixture row + a test pair.
 - [x] Cancellation semantics в normalized events (`cancel_requested` → `cancelled` без гонок): `EventKind::Cancel` + node emits it on cancel
 - [x] Миграции schema без изменения legacy happy path (E2E старого сценария зелёный до и после) — `crates/control-plane/tests/migration_compat.rs`: opens a fresh temp SQLite DB (full migration set applied via `sqlx::migrate!`), walks the legacy happy path end-to-end through the `Store` API (bootstrap user → enrollment token → node enroll → heartbeat → task create → scheduler assign → event ingest → attempt complete → task succeeded), and asserts both ingested events are retrievable in sequence. Any migration that renames/drops a column the legacy path uses breaks this test.
 

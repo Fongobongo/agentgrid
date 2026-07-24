@@ -21,6 +21,7 @@ name = "agentgrid-adapters"
 version = "0.1.0"
 dependencies = [
  "agentgrid-common",
+ "libc",
  "serde",
  "serde_json",
  "tokio",
