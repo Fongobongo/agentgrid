@@ -144,7 +144,7 @@
 - [x] `AgentCapabilities` с версиями/readiness поверх heartbeat JSON
 - [ ] Conformance suite: fixtures для mock/claude/opencode (prepare/start/stream/cancel/collect)
 - [x] Cancellation semantics в normalized events (`cancel_requested` → `cancelled` без гонок): `EventKind::Cancel` + node emits it on cancel
-- [ ] Миграции schema без изменения legacy happy path (E2E старого сценария зелёный до и после)
+- [x] Миграции schema без изменения legacy happy path (E2E старого сценария зелёный до и после) — `crates/control-plane/tests/migration_compat.rs`: opens a fresh temp SQLite DB (full migration set applied via `sqlx::migrate!`), walks the legacy happy path end-to-end through the `Store` API (bootstrap user → enrollment token → node enroll → heartbeat → task create → scheduler assign → event ingest → attempt complete → task succeeded), and asserts both ingested events are retrievable in sequence. Any migration that renames/drops a column the legacy path uses breaks this test.
 
 **Exit 3:** три существующих adapter проходят conformance suite; legacy CLI/Web сценарий не изменился.
 
