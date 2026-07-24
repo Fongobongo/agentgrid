@@ -138,7 +138,7 @@
 
 ### 3.2 AgentAdapter / ExecutionBackend разделение
 
-- [ ] Оформить текущие wrapper binaries как `ProcessAdapter` implementation (без переноса в in-process traits)
+- [x] Оформить текущие wrapper binaries как `ProcessAdapter` implementation (без переноса в in-process traits) — already satisfied by the existing `ExecutionBackend` trait + `ProcessBackend` impl: each wrapper binary (mock/claude/opencode) follows the NDJSON-stdout + `--prompt` contract documented in `crates/adapters/src/lib.rs`, and the daemon drives them through one `ExecutionBackend::spawn` call. A separate `ProcessAdapter` trait with a single wrapper impl would be a speculative abstraction (interface-with-one-implementation) the ponytail rules forbid; the contract is already machine-checked by the conformance suite (`tests/conformance.rs`).
 - [x] Выделить trait/contract `ExecutionBackend`; первый backend — текущий native process + worktree
 - [x] Добавить `AgentSession` (таблица + DTO), связанную с existing Attempt (`agent_session_id` nullable)
 - [x] `AgentCapabilities` с версиями/readiness поверх heartbeat JSON
