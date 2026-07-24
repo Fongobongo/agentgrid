@@ -83,6 +83,71 @@ function Dag({ proj }: { proj: WorkflowProjection }) {
   );
 }
 
+// Stage 11.6 follow-up: span waterfall (timeline by time). Each step is a bar
+// positioned on a time axis by started_at..finished_at; steps still pending or
+// running render at the run's current time (running) or as a stub (pending).
+function tsMs(s: string | null | undefined): number | null {
+  if (!s) return null;
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? null : t;
+}
+
+function Waterfall({ proj }: { proj: WorkflowProjection }) {
+  const steps = proj.steps;
+  if (steps.length === 0) return <div className="wf-empty">no steps</div>;
+  const now = Date.now();
+  // Determine the time span: earliest start..latest finish (or now if any
+  // step is still in-flight). Pending steps with no timing are omitted from
+  // the axis but still listed as stubs.
+  const spans = steps.map((s) => {
+    const start = tsMs(s.started_at);
+    const fin = tsMs(s.finished_at);
+    return { s, start, fin };
+  });
+  const startMin = Math.min(
+    ...spans.filter((x) => x.start !== null).map((x) => x.start as number),
+    now,
+  );
+  const endMax = Math.max(
+    ...spans.filter((x) => x.fin !== null).map((x) => x.fin as number),
+    now,
+  );
+  const span = Math.max(endMax - startMin, 1);
+  return (
+    <div className="wf-waterfall">
+      {spans.map(({ s, start, fin }) => {
+        if (start === null) {
+          return (
+            <div className="wf-wf-row" key={s.step_id}>
+              <span className="wf-wf-label mono">{s.step_id}</span>
+              <div className="wf-wf-track">
+                <span className={`wf-wf-stub ${statusClass(s.status)}`}>{s.status}</span>
+              </div>
+            </div>
+          );
+        }
+        const end = fin ?? now;
+        const leftPct = ((start - startMin) / span) * 100;
+        const widthPct = Math.max(((end - start) / span) * 100, 1);
+        return (
+          <div className="wf-wf-row" key={s.step_id}>
+            <span className="wf-wf-label mono">{s.step_id}</span>
+            <div className="wf-wf-track">
+              <span
+                className={`wf-wf-bar ${statusClass(s.status)}`}
+                style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                title={`${s.role} · ${s.status}${s.started_at ? ` · ${s.started_at}` : ''}${s.finished_at ? ` → ${s.finished_at}` : ''}`}
+              >
+                {s.role}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function WorkflowsList({ onOpen }: { onOpen: (id: string) => void }) {
   const [runs, setRuns] = useState<WorkflowRun[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -135,6 +200,7 @@ export function WorkflowsList({ onOpen }: { onOpen: (id: string) => void }) {
 export function WorkflowDetails({ runId }: { runId: string }) {
   const [proj, setProj] = useState<WorkflowProjection | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [view, setView] = useState<'dag' | 'waterfall'>('dag');
 
   const load = () => {
     getWorkflowProjection(runId)
@@ -182,7 +248,11 @@ export function WorkflowDetails({ runId }: { runId: string }) {
         {err && <div className="error">{err}</div>}
       </div>
       {(proj.budget || run.status.toLowerCase()==="blocked") && proj.budget && <BudgetBlock snap={proj.budget} />}
-      <Dag proj={proj} />
+      <div className="wf-view-toggle">
+        <button className={view === 'dag' ? 'navbtn active' : 'navbtn'} onClick={() => setView('dag')}>DAG</button>
+        <button className={view === 'waterfall' ? 'navbtn active' : 'navbtn'} onClick={() => setView('waterfall')}>Timeline</button>
+      </div>
+      {view === 'dag' ? <Dag proj={proj} /> : <Waterfall proj={proj} />}
     </div>
   );
 }

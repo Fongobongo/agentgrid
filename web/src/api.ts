@@ -195,6 +195,8 @@ export interface StepProjection {
   attempts: number;
   verdict: string;
   error_code?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
 }
 
 export interface BudgetUsage {

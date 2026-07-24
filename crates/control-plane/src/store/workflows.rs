@@ -370,7 +370,7 @@ impl Store {
 
     pub async fn get_workflow_run_steps(&self, run_id: &str) -> Result<Vec<WorkflowStepRun>> {
         let rows = sqlx::query(
-            "SELECT id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, base_commit, retryable, max_attempts, attempts, status, created_at, expandable \
+            "SELECT id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, base_commit, retryable, max_attempts, attempts, status, created_at, expandable, started_at, finished_at \
              FROM workflow_steps WHERE run_id = ? ORDER BY created_at ASC",
         )
         .bind(run_id)
@@ -422,6 +422,16 @@ impl Store {
                     .flatten()
                     .map(|v| v != 0),
                 created_at: r.try_get("created_at").unwrap_or_default(),
+                started_at: r
+                    .try_get::<Option<String>, _>("started_at")
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty()),
+                finished_at: r
+                    .try_get::<Option<String>, _>("finished_at")
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty()),
             })
             .collect())
     }
@@ -486,6 +496,8 @@ impl Store {
                 node_id,
                 verdict,
                 error_code,
+                started_at: s.started_at.clone(),
+                finished_at: s.finished_at.clone(),
             });
         }
         Ok(Some(agentgrid_common::WorkflowProjection {
@@ -552,11 +564,44 @@ impl Store {
     }
 
     async fn set_step_status(&self, step_run_id: &str, status: WorkflowStepStatus) -> Result<()> {
-        sqlx::query("UPDATE workflow_steps SET status = ? WHERE id = ?")
-            .bind(role_str_status(status))
-            .bind(step_run_id)
-            .execute(&self.pool)
-            .await?;
+        // Stage 11.6: record timing so the web UI can render a span waterfall
+        // (timeline by time, not just dependency depth). `started_at` lands
+        // when the step leaves pending for running; `finished_at` lands on a
+        // terminal transition.
+        let now = now_iso();
+        match status {
+            WorkflowStepStatus::Running => {
+                sqlx::query(
+                    "UPDATE workflow_steps SET status = ?, started_at = COALESCE(started_at, ?) WHERE id = ?",
+                )
+                .bind(role_str_status(status))
+                .bind(&now)
+                .bind(step_run_id)
+                .execute(&self.pool)
+                .await?;
+            }
+            WorkflowStepStatus::Succeeded
+            | WorkflowStepStatus::Failed
+            | WorkflowStepStatus::Blocked
+            | WorkflowStepStatus::Skipped
+            | WorkflowStepStatus::Cancelled => {
+                sqlx::query(
+                    "UPDATE workflow_steps SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ?",
+                )
+                .bind(role_str_status(status))
+                .bind(&now)
+                .bind(step_run_id)
+                .execute(&self.pool)
+                .await?;
+            }
+            WorkflowStepStatus::Pending => {
+                sqlx::query("UPDATE workflow_steps SET status = ? WHERE id = ?")
+                    .bind(role_str_status(status))
+                    .bind(step_run_id)
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
         Ok(())
     }
 

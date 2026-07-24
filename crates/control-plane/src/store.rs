@@ -2885,6 +2885,9 @@ mod workflow_tests {
         assert_eq!(arch.verdict, "succeeded");
         assert_eq!(arch.node_id.as_deref(), Some("n1"));
         assert!(arch.task_id.is_some());
+        // Stage 11.6: timing lands on transitions for the span waterfall.
+        assert!(arch.started_at.is_some(), "started_at set when step ran");
+        assert!(arch.finished_at.is_some(), "finished_at set on terminal");
         let work = proj.steps.iter().find(|x| x.step_id == "work").unwrap();
         assert_eq!(work.role, WorkflowRole::Worker);
         assert!(work.task_id.is_some(), "worker task should be spawned");

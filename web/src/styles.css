@@ -283,3 +283,17 @@ button.link {
 .budget-table tr.warn td { color: var(--warn); }
 .budget-table tr.err td { color: var(--bad); font-weight: 600; }
 .wf-empty, .empty { color: var(--muted); }
+
+/* Stage 11.6 follow-up: span waterfall (timeline by time). */
+.wf-view-toggle { display: flex; gap: 8px; margin: 12px 0; }
+.wf-waterfall { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+.wf-wf-row { display: flex; align-items: center; gap: 8px; }
+.wf-wf-label { width: 80px; color: var(--muted); font-size: 12px; text-align: right; }
+.wf-wf-track { position: relative; flex: 1; height: 22px; background: var(--panel); border-radius: 4px; overflow: hidden; }
+.wf-wf-bar { position: absolute; top: 2px; height: 18px; min-width: 4px; border-radius: 3px; font-size: 11px; line-height: 18px; padding: 0 6px; color: var(--bg); white-space: nowrap; overflow: hidden; }
+.wf-wf-bar.ok { background: var(--ok); }
+.wf-wf-bar.err { background: var(--bad); }
+.wf-wf-bar.warn { background: var(--warn); }
+.wf-wf-bar.run { background: var(--accent); }
+.wf-wf-bar.idle { background: var(--muted); }
+.wf-wf-stub { display: inline-block; padding: 0 6px; font-size: 11px; line-height: 18px; color: var(--muted); }

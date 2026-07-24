@@ -385,7 +385,7 @@
 ### 11.6 Run viewer с DAG (3) (из open-multi-agent) — done (minimal)
 
 - [x] Observability UI: список run'ов (`#/workflows`) + детальная страница run'а (`#/workflow/<id>`) с DAG шагов (слои по глубине `depends_on`), статусы/verdict/role/node/attempts/error_code, автопoлл, кнопка cancel. Под `GET /v1/workflow-runs` + `/v1/workflow-runs/{id}/projection`.
-- [ ] Span waterfall (timeline по времени) — follow-up; текущая node view — layered DAG, не по времени.
+- [x] Span waterfall (timeline по времени) — follow-up; текущая node view — layered DAG, не по времени. Now done: migration `0030_step_timings.sql` adds `started_at`/`finished_at` to `workflow_steps`; `set_step_status` records `started_at` (COALESCE) on the Running transition and `finished_at` on a terminal transition (Succeeded/Failed/Blocked/Skipped/Cancelled); `StepProjection` + `WorkflowStepRun` expose the two fields; web UI `Workflows.tsx` adds a DAG/Timeline toggle and a `Waterfall` view that positions each step as a bar on a time axis (earliest start → latest finish or now), with pending steps rendered as stubs. Test: `workflow_run_projection_exposes_roles_nodes_verdicts` now asserts `started_at`/`finished_at` land on a step that ran and terminated.
 
 ---
 

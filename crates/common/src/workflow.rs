@@ -948,6 +948,12 @@ pub struct WorkflowStepRun {
     pub attempts: u32,
     pub status: WorkflowStepStatus,
     pub created_at: String,
+    /// Stage 11.6 follow-up: step timing for the span waterfall (set by
+    /// `set_step_status` when the step transitions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 /// Request body for `POST /v1/workflows` — define a template.
@@ -1004,6 +1010,13 @@ pub struct StepProjection {
     pub verdict: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// Stage 11.6 follow-up: step timing for the span waterfall. `started_at`
+    /// is set when the step leaves pending for running; `finished_at` on a
+    /// terminal transition. None until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 /// Live projection of a workflow run's Loop Engineering budget state: the
