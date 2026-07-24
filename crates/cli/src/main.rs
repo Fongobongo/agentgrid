@@ -10,6 +10,8 @@ use agentgrid_common::{
 };
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+
+mod tui;
 use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
@@ -61,6 +63,8 @@ enum AgCommand {
     Server(ServerStartArgs),
     /// Define and run Agentgrid workflows (DAGs of agent steps).
     Workflow(WorkflowArgs),
+    /// Full-screen TUI dashboard (read-only monitoring).
+    Tui(TuiArgs),
 }
 
 #[derive(Args)]
@@ -417,6 +421,13 @@ struct RepoAddArgs {
 }
 
 #[derive(Args)]
+struct TuiArgs {
+    /// Disable colored output. Default: color on.
+    #[arg(long)]
+    no_color: bool,
+}
+
+#[derive(Args)]
 struct WorkflowArgs {
     #[command(subcommand)]
     command: WorkflowSub,
@@ -521,7 +532,12 @@ async fn main() -> Result<()> {
         AgCommand::Profiles(a) => cmd_profiles(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
         AgCommand::Workflow(a) => cmd_workflow(&client, &base, a, cli.json).await,
+        AgCommand::Tui(a) => cmd_tui(&client, &base, a).await,
     }
+}
+
+async fn cmd_tui(client: &reqwest::Client, base: &str, a: TuiArgs) -> Result<()> {
+    tui::run_dashboard(client.clone(), base.to_string(), a.no_color).await
 }
 
 async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()> {

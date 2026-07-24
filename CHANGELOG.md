@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (cli — full-screen TUI dashboard `ag tui`)
+
+- New `ag tui` subcommand: a full-screen monitoring dashboard over the
+  control plane, built on ratatui + crossterm. Layout: header bar (server /
+  task count / online node count / live phase) + sidebar (task list with
+  phase-colored markers + a node-status sub-list) + main pane (the selected
+  task's event stream, colored by kind, scrollable, with follow-the-latest
+  mode) + footer keybind hint bar. Overlays: `?` help, `i` task detail.
+- Keys: ↑/↓ or j/k to move the focused pane; PgUp/PgDn (Ctrl-U/D) scroll the
+  events; Tab toggles focus Sidebar ↔ Main; `r` refresh; `Enter` reload events;
+  `f` toggle follow; `?` help; `i` detail; `q`/Esc/Ctrl-C quit. Esc/q closes an
+  open overlay instead of quitting.
+- Read-only (task creation/cancellation stays on `ag run` / `ag task cancel`);
+  no store/migration change (queries existing /v1/tasks, /v1/nodes,
+  /v1/tasks/{id}/events, /v1/approvals). State/render split mirrors herdr's
+  `app/state` vs `ui` boundary (no god object).
+- RAII `TerminalGuard` restores the terminal on panic/err so raw mode never
+  leaks. `--no-color` disables ANSI.
+- Tests: `phase_from_event_table`, `format_event_tool_and_file`,
+  `sidebar_move_and_scroll_clamp`, `map_key_basics`.
+- Inspired by [herdr](https://github.com/ogulcancelik/herdr)'s state/render
+  separation and lifecycle-state idea; we did not port herdr's PTY-pane
+  multiplexer (different domain — we monitor an orchestrator, not manage
+  terminal panes).
+
 ### Added (cli — live lifecycle phase + colored `ag logs`)
 
 - `ag logs` now derives and prints a client-side lifecycle `Phase` (`starting |
