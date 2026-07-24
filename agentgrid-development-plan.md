@@ -285,12 +285,12 @@
 
 - [x] Autonomy levels L0–L4 в profile (default L2 patch)
 - [x] Approval API: `POST /v1/approvals/{id}` (scope: tool call / session / step / command digest / duration)
-- [ ] Approval UI в web (список pending, allow/deny с причиной) и CLI (`ag approvals list/approve/deny`)
+- [x] Approval UI в web (список pending, allow/deny с причиной) и CLI (`ag approvals list/approve/deny`)
   - [x] CLI `ag approvals list/allow/deny` (с `--reason` для audit-trail) —_BASE с Stage 5
   - [x] CP принимають опциональный `reason` в `POST /v1/approvals/{id}/{allow|deny}` (по умолчанию placeholder)
   - [x] Web UI раздела Approvals (hash `#/approvals`): список (по умолчанию `pending`, filter=all — все), автополл 3 s, allow/deny через `window.prompt` с записью reason; reason/task дрожат в таблице. Covered `approval_flow_allow_deny_and_expiry` (CPHz тест проверят persists reason)
 - [x] Audit event на каждое policy decision и approval
-- [ ] Skill trust management UI/CLI
+- [x] Skill trust management UI/CLI
   - [x] CP хранение trust-решений: миграция `0020_skill_trust`, `SkillTrustView` в common, методы store `set/get/list_skill_trust`. Эндпоинты `GET /v1/skills[?source=]`, `GET /v1/skills/{name}?source=`, `POST /v1/skills/{name}/trust|untrust?source=`. Каждое решение → audit `skill.trust`. Покрыто `skill_trust_defaults_untrusted_then_round_trips`.
   - [x] CLI `ag skills list [--source]` / `trust <name> [--source]` / `untrust <name> [--source]`.
   - [x] Web UI раздела Skills (`#/skills`): таблица доверия (✅/⛔), кнопка Trust/Untrust с confirm, автополл 5 s. Fail-closed плашка: ненайденный skill = untrusted.
@@ -435,7 +435,7 @@
 - [ ] Раз в неделю — ручной прогон happy path на двух реальных машинах; перед release — smoke на Linux/macOS/Windows
 - [~] Держать resource budgets: node idle RSS ≤ 25 МБ, control plane idle ≤ 64 МБ, streaming ≤ 60 МБ; фиксировать OS/архитектуру, dataset и p50/p95, чтобы цифры были воспроизводимы — `agentgrid_common::rss::current_rss()` зонд `/proc/self/status` VmRSS (Linux) + unit-тест парсинга. Инфраструктура измерения готова; [ ] измерения в CI (p50/p95, OS/arch) — follow-up (требует bench harness + фиксацию env).
 - [ ] CI matrix: Linux x86_64/aarch64, macOS arm64/x86_64 (где доступно), Windows x86_64; platform-specific tests не маскировать общим `allow_failure`
-- [ ] Release artifacts: checksums, SBOM, подпись/attestation, pinned toolchain и dependency audit
+- [~] Release artifacts: checksums, SBOM, подпись/attestation, pinned toolchain и dependency audit — SHA256 `SHA256SUMS` после build добавлен в `release.yml`; MSRV `rust-version = "1.85"` в `Cargo.toml`. Остаток: SBOM (cargo-cyclonedx), подпись/attestation (cosign/attest-build-provenance) — follow-up (нужны external инструменты в CI).
 - [ ] Миграции БД: forward-only в пределах релиза + backup/restore rehearsal; rolling N/N-1 только там, где заявлено
 - [ ] Не добавлять обязательные runtime-зависимости (Docker/Node.js/Python/внешняя СУБД) в core
 - [ ] Идеи вне текущего этапа — в backlog, не в код
@@ -503,7 +503,7 @@
 - [x] Validation failed + agent exit 0 → итог `failed/validation_failed`, не `succeeded` — покрыто `validation_failure_must_not_report_success` (Stage 1.1).
 - [x] Сеть недоступна во время attempt → events/completion/artifacts доезжают после восстановления — `tests/e2e/run-outbox.sh` scenario B (4-сек CP outage mid-stream, 200 contiguous events) + scenario D (10-сек outage, AG_E2E_OUTAGE_SECS tunable); artifacts CP-side uploads рetraятся через `send_with_retry`.
 - [x] `kill -9` node-daemon посреди attempt → после рестарта нет потерянных completions, нет зависших `running` — `tests/e2e/run-outbox.sh` scenario C (kill -9 node mid-running → maintenance mark offline → attempt `lost`, task `failed/node_lost` → retry → restart node → `succeeded`). “Нет потерянных completions” моделирует scenario A (kill after completion durable в `completions.jsonl`, redelivered на restart). 10/10 стабильно.
-- [x] Секрет в stdout/stderr/validation output → замаскирован во всех путях, включая fallback и artifacts — stdout/stderr masked через `mask_secrets`; validation output теперь masked в стриме events + `validation.log` (`run_validation(secrets)`). Покрыто `validation_command_masks_secrets_in_output_and_log`. [ ] секреты в artifacts (validation.log как `validation` artifact-name path-traversal) — см. artifact path-traversal (покрыт path-guard; masking лог артефактов follow-up если конкретный артефакт сохраняет raw).
+- [x] Секрет в stdout/stderr/validation output → замаскирован во всех путях, включая arvéfacts — stdout/stderr masked через `mask_secrets`; validation output masked в стриме events + `validation.log` (`run_validation(secrets)` пишет masked log на диск); `agent-raw-output.log` пишет masked stream (read_stream masks before raw-file write). Artefact upload берёт уже masked bytes (line 508 follow-up закрыт). Покрыто `validation_command_masks_secrets_in_output_and_log`, `raw_and_validation_logs_excluded_from_commit_and_patch`, `read_stream_mirrors_raw_output`.
 - [x] `agent-raw-output.log` не попадает в git-коммит и в patch — покрыто `raw_and_validation_logs_excluded_from_commit_and_patch` (git.rs: raw + validation log excluded by path filter, verified leaks are absent in patch).
 - [x] Artifact name `../../etc/passwd` → отклонён, запись только внутри artifact root
 - [x] Repo slug/branch/URL с shell-метасимволами → нет выполнения произвольных команд — покрыто `rejects_injection_in_repo_branch_or_url` (+ `validate_token`/`validate_git_url`, git args без shell).

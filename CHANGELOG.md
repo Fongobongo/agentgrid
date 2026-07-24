@@ -23,6 +23,30 @@ All notable changes to this project are documented in this file.
     agent off a monotonic `tokio::time::sleep`. With a single-instance CP
     there is no skew-sensitive path to break.
 
+### Audit (Spec 22.1.1 / release — follow-up, second pass)
+
+- Re-audit closed three more regression-checklist checkboxes by reading the
+  existing tests/code rather than writing new code, plus one release artifact
+  item:
+  - Secret leakage in artifacts (`validation.log` / `agent-raw-output.log` as
+    artifacts) — already safe: `run_validation(secrets)` masks both into the
+    `validation.log` payload, and `read_stream` masks before writing the raw
+    log. `upload_if_exists` carries the already-masked bytes. Artifacts
+    inherit the same masking as the event stream.
+  - Approval UI in web + CLI — confirmed covered (existing `#/approvals` web
+    UI and `ag approvals list/allow/deny --reason`, plus
+    `approval_flow_allow_deny_and_expiry` CP test). Parent checkbox closed.
+  - Skill trust management UI/CLI — confirmed complete except the explicit
+    "real enforcement on agent load" follow-up (marked "не сейчас"). Parent
+    checkbox closed.
+
+### Release (release.yml — SHA256 checksums)
+
+- Release binaries now ship a per-target `SHA256SUMS` so consumers can audit
+  downloaded artifacts; generated after the build step and uploaded alongside
+  the binaries. MSRV stays `rust-version = "1.85"` in Cargo.toml. SBOM and
+  signing/attestation (cosign, attest-build-provenance) deferred.
+
 ### Added (control-plane — background workflow ticker / restart recovery, Stage 13 / line 487)
 
 - Workflow runs no longer strand after a control-plane restart or when a
