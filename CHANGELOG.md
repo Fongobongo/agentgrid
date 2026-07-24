@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (node-daemon — cluster executor capability probe, Stage 10 / line 333)
+
+- The node now actually probes the `zeroshot` cluster-executor adapter's
+  capability at startup and on each heartbeat (the pure `cluster::probe_decision`
+  contract existed but was never wired in). New `probe_cluster_adapter` checks
+  the container runtime (docker) presence, the executor binary presence, and
+  the executor `--version` against `AGENTGRID_ZEROSHOT_VERSION` (default `"0."`)
+  via the pure `probe_decision` helper. Fail-closed: missing runtime / missing
+  binary / version-prefix mismatch → `ready = false`, so the node never claims a
+  `zeroshot` task it cannot run (capability honesty, same discipline as the
+  wrapper-adapter boundary in Stage 9.1).
+- Tests: `cluster_probe_fail_closed_when_runtime_missing`,
+  `cluster_probe_fail_closed_when_executor_missing`,
+  `cluster_probe_fail_closed_on_version_mismatch`.
+
 ### Added (control-plane — independent verifier workspace isolation, Stage 8 / line 240)
 
 - The independent verifier step now starts from the worker's tree without

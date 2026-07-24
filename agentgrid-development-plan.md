@@ -331,7 +331,7 @@
 - [ ] Export результатов cluster как artifacts
 - [ ] Маппинг executor/verifier ролей Zeroshot ↔ Agentgrid RoleRun
 - [ ] Security review Docker mounts (не прокидывать credentials хоста)
-- [ ] Version pin + проверка при probe
+- [x] Version pin + проверка при probe — node startup и heartbeat capability loop теперь используют `probe_cluster_adapter("zeroshot","docker")` для адаптера `zeroshot`: проверяет docker runtime + executor binary + версию (`--version`) против `AGENTGRID_ZEROSHOT_VERSION` (default `"0."`) через чистую `cluster::probe_decision` (pinned prefix). Fail-closed (missing runtime / binary / version mismatch → `ready=false`, node не заявляет `zeroshot`). Тесты: `cluster_probe_fail_closed_when_runtime_missing`, `cluster_probe_fail_closed_when_executor_missing`, `cluster_probe_fail_closed_on_version_mismatch` (node).
 - [ ] Verified profile: готовый profile с Zeroshot verified loop
 - [ ] E2E: одна Agentgrid task запускает Zeroshot verified loop на выбранной node
 

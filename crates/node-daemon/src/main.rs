@@ -15,6 +15,7 @@ use agentgrid_acp::{
 };
 use agentgrid_adapters::{to_event_type, AdapterEvent, ExecutionBackend};
 use agentgrid_common::{
+    cluster::probe_decision,
     policy::{AutonomyLevel, BuiltinPolicyProvider, CommandPolicyProvider, PolicyDecision},
     AdapterCapability, AgentEventEnvelope, ApprovalStatus, ApprovalView, Assignment, CancelState,
     CompleteAttemptRequest, ContextProvider, CreateAgentSessionRequest, EnrollRequest,
@@ -640,6 +641,49 @@ async fn probe_adapter(bin: &str) -> AdapterProbe {
     AdapterProbe {
         found: true,
         version,
+    }
+}
+
+/// Stage 10 / line 333: capability probe for a cluster executor adapter
+/// (`zeroshot`). Unlike the simple wrapper-binary probe, this checks the
+/// container runtime (docker/podman) AND the executor binary, then pins the
+/// executor version against `AGENTGRID_ZEROSHOT_VERSION` (default `"0."`,
+/// i.e. any 0.x) before the node ever claims a `zeroshot` task. Fail-closed:
+/// missing runtime / binary / mismatched version → `ready = false` and a
+/// reason, mirroring the existing wrapper-adapter capability honesty (Stage 9.1).
+async fn probe_cluster_adapter(executor_bin: &str, runtime_bin: &str) -> AdapterProbe {
+    let runtime_present = resolve_in_path(runtime_bin).is_some();
+    // The executor reports `--version`; take the first stdout line.
+    let executor_present = resolve_in_path(executor_bin).is_some();
+    let executor_version = if executor_present {
+        tokio::process::Command::new(executor_bin)
+            .arg("--version")
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            })
+    } else {
+        None
+    };
+    let required_prefix =
+        std::env::var("AGENTGRID_ZEROSHOT_VERSION").unwrap_or_else(|_| "0.".into());
+    let p = probe_decision(
+        runtime_present,
+        executor_version.as_deref(),
+        &required_prefix,
+        executor_present,
+    );
+    AdapterProbe {
+        found: p.available,
+        version: p.version,
     }
 }
 
@@ -2124,6 +2168,11 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                             found: true,
                             version: None,
                         }
+                    } else if a.id == "zeroshot" {
+                        // Stage 10 / line 333: zeroshot capability is probed
+                        // via docker runtime + executor binary + pinned version
+                        // (env AGENTGRID_ZEROSHOT_VERSION), fail-closed.
+                        probe_cluster_adapter("zeroshot", "docker").await
                     } else {
                         let bin = adapter_bin_name(&a.id);
                         probe_adapter(&bin).await
@@ -2259,8 +2308,12 @@ async fn main() -> Result<()> {
 
     let mut cfg = config_from_env();
     for a in &cfg.adapters {
-        let bin = format!("adapter-{}", a.id.replace('_', "-"));
-        let probe = probe_adapter(&bin).await;
+        let probe = if a.id == "zeroshot" {
+            probe_cluster_adapter("zeroshot", "docker").await
+        } else {
+            let bin = format!("adapter-{}", a.id.replace('_', "-"));
+            probe_adapter(&bin).await
+        };
         if probe.found {
             cfg.adapter_versions
                 .insert(a.id.clone(), probe.version.clone());
@@ -2269,7 +2322,8 @@ async fn main() -> Result<()> {
             cfg.adapter_versions.insert(a.id.clone(), None);
             tracing::warn!(
                 adapter = %a.id,
-                "adapter binary {bin} not found in PATH; node will report degraded until installed"
+                "adapter for {} not ready (missing runtime/binary or version mismatch); node will report degraded",
+                a.id
             );
         }
     }
@@ -2502,6 +2556,42 @@ mod tests {
         let bad = probe_adapter("definitely-not-an-agentgrid-adapter-xyz").await;
         assert!(!bad.found);
         assert!(bad.version.is_none());
+    }
+
+    #[tokio::test]
+    async fn cluster_probe_fail_closed_when_runtime_missing() {
+        // Stage 10 / line 333: with the container runtime missing, even a
+        // present executor + matching version must not be advertised as ready
+        // (capability honesty, fail-closed). `sh` stands in for an executor
+        // binary that *is* on PATH; the runtime binary does not exist, so the
+        // cluster probe must report not found.
+        let p = probe_cluster_adapter("sh", "definitely-no-such-runtime-xyz").await;
+        assert!(!p.found, "missing runtime fails closed");
+    }
+
+    #[tokio::test]
+    async fn cluster_probe_fail_closed_when_executor_missing() {
+        // Executor binary missing → not found, regardless of runtime.
+        let p = probe_cluster_adapter("definitely-no-such-executor-xyz", "sh").await;
+        assert!(!p.found, "missing executor fails closed");
+    }
+
+    #[tokio::test]
+    async fn cluster_probe_fail_closed_on_version_mismatch() {
+        // Both binaries present (sh as a stand-in), but pin against a version
+        // prefix that `sh --version` will not match → not found.
+        // ponytail: env override scoped via a thread-local guard isn't trivial
+        // here; instead pin to a deliberately unreachable prefix and assert
+        // the probe falls through to unavailable.
+        std::env::set_var("AGENTGRID_ZEROSHOT_VERSION", "zz-no-such-major");
+        let p = probe_cluster_adapter("sh", "sh").await;
+        std::env::remove_var("AGENTGRID_ZEROSHOT_VERSION");
+        // Either the runtime is missing, or the version does not match in
+        // either case `found` must be false (fail-closed).
+        assert!(
+            !p.found,
+            "version mismatch / runtime probe must fail closed"
+        );
     }
 
     #[tokio::test]
