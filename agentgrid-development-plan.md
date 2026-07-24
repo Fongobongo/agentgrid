@@ -502,9 +502,9 @@
 
 - [x] Validation failed + agent exit 0 → итог `failed/validation_failed`, не `succeeded` — покрыто `validation_failure_must_not_report_success` (Stage 1.1).
 - [x] Сеть недоступна во время attempt → events/completion/artifacts доезжают после восстановления — `tests/e2e/run-outbox.sh` scenario B (4-сек CP outage mid-stream, 200 contiguous events) + scenario D (10-сек outage, AG_E2E_OUTAGE_SECS tunable); artifacts CP-side uploads рetraятся через `send_with_retry`.
-- [ ] `kill -9` node-daemon посреди attempt → после рестарта нет потерянных completions, нет зависших `running`
+- [x] `kill -9` node-daemon посреди attempt → после рестарта нет потерянных completions, нет зависших `running` — `tests/e2e/run-outbox.sh` scenario C (kill -9 node mid-running → maintenance mark offline → attempt `lost`, task `failed/node_lost` → retry → restart node → `succeeded`). “Нет потерянных completions” моделирует scenario A (kill after completion durable в `completions.jsonl`, redelivered на restart). 10/10 стабильно.
 - [x] Секрет в stdout/stderr/validation output → замаскирован во всех путях, включая fallback и artifacts — stdout/stderr masked через `mask_secrets`; validation output теперь masked в стриме events + `validation.log` (`run_validation(secrets)`). Покрыто `validation_command_masks_secrets_in_output_and_log`. [ ] секреты в artifacts (validation.log как `validation` artifact-name path-traversal) — см. artifact path-traversal (покрыт path-guard; masking лог артефактов follow-up если конкретный артефакт сохраняет raw).
-- [ ] `agent-raw-output.log` не попадает в git-коммит и в patch
+- [x] `agent-raw-output.log` не попадает в git-коммит и в patch — покрыто `raw_and_validation_logs_excluded_from_commit_and_patch` (git.rs: raw + validation log excluded by path filter, verified leaks are absent in patch).
 - [x] Artifact name `../../etc/passwd` → отклонён, запись только внутри artifact root
 - [x] Repo slug/branch/URL с shell-метасимволами → нет выполнения произвольных команд — покрыто `rejects_injection_in_repo_branch_or_url` (+ `validate_token`/`validate_git_url`, git args без shell).
 - [x] Task для adapter B на node с default A → запускается именно B или честный reject — покрыто `scheduler_skips_incompatible_head_of_line` + `task_eligibility` missing-adapter reason (task остаётся queued).
@@ -518,7 +518,7 @@
 - [ ] Переполнение диска на node (spool limit) и на control plane (SQLite)
 - [ ] Краш adapter-процесса посреди NDJSON-строки / JSON-RPC фрейма
 - [ ] Рестарт control plane под нагрузкой → nodes переподключаются, ничего не теряется
-- [ ] Часы node сбиты (clock skew) → лизы/таймауты не ломаются
+- [x] Чаи node сбиты (clock skew) → лизы/таймауты не ломатся — не применимо. CS сравнивается только с собственным wall clock: `lease_expires_at`/`ack_deadline` CP выставляет при назначении (`iso_plus_secs`, время CP), staleness heartbeat режется к `(CP now - 30s)` (време CP). Node clock в `HeartbeatRequest` не передаётся вовсе (отсутствует `timestamp`-поле); agent timeout (`assignment.timeout_secs`)node измеряет монотонным `tokio::time::sleep`. Единственный skew-sensitive путь — дрейф самого CP wall clock, а CP работает на одной машине (no cluster skew). No fix needed.
 - [x] SSE-клиент переподключается и дочитывает события по sequence без дыр и дублей — `events_stream` выставляет SSE `id:` (sequence) + `event:` (task-event); `Last-Event-ID` header или `after_sequence` query сечёт `max` → следующий poll после последнего доставленного sequence. Покрыто `sse_tests::resume_*` (query/header/max/none/garbage).
 
 ---

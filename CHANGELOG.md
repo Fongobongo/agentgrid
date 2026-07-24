@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Resolved (audit — regression-test checklist, Spec 22.1.1)
+
+- Marked three regression-test checkboxes as covered after re-auditing the
+  existing coverage rather than writing new code, so the gap list reflects
+  reality:
+  - `kill -9 node mid-running → no lost completions, no stuck running`
+    (process E2E `tests/e2e/run-outbox.sh` scenario C: kill mid-running →
+    node offline → attempt lost → task failed/node_lost → retry → restart
+    node → succeeded; completion durability is modeled by scenario A).
+  - `agent-raw-output.log` not leaking into the git commit/patch — already
+    covered by `raw_and_validation_logs_excluded_from_commit_and_patch`
+    (git.rs path-filter excludes raw + validation logs).
+  - `node clock skew does not break leases/timeouts` — not applicable: the
+    CP compares only its own wall clock (it stamps lease_expires_at /
+    ack_deadline at assign time; heartbeat staleness is cut against CP now).
+    The node never sends its own timestamp in HeartbeatRequest and times the
+    agent off a monotonic `tokio::time::sleep`. With a single-instance CP
+    there is no skew-sensitive path to break.
+
 ### Added (control-plane — background workflow ticker / restart recovery, Stage 13 / line 487)
 
 - Workflow runs no longer strand after a control-plane restart or when a
