@@ -114,11 +114,19 @@ fn validate_git_url(s: &str) -> Result<()> {
 }
 
 /// Ensure the repo clone exists and create a per-attempt worktree.
+/// `upstream_patches` carries `changes.patch` bytes fetched from the control
+/// plane for SHAs that may not be reachable via the shared Git remote — a
+/// fallback for distributed workflows without a shared remote (Stage 8 /
+/// line 257). When a cherry-pick SHA is missing from the local mirror, the
+/// matching patch (keyed by SHA) is applied instead; if neither the SHA nor a
+/// patch is available the upstream is skipped (best-effort, the integrator
+/// still runs with one fewer merged worker).
 pub fn prepare_workspace(
     repository_root: &Path,
     workspace_root: &Path,
     assignment: &Assignment,
     upstream_commits: &[String],
+    upstream_patches: &[(String, Vec<u8>)],
 ) -> Result<Workspace> {
     let ws = workspace_root.join(&assignment.attempt_id);
     std::fs::create_dir_all(&ws)?;
@@ -208,39 +216,77 @@ pub fn prepare_workspace(
     // partial state is committed (the worktree stays on the clean
     // `start_point`).
     if !upstream_commits.is_empty() {
+        let ws_path = ws.to_str().unwrap_or("");
         for sha in upstream_commits {
             validate_token(sha)?;
             // Best-effort: ensure the commit object is present in the local
-            // mirror so cherry-pick can resolve it.
+            // mirror so cherry-pick can resolve it. Stage 8 / line 257:
+            // without a shared Git remote the SHA may never arrive — fall
+            // back to the worker's `changes.patch` artifact fetched from the
+            // control plane and applied with `git apply --3way`.
             let _ = Command::new("git")
                 .args(["fetch", "origin", sha])
                 .current_dir(&repo_dir)
                 .status();
-        }
-        let ws_path = ws.to_str().unwrap_or("");
-        for sha in upstream_commits {
-            let cp = Command::new("git")
-                .args([
-                    "-c",
-                    "user.name=agentgrid",
-                    "-c",
-                    "user.email=agentgrid@agentgrid",
-                    "cherry-pick",
-                    sha,
-                ])
+            let have_obj = Command::new("git")
+                .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
                 .current_dir(ws_path)
-                .output()?;
-            if !cp.status.success() {
-                // Abort the cherry-pick so the index is back to a clean state;
-                // the worktree branch is left at `start_point` (no worker
-                // commits partially merged), and the caller reports the error.
-                let _ = Command::new("git")
-                    .args(["cherry-pick", "--abort"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if have_obj {
+                let cp = Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=agentgrid",
+                        "-c",
+                        "user.email=agentgrid@agentgrid",
+                        "cherry-pick",
+                        sha,
+                    ])
                     .current_dir(ws_path)
-                    .status();
+                    .output()?;
+                if !cp.status.success() {
+                    let _ = Command::new("git")
+                        .args(["cherry-pick", "--abort"])
+                        .current_dir(ws_path)
+                        .status();
+                    anyhow::bail!(
+                        "integrator cherry-pick of upstream commit {sha} conflicted; \
+                         merged branches need manual resolution or non-conflicting workers"
+                    );
+                }
+                continue;
+            }
+            // SHA not reachable via the shared remote: apply the worker's
+            // binary patch artifact fetched from the control plane.
+            let Some(patch) = upstream_patches.iter().find(|(s, _)| s == sha) else {
+                tracing::warn!(
+                    "integrator: upstream commit {sha} not reachable and no \
+                     changes.patch artifact available; skipping this upstream"
+                );
+                continue;
+            };
+            let mut ap = Command::new("git")
+                .args(["apply", "--3way", "--whitespace=nowarn", "-"])
+                .current_dir(ws_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| anyhow::anyhow!("git apply spawn: {e}"))?;
+            use std::io::Write;
+            {
+                let mut stdin = ap.stdin.take().unwrap();
+                stdin.write_all(&patch.1)?;
+            }
+            let out = ap.wait_with_output()?;
+            if !out.status.success() {
                 anyhow::bail!(
-                    "integrator cherry-pick of upstream commit {sha} conflicted; \
-                     merged branches need manual resolution or non-conflicting workers"
+                    "integrator `git apply` of upstream changes.patch ({sha}) \
+                     conflicted: {}; merged branches need manual resolution or \
+                     non-conflicting workers",
+                    String::from_utf8_lossy(&out.stderr)
                 );
             }
         }
@@ -399,6 +445,7 @@ mod tests {
             parent_acp_session_id: None,
             provenance: None,
             upstream_commits: vec![],
+            upstream_task_ids: vec![],
         }
     }
 
@@ -407,7 +454,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ag-git-plain-{}", uuid::Uuid::new_v4()));
         let ws_root = dir.join("ws");
         let a = make_assignment("", "main");
-        let ws = prepare_workspace(&dir.join("repos"), &ws_root, &a, &[]).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &ws_root, &a, &[], &[]).unwrap();
         assert!(!ws.is_git);
         assert!(ws.path.exists());
         assert!(finalize_workspace(ws, "n@x").unwrap().is_none());
@@ -438,7 +485,7 @@ mod tests {
         .unwrap();
 
         let a = make_assignment(origin.to_str().unwrap(), "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
         assert!(ws.is_git);
         // Agent writes a new file in the worktree.
         std::fs::write(ws.path.join("new.txt"), "hello").unwrap();
@@ -474,7 +521,7 @@ mod tests {
         )
         .unwrap();
         let a = make_assignment(origin.to_str().unwrap(), "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
         assert!(ws.is_git);
         let ws_path = ws.path.clone();
         let repo_dir = ws.repo_dir.clone().unwrap();
@@ -504,7 +551,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("ag-git-cleanup-plain-{}", uuid::Uuid::new_v4()));
         let a = make_assignment("", "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
         assert!(!ws.is_git);
         let ws_path = ws.path.clone();
         assert!(ws_path.exists());
@@ -579,7 +626,7 @@ mod tests {
 
         let mut a = make_assignment(origin.to_str().unwrap(), "main");
         a.base_commit = Some(c0.clone());
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
         assert!(ws.is_git);
         assert_eq!(ws.base_commit.as_deref(), Some(c0.as_str()));
         // worktree HEAD is the pinned commit, not the main tip
@@ -621,7 +668,7 @@ mod tests {
         .unwrap();
 
         let a = make_assignment(origin.to_str().unwrap(), "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[]).unwrap();
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
         // Agent writes a legit change plus the private logs node writes in-tree.
         std::fs::write(ws.path.join("new.txt"), "hello").unwrap();
         std::fs::write(ws.path.join("agent-raw-output.log"), "SECRET-RAW").unwrap();
@@ -699,8 +746,9 @@ mod tests {
                     parent_acp_session_id: None,
                     provenance: None,
                     upstream_commits: vec![],
+                    upstream_task_ids: vec![],
                 };
-                prepare_workspace(&repos, &ws_root, &a, &[])
+                prepare_workspace(&repos, &ws_root, &a, &[], &[])
             }));
         }
         let mut ok = 0;
@@ -800,10 +848,72 @@ mod tests {
 
         // Integrator prep with both worker SHAs.
         let a = make_assignment(origin.to_str().unwrap(), "main");
-        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[sha1, sha2])
+        let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[sha1, sha2], &[])
             .expect("non-conflicting cherry-picks succeed");
         assert!(ws.path.join("file1.txt").exists(), "worker1 commit landed");
         assert!(ws.path.join("file2.txt").exists(), "worker2 commit landed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn integrator_applies_patch_bundle_when_sha_not_reachable() {
+        // Stage 8 / line 257: distributed workflow without a shared Git remote
+        // — an upstream worker's commit SHA may not be reachable via
+        // `git fetch origin <sha>` on the integrator's node (no shared
+        // remote, or the sha lives on a different host). The node falls back
+        // to the worker's `changes.patch` artifact fetched from the control
+        // plane and `git apply --3way`s it onto the worktree. Modeled here:
+        // we hand `prepare_workspace` a SHA that does not exist anywhere in
+        // the local mirror (git fetch + cat-file -e both miss) together with
+        // a binary patch keyed by that same SHA — the prepared worktree must
+        // end up containing the patched file.
+        let dir = std::env::temp_dir().join(format!("ag-git-patch-{}", uuid::Uuid::new_v4()));
+        let origin = dir.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(origin.join("base.txt"), "base").unwrap();
+        git(&origin, &["add", "-A"]).unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        // Build a `changes.patch` that adds a new file (`worker.txt`). The
+        // "winning" SHA below does not exist in the local mirror, so neither
+        // `git fetch origin <sha>` nor `git cat-file -e <sha>` resolves.
+        let patch =
+            b"diff --git a/worker.txt b/worker.txt\nnew file mode 100644\nindex 0000000..257cc56\n--- /dev/null\n+++ b/worker.txt\n@@ -0,0 +1 @@\n+worker change\n";
+        let fake_sha = "1111111111111111111111111111111111111111".to_string();
+
+        let a = make_assignment(origin.to_str().unwrap(), "main");
+        let shas = vec![fake_sha.clone()];
+        let ws = prepare_workspace(
+            &dir.join("repos"),
+            &dir.join("ws"),
+            &a,
+            &shas,
+            &[(fake_sha, patch.to_vec())],
+        )
+        .expect("patch-bundle fallback lands the worker change");
+        assert!(
+            ws.path.join("worker.txt").exists(),
+            "patch-bundle fallback applied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path.join("worker.txt")).unwrap(),
+            "worker change\n",
+            "patch content matches",
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -816,27 +926,27 @@ mod tests {
 
         a.repository = "repo; rm -rf /".into();
         assert!(
-            prepare_workspace(&repos, &ws, &a, &[]).is_err(),
+            prepare_workspace(&repos, &ws, &a, &[], &[]).is_err(),
             "repo injection"
         );
 
         a.repository = "repo".into();
         a.default_branch = "main; touch /tmp/pwn".into();
         assert!(
-            prepare_workspace(&repos, &ws, &a, &[]).is_err(),
+            prepare_workspace(&repos, &ws, &a, &[], &[]).is_err(),
             "branch injection"
         );
 
         a.default_branch = "../escape".into();
         assert!(
-            prepare_workspace(&repos, &ws, &a, &[]).is_err(),
+            prepare_workspace(&repos, &ws, &a, &[], &[]).is_err(),
             "branch traversal"
         );
 
         a.default_branch = "main".into();
         a.git_url = "$(curl evil)".into();
         assert!(
-            prepare_workspace(&repos, &ws, &a, &[]).is_err(),
+            prepare_workspace(&repos, &ws, &a, &[], &[]).is_err(),
             "url injection"
         );
         std::fs::remove_dir_all(&dir).ok();

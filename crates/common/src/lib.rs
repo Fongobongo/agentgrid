@@ -359,6 +359,13 @@ pub struct Assignment {
     /// The node cherry-picks them in order (defense-in-depth: token-validated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upstream_commits: Vec<String>,
+    /// Stage 8 / line 257: task ids parallel to `upstream_commits` (same
+    /// order) so the node can fetch each upstream worker's `changes.patch`
+    /// artifact from the control plane and `git apply` it when the commit SHA
+    /// is not reachable via the shared Git remote (distributed workflow
+    /// without a shared remote). Empty for non-integrator steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream_task_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -762,6 +769,7 @@ mod tests {
                 parent_acp_session_id: None,
                 provenance: None,
                 upstream_commits: vec![],
+                upstream_task_ids: vec![],
             }),
         };
         assert_eq!(round_trip(&pr), pr);

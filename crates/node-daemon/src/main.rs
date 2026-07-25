@@ -1464,8 +1464,40 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     let ws_root = cfg.workspace_root.clone();
     let prep_assignment = assignment.clone();
     let upstream = assignment.upstream_commits.clone();
+    let upstream_task_ids = assignment.upstream_task_ids.clone();
+    // Stage 8 / line 257: distributed workflow without a shared Git remote —
+    // fetch each upstream worker's `changes.patch` artifact from the CP up
+    // front so `prepare_workspace` can `git apply` it when the commit SHA is
+    // not reachable via `git fetch origin <sha>`. Parallel indices.
+    let mut upstream_patches: Vec<(String, Vec<u8>)> = Vec::new();
+    for (sha, task_id) in upstream.iter().zip(upstream_task_ids.iter()) {
+        if task_id.is_empty() {
+            continue;
+        }
+        let url = format!(
+            "{}/v1/node/tasks/{}/artifacts/changes.patch",
+            cfg.server, task_id
+        );
+        match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => match r.bytes().await {
+                Ok(b) if !b.is_empty() => upstream_patches.push((sha.clone(), b.to_vec())),
+                _ => tracing::warn!("upstream {sha} changes.patch empty; will rely on git fetch"),
+            },
+            Ok(r) => tracing::warn!(
+                "upstream {sha} changes.patch fetch status {}; will rely on git fetch",
+                r.status()
+            ),
+            Err(e) => tracing::warn!("upstream {sha} changes.patch fetch error: {e}"),
+        }
+    }
     let ws = tokio::task::spawn_blocking(move || {
-        git::prepare_workspace(&repo_root, &ws_root, &prep_assignment, &upstream)
+        git::prepare_workspace(
+            &repo_root,
+            &ws_root,
+            &prep_assignment,
+            &upstream,
+            &upstream_patches,
+        )
     })
     .await??;
     tracing::info!(attempt_id = %assignment.attempt_id, git = ws.is_git, "starting attempt");
@@ -3228,6 +3260,7 @@ mod tests {
             parent_acp_session_id: None,
             provenance: None,
             upstream_commits: vec![],
+            upstream_task_ids: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -3333,6 +3366,7 @@ mod tests {
             parent_acp_session_id: None,
             provenance: None,
             upstream_commits: vec![],
+            upstream_task_ids: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -3435,6 +3469,7 @@ mod tests {
             parent_acp_session_id: None,
             provenance: None,
             upstream_commits: vec![],
+            upstream_task_ids: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -3592,6 +3627,7 @@ mod tests {
                 parent_acp_session_id: None,
                 provenance: None,
                 upstream_commits: vec![],
+                upstream_task_ids: vec![],
             };
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),

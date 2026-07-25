@@ -769,6 +769,33 @@ async fn artifact_upload_and_read() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     assert_eq!(body.as_ref(), b"diff --git a/x b/x".as_slice());
+
+    // Stage 8 / line 257: a *node* (using its own node-credential, no user
+    // JWT) must be able to fetch an upstream worker's `changes.patch`
+    // artifact so the integrator node can `git apply` it as a fallback when
+    // the worker's commit SHA is not reachable via a shared Git remote.
+    // Route: GET /v1/node/tasks/{id}/artifacts/{name} (node-auth).
+    let (_n2, cred2) = enroll(
+        &app,
+        "node-art-fetcher",
+        vec!["mock".into()],
+        vec!["*".into()],
+    )
+    .await;
+    let resp = app
+        .oneshot(get_auth(
+            &format!("/v1/node/tasks/{}/artifacts/changes.patch", assign.task_id),
+            &cred2,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "node can fetch upstream changes.patch"
+    );
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), b"diff --git a/x b/x".as_slice());
 }
 
 #[tokio::test]

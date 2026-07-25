@@ -304,6 +304,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(upload_artifact_raw),
         )
         .route("/v1/tasks/{id}/artifacts/{name}", get(get_artifact))
+        .route(
+            "/v1/node/tasks/{id}/artifacts/{name}",
+            get(get_artifact_node),
+        )
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations/{id}", get(show_conversation))
         .route(
@@ -1691,6 +1695,38 @@ async fn get_artifact(
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
             tracing::error!("read_artifact failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_artifact_node(
+    State(state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthedNode>,
+    Path((task_id, name)): Path<(String, String)>,
+) -> Result<Response, StatusCode> {
+    // Stage 8 / line 257: node-side mirror of `get_artifact` so the node can
+    // fetch an upstream worker's `changes.patch` artifact with its own
+    // node-credential (no user JWT available on the node). Same safety:
+    // reject traversal names as 404.
+    if !is_safe_artifact_name(&name) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    match state.store.read_artifact_bytes(&task_id, &name).await {
+        Ok(Some(bytes)) => {
+            let mt = state
+                .store
+                .read_artifact_meta(&task_id, &name)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|m| m.media_type)
+                .unwrap_or_else(|| "application/octet-stream".into());
+            Ok(([(header::CONTENT_TYPE, mt.as_str())], Bytes::from(bytes)).into_response())
+        }
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("read_artifact (node) failed: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

@@ -4,6 +4,41 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane+node — distributed patch-bundle fallback, Stage 8 / line 257)
+
+- `Assignment.upstream_task_ids` (parallel to `upstream_commits`, same order):
+  control-plane resolves each upstream worker's `(commit_sha, task_id)` pair
+  via `upstream_refs_for_task` and surfaces both in the assignment, so a node
+  running an integrator/verifier step can fetch each worker's `changes.patch`
+  artifact from the control plane as a fallback when the SHA is not reachable
+  via the shared Git remote (distributed workflow without a shared remote,
+  e.g. workers and integrator on different physical hosts without a common
+  origin).
+- Node `git::prepare_workspace` now, for each upstream SHA, runs
+  `git fetch origin <sha>` + `git cat-file -e <sha>`; if the commit object is
+  absent it falls back to `git apply --3way` of the worker's `changes.patch`
+  artifact fetched up front (`GET /v1/node/tasks/{id}/artifacts/changes.patch`).
+  Local cherry-pick is still the fast path when the SHA is reachable.
+  Best-effort: an upstream with neither a reachable SHA nor a patch is skipped
+  (integrator still runs with one fewer merged worker).
+- New control-plane route `GET /v1/node/tasks/{id}/artifacts/{name}` mirrors
+  `GET /v1/tasks/{id}/artifacts/{name}` but authenticates with the node's
+  own credential (`require_node_auth`) — nodes have no user JWT.
+- Tests: node `integrator_applies_patch_bundle_when_sha_not_reachable`
+  (git unit; fake-unreachable SHA + patch-only path lands the worker change);
+  CP `artifact_upload_and_read` extended to assert a second node-credential can
+  fetch the upstream `changes.patch`; CP store tests assert `upstream_task_ids`
+  parallel to `upstream_commits` for integrator + verifier.
+
+### Added (tests — slow-network failure injection)
+
+- `tests/e2e/run-slow-net.sh` + `tests/e2e/throttle-proxy.py`: process-based,
+  no Docker / no `tc`. The proxy sleeps before every socket write
+  (`AG_PROXY_DELAY_MS`, default 200 ms) so a chatty mock task (`spam:200`, 200
+  events) traverses a 250 ms/write-inflated link; the run still reaches
+  `succeeded` with contiguous event sequences (no gaps / no duplicates / no
+  spurious timeouts). Covers the last open failure-injection checklist item.
+
 ### Added (cli — full-screen TUI dashboard `ag tui`)
 
 - New `ag tui` subcommand: a full-screen monitoring dashboard over the

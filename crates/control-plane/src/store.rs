@@ -1062,7 +1062,9 @@ impl Store {
                 .await?;
             tx.commit().await?;
 
-            let upstream_commits = self.upstream_commits_for_task(&task_id).await?;
+            let upstream_refs = self.upstream_refs_for_task(&task_id).await?;
+            let (upstream_commits, upstream_task_ids): (Vec<String>, Vec<String>) =
+                upstream_refs.into_iter().unzip();
             return Ok(Some(Assignment {
                 attempt_id,
                 task_id,
@@ -1078,6 +1080,7 @@ impl Store {
                 parent_acp_session_id,
                 provenance: None,
                 upstream_commits,
+                upstream_task_ids,
             }));
         }
 
@@ -2545,6 +2548,18 @@ mod workflow_tests {
             vec!["sha-worker-1".to_string(), "sha-worker-2".to_string()],
             "integrator carries upstream worker commit SHAs",
         );
+        // Stage 8 / line 257: parallel task_ids are also surfaced so the node
+        // can fetch each worker's changes.patch artifact as a fallback when
+        // the SHA is not reachable via a shared Git remote.
+        assert_eq!(
+            int_a.upstream_commits.len(),
+            int_a.upstream_task_ids.len(),
+            "upstream_task_ids parallel to upstream_commits",
+        );
+        assert!(
+            !int_a.upstream_task_ids.is_empty(),
+            "integrator carries upstream worker task ids",
+        );
     }
 
     #[tokio::test]
@@ -2605,6 +2620,11 @@ mod workflow_tests {
             v.upstream_commits,
             vec!["sha-worker-1".to_string()],
             "verifier carries the worker's winning commit SHA (no transcript)",
+        );
+        assert_eq!(
+            v.upstream_task_ids.len(),
+            1,
+            "verifier carries the upstream worker task id for patch fallback",
         );
     }
 

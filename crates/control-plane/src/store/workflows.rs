@@ -680,7 +680,20 @@ impl Store {
     /// Returns `[]` for plain (non-workflow) tasks and for steps without any
     /// succeeded dependency. Best-effort: a missing commit SHA is skipped
     /// (the integrator still runs, but with one fewer merged worker).
-    pub(crate) async fn upstream_commits_for_task(&self, task_id: &str) -> Result<Vec<String>> {
+    /// Stage 8 / line 239: for an Integrator (or Verifier) workflow step's
+    /// task, resolve the winning `(commit_sha, task_id)` pairs of its
+    /// upstream dependency steps, so the node can land them into the worktree
+    /// before the agent runs. The `task_id` lets the node fetch each worker's
+    /// `changes.patch` artifact from the CP as a fallback when the commit SHA
+    /// is not reachable via the shared Git remote (Stage 8 / line 257:
+    /// distributed workflow without a shared remote). Returns `[]` for plain
+    /// (non-workflow) tasks and for steps without any succeeded dependency.
+    /// Best-effort: a missing commit SHA is skipped (the integrator still
+    /// runs, but with one fewer merged worker).
+    pub(crate) async fn upstream_refs_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<(String, String)>> {
         // 1. task_id -> role_runs.step_run_id (the integrator step run).
         let this_step_run: Option<String> =
             sqlx::query_scalar("SELECT step_run_id FROM role_runs WHERE task_id = ? LIMIT 1")
@@ -744,7 +757,7 @@ impl Store {
                     .await?;
             let Some(dep_task) = dep_task else { continue };
             if let Some(sha) = self.attempt_commit_for_task(&dep_task).await? {
-                out.push(sha);
+                out.push((sha, dep_task));
             }
         }
         Ok(out)
