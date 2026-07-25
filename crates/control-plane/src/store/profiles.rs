@@ -25,8 +25,8 @@ impl Store {
         .await?;
         sqlx::query(
             "INSERT INTO agent_profiles \
-             (id, revision, system_prompt, autonomy, memory_max, cpu_quota, tasks_max, created_at, created_by, secret_requirements, adapter_version) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, revision, system_prompt, autonomy, memory_max, cpu_quota, tasks_max, created_at, created_by, secret_requirements, adapter_version, mcp_server_ids) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(next)
@@ -39,6 +39,7 @@ impl Store {
         .bind(created_by)
         .bind(serde_json::to_string(&body.secret_requirements).unwrap_or_else(|_| "[]".into()))
         .bind(&body.adapter_version)
+        .bind(serde_json::to_string(&body.mcp_server_ids).unwrap_or_else(|_| "[]".into()))
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -64,7 +65,7 @@ impl Store {
         let row = sqlx::query(
             "SELECT p.id, p.revision, p.system_prompt, p.autonomy, p.memory_max, \
                     p.cpu_quota, p.tasks_max, p.created_at, p.created_by, \
-                    p.secret_requirements, p.adapter_version,\
+                    p.secret_requirements, p.adapter_version, p.mcp_server_ids,\
                     (a.active_revision IS NOT NULL) AS active \
              FROM agent_profiles p \
              LEFT JOIN agent_profiles_active a ON a.id = p.id AND a.active_revision = p.revision \
@@ -82,7 +83,7 @@ impl Store {
         let rows = sqlx::query(
             "SELECT p.id, p.revision, p.system_prompt, p.autonomy, p.memory_max, \
                     p.cpu_quota, p.tasks_max, p.created_at, p.created_by, \
-                    p.secret_requirements, p.adapter_version,\
+                    p.secret_requirements, p.adapter_version, p.mcp_server_ids,\
                     (a.active_revision = p.revision) AS active \
              FROM agent_profiles p \
              LEFT JOIN agent_profiles_active a ON a.id = p.id \

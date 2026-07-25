@@ -400,9 +400,15 @@ fn level_rank(l: AutonomyLevel) -> u8 {
 /// control plane, keeps only `enabled` servers, and projects it as the JSON
 /// the ACP adapter consumes. `Value::Null` (or empty) when the CP is
 /// unreachable — the agent never *auto*-spawns an unregistered server.
-/// ponytail: all registry servers are operator-managed = trusted; per-profile
-/// server attachment (subset) is a follow-up.
-async fn mcp_servers_payload(client: &reqwest::Client, server: &str) -> serde_json::Value {
+/// When `subset` is non-empty, only those registry servers (by id) are
+/// attached — a per-profile MCP allow-list (Stage 13 follow-up). Empty
+/// subset = use all enabled servers in the registry; all registry servers are
+/// operator-managed = trusted.
+async fn mcp_servers_payload(
+    client: &reqwest::Client,
+    server: &str,
+    subset: &[String],
+) -> serde_json::Value {
     let resp = match client.get(format!("{server}/v1/mcp-servers")).send().await {
         Ok(r) => r,
         Err(e) => {
@@ -420,7 +426,11 @@ async fn mcp_servers_payload(client: &reqwest::Client, server: &str) -> serde_js
             return Value::Null;
         }
     };
-    let enabled: Vec<_> = servers.into_iter().filter(|s| s.enabled).collect();
+    let enabled: Vec<_> = servers
+        .into_iter()
+        .filter(|s| s.enabled)
+        .filter(|s| subset.is_empty() || subset.iter().any(|id| id == &s.id))
+        .collect();
     if enabled.is_empty() {
         return Value::Null;
     }
@@ -1213,7 +1223,11 @@ async fn drive_acp_session(
             session_id: None,
         });
     }
-    let mcp_payload = mcp_servers_payload(client, &cfg.server).await;
+    let mcp_subset = cp_profile
+        .as_ref()
+        .map(|p| p.mcp_server_ids.clone())
+        .unwrap_or_default();
+    let mcp_payload = mcp_servers_payload(client, &cfg.server, &mcp_subset).await;
     let session_id = match acp
         .session_new(SessionNewParams {
             agent: assignment.adapter.clone(),
@@ -2997,7 +3011,7 @@ mod tests {
         ]"#;
         let server = dummy_profile_server(body).await;
         let client = reqwest::Client::new();
-        let val = mcp_servers_payload(&client, &server).await;
+        let val = mcp_servers_payload(&client, &server, &[]).await;
         let servers = val.get("servers").expect("enabled servers present");
         let arr = servers.as_array().unwrap();
         assert_eq!(
@@ -3010,6 +3024,27 @@ mod tests {
         // No secret value bytes leak through.
         let text = val.to_string();
         assert!(!text.contains("ghp_"), "no secret bytes: {text}");
+    }
+
+    #[tokio::test]
+    async fn mcp_payload_subset_filters_to_profile_allow_list() {
+        // Stage 13 follow-up: a non-empty per-profile subset attaches only the
+        // listed registry servers (by id), even if more are enabled. Empty
+        // subset = all enabled (covered above).
+        let body = r#"[
+            {"id":"github","name":"GitHub","command":"mcp-github","args":[],"env_requirements":[],"enabled":true,"created_at":""},
+            {"id":"fs","name":"FS","command":"mcp-fs","args":[],"env_requirements":[],"enabled":true,"created_at":""},
+            {"id":"legacy","name":"Legacy","command":"mcp-old","args":[],"env_requirements":[],"enabled":false,"created_at":""}
+        ]"#;
+        let server = dummy_profile_server(body).await;
+        let client = reqwest::Client::new();
+        let val = mcp_servers_payload(&client, &server, &["github".into()]).await;
+        let arr = val.get("servers").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 1, "subset keeps only the listed id");
+        assert_eq!(arr[0]["name"], "github");
+        // Empty subset = all enabled (2 here; legacy disabled dropped).
+        let val = mcp_servers_payload(&client, &server, &[]).await;
+        assert_eq!(val.get("servers").unwrap().as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -3028,6 +3063,7 @@ mod tests {
             active: true,
             secret_requirements: vec![],
             adapter_version: None,
+            mcp_server_ids: vec![],
         };
         // cfg L4, profile L1 → L1 (profile tightens).
         assert_eq!(
@@ -3092,6 +3128,7 @@ mod tests {
             active: true,
             secret_requirements: vec![],
             adapter_version: ver.map(|s| s.to_string()),
+            mcp_server_ids: vec![],
         };
         assert_eq!(
             check_adapter_compatibility(Some(&p(Some("1.4.0"))), Some("2.0.0")),
@@ -3130,6 +3167,7 @@ mod tests {
             active: true,
             secret_requirements: reqs,
             adapter_version: None,
+            mcp_server_ids: vec![],
         };
         // Required unset → fail-closed.
         let code = check_profile_secrets(Some(&p(vec![agentgrid_common::SecretRequirement {
@@ -3175,6 +3213,7 @@ mod tests {
             active: true,
             secret_requirements: vec![],
             adapter_version: None,
+            mcp_server_ids: vec![],
         };
         let l = profile_limits(Some(&prof(536870912, 50, 100)));
         assert_eq!(l.memory_max, Some(536870912));

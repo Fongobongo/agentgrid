@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (control-plane+node — per-profile MCP server subset, Stage 13 follow-up)
+
+- `AgentProfile.mcp_server_ids` (and `AgentProfileCreate.mcp_server_ids`):
+  an optional allow-list of MCP server ids the profile attaches to its
+  sessions. Non-empty = attach only the listed registry servers (by id);
+  empty (default) = attach every enabled server. Migration `0031_profile_mcp_subset.sql`.
+- Node `mcp_servers_payload(client, server, &subset)` now filters the
+  operator-trusted registry by the per-profile subset before serializing
+  `SessionNewParams.mcp`. Lets an operator restrict MCP tools per adapter
+  without splitting the registry. Real stdio spawn / `tools/list` discovery
+  stays inside the ACP adapter (it consumes the `mcp` field we project), so
+  this completes the registry-side half of the follow-up.
+- Tests: node `mcp_payload_subset_filters_to_profile_allow_list`;
+  common `profile_carries_secret_requirements_and_adapter_version` asserts
+  `mcp_server_ids` round-trips; CP `agent_profile_revisions_immutable_and_roll_back`
+  asserts the subset persists through create→activate→fetch.
+
 ### Added (control-plane+node — distributed patch-bundle fallback, Stage 8 / line 257)
 
 - `Assignment.upstream_task_ids` (parallel to `upstream_commits`, same order):

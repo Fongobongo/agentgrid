@@ -45,6 +45,13 @@ pub struct AgentProfile {
     /// compatible (equal major) before activating; `None` = no check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_version: Option<String>,
+    /// Stage 13: an optional MCP server subset — if non-empty, the node only
+    /// attaches the listed registry servers (by id) to sessions for this
+    /// adapter. Empty = use all enabled servers in the registry. The per-
+    /// profile subset lets an operator give one adapter trusted MCP tools it
+    /// needs while denying them to others, without splitting the registry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_server_ids: Vec<String>,
 }
 
 /// Body for `POST /v1/profiles/{id}` — create a new revision. Fields the caller
@@ -67,6 +74,11 @@ pub struct AgentProfileCreate {
     /// Adapter version this profile targets (optional capability check).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_version: Option<String>,
+    /// Stage 13: optional MCP server subset — if non-empty, only these
+    /// registry servers (by id) are attached for this adapter. Empty = use
+    /// all enabled servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_server_ids: Vec<String>,
 }
 
 fn default_autonomy() -> String {
@@ -148,14 +160,17 @@ mod tests {
                 },
             ],
             adapter_version: Some("1.2.3".into()),
+            mcp_server_ids: vec!["github".into(), "fs".into()],
         };
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains("secret_requirements"));
         assert!(json.contains("adapter_version"));
+        assert!(json.contains("mcp_server_ids"));
         assert!(!json.to_lowercase().contains("secret_value"));
         let back: AgentProfileCreate = serde_json::from_str(&json).unwrap();
         assert_eq!(back.secret_requirements.len(), 2);
         assert_eq!(back.adapter_version.as_deref(), Some("1.2.3"));
+        assert_eq!(back.mcp_server_ids, vec!["github".to_string(), "fs".into()]);
     }
 
     #[test]

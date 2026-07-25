@@ -2068,6 +2068,12 @@ fn profile_from_row(r: &sqlx::sqlite::SqliteRow) -> AgentProfile {
         active: r.try_get::<bool, _>("active").unwrap_or(false),
         secret_requirements,
         adapter_version: r.try_get("adapter_version").ok(),
+        mcp_server_ids: serde_json::from_str(
+            r.try_get::<String, _>("mcp_server_ids")
+                .as_deref()
+                .unwrap_or("[]"),
+        )
+        .unwrap_or_default(),
     }
 }
 

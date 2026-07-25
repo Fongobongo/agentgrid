@@ -3526,6 +3526,7 @@ async fn agent_profile_carries_secret_requirements_and_version() {
             },
         ],
         adapter_version: Some("1.4.0".into()),
+        mcp_server_ids: vec!["github".into()],
     })
     .unwrap();
     let resp = app
@@ -3568,4 +3569,9 @@ async fn agent_profile_carries_secret_requirements_and_version() {
     assert_eq!(p.secret_requirements[1].env, "OPTIONAL_TOKEN");
     assert!(!p.secret_requirements[1].required);
     assert_eq!(p.adapter_version.as_deref(), Some("1.4.0"));
+    assert_eq!(
+        p.mcp_server_ids,
+        vec!["github".to_string()],
+        "per-profile MCP subset round-trips through the store",
+    );
 }
