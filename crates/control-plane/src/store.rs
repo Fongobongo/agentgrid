@@ -511,6 +511,17 @@ impl Store {
         })
     }
 
+    /// Resolve the owning node id of an attempt, or None if no such attempt.
+    /// Used by node handlers to enforce cross-node isolation (hardening P0):
+    /// a node may only mutate attempts assigned to it.
+    pub async fn attempt_owner(&self, attempt_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT node_id FROM attempts WHERE id = ?")
+            .bind(attempt_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.try_get::<String, _>("node_id")).transpose()?)
+    }
+
     /// Record a heartbeat: refresh capabilities/load and last-seen time.
     pub async fn heartbeat(&self, node_id: &str, req: &HeartbeatRequest) -> Result<bool> {
         let status = req.status.unwrap_or(NodeStatus::Online);

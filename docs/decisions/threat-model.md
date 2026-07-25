@@ -43,7 +43,7 @@ External ACP clients can drive the grid as an ACP agent (Stage 6) since 0.2.
 | # | Threat | Mitigation | Gap / follow-up |
 |---|--------|-----------|-----------------|
 | T1 | Secret in agent stdout/stderr leaks into events, artifacts, commit, patch | `AGENTGRID_SECRETS` masked in all stream paths, `validation.log`, `changes.patch`; agent logs excluded from the commit/diff via per-worktree `.git/info/exclude` (0.1.1) | binary-safe artifact API + `openat`/`O_NOFOLLOW` still follow-up |
-| T2 | Crafted artifact name reads/writes outside the artifact root (`../../etc/passwd`) | upload + download both gate on `is_safe_artifact_name`; `Store::artifact_path` canonicalizes and checks the resolved dir stays under the root (0.1.1) | descriptor-relative write API pending |
+| T2 | Crafted artifact name reads/writes outside the artifact root (`../../etc/passwd`) | upload + download both gate on `is_safe_artifact_name` (validated before the ownership check so a traversal attempt never discloses attempt existence); `Store::artifact_path` canonicalizes and checks the resolved dir stays under the root (0.1.1) | descriptor-relative write API pending |
 | T3 | Shell injection via repo/branch/URL/adapters | git invoked via `Command::arg` (no `sh -c`); tokens validated (`[a-z0-9-_]`, no traversal) | `checkout -B` on shared clone → bare mirror follow-up |
 | T4 | Two parallel attempts of one repo race the shared clone | per-repository in-process `Mutex` across fetch/`checkout -B`/`worktree add` (0.1.1) | cross-process file lock follow-up |
 | T5 | Node vanishes mid-attempt → wedged/`running` tasks | node offline → non-terminal attempts atomically `lost`; lease + ack deadline revert | — |
@@ -56,6 +56,7 @@ External ACP clients can drive the grid as an ACP agent (Stage 6) since 0.2.
 | T12 | Dangerous agent command (package install, destructive) executed unattended | command-policy provider (`ask`/`deny` default), audit per decision; autonomy L0–L4; fail-closed on provider error | pluggable providers + ACP/adapter enforcement boundary noted as not-yet-strict for wrapper-only adapters |
 | T13 | Docker-mount secrets leak (sandboxing/backends) | not yet enforced (sandbox optional, off-by-default) | h5i/CubeSandbox spikes + secure profile (Stage 12) |
 | T14 | Incompatible/rogue node joins a grid | protocol versioning; incompatible node marked `degraded(incompatible_protocol)` | — |
+| T15 | A node mutates or reads another node's attempt (cross-node isolation breach) | every `/v1/node/attempts/*` mutation (events, complete, ack, cancel-poll, session, artifact upload) and the node-scoped artifact read enforce authenticated-node ownership of the target attempt; a foreign attempt yields `403` (or `404` to hide existence); upstream artifact reads are restricted to the consumer node whose workflow step depends on the producer task (`can_node_read_upstream_artifact`); revoked nodes fail at `require_node_auth` (0.4.1) | fencing tokens for stale-writer protection pending (Milestone 2) |
 
 ## Operational safety invariants
 

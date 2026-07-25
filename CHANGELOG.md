@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security (hardening P0 — cross-node isolation)
+
+- All `/v1/node/attempts/*` mutation endpoints (event ingest, complete, ack,
+  cancel-poll, agent-session create, artifact upload JSON + raw) now enforce
+  that the authenticated node owns the target attempt. A foreign attempt
+  yields `403 Forbidden`; a missing attempt yields `404` (no existence
+  disclosure). Previously any node credential could mutate any attempt by id.
+- `GET /v1/node/tasks/{id}/artifacts/{name}` (upstream `changes.patch` fetch)
+  is now authorized: only the consumer node whose workflow step depends on
+  the producer task may read it. Unrelated nodes get `404`. Added
+  `Store::attempt_owner` and `Store::can_node_read_upstream_artifact`.
+- Artifact name traversal validation now runs before the ownership check so
+  a crafted name never reaches the store or discloses attempt existence.
+- Threat model updated: T2 (artifact traversal) and new T15 (cross-node
+  isolation) reflect the enforced mitigations.
+- Regression tests: cross-node ACK/events/complete/session/artifact-upload/
+  cancel-poll/revoke all rejected; positive case for upstream artifact read
+  by a workflow consumer node.
+
 ### Added (tests — two-host E2E on physical hosts, Stage 8 / line 260)
 
 - `tests/e2e/run-two-host.sh`: process-based, no Docker, no second CI runner.

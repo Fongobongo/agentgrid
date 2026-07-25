@@ -438,6 +438,28 @@ async fn require_node_auth(
     }
 }
 
+/// Reject a node request whose attempt is not owned by the authenticated
+/// node. Hardening P0: cross-node isolation. Returns `Ok(())` if the attempt
+/// exists and belongs to `auth.node_id`; `Err(FORBIDDEN)` if it exists but
+/// belongs to another node; `Err(NOT_FOUND)` if no such attempt (avoid
+/// disclosing existence). Optionally allow a revoked caller to also hit 403 —
+/// but revoked nodes already fail at `require_node_auth` (no credential match).
+async fn check_attempt_owner(
+    state: &AppState,
+    auth: &AuthedNode,
+    attempt_id: &str,
+) -> Result<(), StatusCode> {
+    match state.store.attempt_owner(attempt_id).await {
+        Ok(Some(node_id)) if node_id == auth.node_id => Ok(()),
+        Ok(Some(_)) => Err(StatusCode::FORBIDDEN),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("attempt_owner failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 async fn health_live() -> StatusCode {
     StatusCode::OK
 }
@@ -1702,7 +1724,7 @@ async fn get_artifact(
 
 async fn get_artifact_node(
     State(state): State<Arc<AppState>>,
-    Extension(_auth): Extension<AuthedNode>,
+    Extension(auth): Extension<AuthedNode>,
     Path((task_id, name)): Path<(String, String)>,
 ) -> Result<Response, StatusCode> {
     // Stage 8 / line 257: node-side mirror of `get_artifact` so the node can
@@ -1710,6 +1732,20 @@ async fn get_artifact_node(
     // node-credential (no user JWT available on the node). Same safety:
     // reject traversal names as 404.
     if !is_safe_artifact_name(&name) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Hardening P0: authorize the caller node to read this producer task's
+    // artifact (workflow dependency producer -> consumer attempt owned by
+    // the caller). Always 404 on denial to avoid disclosing existence.
+    let allowed = state
+        .store
+        .can_node_read_upstream_artifact(&auth.node_id, &task_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("can_node_read_upstream_artifact failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if !allowed {
         return Err(StatusCode::NOT_FOUND);
     }
     match state.store.read_artifact_bytes(&task_id, &name).await {
@@ -1734,16 +1770,22 @@ async fn get_artifact_node(
 
 async fn upload_artifact(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
     Json(req): Json<UploadArtifactRequest>,
 ) -> StatusCode {
-    if req.content.len() > state.limits.artifact {
-        return StatusCode::PAYLOAD_TOO_LARGE;
-    }
     // Stage 2.2: never let a crafted name escape the artifact root
-    // (../../etc/passwd, absolute paths, separators).
+    // (../../etc/passwd, absolute paths, separators). Validated before the
+    // ownership check so a traversal attempt never reaches the store and
+    // never discloses attempt existence.
     if !is_safe_artifact_name(&req.name) {
         return StatusCode::BAD_REQUEST;
+    }
+    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
+    if req.content.len() > state.limits.artifact {
+        return StatusCode::PAYLOAD_TOO_LARGE;
     }
     match state
         .store
@@ -1771,10 +1813,14 @@ async fn upload_artifact(
 /// artifact; the legacy JSON endpoint stays for text-only clients.
 async fn upload_artifact_raw(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
+    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
     if body.len() > state.limits.artifact {
         return StatusCode::PAYLOAD_TOO_LARGE;
     }
@@ -1958,8 +2004,12 @@ async fn poll(
 
 async fn attempt_cancel_handler(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
-) -> Json<CancelState> {
+) -> Response {
+    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code.into_response();
+    }
     let requested = state
         .store
         .attempt_cancel_requested(&attempt_id)
@@ -1968,6 +2018,7 @@ async fn attempt_cancel_handler(
     Json(CancelState {
         cancel_requested: requested,
     })
+    .into_response()
 }
 
 async fn cancel_task_handler(
@@ -2162,9 +2213,13 @@ async fn retry_task_handler(
 
 async fn ingest_events(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
     Json(req): Json<IngestEventsRequest>,
 ) -> StatusCode {
+    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
     for e in &req.events {
         if e.payload.to_string().len() > state.limits.event {
             return StatusCode::PAYLOAD_TOO_LARGE;
@@ -2182,9 +2237,13 @@ async fn ingest_events(
 
 async fn complete_attempt(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
     Json(req): Json<CompleteAttemptRequest>,
 ) -> StatusCode {
+    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
     match state.store.complete_attempt(&attempt_id, &req).await {
         Ok(true) => StatusCode::OK,
         Ok(false) => StatusCode::NOT_FOUND,
@@ -2197,8 +2256,12 @@ async fn complete_attempt(
 
 async fn ack_attempt_handler(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
 ) -> StatusCode {
+    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
     match state.store.ack_attempt(&attempt_id).await {
         Ok(true) => StatusCode::OK,
         Ok(false) => StatusCode::NOT_FOUND,
@@ -2211,9 +2274,13 @@ async fn ack_attempt_handler(
 
 async fn create_agent_session_handler(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
     Json(req): Json<CreateAgentSessionRequest>,
 ) -> Response {
+    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code.into_response();
+    }
     match state
         .store
         .create_agent_session(&attempt_id, &req.adapter)

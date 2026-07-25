@@ -763,6 +763,69 @@ impl Store {
         Ok(out)
     }
 
+    /// Authorize a node to read an upstream producer task's artifact
+    /// (hardening P0): the caller node must hold an in-flight attempt for a
+    /// consumer task whose workflow step depends on the producer task's step.
+    /// Non-workflow tasks have no upstream consumers, so arbitrary nodes may
+    /// not read their artifacts through `/v1/node/tasks/.../artifacts/...`.
+    pub async fn can_node_read_upstream_artifact(
+        &self,
+        node_id: &str,
+        producer_task_id: &str,
+    ) -> Result<bool> {
+        // Producer task's step run (None for plain tasks -> not readable here).
+        let producer_step_run: Option<String> =
+            sqlx::query_scalar("SELECT step_run_id FROM role_runs WHERE task_id = ? LIMIT 1")
+                .bind(producer_task_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(producer_step_run) = producer_step_run else {
+            return Ok(false);
+        };
+        let producer_step_id: String =
+            sqlx::query_scalar("SELECT step_id FROM workflow_steps WHERE id = ?")
+                .bind(&producer_step_run)
+                .fetch_one(&self.pool)
+                .await?;
+        let run_id: String = sqlx::query_scalar("SELECT run_id FROM workflow_steps WHERE id = ?")
+            .bind(&producer_step_run)
+            .fetch_one(&self.pool)
+            .await?;
+        // Any consumer step in the same run whose depends_on contains the
+        // producer step_id, whose task is assigned to an attempt owned by node.
+        let consumer_steps =
+            sqlx::query("SELECT id, depends_on FROM workflow_steps WHERE run_id = ? AND id != ?")
+                .bind(&run_id)
+                .bind(&producer_step_run)
+                .fetch_all(&self.pool)
+                .await?;
+        for row in consumer_steps {
+            let deps_json: String = row.try_get::<String, _>("depends_on").unwrap_or_default();
+            let deps: Vec<String> = serde_json::from_str(&deps_json).unwrap_or_default();
+            if !deps.iter().any(|d| d == &producer_step_id) {
+                continue;
+            }
+            let consumer_step_run: String = row.try_get("id")?;
+            let consumer_task: Option<String> =
+                sqlx::query_scalar("SELECT task_id FROM role_runs WHERE step_run_id = ? LIMIT 1")
+                    .bind(&consumer_step_run)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            let Some(consumer_task) = consumer_task else {
+                continue;
+            };
+            let owner: Option<String> =
+                sqlx::query_scalar("SELECT node_id FROM attempts WHERE task_id = ?")
+                    .bind(&consumer_task)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            if owner.as_deref() == Some(node_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Stage 13: stamp a pending plan onto the run row (read on approval).
     async fn set_workflow_run_plan(&self, run_id: &str, plan: &str) -> Result<()> {
         sqlx::query("UPDATE workflow_runs SET plan = ? WHERE id = ?")

@@ -770,11 +770,9 @@ async fn artifact_upload_and_read() {
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     assert_eq!(body.as_ref(), b"diff --git a/x b/x".as_slice());
 
-    // Stage 8 / line 257: a *node* (using its own node-credential, no user
-    // JWT) must be able to fetch an upstream worker's `changes.patch`
-    // artifact so the integrator node can `git apply` it as a fallback when
-    // the worker's commit SHA is not reachable via a shared Git remote.
-    // Route: GET /v1/node/tasks/{id}/artifacts/{name} (node-auth).
+    // Hardening P0 (upstream artifact authorization): a *second* node that is
+    // not a workflow consumer of this producer task must NOT be able to fetch
+    // its artifact through the node-scoped route. Existence is hidden (404).
     let (_n2, cred2) = enroll(
         &app,
         "node-art-fetcher",
@@ -791,11 +789,9 @@ async fn artifact_upload_and_read() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
-        "node can fetch upstream changes.patch"
+        StatusCode::NOT_FOUND,
+        "unrelated node cannot read a non-consumer producer artifact"
     );
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(body.as_ref(), b"diff --git a/x b/x".as_slice());
 }
 
 #[tokio::test]
@@ -3574,4 +3570,420 @@ async fn agent_profile_carries_secret_requirements_and_version() {
         vec!["github".to_string()],
         "per-profile MCP subset round-trips through the store",
     );
+}
+
+// ============================================================================
+// Hardening P0: cross-node isolation regression tests.
+// A node may only mutate attempts assigned to it. A second node's credential
+// must not be able to ingest events, complete, ack, cancel-poll, create a
+// session, or upload artifacts on the first node's attempt. Upstream artifact
+// reads are restricted to the consumer's workflow-dependency chain.
+// ============================================================================
+
+/// Helper: enroll two nodes; create+assign a task to node_a only (node_b polls
+/// and expects nothing). Returns (assign_a, cred_a, cred_b, node_b_id).
+async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, String, String) {
+    let (node_a, cred_a) = enroll(app, "iso-a", vec!["mock".into()], vec!["*".into()]).await;
+    let (node_b, cred_b) = enroll(app, "iso-b", vec!["mock".into()], vec!["*".into()]).await;
+    let req = CreateTaskRequest {
+        prompt: prompt.into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        // Pin to node_a so node_b cannot pick it up.
+        requested_node_id: Some(node_a.clone()),
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let poll_a = PollRequest {
+        node_id: node_a.clone(),
+        name: "iso-a".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        protocol_version: None,
+    };
+    let mut assign = None;
+    for _ in 0..50 {
+        let r = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/node/poll",
+                serde_json::to_string(&poll_a).unwrap(),
+                &cred_a,
+            ))
+            .await
+            .unwrap();
+        let pr: PollResponse =
+            serde_json::from_slice(&to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+        if let Some(a) = pr.assignment {
+            assign = Some(a);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    (assign.unwrap(), cred_a, cred_b, node_b)
+}
+
+fn complete_req() -> CompleteAttemptRequest {
+    CompleteAttemptRequest {
+        exit_code: 0,
+        commit_sha: None,
+        error_code: None,
+        acp_session_id: None,
+        provenance: None,
+        plan: None,
+    }
+}
+
+#[tokio::test]
+async fn cross_node_cannot_ingest_events() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (assign, cred_a, cred_b, _node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
+    // Own node: ok.
+    let ev = IngestEventsRequest {
+        events: vec![IncomingEvent {
+            sequence: 1,
+            r#type: EventType::Stdout,
+            payload: json!({"text": "start"}),
+        }],
+    };
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred_a,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    // Other node: forbidden.
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    // Unknown attempt: not found.
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/attempts/does-not-exist/events",
+            serde_json::to_string(&ev).unwrap(),
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cross_node_cannot_complete_attempt() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (assign, cred_a, cred_b, _node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
+    // other node must not complete.
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&complete_req()).unwrap(),
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    // Task untouched (still assigned/running-from-own-ingest; here just not
+    // succeeded): own node still can complete.
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&complete_req()).unwrap(),
+            &cred_a,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cross_node_cannot_ack_attempt() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (assign, cred_a, cred_b, _node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
+    let r = ack_attempt(&app, &assign.attempt_id, &cred_b).await;
+    assert_eq!(r, StatusCode::FORBIDDEN);
+    // Own node ack succeeds, leaves attempt running.
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred_a).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn cross_node_cannot_poll_cancel_state() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (assign, _cred_a, cred_b, _node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
+    let r = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/node/attempts/{}/cancel", assign.attempt_id),
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn cross_node_cannot_create_agent_session() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (assign, _cred_a, cred_b, _node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
+    let body = serde_json::json!({ "adapter": "mock" }).to_string();
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/session", assign.attempt_id),
+            body,
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn cross_node_cannot_upload_artifact() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (assign, _cred_a, cred_b, _node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
+    let req = UploadArtifactRequest {
+        name: "out.log".into(),
+        content: "hello".into(),
+        media_type: Some("text/plain".into()),
+        sha256: None,
+    };
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
+            serde_json::to_string(&req).unwrap(),
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    // raw upload path too.
+    let r = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/node/attempts/{}/artifacts/raw",
+                    assign.attempt_id
+                ))
+                .header("authorization", format!("Bearer {cred_b}"))
+                .header("x-artifact-name", "raw.bin")
+                .body(Body::from(b"x".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn cross_node_cannot_read_unrelated_artifact() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (assign, cred_a, cred_b, _node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
+    // Own node uploads an artifact.
+    let req = UploadArtifactRequest {
+        name: "out.log".into(),
+        content: "hello".into(),
+        media_type: Some("text/plain".into()),
+        sha256: None,
+    };
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
+            serde_json::to_string(&req).unwrap(),
+            &cred_a,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    // Other node (not a consumer via workflow dependency) cannot fetch it via
+    // the node-scoped artifact endpoint: 404 (no existence disclosure).
+    let r = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/node/tasks/{}/artifacts/out.log", assign.task_id),
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn revoked_node_cannot_mutate() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (assign, _cred_a, cred_b, node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
+    // Revoke node_b by deleting the node record.
+    let r = app
+        .clone()
+        .oneshot(delete(&format!("/v1/nodes/{node_b}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    // node_b's credential is no longer valid -> 401 on any node endpoint.
+    let ev = IngestEventsRequest {
+        events: vec![IncomingEvent {
+            sequence: 1,
+            r#type: EventType::Stdout,
+            payload: json!({"text": "x"}),
+        }],
+    };
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred_b,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}
+
+// Hardening P0: positive case for upstream artifact authorization. A consumer
+// node (assigned the downstream step's attempt) may fetch the producer step's
+// `changes.patch` through the node-scoped artifact route; unrelated nodes may
+// not (covered by cross_node_cannot_read_unrelated_artifact).
+#[tokio::test]
+async fn consumer_node_can_read_upstream_producer_artifact() {
+    use agentgrid_common::{CreateWorkflowRequest, WorkflowRole, WorkflowStep, WorkflowTemplate};
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "wf-node", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Template: producer `a` -> consumer `b` (b depends on a).
+    let steps = vec![
+        WorkflowStep {
+            id: "a".into(),
+            prompt: "produce".into(),
+            depends_on: vec![],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: None,
+            max_attempts: None,
+            expandable: None,
+        },
+        WorkflowStep {
+            id: "b".into(),
+            prompt: "consume".into(),
+            depends_on: vec!["a".into()],
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: None,
+            max_attempts: None,
+            expandable: None,
+        },
+    ];
+    let body = serde_json::to_string(&CreateWorkflowRequest {
+        name: "upstream-art".into(),
+        steps,
+        context: None,
+        budget: None,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/v1/workflows", body, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tpl: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let run = state
+        .store
+        .create_workflow_run(&tpl.id, None, Some("demo"), None)
+        .await
+        .unwrap();
+
+    // Tick: step a activates and is assigned to the node.
+    state.store.tick_workflow_run(&run.id).await.unwrap();
+    let a = state.store.try_assign(&node_id).await.unwrap().unwrap();
+
+    // Producer uploads its `changes.patch` artifact on its own attempt.
+    let art = UploadArtifactRequest {
+        name: "changes.patch".into(),
+        content: "diff --git a/x b/x".into(),
+        ..Default::default()
+    };
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/artifacts", a.attempt_id),
+            serde_json::to_string(&art).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // Complete a, tick until b is assigned to the same node.
+    state
+        .store
+        .complete_attempt(&a.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    state.store.tick_workflow_run(&run.id).await.unwrap();
+    state.store.tick_workflow_run(&run.id).await.unwrap();
+    let b = state.store.try_assign(&node_id).await.unwrap().unwrap();
+
+    // Consumer node fetches the producer task's changes.patch via the
+    // node-scoped route: authorized because b depends on a.
+    let r = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/node/tasks/{}/artifacts/changes.patch", a.task_id),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "consumer node may read its upstream producer artifact"
+    );
+    let body = to_bytes(r.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), b"diff --git a/x b/x".as_slice());
+
+    // Sanity: the consumer's own task is distinct from the producer's.
+    assert_ne!(b.task_id, a.task_id);
 }
