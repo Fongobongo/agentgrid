@@ -3470,6 +3470,175 @@ mod tests {
         std::fs::remove_dir_all(&ws).ok();
     }
 
+    /// A dummy CP that serves a fixed JSON body for `GET /v1/skills` and 200
+    /// OK (empty) for everything else. Used to exercise the
+    /// `compose_skills_block` → `session/prompt` wiring inside
+    /// `drive_acp_session` without a real control plane.
+    async fn dummy_skills_server(skills_body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf).await;
+                    let req = String::from_utf8_lossy(&buf);
+                    if req.starts_with("GET /v1/skills") {
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            skills_body.len(),
+                            skills_body
+                        );
+                        let _ = s.write_all(resp.as_bytes()).await;
+                    } else {
+                        let _ = s
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Stage 4 integration test (plan Этап 4): a mock ACP agent with an
+    /// operator-trusted project skill discovers it and receives the skill
+    /// catalogue block in its `session/prompt` prompt; an untrusted skill is
+    /// omitted (fail-closed). Both cases run sequentially in one test because
+    /// they mutate the process-global `HOME` / `PATH` env (cargo runs
+    /// `#[tokio::test]`s in parallel, which would race on those keys).
+    #[tokio::test]
+    async fn drive_acp_session_injects_trusted_skills_block_into_prompt() {
+        async fn one_case(trusted: bool, expect_block: bool) {
+            let tmp =
+                std::env::temp_dir().join(format!("ag-skill-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            std::env::set_var("HOME", &tmp);
+
+            let manifest = env!("CARGO_MANIFEST_DIR");
+            let fake = [
+                "../../target/debug/adapter-fake-acp",
+                "../../target/release/adapter-fake-acp",
+            ]
+            .iter()
+            .map(|p| std::path::Path::new(manifest).join(p))
+            .find(|p| p.is_file())
+            .expect("fake ACP agent built");
+            let bin_dir = fake.parent().unwrap();
+            let orig = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
+            let record = tmp.join("prompt.txt");
+            std::env::set_var("AG_FAKE_RECORD_PROMPT", &record);
+
+            let body = format!(
+                r#"[{{"name":"git-help","source":"project","trusted":{trusted}}}]"#
+            );
+            let body_static: &'static str = Box::leak(body.into_boxed_str());
+            let server = dummy_skills_server(body_static).await;
+
+            let cfg = Config {
+                server: server.clone(),
+                node_name: "test".into(),
+                workspace_root: std::env::temp_dir().join("ag-skill-ws"),
+                max_concurrency: 2,
+                agent_version: "0.1.0".into(),
+                adapters: vec![AdapterSpec {
+                    id: "fake-acp".into(),
+                    protocol: AdapterProtocol::Acp,
+                }],
+                repositories: vec!["*".into()],
+                heartbeat_secs: 10,
+                enroll_token: None,
+                credential_path: std::env::temp_dir().join("ag-skill-cred.json"),
+                repository_root: std::env::temp_dir().join("ag-skill-repos"),
+                secrets: vec![],
+                sandbox: sandbox::SandboxKind::None,
+                adapter_env: vec![],
+                outbox_root: std::env::temp_dir()
+                    .join(format!("ag-skill-outbox-{}", uuid::Uuid::new_v4())),
+                completion_outbox: Arc::new(
+                    outbox::CompletionOutbox::open(
+                        &std::env::temp_dir()
+                            .join(format!("ag-skill-comp-{}", uuid::Uuid::new_v4())),
+                    )
+                    .unwrap(),
+                ),
+                autonomy: AutonomyLevel::default(),
+                adapter_versions: Default::default(),
+            };
+
+            let ws = tmp.join("ws");
+            let skill_dir = ws.join(".agents").join("skills").join("git-help");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: git-help\ndescription: Helps with git tasks\n---\n## git-help body\n",
+            )
+            .unwrap();
+
+            let assignment = Assignment {
+                attempt_id: format!("att-{}", uuid::Uuid::new_v4()),
+                task_id: "t1".into(),
+                repository: "*".into(),
+                prompt: "do the thing".into(),
+                adapter: "fake-acp".into(),
+                number: 1,
+                timeout_secs: 30,
+                git_url: String::new(),
+                default_branch: String::new(),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                provenance: None,
+                upstream_commits: vec![],
+            };
+            let sink = EventSink::new(
+                assignment.attempt_id.clone(),
+                reqwest::Client::new(),
+                cfg.server.clone(),
+                Arc::new(
+                    outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap(),
+                ),
+            );
+            let res =
+                drive_acp_session(&cfg, &reqwest::Client::new(), &assignment, &ws, sink.clone())
+                    .await
+                    .unwrap();
+            assert!(res.success, "ACP session should succeed");
+
+            let recorded = std::fs::read_to_string(&record)
+                .expect("fake-acp should have recorded the received prompt");
+            if expect_block {
+                assert!(
+                    recorded.contains("Available agent skills (operator-trusted)"),
+                    "trusted-skills block must be injected into prompt; got: {recorded}"
+                );
+                assert!(
+                    recorded.contains("git-help"),
+                    "discovered trusted skill name must appear; got: {recorded}"
+                );
+            } else {
+                assert!(
+                    !recorded.contains("Available agent skills"),
+                    "untrusted skill must be omitted (fail-closed); got: {recorded}"
+                );
+            }
+
+            std::env::remove_var("AG_FAKE_RECORD_PROMPT");
+            std::fs::remove_dir_all(&tmp).ok();
+        }
+
+        // trusted → block injected.
+        one_case(true, true).await;
+        // untrusted → block omitted (fail-closed).
+        one_case(false, false).await;
+        std::env::remove_var("HOME");
+    }
+
     #[test]
     fn agent_profile_reads_inline_and_none() {
         std::env::set_var("AGENTGRID_AGENT_PROFILE_TESTAG", "be brief");

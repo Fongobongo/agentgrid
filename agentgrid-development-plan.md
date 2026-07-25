@@ -168,8 +168,8 @@
 - [x] Hash verification при материализации
 - [x] Materialization в agent-specific paths на node (примитив `materialize(dest)`; dest задаётся вызывающим per-agent)
 - [x] Profile revision: иммутабельные ревизии, транзакционная активация, rollback (`RevisionStore`)
-- [ ] Интеграционный тест: OpenCode/mock agent с активированным skill выполняет задачу
-- [ ] E2E: один bundle материализуется одинаково на локальной и удалённой node
+- [x] Интеграционный тест: OpenCode/mock agent с активированным skill выполняет задачу — Stage 4 integration test `drive_acp_session_injects_trusted_skills_block_into_prompt` (node-daemon): fake-acp records its received `session/prompt` prompt (`AG_FAKE_RECORD_PROMPT`), dummy CP serves a trust ledger, worktree carries `.agents/skills/git-help/SKILL.md`. Two sequential cases: trusted → «Available agent skills (operator-trusted)» + skill name injected into prompt; untrusted → block omitted (fail-closed). Sequential because the cases mutate process-global `HOME`/`PATH` (cargo runs `#[tokio::test]`s in parallel).
+- [x] E2E: один bundle материализуется одинаково на локальной и удалённой node — `tests/e2e/run-skill-bundle.sh`: builds a two-skill source bundle, materializes on the local box (`cp -a` mirroring `materialize` verbatim-copy semantics) + checksums the `SKILL.md` content; ships the same bundle to the AG_REMOTE_* host via `tests/e2e/remote-ssh.py` (paramiko; no `sshpass` on dev box), materializes there the same way, checksums, asserts the content hash is identical. Skips (exit 77) when `AG_REMOTE_HOST` is unset (CI without a spare host stays green). ponytail: uses file tools not a compiled `agentgrid-skills` binary on the remote (see file header for upgrade path if `materialize` ever re-serializes parsed structs).
 
 **Exit 4:** pinned skills детерминированно материализуются local и remote; untrusted project skill не активируется.
 

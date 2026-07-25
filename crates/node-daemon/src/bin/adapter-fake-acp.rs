@@ -42,6 +42,18 @@ fn main() {
                 writeln!(out, "{}", resp).ok();
             }
             "session/prompt" => {
+                // Test mode (Stage 4 integration): record the received prompt
+                // (after the node appends skills/context blocks) to a file
+                // so the test can assert the skills block was injected.
+                if let Some(p) = std::env::var_os("AG_FAKE_RECORD_PROMPT") {
+                    if let Some(prompt) = v
+                        .get("params")
+                        .and_then(|p| p.get("prompt"))
+                        .and_then(|p| p.as_str())
+                    {
+                        let _ = std::fs::write(&p, prompt);
+                    }
+                }
                 // Test mode: hang mid-frame. Write the start of a JSON-RPC
                 // `session/update` line with no terminating newline and block,
                 // simulating an ACP subprocess that dies mid-frame (truncated
