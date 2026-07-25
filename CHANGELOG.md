@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (tests — two-host E2E on physical hosts, Stage 8 / line 260)
+
+- `tests/e2e/run-two-host.sh`: process-based, no Docker, no second CI runner.
+  Brings up the local control plane (listening on 0.0.0.0) + a local node,
+  uploads the debug-gnu `agentgrid-node-daemon` + `adapter-mock` binaries to
+  the remote Linux host over SSH (`tests/e2e/remote-ssh.py`, same glibc 2.36),
+  enrolls the remote node with a fresh single-use token, then defines a
+  workflow pinning workers to the remote host and integrator+verifier to the
+  local host. Asserts `succeeded` and that the projection shows steps ran on
+  both node ids (provenance). Closes the Stage 8 release gate "the same
+  manifest works on one PC and on two hosts". Remote host creds come from
+  `.env` (`AG_REMOTE_*`); the documented follow-up is wiring this into CI on
+  a second runner.
+
 ### Added (control-plane+node — per-profile MCP server subset, Stage 13 follow-up)
 
 - `AgentProfile.mcp_server_ids` (and `AgentProfileCreate.mcp_server_ids`):
