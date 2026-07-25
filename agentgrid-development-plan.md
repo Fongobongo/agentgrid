@@ -436,17 +436,17 @@
 
 ## Сквозные практики (все этапы)
 
-- [ ] Каждый P0-баг закрывается с regression test
+- [x] Каждый P0-баг закрывается с regression test  — regression tests в `crates/control-plane/tests/api.rs` + `migration_compat.rs` + e2e scripts
 - [ ] Каждая фича — через PR с зелёным CI (fmt/clippy/test/build/web/E2E)
 - [x] ADR на каждое архитектурное решение (минимум: outcome model, ack, outbox, adapter registry, ACP north/south, skills trust, workflow DAG, Zeroshot ownership) — ADR 0001 (MVP scope, covers outcome model/ack/outbox/adapter registry), 0002 (Zeroshot ownership), 0003 (execution backends), 0004 (workflow DAG invariants). Skills trust + ACP north/south inlined в Stage docs (`docs/acp-interop.md`, threat-model) — follow-up: поднять до standalone ADR если требуется.
-- [ ] CHANGELOG и semver теги: `v0.1.1`, `v0.2.0`, `v0.3.0`, далее по этапам
+- [x] CHANGELOG и semver теги: `v0.1.1`, `v0.2.0`, `v0.3.0`, далее по этапам  — `CHANGELOG.md` + git tags v0.1.1/v0.2.0/v0.3.0
 - [ ] Раз в неделю — ручной прогон happy path на двух реальных машинах; перед release — smoke на Linux/macOS/Windows
 - [~] Держать resource budgets: node idle RSS ≤ 25 МБ, control plane idle ≤ 64 МБ, streaming ≤ 60 МБ; фиксировать OS/архитектуру, dataset и p50/p95, чтобы цифры были воспроизводимы — `agentgrid_common::rss::current_rss()` зонд `/proc/self/status` VmRSS (Linux) + unit-тест парсинга. Инфраструктура измерения готова; [ ] измерения в CI (p50/p95, OS/arch) — follow-up (требует bench harness + фиксацию env).
 - [ ] CI matrix: Linux x86_64/aarch64, macOS arm64/x86_64 (где доступно), Windows x86_64; platform-specific tests не маскировать общим `allow_failure`
 - [~] Release artifacts: checksums, SBOM, подпись/attestation, pinned toolchain и dependency audit — SHA256 `SHA256SUMS` после build добавлен в `release.yml`; MSRV `rust-version = "1.85"` в `Cargo.toml`. Остаток: SBOM (cargo-cyclonedx), подпись/attestation (cosign/attest-build-provenance) — follow-up (нужны external инструменты в CI).
-- [ ] Миграции БД: forward-only в пределах релиза + backup/restore rehearsal; rolling N/N-1 только там, где заявлено
-- [ ] Не добавлять обязательные runtime-зависимости (Docker/Node.js/Python/внешняя СУБД) в core
-- [ ] Идеи вне текущего этапа — в backlog, не в код
+- [x] Миграции БД: forward-only в пределах релиза + backup/restore rehearsal; rolling N/N-1 только там, где заявлено  — `migration_compat.rs` + `VACUUM INTO` backup
+- [x] Не добавлять обязательные runtime-зависимости (Docker/Node.js/Python/внешнюю СУБД) в core  — AGENTS.md hard constraints
+- [x] Идеи вне текущего этапа — в backlog, не в код  — backlog в конце impl-plan + dev-plan
 
 ## Зависимости между этапами
 
