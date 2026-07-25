@@ -3514,8 +3514,7 @@ mod tests {
     #[tokio::test]
     async fn drive_acp_session_injects_trusted_skills_block_into_prompt() {
         async fn one_case(trusted: bool, expect_block: bool) {
-            let tmp =
-                std::env::temp_dir().join(format!("ag-skill-{}", uuid::Uuid::new_v4()));
+            let tmp = std::env::temp_dir().join(format!("ag-skill-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&tmp).unwrap();
             std::env::set_var("HOME", &tmp);
 
@@ -3534,9 +3533,7 @@ mod tests {
             let record = tmp.join("prompt.txt");
             std::env::set_var("AG_FAKE_RECORD_PROMPT", &record);
 
-            let body = format!(
-                r#"[{{"name":"git-help","source":"project","trusted":{trusted}}}]"#
-            );
+            let body = format!(r#"[{{"name":"git-help","source":"project","trusted":{trusted}}}]"#);
             let body_static: &'static str = Box::leak(body.into_boxed_str());
             let server = dummy_skills_server(body_static).await;
 
@@ -3604,10 +3601,15 @@ mod tests {
                     outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap(),
                 ),
             );
-            let res =
-                drive_acp_session(&cfg, &reqwest::Client::new(), &assignment, &ws, sink.clone())
-                    .await
-                    .unwrap();
+            let res = drive_acp_session(
+                &cfg,
+                &reqwest::Client::new(),
+                &assignment,
+                &ws,
+                sink.clone(),
+            )
+            .await
+            .unwrap();
             assert!(res.success, "ACP session should succeed");
 
             let recorded = std::fs::read_to_string(&record)

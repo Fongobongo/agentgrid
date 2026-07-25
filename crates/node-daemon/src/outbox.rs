@@ -116,7 +116,8 @@ impl EventOutbox {
             .open(&self.path)
             .with_context(|| format!("open outbox {}", self.path.display()))
             .map_err(PushError::Other)?;
-        f.write_all(s.as_bytes()).map_err(|e| PushError::Other(e.into()))?;
+        f.write_all(s.as_bytes())
+            .map_err(|e| PushError::Other(e.into()))?;
         f.sync_data().map_err(|e| PushError::Other(e.into()))?;
         Ok(())
     }

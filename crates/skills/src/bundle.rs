@@ -311,13 +311,24 @@ mod tests {
             discovered("p1", SkillSource::Project, "project"),
             discovered("u1", SkillSource::User, "user"),
         ];
+        let u1_src = skills[1].path.clone();
         let dest = std::env::temp_dir().join(format!("ag_mat_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dest);
         let (written, skipped) = materialize(&skills, &dest, &TrustStore::new(), None).unwrap();
         assert_eq!(skipped, vec!["p1".to_string()]);
         assert_eq!(written.len(), 1);
         assert_eq!(written[0].name, "u1");
-        assert!(dest.join("u1").join("SKILL.md").exists());
+        // Byte-fidelity: the written file must equal the original SKILL.md
+        // verbatim, not a re-serialized parsed struct. If `materialize` ever
+        // switches to round-tripping through `Skill`, this fails while the
+        // hash tests stay circular — see tests/e2e/run-skill-bundle.sh header.
+        let out = dest.join("u1").join("SKILL.md");
+        assert!(out.exists());
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            std::fs::read_to_string(&u1_src).unwrap(),
+            "materialize must copy the original SKILL.md byte-for-byte"
+        );
         assert!(!dest.join("p1").exists());
     }
 

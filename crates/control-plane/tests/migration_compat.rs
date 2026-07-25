@@ -86,17 +86,13 @@ async fn migrations_serve_legacy_happy_path() {
     assert_eq!(task.status, TaskStatus::Queued);
 
     // 5. Scheduler assigns the task to the online node (head-of-line path).
-    let assign = s
-        .try_assign(&node_id)
-        .await
-        .unwrap()
-        .expect("assignment");
+    let assign = s.try_assign(&node_id).await.unwrap().expect("assignment");
     assert_eq!(assign.task_id, task.id);
     assert_eq!(assign.adapter, "mock");
 
     // 6. Node ingests a couple of events (migration 0010 + later).
-    assert!(
-        s.ingest_events(
+    assert!(s
+        .ingest_events(
             &assign.attempt_id,
             &agentgrid_common::IngestEventsRequest {
                 events: vec![
@@ -114,8 +110,7 @@ async fn migrations_serve_legacy_happy_path() {
             },
         )
         .await
-        .unwrap()
-    );
+        .unwrap());
 
     // 7. Node completes the attempt → task succeeded (legacy outcome).
     s.complete_attempt(

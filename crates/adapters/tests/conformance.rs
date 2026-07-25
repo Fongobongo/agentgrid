@@ -58,7 +58,8 @@ async fn start_stream_collect(f: &AdapterFixture) {
         f.name
     );
     assert!(
-        out.lines().any(|l| l.contains("hello.txt") || l.contains("note:")),
+        out.lines()
+            .any(|l| l.contains("hello.txt") || l.contains("note:")),
         "{} event stream should mention its work: {out}",
         f.name
     );
@@ -91,8 +92,7 @@ async fn start_cancel(f: &AdapterFixture) {
     }
     // Must reap within a short grace; a wedged adapter would hang here.
     let mut child = bp.child;
-    let reaped =
-        tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let reaped = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     assert!(
         reaped.is_ok(),
         "{} adapter did not terminate within 5s of cancel",
