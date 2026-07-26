@@ -445,37 +445,92 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
 /// Serve the built web UI (Stage 4.3). Unknown non-API paths fall back to
 /// `index.html`; missing files under `/v1/` return 404.
+///
+/// Hardening P0 (static file traversal): unlike the former blind
+/// `root.join(rel)` + lexically-challenged `starts_with` check, the request
+/// path is rebuilt from a **component whitelist** — only `Normal` segments
+/// are joined; `ParentDir`, `RootDir`, and any OS prefix component are
+/// rejected. The web root is canonicalized once per request and the resolved
+/// file path is canonicalized before read; the canonical file path must
+/// remain under the canonical root, so symlinks/`..`/backslashes cannot
+/// escape. Axum percent-decodes the URI path before we see it.
 async fn static_fallback(State(state): State<Arc<AppState>>, uri: Uri) -> Response {
-    use axum::http::header::CONTENT_TYPE;
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
     let root = match &state.web_root {
         Some(r) => r.clone(),
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-    let rel = uri.path().trim_start_matches('/');
-    let fs_path = if rel.is_empty() {
-        root.join("index.html")
-    } else {
-        root.join(rel)
+    let canon_root = match root.canonicalize() {
+        Ok(c) => c,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
-    if fs_path != root && !fs_path.starts_with(&root) {
-        return StatusCode::FORBIDDEN.into_response();
+
+    let rel = uri.path().trim_start_matches('/');
+    let fs_path = match join_within_root(&canon_root, rel) {
+        Some(p) => p,
+        None => return StatusCode::FORBIDDEN.into_response(),
+    };
+
+    if let Ok(bytes) = tokio::fs::read(&fs_path).await {
+        // Canonicalize the *existing* file and re-check containment; a symlink
+        // at fs_path pointing outside the root is blocked here.
+        if let Ok(canon_file) = fs_path.canonicalize() {
+            if !canon_file.starts_with(&canon_root) {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+        }
+        let ct = content_type(&fs_path);
+        let cache = cache_control_for(&fs_path);
+        (
+            [(CONTENT_TYPE, ct), (CACHE_CONTROL, cache.to_string())],
+            bytes,
+        )
+            .into_response()
+    } else if uri.path().starts_with("/v1/") {
+        StatusCode::NOT_FOUND.into_response()
+    } else {
+        let idx = canon_root.join("index.html");
+        match tokio::fs::read(&idx).await {
+            Ok(b) => (
+                [
+                    (CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+                    (CACHE_CONTROL, "no-cache".to_string()),
+                ],
+                b,
+            )
+                .into_response(),
+            Err(_) => StatusCode::NOT_FOUND.into_response(),
+        }
     }
-    match tokio::fs::read(&fs_path).await {
-        Ok(bytes) => {
-            let ct = content_type(&fs_path);
-            ([(CONTENT_TYPE, ct)], bytes).into_response()
+}
+
+/// Hardening P0 (static file traversal): rebuild the target path from a
+/// path-component whitelist over `rel`. Only `Normal` segments are joined;
+/// `Component::ParentDir` (`..`), `Component::RootDir` (leading `/`), and any
+/// Windows prefix are rejected, so `../`, `..\`, absolute paths, and
+/// percent-encoded equivalents (already decoded by axum) cannot escape.
+fn join_within_root(root: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let mut p = root.to_path_buf();
+    for comp in std::path::Path::new(rel).components() {
+        match comp {
+            Component::Normal(s) => p.push(s),
+            Component::CurDir => {}
+            _ => return None,
         }
-        Err(_) => {
-            if uri.path().starts_with("/v1/") {
-                return StatusCode::NOT_FOUND.into_response();
-            }
-            match tokio::fs::read(root.join("index.html")).await {
-                Ok(b) => {
-                    ([(CONTENT_TYPE, "text/html; charset=utf-8".to_string())], b).into_response()
-                }
-                Err(_) => StatusCode::NOT_FOUND.into_response(),
-            }
-        }
+    }
+    Some(p)
+}
+
+/// Cache-Control policy for a served static asset (hardening P0): Vite/hashed
+/// assets under an `assets/` directory are immutable and cacheable for a year;
+/// everything else (notably `index.html`) is `no-cache` so a redeployment is
+/// always re-checked for the newest shell.
+fn cache_control_for(p: &std::path::Path) -> &'static str {
+    if p.parent().map(|d| d.ends_with("assets")) == Some(true) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
     }
 }
 

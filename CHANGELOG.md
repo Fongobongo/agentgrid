@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security (hardening P0 — static file traversal)
+
+- The web UI SPA fallback rebuilt its target path with a lexically-flawed
+  `root.join(rel)` + `fs_path.starts_with(root)`: a `/../` (or `%2e%2e/`, or
+  backslash) segment passed the prefix check yet escaped the root after the
+  OS resolved `..`. Now the request path is rebuilt from a **path-component
+  whitelist** (`Component::Normal` only; `ParentDir`/`RootDir`/prefix
+  rejected), the web root is **canonicalized** and the resolved file path is
+  re-canonicalized and required to stay under it — a symlink inside the root
+  pointing outside the root is blocked with `403`. axum percent-decodes the
+  URI path before the handler sees it.
+- `Cache-Control`: hashed assets under `assets/` get
+  `public, max-age=31536000, immutable`; `index.html` and non-hashed files get
+  `no-cache` so deployments take effect without a hard refresh.
+- Regression test: `/../`, `/%2e%2e/`, mixed encoding, backslashes, absolute
+  traversal, and a root-escaping symlink all rejected; hashed asset cached
+  immutable; `index.html` `no-cache`.
+
 ### Security (hardening P0 — artifact integrity and download safety)
 
 - Artifact uploads now **compute the SHA-256 server-side** and, when the

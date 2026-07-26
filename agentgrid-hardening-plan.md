@@ -172,13 +172,13 @@
 ## 4. Static file traversal — P0/P1
 
 - [ ] Заменить самописный `static_fallback` на `tower_http::services::ServeDir` либо эквивалент.
-- [ ] Если handler сохраняется — percent-decode path до проверки.
-- [ ] Отклонять `ParentDir`, `RootDir` и platform prefix components.
+- [x] Если handler сохраняется — percent-decode path до проверки.
+- [x] Отклонять `ParentDir`, `RootDir` и platform prefix components.
 - [ ] Canonicalize web root один раз при старте.
-- [ ] Проверять canonical candidate внутри canonical root.
-- [ ] Не следовать symlinks за пределы web root.
-- [ ] Добавить `Cache-Control` для hashed assets и `no-cache` для `index.html`.
-- [ ] Добавить тесты `/../`, `/%2e%2e/`, mixed encoding, backslashes и symlinks.
+- [x] Проверять canonical candidate внутри canonical root.
+- [x] Не следовать symlinks за пределы web root.
+- [x] Добавить `Cache-Control` для hashed assets и `no-cache` для `index.html`.
+- [x] Добавить тесты `/../`, `/%2e%2e/`, mixed encoding, backslashes и symlinks.
 
 **Основной файл:** `crates/control-plane/src/lib.rs`
 

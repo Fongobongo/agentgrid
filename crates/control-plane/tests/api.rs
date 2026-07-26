@@ -4271,3 +4271,140 @@ async fn consumer_node_can_read_upstream_producer_artifact() {
     // Sanity: the consumer's own task is distinct from the producer's.
     assert_ne!(b.task_id, a.task_id);
 }
+
+/// Hardening P0 (static file traversal): `/../`, `%2e%2e/`, mixed encoding,
+/// backslashes, and an absolute path must not escape the web root; hashed
+/// assets under `assets/` are cached immutable and `index.html` is `no-cache`.
+/// A symlink inside the root pointing outside the root is blocked (403).
+#[tokio::test]
+async fn static_fallback_rejects_traversal_and_caches_safe() {
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let root = std::env::temp_dir().join(format!(
+        "ag-web-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let assets = root.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(root.join("index.html"), b"<html>app</html>").unwrap();
+    std::fs::write(assets.join("main-abc123.js"), b"console.log(1)").unwrap();
+    std::fs::write(assets.join("style.css"), b"body{}").unwrap();
+
+    // Symlink inside the root pointing at /etc/passwd — must be blocked (403).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let _ = symlink("/etc/passwd", root.join("escape.txt"));
+    }
+
+    let prev = std::env::var("AGENTGRID_WEB_ROOT").ok();
+    std::env::set_var("AGENTGRID_WEB_ROOT", root.to_str().unwrap());
+    drop(_g);
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = prev {
+        std::env::set_var("AGENTGRID_WEB_ROOT", p);
+    } else {
+        std::env::remove_var("AGENTGRID_WEB_ROOT");
+    }
+    drop(_g);
+
+    let token = test_token(&app).await;
+
+    // index.html served with no-cache.
+    let r = app.clone().oneshot(get_auth("/", &token)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers().get("cache-control").unwrap(),
+        "no-cache",
+        "index.html must be no-cache"
+    );
+
+    // Hashed asset cached immutable.
+    let r = app
+        .clone()
+        .oneshot(get_auth("/assets/main-abc123.js", &token))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers().get("content-type").unwrap(),
+        "text/javascript; charset=utf-8"
+    );
+    let cache = r
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cache.contains("immutable") && cache.contains("31536000"),
+        "cache={cache}"
+    );
+
+    // Traversal attempts: `/../` already normalised by the client/router, but
+    // percent-encoded `..` survives as a literal path to the fallback.
+    for bad in [
+        "/../",
+        "/%2e%2e/",
+        "/%2e%2e%2fetcpasswd",
+        "/..%2f..%2fetc%2fpasswd",
+        "/\\..\\etc\\passwd",
+    ] {
+        let r = app.clone().oneshot(get_auth(bad, &token)).await.unwrap();
+        // Either 403 (traversal component rejected) or 404 (normalised, no
+        // index next). Must NOT be 200 from a file outside the root: check the
+        // body is never a slice of /etc/passwd by asserting the status is not OK
+        // unless it resolved to index.html (text/html).
+        let st = r.status();
+        assert!(
+            st == StatusCode::FORBIDDEN
+                || st == StatusCode::NOT_FOUND
+                || r.headers()
+                    .get("content-type")
+                    .map(|v| v == "text/html; charset=utf-8")
+                    .unwrap_or(false),
+            "{bad}: unexpected status {st} (must not serve out-of-root file)"
+        );
+    }
+
+    // An absolute-path rel (leading slash stripped by trim_start) with `..`
+    // components is blocked too.
+    let r = app
+        .clone()
+        .oneshot(get_auth("/a/../b/../../etc/passwd", &token))
+        .await
+        .unwrap();
+    assert!(
+        r.status() == StatusCode::FORBIDDEN
+            || r.headers()
+                .get("content-type")
+                .map(|v| v == "text/html; charset=utf-8")
+                .unwrap_or(false),
+        "parent-dir traversal must not serve out-of-root file"
+    );
+
+    // Symlink escape (unix) must be 403, never /etc/passwd bytes.
+    #[cfg(unix)]
+    {
+        let r = app
+            .clone()
+            .oneshot(get_auth("/escape.txt", &token))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::FORBIDDEN,
+            "symlink escaping root must be blocked"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
