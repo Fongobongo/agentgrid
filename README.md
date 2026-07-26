@@ -48,6 +48,16 @@ the node, and provide the model key (e.g. `GOOGLE_GENERATIVE_AI_API_KEY`). See
 `docs/deploy/reverse-proxy.md` for TLS termination in front of the plain-HTTP
 control plane.
 
+**Unattended permission bypass (unsafe).** By default the `claude` and
+`opencode` adapters run **safe**: they do NOT pass `--dangerously-skip-permissions`
+/ `--auto`, so an unattended run blocks on the first interactive prompt rather
+than auto-running destructive tools. To allow an unattended agent to proceed
+without prompts you must opt in explicitly with
+`AGENTGRID_UNSAFE_UNATTENDED=1` (or the per-adapter `AGENTGRID_OPENCODE_AUTO`
+knob for opencode). The adapter prints a stderr warning when the bypass is on.
+Do NOT enable this without a sandbox; structured permission interception is a
+follow-up.
+
 ## Build from source
 
 Requires Rust (edition 2021), git, and a C toolchain. SQLite is bundled and TLS

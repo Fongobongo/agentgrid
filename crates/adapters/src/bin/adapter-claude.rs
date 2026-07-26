@@ -102,17 +102,14 @@ fn main() {
     }
 
     let bin = std::env::var("AGENTGRID_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
-    let mut child = match Command::new(&bin)
-        .arg("-p")
-        .arg(&prompt)
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--verbose")
-        .arg("--dangerously-skip-permissions")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    // Hardening P0 (unsafe adapter defaults): `--dangerously-skip-permissions`
+    // is gated on `AGENTGRID_UNSAFE_UNATTENDED=1`; default off = safe.
+    let unsafe_unattended = agentgrid_adapters::unsafe_unattended_from_env();
+    agentgrid_adapters::warn_unsafe("adapter-claude", unsafe_unattended, false);
+    let args = agentgrid_adapters::claude_args(&prompt, unsafe_unattended);
+    let mut cmd = Command::new(&bin);
+    cmd.args(&args);
+    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("adapter-claude: failed to spawn {bin}: {e}");

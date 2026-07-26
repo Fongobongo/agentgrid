@@ -184,10 +184,10 @@
 
 ## 5. Unsafe adapter defaults — P0
 
-- [ ] Убрать безусловный `--dangerously-skip-permissions` из Claude adapter.
-- [ ] Сделать OpenCode `--auto` выключенным по умолчанию.
-- [ ] Добавить явный unsafe flag/profile для unattended execution.
-- [ ] Требовать `AGENTGRID_UNSAFE_UNATTENDED=1` для полного bypass permissions.
+- [x] Убрать безусловный `--dangerously-skip-permissions` из Claude adapter.
+- [x] Сделать OpenCode `--auto` выключенным по умолчанию.
+- [x] Добавить явный unsafe flag/profile для unattended execution.
+- [x] Требовать `AGENTGRID_UNSAFE_UNATTENDED=1` для полного bypass permissions.
 - [ ] Не разрешать unsafe mode при `sandbox=none`, если не указан отдельный override.
 - [ ] Показывать unsafe badge/warning в CLI, TUI и web UI.
 - [ ] Записывать выбранный security profile в attempt provenance.
@@ -197,9 +197,9 @@
 
 ### Тесты
 
-- [ ] Claude adapter default command не содержит dangerous skip flag.
-- [ ] OpenCode adapter default command не содержит `--auto`.
-- [ ] Unsafe mode нельзя включить неявно.
+- [x] Claude adapter default command не содержит dangerous skip flag.
+- [x] OpenCode adapter default command не содержит `--auto`.
+- [x] Unsafe mode нельзя включить неявно.
 - [ ] Strict profile отказывается работать через wrapper без structured permissions/sandbox.
 
 **Основные файлы:**

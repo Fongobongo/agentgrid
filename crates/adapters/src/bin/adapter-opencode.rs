@@ -110,9 +110,16 @@ fn main() {
     let model = std::env::var("AGENTGRID_OPENCODE_MODEL")
         .or_else(|_| std::env::var("AGENTGRID_MODEL"))
         .ok();
-    let auto = std::env::var("AGENTGRID_OPENCODE_AUTO")
-        .map(|v| v != "0" && v != "false")
-        .unwrap_or(true);
+    // Hardening P0 (unsafe adapter defaults): `--auto` is OFF by default; only
+    // `AGENTGRID_UNSAFE_UNATTENDED=1` or a legacy `AGENTGRID_OPENCODE_AUTO` knob
+    // turns it on.
+    let unsafe_unattended = agentgrid_adapters::unsafe_unattended_from_env();
+    let auto = agentgrid_adapters::opencode_auto(unsafe_unattended);
+    agentgrid_adapters::warn_unsafe(
+        "adapter-opencode",
+        unsafe_unattended,
+        auto && !unsafe_unattended,
+    );
 
     let mut cmd = Command::new(&bin);
     cmd.arg("run").arg("--format").arg("json");

@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security (hardening P0 — unsafe adapter defaults)
+
+- The Claude Code adapter no longer adds `--dangerously-skip-permissions`
+  unconditionally. The dangerous permission bypass is gated behind a single
+  operator opt-in `AGENTGRID_UNSAFE_UNATTENDED=1` (default off = safe); the
+  opencode adapter likewise gates `--auto` behind the same knob (the legacy
+  `AGENTGRID_OPENCODE_AUTO` knob still opts in but is loudly warned). When on,
+  the adapter prints a stderr warning naming the bypass; when off, it prefers
+  to block on the first prompt rather than auto-approve destructive tools.
+- Arg construction moved to `agentgrid_adapters::{claude_args, opencode_auto,
+  unsafe_unattended_from_env, warn_unsafe}` so it is unit-testable.
+- Regression tests: default args contain no dangerous flag; opt-in adds it;
+  `--auto` off by default; unsafe knob resolution (1/true/0/false/garbage).
+
 ### Security (hardening P0 — static file traversal)
 
 - The web UI SPA fallback rebuilt its target path with a lexically-flawed
