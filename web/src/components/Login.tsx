@@ -5,6 +5,7 @@ export default function Login({ onAuthed }: { onAuthed: (t: string) => void }) {
   const [mode, setMode] = useState<'login' | 'setup'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [setupToken, setSetupToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -16,7 +17,7 @@ export default function Login({ onAuthed }: { onAuthed: (t: string) => void }) {
       const res =
         mode === 'login'
           ? await login(username, password)
-          : await setup(username, password);
+          : await setup(username, password, setupToken);
       onAuthed(res.token);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -41,8 +42,21 @@ export default function Login({ onAuthed }: { onAuthed: (t: string) => void }) {
       <form className="login-card" onSubmit={submit}>
         <h1>agentgrid</h1>
         <p className="muted">
-          {mode === 'setup' ? 'Create the first admin account' : 'Sign in to continue'}
+          {mode === 'setup'
+            ? 'Create the first admin account (needs the one-time setup token printed in the server logs)'
+            : 'Sign in to continue'}
         </p>
+        {mode === 'setup' && (
+          <label>
+            Setup token
+            <input
+              value={setupToken}
+              onChange={(e) => setSetupToken(e.target.value)}
+              placeholder="from server stdout / docker logs"
+              required
+            />
+          </label>
+        )}
         <label>
           Username
           <input
@@ -76,6 +90,8 @@ export default function Login({ onAuthed }: { onAuthed: (t: string) => void }) {
           {mode === 'login'
             ? 'No account yet? Create the first admin.'
             : 'Have an account? Switch to login.'}
+          {mode === 'login' &&
+            ' The bootstrap window opens only while no users exist (token printed server-side).'}
         </button>
       </form>
     </div>

@@ -31,6 +31,20 @@ fn post_auth(uri: &str, body: String, cred: &str) -> Request<Body> {
         .unwrap()
 }
 
+async fn test_token(app: &Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(post(
+            "/v1/auth/login",
+            serde_json::json!({"username":"test","password":"test"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    let v: Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    v["token"].as_str().unwrap().to_string()
+}
+
 async fn enroll(
     app: &Router,
     name: &str,
@@ -39,7 +53,11 @@ async fn enroll(
 ) -> (String, String) {
     let tk_resp = app
         .clone()
-        .oneshot(post("/v1/nodes/enrollment-token", "{}".into()))
+        .oneshot(post_auth(
+            "/v1/nodes/enrollment-token",
+            "{}".into(),
+            &test_token(app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(tk_resp.status(), StatusCode::OK);
@@ -89,7 +107,11 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
     };
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &test_token(app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);

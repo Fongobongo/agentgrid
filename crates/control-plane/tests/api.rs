@@ -1,3 +1,4 @@
+#![allow(clippy::needless_borrow)]
 //! End-to-end API test: create task -> node enroll + poll assignment -> ingest
 //! events (with idempotency) -> complete -> terminal task status. Exercises the
 //! full slice without network I/O. Node endpoints require credential auth
@@ -47,10 +48,11 @@ fn get_auth(uri: &str, cred: &str) -> Request<Body> {
         .unwrap()
 }
 
-fn delete(uri: &str) -> Request<Body> {
+fn delete_auth(uri: &str, cred: &str) -> Request<Body> {
     Request::builder()
         .method("DELETE")
         .uri(uri)
+        .header("authorization", format!("Bearer {cred}"))
         .body(Body::empty())
         .unwrap()
 }
@@ -65,15 +67,17 @@ fn post_json(uri: &str, body: String, token: Option<&str>) -> Request<Body> {
         .unwrap()
 }
 
-async fn auth_setup(app: &Router, user: &str, pass: &str) -> StatusCode {
+async fn auth_setup(app: &Router, state: &AppState, user: &str, pass: &str) -> StatusCode {
+    let token = state.setup_token().await;
+    let body = serde_json::to_string(&serde_json::json!({
+        "username": user,
+        "password": pass,
+        "setup_token": token,
+    }))
+    .unwrap();
     let resp = app
         .clone()
-        .oneshot(post_json(
-            "/v1/auth/setup",
-            serde_json::to_string(&serde_json::json!({ "username": user, "password": pass }))
-                .unwrap(),
-            None,
-        ))
+        .oneshot(post_json("/v1/auth/setup", body, None))
         .await
         .unwrap();
     resp.status()
@@ -99,6 +103,13 @@ async fn auth_login(app: &Router, user: &str, pass: &str) -> Option<String> {
     }
 }
 
+/// Login as the `test`/`test` user bootstrapped by `AppState::open_temp`.
+async fn test_token(app: &Router) -> String {
+    auth_login(app, "test", "test")
+        .await
+        .expect("test user login")
+}
+
 /// Create an enrollment token, enroll a node, return (node_id, credential).
 async fn enroll(
     app: &Router,
@@ -108,7 +119,11 @@ async fn enroll(
 ) -> (String, String) {
     let tk_resp = app
         .clone()
-        .oneshot(post("/v1/nodes/enrollment-token", "{}".into()))
+        .oneshot(post_auth(
+            "/v1/nodes/enrollment-token",
+            "{}".into(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(tk_resp.status(), StatusCode::OK);
@@ -157,9 +172,18 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         base_commit: None,
         parent_acp_session_id: None,
     };
+    // Task creation is a user route; tests bootstrap a `test`/`test` user
+    // (hardening P0 closed the open bootstrap window).
+    let user_token = auth_login(app, "test", "test")
+        .await
+        .expect("test user login");
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &user_token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -187,13 +211,10 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
 async fn show_status(app: &Router, task_id: &str) -> TaskStatus {
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/tasks/{task_id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{task_id}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     let tv: TaskView =
@@ -205,13 +226,10 @@ async fn show_status(app: &Router, task_id: &str) -> TaskStatus {
 async fn show_task_view(app: &Router, task_id: &str) -> TaskView {
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/tasks/{task_id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{task_id}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
@@ -220,13 +238,10 @@ async fn show_task_view(app: &Router, task_id: &str) -> TaskView {
 async fn task_eligibility(app: &Router, task_id: &str) -> TaskEligibility {
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/tasks/{task_id}/eligibility"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{task_id}/eligibility"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -386,7 +401,11 @@ async fn validation_failure_must_not_report_success() {
     };
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -448,13 +467,10 @@ async fn validation_failure_must_not_report_success() {
     let tv: TaskView = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri(format!("/v1/tasks/{task_id}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(get_auth(
+                    &format!("/v1/tasks/{task_id}"),
+                    &test_token(&app).await,
+                ))
                 .await
                 .unwrap()
                 .into_body(),
@@ -484,7 +500,11 @@ async fn cancel_queued_marks_cancelled() {
     };
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -493,13 +513,11 @@ async fn cancel_queued_marks_cancelled() {
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/v1/tasks/{}/cancel", tv.id))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(post_auth(
+            &format!("/v1/tasks/{}/cancel", tv.id),
+            "{}".into(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -518,13 +536,11 @@ async fn cancel_running_then_node_confirms_cancelled() {
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/v1/tasks/{}/cancel", assign.task_id))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(post_auth(
+            &format!("/v1/tasks/{}/cancel", assign.task_id),
+            "{}".into(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -584,13 +600,11 @@ async fn retry_failed_task_reques() {
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/v1/tasks/{}/retry", assign.task_id))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(post_auth(
+            &format!("/v1/tasks/{}/retry", assign.task_id),
+            "{}".into(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -632,7 +646,10 @@ async fn revoked_node_gets_401() {
     // Revoke the node.
     let resp = app
         .clone()
-        .oneshot(delete(&format!("/v1/nodes/{node_id}")))
+        .oneshot(delete_auth(
+            &format!("/v1/nodes/{node_id}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -681,9 +698,10 @@ async fn repository_create_and_list() {
     };
     let resp = app
         .clone()
-        .oneshot(post(
+        .oneshot(post_auth(
             "/v1/repositories",
             serde_json::to_string(&req).unwrap(),
+            &test_token(&app).await,
         ))
         .await
         .unwrap();
@@ -695,13 +713,7 @@ async fn repository_create_and_list() {
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/repositories")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth("/v1/repositories", &test_token(&app).await))
         .await
         .unwrap();
     let repos: Vec<RepositoryView> =
@@ -754,16 +766,10 @@ async fn artifact_upload_and_read() {
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/v1/tasks/{}/artifacts/changes.patch",
-                    assign.task_id
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{}/artifacts/changes.patch", assign.task_id),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -825,13 +831,10 @@ async fn artifact_binary_raw_upload_round_trips() {
     assert_eq!(resp.status(), StatusCode::OK);
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/tasks/{}/artifacts/blob.bin", assign.task_id))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{}/artifacts/blob.bin", assign.task_id),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -850,13 +853,7 @@ async fn metrics_endpoint_exposes_counts() {
     let app = build_router(state);
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/metrics")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth("/metrics", &test_token(&app).await))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -874,24 +871,76 @@ async fn metrics_endpoint_exposes_counts() {
 
 #[tokio::test]
 async fn user_auth_setup_login_and_protects_endpoints() {
-    let state = AppState::open_temp().await.unwrap();
-    let app = build_router(state);
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
 
-    // Open bootstrap window: no users yet, so task creation works without a token.
-    let id0 = create_task_only(&app, "demo", "mock", None).await;
-    assert!(!id0.is_empty());
+    // Hardening P0: bootstrap window is closed. Before the first user exists,
+    // task creation (any /v1/ user route) is 503, not open.
+    let pre = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/tasks",
+            serde_json::to_string(&CreateTaskRequest {
+                prompt: "x".into(),
+                repository: "demo".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+            })
+            .unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(pre.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    // Setup the first user, then a second setup is rejected.
+    // Setup without the one-time token is forbidden.
+    let no_token = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/auth/setup",
+            serde_json::to_string(&serde_json::json!({
+                "username": "alice", "password": "secret"
+            }))
+            .unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(no_token.status(), StatusCode::FORBIDDEN);
+
+    // Wrong setup token is forbidden.
+    let wrong = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/auth/setup",
+            serde_json::to_string(&serde_json::json!({
+                "username": "alice", "password": "secret",
+                "setup_token": "deadbeef"
+            }))
+            .unwrap(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+
+    // Setup with the correct one-time token creates the first user.
     assert_eq!(
-        auth_setup(&app, "alice", "secret").await,
+        auth_setup(&app, &state, "alice", "secret").await,
         StatusCode::CREATED
     );
+    // The token is single-use: a second setup (even with the same token) is
+    // 409 because a user now exists.
     assert_eq!(
-        auth_setup(&app, "bob", "secret").await,
+        auth_setup(&app, &state, "bob", "secret").await,
         StatusCode::CONFLICT
     );
 
-    // Now the bootstrap window is closed: task creation requires a token.
+    // Now the bootstrap window is closed: task creation requires a JWT.
     let no_token = app
         .clone()
         .oneshot(post_json(
@@ -951,9 +1000,19 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         base_commit: None,
         parent_acp_session_id: None,
     };
+    // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
+    // creation is a user route and now requires a JWT (hardening P0 closed
+    // the open bootstrap window).
+    let token = auth_login(app, "test", "test")
+        .await
+        .expect("test user login");
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -977,10 +1036,10 @@ async fn eligibility_empty_pool() {
 /// request carrying that cookie (no Authorization header) is authenticated.
 #[tokio::test]
 async fn login_sets_cookie_and_cookie_auths() {
-    let state = AppState::open_temp().await.unwrap();
-    let app = build_router(state);
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
     assert_eq!(
-        auth_setup(&app, "alice", "secret").await,
+        auth_setup(&app, &state, "alice", "secret").await,
         StatusCode::CREATED
     );
     let resp = app
@@ -1151,7 +1210,11 @@ async fn oversized_prompt_returns_413() {
     };
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -1171,7 +1234,11 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
     };
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -1459,7 +1526,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
     let nodes: serde_json::Value = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_auth("/v1/nodes", &cred))
+                .oneshot(get_auth("/v1/nodes", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -1498,13 +1565,11 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
     // Retry -> re-queue -> re-assign to the recovered node -> succeed.
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/v1/tasks/{}/retry", assign.task_id))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(post_auth(
+            &format!("/v1/tasks/{}/retry", assign.task_id),
+            "{}".into(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1633,7 +1698,7 @@ async fn approval_flow_allow_deny_and_expiry() {
         .oneshot(post_json(
             &format!("/v1/approvals/{ap_id}/allow"),
             r#"{"reason":"looked ok"}"#.into(),
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
@@ -1654,7 +1719,7 @@ async fn approval_flow_allow_deny_and_expiry() {
         .oneshot(post_json(
             &format!("/v1/approvals/{ap_id}/deny"),
             "{}".into(),
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
@@ -1670,7 +1735,11 @@ async fn list_approvals(app: &Router, status: Option<&str>) -> Vec<ApprovalView>
         Some(s) => format!("/v1/approvals?status={s}"),
         None => "/v1/approvals".into(),
     };
-    let resp = app.clone().oneshot(get_q(&uri)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(get_auth(&uri, &test_token(&app).await))
+        .await
+        .unwrap();
     assert!(resp.status().is_success());
     serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
@@ -1693,7 +1762,7 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
                 "permission": { "tool": "Bash", "input": "rm -rf /" }
             }))
             .unwrap(),
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
@@ -1710,7 +1779,10 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
     // Pending immediately after creation.
     let pending = app
         .clone()
-        .oneshot(get_q(&format!("/v1/approvals/{id}")))
+        .oneshot(get_auth(
+            &format!("/v1/approvals/{id}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(pending.status(), StatusCode::OK);
@@ -1726,14 +1798,17 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         .oneshot(post_json(
             &format!("/v1/approvals/{id}/allow"),
             "{}".into(),
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
     assert_eq!(allow.status(), StatusCode::OK);
     let allowed = app
         .clone()
-        .oneshot(get_q(&format!("/v1/approvals/{id}")))
+        .oneshot(get_auth(
+            &format!("/v1/approvals/{id}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     let view: ApprovalView =
@@ -1743,24 +1818,20 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
     // Unknown id 404s.
     let missing = app
         .clone()
-        .oneshot(get_q("/v1/approvals/does-not-exist"))
+        .oneshot(get_auth(
+            "/v1/approvals/does-not-exist",
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
-fn get_q(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method("GET")
-        .uri(uri)
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn post_q(uri: &str) -> Request<Body> {
+fn post_q_auth(uri: &str, cred: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(uri)
+        .header("authorization", format!("Bearer {cred}"))
         .body(Body::empty())
         .unwrap()
 }
@@ -1778,7 +1849,7 @@ async fn workflow_create_list_show_run_and_steps() {
     let body = json!({"name":"build","steps":steps,"context":null}).to_string();
     let resp = app
         .clone()
-        .oneshot(post("/v1/workflows", body))
+        .oneshot(post_auth("/v1/workflows", body, &test_token(&app).await))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -1790,13 +1861,7 @@ async fn workflow_create_list_show_run_and_steps() {
     // list
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/workflows")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth("/v1/workflows", &test_token(&app).await))
         .await
         .unwrap();
     let list: serde_json::Value =
@@ -1806,13 +1871,10 @@ async fn workflow_create_list_show_run_and_steps() {
     // show
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/workflows/{tid}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/workflows/{tid}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1820,7 +1882,11 @@ async fn workflow_create_list_show_run_and_steps() {
     // run
     let resp = app
         .clone()
-        .oneshot(post(&format!("/v1/workflows/{tid}/runs"), "{}".into()))
+        .oneshot(post_auth(
+            &format!("/v1/workflows/{tid}/runs"),
+            "{}".into(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -1832,13 +1898,10 @@ async fn workflow_create_list_show_run_and_steps() {
     // show run + steps
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/workflow-runs/{rid}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/workflow-runs/{rid}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1855,7 +1918,7 @@ async fn workflow_rejects_invalid_dag() {
     let body = json!({"name":"bad","steps":steps}).to_string();
     let resp = app
         .clone()
-        .oneshot(post("/v1/workflows", body))
+        .oneshot(post_auth("/v1/workflows", body, &test_token(&app).await))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1875,9 +1938,10 @@ async fn workflow_create_rejects_cycle_duplicate_self_dep() {
     ]);
     let resp = app
         .clone()
-        .oneshot(post(
+        .oneshot(post_auth(
             "/v1/workflows",
             json!({"name":"cyc","steps":steps}).to_string(),
+            &test_token(&app).await,
         ))
         .await
         .unwrap();
@@ -1890,9 +1954,10 @@ async fn workflow_create_rejects_cycle_duplicate_self_dep() {
     ]);
     let resp = app
         .clone()
-        .oneshot(post(
+        .oneshot(post_auth(
             "/v1/workflows",
             json!({"name":"dup","steps":steps}).to_string(),
+            &test_token(&app).await,
         ))
         .await
         .unwrap();
@@ -1906,9 +1971,10 @@ async fn workflow_create_rejects_cycle_duplicate_self_dep() {
     let steps = json!([{"id":"a","prompt":"x","depends_on":["a"]}]);
     let resp = app
         .clone()
-        .oneshot(post(
+        .oneshot(post_auth(
             "/v1/workflows",
             json!({"name":"self","steps":steps}).to_string(),
+            &test_token(&app).await,
         ))
         .await
         .unwrap();
@@ -1932,6 +1998,10 @@ async fn workflow_schedule_fires_run_on_tick() {
                 .method("POST")
                 .uri("/v1/workflows")
                 .header("content-type", "application/yaml")
+                .header(
+                    "authorization",
+                    format!("Bearer {}", test_token(&app).await),
+                )
                 .body(Body::from(body))
                 .unwrap(),
         )
@@ -1953,7 +2023,7 @@ async fn workflow_schedule_fires_run_on_tick() {
         .oneshot(post_json(
             &format!("/v1/workflows/{}/schedules", tpl.id),
             create,
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
@@ -2043,7 +2113,11 @@ async fn l4_schedule_ratify_gate_refuses_without_budget_accepts_with() {
     .unwrap();
     let resp = app
         .clone()
-        .oneshot(post_json("/v1/workflows", body, None))
+        .oneshot(post_json(
+            "/v1/workflows",
+            body,
+            Some(&test_token(&app).await),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -2062,7 +2136,7 @@ async fn l4_schedule_ratify_gate_refuses_without_budget_accepts_with() {
         .oneshot(post_json(
             &format!("/v1/workflows/{}/schedules", tpl.id),
             bad,
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
@@ -2084,7 +2158,7 @@ async fn l4_schedule_ratify_gate_refuses_without_budget_accepts_with() {
         .oneshot(post_json(
             &format!("/v1/workflows/{}/schedules", tpl.id),
             ok_l2,
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
@@ -2130,7 +2204,11 @@ async fn architect_expandable_plan_pauses_planready_then_approve_expands_steps()
     .unwrap();
     let resp = app
         .clone()
-        .oneshot(post_json("/v1/workflows", body, None))
+        .oneshot(post_json(
+            "/v1/workflows",
+            body,
+            Some(&test_token(&app).await),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -2262,7 +2340,11 @@ async fn typed_mailbox_emits_output_and_renders_handoff_block_in_pending_step_pr
     .unwrap();
     let resp = app
         .clone()
-        .oneshot(post_json("/v1/workflows", body, None))
+        .oneshot(post_json(
+            "/v1/workflows",
+            body,
+            Some(&test_token(&app).await),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -2350,7 +2432,11 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
     let tpl_body = json!({"name":"golden","steps":steps}).to_string();
     let resp = app
         .clone()
-        .oneshot(post("/v1/workflows", tpl_body))
+        .oneshot(post_auth(
+            "/v1/workflows",
+            tpl_body,
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     let tpl: serde_json::Value =
@@ -2359,9 +2445,10 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
 
     let resp = app
         .clone()
-        .oneshot(post(
+        .oneshot(post_auth(
             &format!("/v1/workflows/{tid}/runs"),
             json!({"repository":"demo"}).to_string(),
+            &test_token(&app).await,
         ))
         .await
         .unwrap();
@@ -2383,7 +2470,11 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
         // Scheduler tick: activates ready steps + advances completed ones.
         let resp = app
             .clone()
-            .oneshot(post(&format!("/v1/workflow-runs/{rid}/tick"), "{}".into()))
+            .oneshot(post_auth(
+                &format!("/v1/workflow-runs/{rid}/tick"),
+                "{}".into(),
+                &test_token(&app).await,
+            ))
             .await
             .unwrap();
         let rv: serde_json::Value =
@@ -2435,13 +2526,10 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
 
     let rv = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/workflow-runs/{rid}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/workflow-runs/{rid}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     let rv: serde_json::Value =
@@ -2471,7 +2559,11 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
     let tpl_body = json!({"name":"proj","steps":steps}).to_string();
     let resp = app
         .clone()
-        .oneshot(post("/v1/workflows", tpl_body))
+        .oneshot(post_auth(
+            "/v1/workflows",
+            tpl_body,
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     let tpl: serde_json::Value =
@@ -2480,9 +2572,10 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
 
     let resp = app
         .clone()
-        .oneshot(post(
+        .oneshot(post_auth(
             &format!("/v1/workflows/{tid}/runs"),
             json!({"repository":"demo"}).to_string(),
+            &test_token(&app).await,
         ))
         .await
         .unwrap();
@@ -2501,7 +2594,11 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
     };
 
     app.clone()
-        .oneshot(post(&format!("/v1/workflow-runs/{rid}/tick"), "{}".into()))
+        .oneshot(post_auth(
+            &format!("/v1/workflow-runs/{rid}/tick"),
+            "{}".into(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     let resp = app
@@ -2536,20 +2633,21 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
     assert_eq!(resp.status(), StatusCode::OK);
     for _ in 0..4 {
         app.clone()
-            .oneshot(post(&format!("/v1/workflow-runs/{rid}/tick"), "{}".into()))
+            .oneshot(post_auth(
+                &format!("/v1/workflow-runs/{rid}/tick"),
+                "{}".into(),
+                &test_token(&app).await,
+            ))
             .await
             .unwrap();
     }
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/workflow-runs/{rid}/projection"))
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(get_auth(
+            &format!("/v1/workflow-runs/{rid}/projection"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -2584,7 +2682,11 @@ async fn policy_endpoint_classifies_commands() {
         let body = serde_json::json!({ "command": cmd, "cwd": "/workspace" }).to_string();
         let resp = app
             .clone()
-            .oneshot(post("/v1/policy/evaluate", body))
+            .oneshot(post_auth(
+                "/v1/policy/evaluate",
+                body,
+                &test_token(&app).await,
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2622,7 +2724,11 @@ async fn policy_endpoint_honors_autonomy_level() {
             .to_string();
         let resp = app
             .clone()
-            .oneshot(post("/v1/policy/evaluate", body))
+            .oneshot(post_auth(
+                "/v1/policy/evaluate",
+                body,
+                &test_token(&app).await,
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2685,7 +2791,11 @@ async fn policy_evaluate_audits_decision() {
     let body = serde_json::json!({ "command": "rm -rf /tmp/x", "cwd": "/workspace" }).to_string();
     let resp = app
         .clone()
-        .oneshot(post("/v1/policy/evaluate", body))
+        .oneshot(post_auth(
+            "/v1/policy/evaluate",
+            body,
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -2804,7 +2914,7 @@ async fn backup_endpoint_writes_file() {
         .oneshot(post_json(
             "/v1/admin/backup",
             serde_json::to_string(&json!({ "path": path.to_str().unwrap() })).unwrap(),
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
@@ -2835,7 +2945,11 @@ async fn artifact_get_rejects_traversal_name() {
     };
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&create).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&create).unwrap(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -2872,7 +2986,7 @@ async fn artifact_get_rejects_traversal_name() {
             .clone()
             .oneshot(get_auth(
                 &format!("/v1/tasks/{}/artifacts/{}", tv.id, enc),
-                "",
+                &test_token(&app).await,
             ))
             .await
             .unwrap();
@@ -2893,6 +3007,10 @@ async fn create_workflow_accepts_yaml() {
         .method("POST")
         .uri("/v1/workflows")
         .header("content-type", "application/yaml")
+        .header(
+            "authorization",
+            format!("Bearer {}", test_token(&app).await),
+        )
         .body(Body::from(yaml))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -2921,7 +3039,7 @@ async fn workflow_budget_round_trips_via_json_create_and_get() {
     .to_string();
     let resp = app
         .clone()
-        .oneshot(post("/v1/workflows", body))
+        .oneshot(post_auth("/v1/workflows", body, &test_token(&app).await))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -2936,7 +3054,10 @@ async fn workflow_budget_round_trips_via_json_create_and_get() {
     // Get round-trips.
     let resp = app
         .clone()
-        .oneshot(get_q(&format!("/v1/workflows/{}", created.id)))
+        .oneshot(get_auth(
+            &format!("/v1/workflows/{}", created.id),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -2944,7 +3065,11 @@ async fn workflow_budget_round_trips_via_json_create_and_get() {
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(fetched.budget, created.budget);
     // Listing reflects it.
-    let resp = app.clone().oneshot(get_q("/v1/workflows")).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/workflows", &test_token(&app).await))
+        .await
+        .unwrap();
     let list: Vec<WorkflowTemplate> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(list.len(), 1);
@@ -2974,7 +3099,11 @@ async fn cancel_workflow_run_handler_cancels() {
     };
     let r = app
         .clone()
-        .oneshot(post("/v1/workflows", serde_json::to_string(&tmpl).unwrap()))
+        .oneshot(post_auth(
+            "/v1/workflows",
+            serde_json::to_string(&tmpl).unwrap(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -2987,9 +3116,10 @@ async fn cancel_workflow_run_handler_cancels() {
     };
     let rr = app
         .clone()
-        .oneshot(post(
+        .oneshot(post_auth(
             &format!("/v1/workflows/{}/runs", t.id),
             serde_json::to_string(&run_req).unwrap(),
+            &test_token(&app).await,
         ))
         .await
         .unwrap();
@@ -2998,16 +3128,20 @@ async fn cancel_workflow_run_handler_cancels() {
         serde_json::from_slice(&to_bytes(rr.into_body(), usize::MAX).await.unwrap()).unwrap();
     let c = app
         .clone()
-        .oneshot(post(
+        .oneshot(post_auth(
             &format!("/v1/workflow-runs/{}/cancel", run.id),
             "{}".into(),
+            &test_token(&app).await,
         ))
         .await
         .unwrap();
     assert_eq!(c.status(), StatusCode::OK);
     let show = app
         .clone()
-        .oneshot(get_auth(&format!("/v1/workflow-runs/{}", run.id), ""))
+        .oneshot(get_auth(
+            &format!("/v1/workflow-runs/{}", run.id),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(show.status(), StatusCode::OK);
@@ -3026,7 +3160,11 @@ async fn node_protocol_mismatch_marks_degraded() {
     let app = build_router(state);
     let tk = app
         .clone()
-        .oneshot(post("/v1/nodes/enrollment-token", "{}".into()))
+        .oneshot(post_auth(
+            "/v1/nodes/enrollment-token",
+            "{}".into(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(tk.status(), StatusCode::OK);
@@ -3054,7 +3192,7 @@ async fn node_protocol_mismatch_marks_degraded() {
         serde_json::from_slice(&to_bytes(er.into_body(), usize::MAX).await.unwrap()).unwrap();
     let nodes = app
         .clone()
-        .oneshot(get_auth("/v1/nodes", ""))
+        .oneshot(get_auth("/v1/nodes", &test_token(&app).await))
         .await
         .unwrap();
     assert_eq!(nodes.status(), StatusCode::OK);
@@ -3077,7 +3215,10 @@ async fn skill_trust_defaults_untrusted_then_round_trips() {
     // Unknown skill -> untrusted, no decided_by/at.
     let got = app
         .clone()
-        .oneshot(get_q("/v1/skills/ponytail?source=user"))
+        .oneshot(get_auth(
+            "/v1/skills/ponytail?source=user",
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(got.status(), StatusCode::OK);
@@ -3089,14 +3230,20 @@ async fn skill_trust_defaults_untrusted_then_round_trips() {
     // Trust it.
     let r = app
         .clone()
-        .oneshot(post_q("/v1/skills/ponytail/trust?source=user"))
+        .oneshot(post_q_auth(
+            "/v1/skills/ponytail/trust?source=user",
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let v: SkillTrustView = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/skills/ponytail?source=user"))
+                .oneshot(get_auth(
+                    "/v1/skills/ponytail?source=user",
+                    &test_token(&app).await,
+                ))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3112,7 +3259,7 @@ async fn skill_trust_defaults_untrusted_then_round_trips() {
     let list: Vec<SkillTrustView> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/skills"))
+                .oneshot(get_auth("/v1/skills", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3129,14 +3276,20 @@ async fn skill_trust_defaults_untrusted_then_round_trips() {
     // Untrust flips back (decision still recorded, just trusted=false).
     let r = app
         .clone()
-        .oneshot(post_q("/v1/skills/ponytail/untrust?source=user"))
+        .oneshot(post_q_auth(
+            "/v1/skills/ponytail/untrust?source=user",
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let v: SkillTrustView = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/skills/ponytail?source=user"))
+                .oneshot(get_auth(
+                    "/v1/skills/ponytail?source=user",
+                    &test_token(&app).await,
+                ))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3199,7 +3352,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
     let list: Vec<SkillTrustView> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/skills"))
+                .oneshot(get_auth("/v1/skills", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3218,7 +3371,10 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
     // Operator trusts it; a second discovery beat must not revert trust.
     let _ = app
         .clone()
-        .oneshot(post_q("/v1/skills/git-helper/trust?source=user"))
+        .oneshot(post_q_auth(
+            "/v1/skills/git-helper/trust?source=user",
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     let resp = app
@@ -3234,7 +3390,10 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
     let v: SkillTrustView = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/skills/git-helper?source=user"))
+                .oneshot(get_auth(
+                    "/v1/skills/git-helper?source=user",
+                    &test_token(&app).await,
+                ))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3267,7 +3426,11 @@ async fn mcp_server_registry_round_trips_and_gates_disabled() {
     .unwrap();
     let resp = app
         .clone()
-        .oneshot(post_json("/v1/mcp-servers", body, None))
+        .oneshot(post_json(
+            "/v1/mcp-servers",
+            body,
+            Some(&test_token(&app).await),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3281,7 +3444,7 @@ async fn mcp_server_registry_round_trips_and_gates_disabled() {
     let list: Vec<McpServer> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/mcp-servers"))
+                .oneshot(get_auth("/v1/mcp-servers", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3306,7 +3469,11 @@ async fn mcp_server_registry_round_trips_and_gates_disabled() {
     .unwrap();
     let resp = app
         .clone()
-        .oneshot(post_json("/v1/mcp-servers", body, None))
+        .oneshot(post_json(
+            "/v1/mcp-servers",
+            body,
+            Some(&test_token(&app).await),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3317,20 +3484,17 @@ async fn mcp_server_registry_round_trips_and_gates_disabled() {
     // Delete.
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/v1/mcp-servers/github")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(delete_auth(
+            "/v1/mcp-servers/github",
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     let list: Vec<McpServer> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/mcp-servers"))
+                .oneshot(get_auth("/v1/mcp-servers", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3355,7 +3519,7 @@ async fn agent_profile_revisions_immutable_and_roll_back() {
     let list: Vec<String> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/profiles"))
+                .oneshot(get_auth("/v1/profiles", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3379,7 +3543,7 @@ async fn agent_profile_revisions_immutable_and_roll_back() {
                         ..Default::default()
                     })
                     .unwrap(),
-                    None,
+                    Some(&test_token(&app).await),
                 ))
                 .await
                 .unwrap()
@@ -3402,7 +3566,7 @@ async fn agent_profile_revisions_immutable_and_roll_back() {
                         ..Default::default()
                     })
                     .unwrap(),
-                    None,
+                    Some(&test_token(&app).await),
                 ))
                 .await
                 .unwrap()
@@ -3422,14 +3586,14 @@ async fn agent_profile_revisions_immutable_and_roll_back() {
         .oneshot(post_json(
             "/v1/profiles/claude/activate",
             serde_json::to_string(&ActivateProfile { revision: r2_rev }).unwrap(),
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
     let revs: Vec<agentgrid_common::AgentProfile> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/profiles/claude"))
+                .oneshot(get_auth("/v1/profiles/claude", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3455,14 +3619,14 @@ async fn agent_profile_revisions_immutable_and_roll_back() {
         .oneshot(post_json(
             "/v1/profiles/claude/activate",
             serde_json::to_string(&ActivateProfile { revision: r1_rev }).unwrap(),
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
     let revs: Vec<agentgrid_common::AgentProfile> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/profiles/claude"))
+                .oneshot(get_auth("/v1/profiles/claude", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3484,7 +3648,7 @@ async fn agent_profile_revisions_immutable_and_roll_back() {
     let list: Vec<String> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/profiles"))
+                .oneshot(get_auth("/v1/profiles", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3527,7 +3691,11 @@ async fn agent_profile_carries_secret_requirements_and_version() {
     .unwrap();
     let resp = app
         .clone()
-        .oneshot(post_json("/v1/profiles/claude", body, None))
+        .oneshot(post_json(
+            "/v1/profiles/claude",
+            body,
+            Some(&test_token(&app).await),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3541,14 +3709,14 @@ async fn agent_profile_carries_secret_requirements_and_version() {
         .oneshot(post_json(
             "/v1/profiles/claude/activate",
             serde_json::to_string(&ActivateProfile { revision: rev_no }).unwrap(),
-            None,
+            Some(&test_token(&app).await),
         ))
         .await
         .unwrap();
     let revs: Vec<agentgrid_common::AgentProfile> = serde_json::from_slice(
         &to_bytes(
             app.clone()
-                .oneshot(get_q("/v1/profiles/claude"))
+                .oneshot(get_auth("/v1/profiles/claude", &test_token(&app).await))
                 .await
                 .unwrap()
                 .into_body(),
@@ -3598,7 +3766,11 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
     };
     let resp = app
         .clone()
-        .oneshot(post("/v1/tasks", serde_json::to_string(&req).unwrap()))
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -3852,7 +4024,10 @@ async fn revoked_node_cannot_mutate() {
     // Revoke node_b by deleting the node record.
     let r = app
         .clone()
-        .oneshot(delete(&format!("/v1/nodes/{node_b}")))
+        .oneshot(delete_auth(
+            &format!("/v1/nodes/{node_b}"),
+            &test_token(&app).await,
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -3923,7 +4098,11 @@ async fn consumer_node_can_read_upstream_producer_artifact() {
     .unwrap();
     let resp = app
         .clone()
-        .oneshot(post_json("/v1/workflows", body, None))
+        .oneshot(post_json(
+            "/v1/workflows",
+            body,
+            Some(&test_token(&app).await),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);

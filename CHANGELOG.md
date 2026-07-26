@@ -4,6 +4,40 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security (hardening P0 — auth fail-closed and safe bootstrap)
+
+- User routes are now **fail-closed** during the bootstrap window: before
+  the first user exists, all `/v1/` routes return `503 Service Unavailable`
+  except `/v1/auth/setup` (plus `/health/*` and static UI). The previous
+  open bootstrap window that let anyone create tasks/repositories/tokens is
+  closed.
+- `require_user_auth` fails **closed on DB error** (returns `503`, never
+  falls through to `401`/allow) so a transient SQLite outage cannot be
+  confused with "no users / public".
+- First-run bootstrap now requires a **one-time setup token** (32 hex chars,
+  15-min TTL) minted when no users exist and printed to stdout/console only.
+  `POST /v1/auth/setup` rejects without it and **consumes it on first use**;
+  a second setup after a user exists returns `409`.
+- **Env bootstrap removed** (`AGENTGRID_BOOTSTRAP_USER/PASSWORD` no longer
+  auto-create the first user) — it was an unauthenticated credential
+  backdoor. The setup token is now the only bootstrap path.
+- Production mode (`AGENTGRID_ENV=production`) **refuses to start** without
+  `AGENTGRID_JWT_SECRET` ≥ 32 bytes; a random per-run secret is used only
+  in non-production.
+- Docker defaults hardened: the production `docker-compose.yml` has **no
+  baked-in `admin/changeme` or `dev-insecure-secret`"; secrets are generated
+  by `deploy/compose/up.sh` (random JWT secret + admin password, reads the
+  setup token from the control-plane logs to complete bootstrap). A separate
+  `docker-compose.demo.yml` keeps insecure static defaults for local hacking
+  only.
+- `deploy/compose/down.sh` gained `--demo` to target the demo compose file.
+- `deploy/install-control-plane.sh` no longer bakes `admin/changeme` into
+  the systemd unit; first-run setup is done via the printed setup token.
+- Web UI setup form now requires the one-time setup token field.
+- Regression tests: closed bootstrap window (user routes `503` pre-user,
+  setup requires token, token is one-time, second setup `409`), DB-error
+  fail-closed, production JWT-secret bail.
+
 ### Security (hardening P0 — cross-node isolation)
 
 - All `/v1/node/attempts/*` mutation endpoints (event ingest, complete, ack,

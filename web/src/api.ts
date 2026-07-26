@@ -132,8 +132,8 @@ export function login(username: string, password: string) {
   return postJson<{ token: string }>('/v1/auth/login', { username, password }).then((r) => { markAuthed(); return r; });
 }
 
-export function setup(username: string, password: string) {
-  return postJson<{ token: string }>('/v1/auth/setup', { username, password }).then((r) => { markAuthed(); return r; });
+export function setup(username: string, password: string, setupToken: string) {
+  return postJson<{ token: string }>('/v1/auth/setup', { username, password, setup_token: setupToken }).then((r) => { markAuthed(); return r; });
 }
 
 export function logout() {

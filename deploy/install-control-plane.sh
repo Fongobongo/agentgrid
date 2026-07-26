@@ -14,8 +14,9 @@ BIN_DIR="/usr/local/bin"
 DATA_DIR="/var/lib/agentgrid"
 DB_DIR="$DATA_DIR/data"
 ARTIFACT_DIR="$DATA_DIR/artifacts"
-BOOTSTRAP_USER="${AGENTGRID_BOOTSTRAP_USER:-admin}"
-BOOTSTRAP_PASS="${AGENTGRID_BOOTSTRAP_PASSWORD:-changeme}"
+# No baked-in bootstrap credentials: on first run the control plane prints a
+# one-time setup token to stdout (journalctl) the operator presents at
+# POST /v1/auth/setup to create the first admin. See README.
 
 usage() { echo "usage: $0 [--listen addr] [--data-dir dir] [--bin-dir dir]"; exit 1; }
 while [ $# -gt 0 ]; do
@@ -55,8 +56,10 @@ RestartSec=5
 Environment=AGENTGRID_LISTEN=$LISTEN
 Environment=AGENTGRID_DATA_DIR=$DB_DIR
 Environment=AGENTGRID_ARTIFACT_ROOT=$ARTIFACT_DIR
-Environment=AGENTGRID_BOOTSTRAP_USER=$BOOTSTRAP_USER
-Environment=AGENTGRID_BOOTSTRAP_PASSWORD=$BOOTSTRAP_PASS
+# AGENTGRID_JWT_SECRET intentionally NOT set here: set it yourself via
+# `systemctl edit agentgrid-control-plane` (>=32 bytes) before exposing the
+# port. Without it the control plane generates a random per-run secret
+# (sessions invalidated on restart) and refuses to start in production mode.
 # Hardening (Stage 5.1): no new privileges, read-only root except data dirs.
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -72,4 +75,5 @@ echo ">> enabling + starting"
 systemctl daemon-reload
 systemctl enable --now agentgrid-control-plane.service
 echo ">> control plane listening on $LISTEN. journalctl -u agentgrid-control-plane -f"
-echo ">> bootstrap user: $BOOTSTRAP_USER (change the password after first login)"
+echo ">> first run: read the one-time setup token from the logs above,"
+echo ">> then: curl -X POST $LISTEN/v1/auth/setup -H 'content-type: application/json'"" ">>   -d '{\"setup_token\":\"<token>\",\"username\":\"admin\",\"password\":\"<your>\"}'"

@@ -380,11 +380,18 @@ pub struct EnrollTokenResponse {
     pub expires_at: String,
 }
 
-/// Stage 4.1: create the first local user (only allowed while no users exist).
+/// Stage 4.1: create the first local user (only allowed while no users exist
+/// and the one-time bootstrap setup token is presented; hardening P0 closes the
+/// open window where anyone reachable could create the first admin).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetupRequest {
     pub username: String,
     pub password: String,
+    /// One-time bootstrap setup token printed to the control-plane stdout on
+    /// first start (when no users exist). Required whenever a setup token is
+    /// active; absent/empty is rejected.
+    #[serde(default)]
+    pub setup_token: Option<String>,
 }
 
 /// Stage 4.1: username + password exchange for a JWT.

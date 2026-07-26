@@ -1,17 +1,37 @@
 #!/usr/bin/env bash
-# Stage 5.3 helper: bring up the agentgrid stack with one command.
-# Bootstraps the first user, mints two enrollment tokens, writes them to
-# .env, then starts the two node-daemon containers.
+# Bring up the agentgrid stack with one command. Generates a random JWT
+# secret + admin password, starts the control plane, reads the one-time setup
+# token from its logs, completes first-user bootstrap via POST /v1/auth/setup,
+# mints enrollment tokens for both nodes, writes them to .env, and starts the
+# node-daemon containers. The bootstrap credentials are printed once.
+#
+# Production defaults (no insecure baked-in values); see up --demo for local
+# hacking with docker-compose.demo.yml.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
+DEMO=0
+[ "${1:-}" = "--demo" ] && DEMO=1
+
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7800}"
-USER="${AGENTGRID_BOOTSTRAP_USER:-admin}"
-PASS="${AGENTGRID_BOOTSTRAP_PASSWORD:-changeme}"
+
+if [ "$DEMO" = "1" ]; then
+  COMPOSE=(docker compose -f docker-compose.demo.yml)
+  ENV_FILE="deploy/compose/.env.demo"
+else
+  COMPOSE=(docker compose -f docker-compose.yml)
+  ENV_FILE="deploy/compose/.env"
+fi
+
+# Generate fresh secrets unless an operator pre-set them via env.
+ADMIN_USER="${AGENTGRID_ADMIN_USER:-admin}"
+ADMIN_PASS="${AGENTGRID_ADMIN_PASSWORD:-$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)}"
+JWT_SECRET="${AGENTGRID_JWT_SECRET:-$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48)}"
+export AGENTGRID_JWT_SECRET
 
 echo ">> building & starting control plane"
-docker compose up -d control-plane
+"${COMPOSE[@]}" up -d control-plane
 
 echo ">> waiting for control plane health"
 for _ in $(seq 1 30); do
@@ -20,10 +40,22 @@ for _ in $(seq 1 30); do
 done
 curl -fsS "$BASE/health/ready" >/dev/null || { echo "control plane not ready"; exit 1; }
 
-echo ">> logging in as bootstrap user"
+# Read the one-time setup token the control plane printed to stdout at boot.
+# (Only minted when no users exist yet; idempotent on subsequent runs.)
+SETUP_TOKEN=$(grep -m1 "agentgrid setup token" "${COMPOSE[@]}" logs control-plane 2>/dev/null \
+  | sed -n '2p' || true)
+if [ -n "${SETUP_TOKEN:-}" ]; then
+  echo ">> completing first-user bootstrap (POST /v1/auth/setup)"
+  curl -fsS -X POST "$BASE/v1/auth/setup" \
+    -H 'content-type: application/json' \
+    -d "{\"setup_token\":\"$SETUP_TOKEN\",\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" \
+    >/dev/null
+fi
+
+echo ">> logging in as $ADMIN_USER"
 JWT=$(curl -fsS -X POST "$BASE/v1/auth/login" \
   -H 'content-type: application/json' \
-  -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
+  -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 [ -n "$JWT" ] || { echo "login failed"; exit 1; }
 
@@ -37,15 +69,16 @@ echo ">> minting enrollment tokens"
 NODE1_TOKEN=$(mint)
 NODE2_TOKEN=$(mint)
 
-# Compose auto-loads .env; node services read NODE1_TOKEN/NODE2_TOKEN.
-cat > deploy/compose/.env <<EOF
-AGENTGRID_BOOTSTRAP_USER=$USER
-AGENTGRID_BOOTSTRAP_PASSWORD=$PASS
+# Compose auto-loads .env alongside the compose file; node services read it.
+cat > "$ENV_FILE" <<EOF
+AGENTGRID_JWT_SECRET=$JWT_SECRET
 NODE1_TOKEN=$NODE1_TOKEN
 NODE2_TOKEN=$NODE2_TOKEN
 EOF
+chmod 600 "$ENV_FILE"
 
 echo ">> starting nodes"
-docker compose --env-file deploy/compose/.env up -d node-1 node-2
+"${COMPOSE[@]}" up -d node-1 node-2
 
-echo ">> done. control plane: $BASE  (login: $USER / $PASS)"
+echo ">> done. control plane: $BASE"
+echo ">> login: $ADMIN_USER / $ADMIN_PASS (shown this once)"

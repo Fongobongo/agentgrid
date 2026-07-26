@@ -1,8 +1,12 @@
-# Stage 5.3: one control plane (SQLite + artifacts on a persistent volume)
-# and two node-daemon containers. Migrations run at control-plane startup.
+# Production-style one control plane (SQLite + artifacts on a persistent
+# volume) and two node-daemon containers. No insecure defaults: the operator
+# MUST supply AGENTGRID_JWT_SECRET and (for first-run) bootstrap credentials.
+# Use `deploy/compose/up.sh` which generates a random JWT secret + admin
+# password, reads the one-time setup token from the control-plane logs, and
+# completes first-user bootstrap via POST /v1/auth/setup.
 #
-# Tokens are NOT baked in: run `deploy/compose/up.sh` which bootstraps a user,
-# creates enrollment tokens, writes them to `.env`, and brings the nodes up.
+# For local hacking with insecure baked-in defaults see
+# `docker-compose.demo.yml`.
 services:
   control-plane:
     image: ag-cp:test
@@ -10,10 +14,8 @@ services:
     ports:
       - "7800:7800"
     environment:
-      # First-run bootstrap user (created once, then the window closes).
-      AGENTGRID_BOOTSTRAP_USER: ${AGENTGRID_BOOTSTRAP_USER:-admin}
-      AGENTGRID_BOOTSTRAP_PASSWORD: ${AGENTGRID_BOOTSTRAP_PASSWORD:-changeme}
-      AGENTGRID_JWT_SECRET: ${AGENTGRID_JWT_SECRET:-dev-insecure-secret-change-me}
+      AGENTGRID_ENV: production
+      AGENTGRID_JWT_SECRET: ${AGENTGRID_JWT_SECRET:?AGENTGRID_JWT_SECRET must be set (>=32 bytes)}
       AGENTGRID_LISTEN: 0.0.0.0:7800
     volumes:
       - agentgrid-data:/var/lib/agentgrid
@@ -25,7 +27,7 @@ services:
       - control-plane
     environment:
       AGENTGRID_SERVER: http://control-plane:7800
-      AGENTGRID_ENROLL_TOKEN: ${NODE1_TOKEN:-}
+      AGENTGRID_ENROLL_TOKEN: ${NODE1_TOKEN:?NODE1_TOKEN must be set}
       AGENTGRID_NODE_NAME: node-1
       AGENTGRID_MAX_CONCURRENCY: "2"
     volumes:
@@ -38,7 +40,7 @@ services:
       - control-plane
     environment:
       AGENTGRID_SERVER: http://control-plane:7800
-      AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:-}
+      AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:?NODE2_TOKEN must be set}
       AGENTGRID_NODE_NAME: node-2
       AGENTGRID_MAX_CONCURRENCY: "2"
     volumes:

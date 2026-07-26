@@ -97,6 +97,11 @@ pub struct AppState {
     db_path: String,
     /// Brute-force protection on `/v1/auth/login` (Stage 2.5).
     login_rate: Arc<tokio::sync::Mutex<LoginRate>>,
+    /// One-time bootstrap setup token (hardening P0): printed once to stdout
+    /// when no users exist; required to create the first user; consumed on
+    /// first use. `None` once bootstrap is complete or the token has been used
+    /// / has expired (15 min TTL).
+    setup_token: Arc<tokio::sync::Mutex<Option<SetupToken>>>,
 }
 
 /// Request size ceilings (Stage 5.1). Overridable via env; defaults:
@@ -105,6 +110,34 @@ struct Limits {
     prompt: usize,
     event: usize,
     artifact: usize,
+}
+
+/// One-time bootstrap setup token (hardening P0). Printed to stdout once on
+/// first start; must be presented to `POST /v1/auth/setup` to create the
+/// first user; consumed on first use; expires after `SETUP_TOKEN_TTL`.
+struct SetupToken {
+    token: String,
+    issued_at: std::time::Instant,
+}
+
+const SETUP_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+impl SetupToken {
+    fn new() -> Self {
+        use rand::Rng;
+        // 32 hex chars from a random u128; sufficient for a short-lived,
+        // one-time bootstrap token printed to stdout.
+        let token = format!("{:032x}", rand::thread_rng().gen::<u128>());
+        Self {
+            token,
+            issued_at: std::time::Instant::now(),
+        }
+    }
+
+    /// True if the token has not expired.
+    fn is_live(&self) -> bool {
+        self.issued_at.elapsed() < SETUP_TOKEN_TTL
+    }
 }
 
 /// Sliding-window brute-force limiter for the login endpoint (Stage 2.5).
@@ -155,30 +188,60 @@ impl AppState {
     /// Open (or create) the SQLite database at `db_path` and return shared state.
     pub async fn open(db_path: &str) -> anyhow::Result<Arc<Self>> {
         let store = Store::open(db_path).await?;
+        let production = std::env::var("AGENTGRID_ENV").as_deref() == Ok("production");
         let jwt_secret = match std::env::var("AGENTGRID_JWT_SECRET") {
-            Ok(s) => s.into_bytes(),
+            Ok(s) => {
+                // Hardening P0: a weak JWT secret forges session cookies.
+                if s.len() < 32 {
+                    if production {
+                        anyhow::bail!(
+                            "AGENTGRID_JWT_SECRET is shorter than 32 bytes; \
+                             refusing to start in AGENTGRID_ENV=production"
+                        );
+                    }
+                    tracing::warn!(
+                        "AGENTGRID_JWT_SECRET is shorter than 32 bytes; \
+                         session tokens are vulnerable to brute force"
+                    );
+                }
+                s.into_bytes()
+            }
             Err(_) => {
-                // Stage 2.5: a random-per-start secret invalidates previously
-                // issued node tokens after a restart. Require a stable secret in
-                // production; warn loudly when one is not configured.
+                // A random-per-start secret invalidates previously issued
+                // *user session* JWTs after a restart (node credentials are
+                // independent: they are hashed and stored in `nodes`, not
+                // signed with this secret). In production a stable secret is
+                // mandatory; elsewhere we warn and use a random one.
+                if production {
+                    anyhow::bail!(
+                        "AGENTGRID_JWT_SECRET unset; refusing to start in \
+                         AGENTGRID_ENV=production (set a stable >=32-byte secret)"
+                    );
+                }
                 tracing::warn!(
                     "AGENTGRID_JWT_SECRET unset: using a random secret for this run; \
-                     existing node tokens will not survive a restart"
+                     existing user session JWTs will not survive a restart"
                 );
                 use rand::Rng;
                 rand::thread_rng().gen::<[u8; 32]>().to_vec()
             }
         };
-        // Bootstrap the first user from env (one-time) so a fresh install is
-        // not left in its open window.
-        if let (Ok(u), Ok(p)) = (
-            std::env::var("AGENTGRID_BOOTSTRAP_USER"),
-            std::env::var("AGENTGRID_BOOTSTRAP_PASSWORD"),
-        ) {
-            if store.user_count().await? == 0 {
-                store.create_user(&u, &p).await?;
-            }
-        }
+        // Hardening P0: when no users exist (fresh install), mint a
+        // one-time setup token printed to stdout so only an operator with
+        // console access can create the first admin. Consumed on first use;
+        // expires after SETUP_TOKEN_TTL. Env bootstrap removed (backdoor).
+        let setup_token = Arc::new(tokio::sync::Mutex::new(if store.user_count().await? == 0 {
+            let t = SetupToken::new();
+            println!(
+                "\n=== agentgrid setup token (one-time, expires in {} min) ===\n{}\n=== \
+                     present this at POST /v1/auth/setup to create the first user ===",
+                SETUP_TOKEN_TTL.as_secs() / 60,
+                t.token
+            );
+            Some(t)
+        } else {
+            None
+        }));
         let web_root = std::env::var("AGENTGRID_WEB_ROOT")
             .map(std::path::PathBuf::from)
             .ok()
@@ -207,13 +270,28 @@ impl AppState {
             limits,
             db_path: db_path.to_string(),
             login_rate: Arc::new(tokio::sync::Mutex::new(LoginRate::new())),
+            setup_token,
         }))
     }
 
-    /// Open a fresh temporary database (used by tests).
-    pub async fn open_temp() -> anyhow::Result<Arc<Self>> {
+    /// Open a fresh temporary database with no users (used by tests that
+    /// exercise the bootstrap/setup flow). A one-time setup token is minted
+    /// and printed to stdout (same as a fresh install).
+    pub async fn open_temp_fresh() -> anyhow::Result<Arc<Self>> {
         let p = std::env::temp_dir().join(format!("ag-test-{}.db", Uuid::new_v4()));
         Self::open(p.to_str().unwrap()).await
+    }
+
+    /// Open a fresh temporary database (used by tests). Bootstraps a
+    /// `test`/`test` user so the closed bootstrap window does not block
+    /// test task creation; tests then login to obtain a JWT.
+    pub async fn open_temp() -> anyhow::Result<Arc<Self>> {
+        let p = std::env::temp_dir().join(format!("ag-test-{}.db", Uuid::new_v4()));
+        let state = Self::open(p.to_str().unwrap()).await?;
+        if state.store.user_count().await? == 0 {
+            state.store.create_user("test", "test").await?;
+        }
+        Ok(state)
     }
 
     /// Issue a 12h JWT for `username` (Stage 4.1).
@@ -239,6 +317,17 @@ impl AppState {
         )
         .ok()
         .map(|d| d.claims.sub)
+    }
+
+    /// Read the current one-time setup token (if live) for tests / operators
+    /// who missed the stdout print. Does not consume it; `auth_setup` consumes
+    /// on first successful use.
+    pub async fn setup_token(&self) -> Option<String> {
+        let guard = self.setup_token.lock().await;
+        guard
+            .as_ref()
+            .filter(|t| t.is_live())
+            .map(|t| t.token.clone())
     }
 }
 
@@ -479,9 +568,12 @@ fn user_protected(path: &str) -> bool {
     true
 }
 
-/// Require a valid user JWT on user-facing routes, except during the open
-/// bootstrap window (no users yet). Node routes are handled by
-/// [`require_node_auth`] and are skipped here.
+/// Require a valid user JWT on user-facing routes. Hardening P0:
+/// - DB error in `user_count` fails closed (503), never opens the API.
+/// - Before the first user exists (bootstrap not complete), all `/v1/` user
+///   routes are closed (503) except `/v1/auth/setup`; static UI (non-`/v1/`
+///   paths) stays served so the setup page loads. Node routes are handled
+///   by [`require_node_auth`] and are skipped here.
 async fn require_user_auth(
     State(state): State<Arc<AppState>>,
     mut req: Request<Body>,
@@ -489,18 +581,26 @@ async fn require_user_auth(
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path().to_string();
     if user_protected(&path) {
-        let open = state
-            .store
-            .user_count()
-            .await
-            .map(|c| c == 0)
-            .unwrap_or(true);
-        if !open {
-            match auth_token_from_headers(req.headers()).and_then(|t| state.verify_token(&t)) {
-                Some(u) => {
-                    req.extensions_mut().insert(AuthedUser { username: u });
+        match state.store.user_count().await {
+            Ok(0) => {
+                // Bootstrap not complete: only setup (exempt above) and static
+                // UI (non-/v1/ paths) are served; everything else is closed.
+                if path.starts_with("/v1/") {
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
                 }
-                None => return Err(StatusCode::UNAUTHORIZED),
+            }
+            Ok(_) => {
+                match auth_token_from_headers(req.headers()).and_then(|t| state.verify_token(&t)) {
+                    Some(u) => {
+                        req.extensions_mut().insert(AuthedUser { username: u });
+                    }
+                    None => return Err(StatusCode::UNAUTHORIZED),
+                }
+            }
+            // Fail closed: a DB outage never opens the API.
+            Err(e) => {
+                tracing::error!("user_count failed in auth middleware: {e}");
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
     }
@@ -519,6 +619,22 @@ async fn auth_setup(
         Ok(0) => {}
         Ok(_) => return Err(StatusCode::CONFLICT),
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+    // Hardening P0: require the one-time setup token minted at first start.
+    // Rejects missing/expired/already-consumed tokens; the comparison is
+    // constant-time-ish via a simple byte eq (token is high-entropy and
+    // short-lived, so timing leakage is not a practical concern).
+    {
+        let mut guard = state.setup_token.lock().await;
+        let valid = match guard.as_ref() {
+            Some(t) if t.is_live() => t.token == req.setup_token.as_deref().unwrap_or(""),
+            _ => false,
+        };
+        if !valid {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        // Consume: the token is single-use.
+        *guard = None;
     }
     match state.store.create_user(&req.username, &req.password).await {
         Ok(true) => {}

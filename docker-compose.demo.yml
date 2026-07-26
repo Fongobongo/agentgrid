@@ -1,0 +1,46 @@
+# Local demo stack with insecure baked-in defaults for fast hacking.
+# NOT for production: anyone on the network can log in as demo/demo.
+# Production uses docker-compose.yml + deploy/compose/up.sh (random secrets).
+services:
+  control-plane:
+    image: ag-cp:test
+    restart: unless-stopped
+    ports:
+      - "7800:7800"
+    environment:
+      # Demo-only static JWT secret; replace for any non-local use.
+      AGENTGRID_JWT_SECRET: demo-insecure-jwt-secret-32bytes-min-change-me
+      AGENTGRID_LISTEN: 0.0.0.0:7800
+    volumes:
+      - agentgrid-demo-data:/var/lib/agentgrid
+
+  node-1:
+    image: ag-node:test
+    restart: unless-stopped
+    depends_on:
+      - control-plane
+    environment:
+      AGENTGRID_SERVER: http://control-plane:7800
+      AGENTGRID_ENROLL_TOKEN: ${NODE1_TOKEN:-}
+      AGENTGRID_NODE_NAME: node-1
+      AGENTGRID_MAX_CONCURRENCY: "2"
+    volumes:
+      - agentgrid-demo-node1:/var/lib/agentgrid/data
+
+  node-2:
+    image: ag-node:test
+    restart: unless-stopped
+    depends_on:
+      - control-plane
+    environment:
+      AGENTGRID_SERVER: http://control-plane:7800
+      AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:-}
+      AGENTGRID_NODE_NAME: node-2
+      AGENTGRID_MAX_CONCURRENCY: "2"
+    volumes:
+      - agentgrid-demo-node2:/var/lib/agentgrid/data
+
+volumes:
+  agentgrid-demo-data:
+  agentgrid-demo-node1:
+  agentgrid-demo-node2:

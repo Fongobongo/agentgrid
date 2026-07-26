@@ -81,38 +81,38 @@
 
 ### Реализация
 
-- [ ] Убрать `.unwrap_or(true)` из `require_user_auth`.
-- [ ] При ошибке `user_count()` возвращать `503 Service Unavailable`, а не открывать API.
-- [ ] Закрыть все user routes, пока bootstrap не завершён.
-- [ ] Оставить доступным только `/health/*`, static login/setup UI и setup endpoint.
-- [ ] Сгенерировать одноразовый setup token при первом запуске.
-- [ ] Показывать setup token только в локальном stdout или записывать в файл `0600`.
-- [ ] Требовать setup token в `POST /v1/auth/setup`.
-- [ ] Добавить TTL и одноразовое consume setup token.
+- [x] Убрать `.unwrap_or(true)` из `require_user_auth`.
+- [x] При ошибке `user_count()` возвращать `503 Service Unavailable`, а не открывать API.
+- [x] Закрыть все user routes, пока bootstrap не завершён.
+- [x] Оставить доступным только `/health/*`, static login/setup UI и setup endpoint.
+- [x] Сгенерировать одноразовый setup token при первом запуске.
+- [x] Показывать setup token только в локальном stdout или записывать в файл `0600`.
+- [x] Требовать setup token в `POST /v1/auth/setup`.
+- [x] Добавить TTL и одноразовое consume setup token.
 - [ ] Опционально ограничить setup loopback-интерфейсом.
-- [ ] Проверять минимальную длину `AGENTGRID_JWT_SECRET`.
-- [ ] В production mode отказываться запускаться без стабильного JWT secret.
-- [ ] Удалить из комментариев неверное утверждение, что JWT secret влияет на node credentials.
-- [ ] Добавить server-side session version или `jti`, если требуется отзыв пользовательских сессий.
+- [x] Проверять минимальную длину `AGENTGRID_JWT_SECRET`.
+- [x] В production mode отказываться запускаться без стабильного JWT secret.
+- [x] Удалить из комментариев неверное утверждение, что JWT secret влияет на node credentials.
+- [ ] Добавить server-side session version или `jti`, если требуется отзыв пользовательских сессий.
 
 ### Docker defaults
 
-- [ ] Удалить default `admin/changeme` из production compose.
-- [ ] Удалить default `dev-insecure-secret-change-me` из production compose.
-- [ ] Генерировать bootstrap password и JWT secret в `deploy/compose/up.sh`.
-- [ ] Сохранять generated secrets в файл с правами `0600`.
-- [ ] Разделить `docker-compose.yml` и `docker-compose.demo.yml`.
+- [x] Удалить default `admin/changeme` из production compose.
+- [x] Удалить default `dev-insecure-secret-change-me` из production compose.
+- [x] Генерировать bootstrap password и JWT secret в `deploy/compose/up.sh`.
+- [x] Сохранять generated secrets в файл с правами `0600`.
+- [x] Разделить `docker-compose.yml` и `docker-compose.demo.yml`.
 - [ ] Не публиковать control-plane port на всех интерфейсах по умолчанию.
-- [ ] Удалять enrollment tokens из compose env после успешного enrollment.
+- [ ] Удалять enrollment tokens из compose env после успешного enrollment.
 
 ### Тесты
 
-- [ ] Ошибка БД в auth middleware не открывает API.
-- [ ] До setup нельзя создать task/repository/token без setup token.
-- [ ] Неверный setup token отклоняется.
-- [ ] Setup token одноразовый.
-- [ ] Два конкурентных setup запроса создают только одного пользователя.
-- [ ] Второй setup после создания пользователя получает `409`.
+- [x] Ошибка БД в auth middleware не открывает API.
+- [x] До setup нельзя создать task/repository/token без setup token.
+- [x] Неверный setup token отклоняется.
+- [x] Setup token одноразовый.
+- [x] Два конкурентных setup запроса создают только одного пользователя.
+- [x] Второй setup после создания пользователя получает `409`.
 
 **Основные файлы:**
 
