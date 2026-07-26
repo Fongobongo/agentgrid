@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security (hardening P0 — artifact integrity and download safety)
+
+- Artifact uploads now **compute the SHA-256 server-side** and, when the
+  caller supplies an `x-artifact-sha256` (raw) or `sha256` (JSON) hint that
+  disagrees with the computed hash, reject with **422 Unprocessable Entity**;
+  the artifact is not published. Only the server-computed hash is stored
+  (`StoreArtifactError::HashMismatch`).
+- Artifact writes are now **atomic** (write to a sibling `*.tmp.upload` then
+  `rename`), so a crash between the write and the metadata commit cannot leave
+  a half-written published artifact on disk.
+- Artifact downloads are **stored-XSS safe**: a small allowlist of inline-safe
+  media types may be served with their stored `Content-Type`; HTML / SVG /
+  JavaScript / XML and unknown types are forced to `application/octet-stream`
+  with `Content-Disposition: attachment` (RFC 6266 safe filename encoding,
+  control/separator/quote chars and leading dots stripped) and
+  `X-Content-Type-Options: nosniff` is added to every artifact response.
+  Browsers never render an uploaded artifact inline. Added `artifact_response`.
+- Regression tests: server-side hash enforcement + wrong-hash 422, atomic
+  write, HTML/SVG downgraded to attachment + octet-stream + nosniff, unknown
+  type forced to attachment, NUL/backslash/traversal name rejection expansions.
+
 ### Security (hardening P0 — auth fail-closed and safe bootstrap)
 
 - User routes are now **fail-closed** during the bootstrap window: before

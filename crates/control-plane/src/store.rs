@@ -100,15 +100,63 @@ fn from_snake<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
 }
 
 fn sha256_hex(s: &str) -> String {
+    sha256_bytes_hex(s.as_bytes())
+}
+
+/// SHA-256 of raw bytes as lowercase hex (used for artifact integrity).
+fn sha256_bytes_hex(b: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(s.as_bytes());
+    h.update(b);
     let out = h.finalize();
     let mut s = String::with_capacity(out.len() * 2);
-    for b in out {
-        s.push_str(&format!("{b:02x}"));
+    for byte in out {
+        s.push_str(&format!("{byte:02x}"));
     }
     s
+}
+
+/// Error from [`Store::save_artifact_bytes`]. `HashMismatch` means the
+/// caller-supplied sha256 hint disagrees with the server-computed SHA-256
+/// of the uploaded bytes; the handler maps it to `422`.
+#[derive(Debug)]
+pub enum StoreArtifactError {
+    HashMismatch { expected: String, computed: String },
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for StoreArtifactError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreArtifactError::HashMismatch { expected, computed } => {
+                write!(
+                    f,
+                    "artifact sha256 mismatch: header={expected} computed={computed}"
+                )
+            }
+            StoreArtifactError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for StoreArtifactError {}
+
+impl From<anyhow::Error> for StoreArtifactError {
+    fn from(e: anyhow::Error) -> Self {
+        StoreArtifactError::Other(e)
+    }
+}
+
+impl From<std::io::Error> for StoreArtifactError {
+    fn from(e: std::io::Error) -> Self {
+        StoreArtifactError::Other(e.into())
+    }
+}
+
+impl From<sqlx::Error> for StoreArtifactError {
+    fn from(e: sqlx::Error) -> Self {
+        StoreArtifactError::Other(e.into())
+    }
 }
 
 /// Argon2id hash of a password (Stage 4.1).
@@ -298,7 +346,11 @@ impl Store {
         Ok(canon_dir.join(name))
     }
 
-    pub async fn save_artifact(&self, attempt_id: &str, req: &UploadArtifactRequest) -> Result<()> {
+    pub async fn save_artifact(
+        &self,
+        attempt_id: &str,
+        req: &UploadArtifactRequest,
+    ) -> Result<(), StoreArtifactError> {
         self.save_artifact_bytes(
             attempt_id,
             &req.name,
@@ -319,11 +371,28 @@ impl Store {
         bytes: &[u8],
         media_type: Option<&str>,
         sha256: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<(), StoreArtifactError> {
+        // Hardening P0 (artifact integrity): always compute the server-side
+        // SHA-256 of the uploaded bytes. If the caller supplied a sha256 hint
+        // (JSON `sha256` field or raw `x-artifact-sha256` header) and it
+        // disagrees, reject with `HashMismatch` (handler -> 422). We store
+        // only the computed server-side hash, never the client value.
+        let computed = sha256_bytes_hex(bytes);
+        if let Some(expected) = sha256 {
+            let expected = expected.trim().to_ascii_lowercase();
+            if !expected.is_empty() && expected != computed {
+                return Err(StoreArtifactError::HashMismatch { expected, computed });
+            }
+        }
         let dir = self.artifact_root.join(attempt_id);
         tokio::fs::create_dir_all(&dir).await?;
         let path = self.artifact_path(attempt_id, name)?;
-        tokio::fs::write(&path, bytes).await?;
+        // Hardening P0 (crash safety): write to a sibling temp file then
+        // atomic rename, so a crash between write and metadata commit cannot
+        // leave a half-written published artifact. Same dir => same fs rename.
+        let tmp = path.with_extension("tmp.upload");
+        tokio::fs::write(&tmp, bytes).await?;
+        tokio::fs::rename(&tmp, &path).await?;
         let size = bytes.len() as i64;
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
@@ -342,7 +411,7 @@ impl Store {
         .bind(size)
         .bind(&now)
         .bind(media_type)
-        .bind(sha256)
+        .bind(&computed)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -3372,8 +3441,8 @@ mod workflow_tests {
         .unwrap();
         // 0xFF 0xFE 0x00 invalid as UTF-8; would be mangled by read_to_string.
         let bytes: &[u8] = &[0xFFu8, 0xFEu8, 0x00u8, 0x01u8, 0x02u8];
-        let sha = "7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1e3c89e4f0a6f8e8d6f0e2c7b3";
-        s.save_artifact_bytes("att-bart", "blob.bin", bytes, Some("image/png"), Some(sha))
+        let sha = sha256_bytes_hex(bytes);
+        s.save_artifact_bytes("att-bart", "blob.bin", bytes, Some("image/png"), Some(&sha))
             .await
             .unwrap();
         assert_eq!(
@@ -3388,7 +3457,9 @@ mod workflow_tests {
             .expect("meta present");
         assert_eq!(meta.size_bytes, bytes.len() as i64);
         assert_eq!(meta.media_type.as_deref(), Some("image/png"));
-        assert_eq!(meta.sha256.as_deref(), Some(sha));
+        // Only the server-computed hash is stored (hardening P0), so it equals
+        // the computed hash, not any client value — and for a correct hint it's identical.
+        assert_eq!(meta.sha256.as_deref(), Some(sha.as_str()));
     }
 
     #[tokio::test]

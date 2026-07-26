@@ -1817,18 +1817,14 @@ async fn get_artifact(
     }
     match state.store.read_artifact_bytes(&task_id, &name).await {
         Ok(Some(bytes)) => {
-            // Stage 2.2: serve the stored content type (default
-            // `application/octet-stream` for binary artifacts) so non-text
-            // artifacts (binary diffs, archives) download correctly.
             let mt = state
                 .store
                 .read_artifact_meta(&task_id, &name)
                 .await
                 .ok()
                 .flatten()
-                .and_then(|m| m.media_type)
-                .unwrap_or_else(|| "application/octet-stream".into());
-            Ok(([(header::CONTENT_TYPE, mt.as_str())], Bytes::from(bytes)).into_response())
+                .and_then(|m| m.media_type);
+            Ok(artifact_response(bytes, mt.as_deref(), &name))
         }
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -1872,9 +1868,8 @@ async fn get_artifact_node(
                 .await
                 .ok()
                 .flatten()
-                .and_then(|m| m.media_type)
-                .unwrap_or_else(|| "application/octet-stream".into());
-            Ok(([(header::CONTENT_TYPE, mt.as_str())], Bytes::from(bytes)).into_response())
+                .and_then(|m| m.media_type);
+            Ok(artifact_response(bytes, mt.as_deref(), &name))
         }
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -1915,6 +1910,9 @@ async fn upload_artifact(
         .await
     {
         Ok(()) => StatusCode::OK,
+        Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         Err(e) => {
             tracing::error!("save_artifact failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1971,11 +1969,87 @@ async fn upload_artifact_raw(
         .await
     {
         Ok(()) => StatusCode::OK,
+        Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         Err(e) => {
             tracing::error!("save_artifact_bytes failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+/// Hardening P0 (stored XSS / download safety): build a `Response` for a
+/// served artifact. A small allowlist of inline-safe media types may be
+/// served with their stored `Content-Type`; everything else is forced to
+/// `application/octet-stream`. HTML / SVG / JavaScript / XML and unknown
+/// types are always sent as an **attachment** with `Content-Disposition`,
+/// and every artifact response adds `X-Content-Type-Options: nosniff` so a
+/// browser never sniffs a download as HTML/script. `name` is encoded as a
+/// safe RFC 6266 `filename` (ASCII-only, control chars stripped).
+fn artifact_response(bytes: Vec<u8>, media_type: Option<&str>, name: &str) -> Response {
+    const INLINE_SAFE: &[&str] = &[
+        "application/octet-stream",
+        "text/plain",
+        "application/json",
+        "application/zip",
+        "application/gzip",
+        "application/x-tar",
+        "application/x-bzip2",
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+    ];
+    const ACTIVE: &[&str] = &[
+        "text/html",
+        "text/xml",
+        "application/xml",
+        "application/xhtml+xml",
+        "image/svg+xml",
+        "application/javascript",
+        "text/javascript",
+        "application/ecmascript",
+    ];
+    let stored = media_type.unwrap_or("application/octet-stream").trim();
+    let (content_type, attachment) = if ACTIVE.contains(&stored) {
+        ("application/octet-stream", true)
+    } else if INLINE_SAFE.contains(&stored) {
+        (stored, false)
+    } else {
+        // Unknown type: never trust the client-requested type inline.
+        ("application/octet-stream", true)
+    };
+    // ponytail: extension-based sniﬃng is a P2 follow-up; the allowlist +
+    // nosniff + attachment triplet already blocks inline exﬆecution.
+    let safe_name: String = name
+        .chars()
+        .filter(|c| c.is_ascii() && !c.is_ascii_control() && *c != '/' && *c != '\\' && *c != '"')
+        .collect::<String>()
+        .trim_start_matches('.')
+        .to_string();
+    let mut resp = (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::HeaderName::from_static("x-content-type-options"),
+                "nosniff",
+            ),
+        ],
+        Bytes::from(bytes),
+    )
+        .into_response();
+    if attachment {
+        let cd = if safe_name.is_empty() {
+            "attachment".to_string()
+        } else {
+            format!("attachment; filename=\"{}\"", safe_name)
+        };
+        if let Ok(v) = axum::http::HeaderValue::from_str(&cd) {
+            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    resp
 }
 
 /// A safe artifact name is a single path segment: no separators, no `.`
@@ -2573,5 +2647,92 @@ mod sse_tests {
     fn resume_ignores_non_numeric_header() {
         // A garbage Last-Event-ID falls back to the query (no gaps, no dup).
         assert_eq!(sse_resume_after(4, Some(&header("garbage"))), 4);
+    }
+}
+
+#[cfg(test)]
+mod artifact_response_tests {
+    use super::artifact_response;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Response;
+
+    fn hdr(resp: &Response<Body>, name: &str) -> Option<String> {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    }
+
+    #[tokio::test]
+    async fn html_served_as_attachment_octetstream_with_nosniff() {
+        let resp = artifact_response(b"<html></html>".to_vec(), Some("text/html"), "x.html");
+        assert_eq!(
+            hdr(&resp, "content-type").as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            hdr(&resp, "x-content-type-options").as_deref(),
+            Some("nosniff")
+        );
+        let cd = hdr(&resp, "content-disposition").unwrap_or_default();
+        assert!(cd.starts_with("attachment"), "cd={cd}");
+        assert!(cd.contains("filename=\"x.html\""));
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn svg_served_as_attachment_octetstream_with_nosniff() {
+        let resp = artifact_response(b"<svg/>".to_vec(), Some("image/svg+xml"), "logo.svg");
+        assert_eq!(
+            hdr(&resp, "content-type").as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            hdr(&resp, "x-content-type-options").as_deref(),
+            Some("nosniff")
+        );
+        let cd = hdr(&resp, "content-disposition").unwrap_or_default();
+        assert!(cd.starts_with("attachment") && cd.contains("filename=\"logo.svg\""));
+    }
+
+    #[tokio::test]
+    async fn png_allowed_inline_no_attachment() {
+        let resp = artifact_response(b"\x89PNG".to_vec(), Some("image/png"), "blob.png");
+        assert_eq!(hdr(&resp, "content-type").as_deref(), Some("image/png"));
+        assert_eq!(
+            hdr(&resp, "x-content-type-options").as_deref(),
+            Some("nosniff")
+        );
+        assert!(
+            hdr(&resp, "content-disposition").is_none(),
+            "no attachment for inline-safe"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_type_forced_octetstream_attachment() {
+        let resp = artifact_response(b"x".to_vec(), Some("application/x-crazy"), "weird.dat");
+        assert_eq!(
+            hdr(&resp, "content-type").as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            hdr(&resp, "x-content-type-options").as_deref(),
+            Some("nosniff")
+        );
+        assert!(hdr(&resp, "content-disposition")
+            .unwrap_or_default()
+            .contains("attachment"));
+    }
+
+    #[tokio::test]
+    async fn filename_control_and_separator_chars_stripped() {
+        // name "../e<TAB>v<QUOTE>x" -> separators/control/quote stripped to "evx"
+        let resp = artifact_response(b"x".to_vec(), Some("text/html"), "../e\tv\"x");
+        let cd = hdr(&resp, "content-disposition").unwrap_or_default();
+        assert!(
+            cd.contains("filename=\"evx\"") || cd == "attachment",
+            "cd={cd}"
+        );
     }
 }

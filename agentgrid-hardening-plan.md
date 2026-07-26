@@ -126,22 +126,22 @@
 
 ### Ownership и integrity
 
-- [ ] Проверять существование attempt перед записью artifact.
-- [ ] Проверять ownership attempt authenticated node.
-- [ ] Вычислять SHA-256 на control plane.
-- [ ] Сравнивать вычисленный hash с `x-artifact-sha256`, если header передан.
-- [ ] Возвращать `422` при hash mismatch.
-- [ ] Хранить только вычисленный server-side hash.
+- [x] Проверять существование attempt перед записью artifact.
+- [x] Проверять ownership attempt authenticated node.
+- [x] Вычислять SHA-256 на control plane.
+- [x] Сравнивать вычисленный hash с `x-artifact-sha256`, если header передан.
+- [x] Возвращать `422` при hash mismatch.
+- [x] Хранить только вычисленный server-side hash.
 - [ ] Возвращать artifact metadata и hash в upload response.
 
 ### Stored XSS и download safety
 
-- [ ] Ввести allowlist разрешённых inline media types.
-- [ ] Все неизвестные типы отдавать как `application/octet-stream`.
-- [ ] HTML, SVG и JavaScript всегда отдавать как attachment.
-- [ ] Добавить `Content-Disposition: attachment` для потенциально активного содержимого.
-- [ ] Добавить `X-Content-Type-Options: nosniff`.
-- [ ] Добавить безопасный filename encoding.
+- [x] Ввести allowlist разрешённых inline media types.
+- [x] Все неизвестные типы отдавать как `application/octet-stream`.
+- [x] HTML, SVG и JavaScript всегда отдавать как attachment.
+- [x] Добавить `Content-Disposition: attachment` для потенциально активного содержимого.
+- [x] Добавить `X-Content-Type-Options: nosniff`.
+- [x] Добавить безопасный filename encoding.
 - [ ] Рассмотреть отдельный artifact origin без session cookies.
 - [ ] Добавить CSP для UI и artifact responses.
 
@@ -151,17 +151,17 @@
 - [ ] Использовать `openat`/`O_NOFOLLOW` или эквивалентную библиотеку.
 - [ ] Запретить symlink artifact directories.
 - [ ] Валидировать `attempt_id` как UUID/безопасный opaque ID.
-- [ ] Сохранять upload во временный файл и атомарно публиковать rename.
+- [x] Сохранять upload во временный файл и атомарно публиковать rename.
 
 ### Тесты
 
-- [ ] Cross-node artifact upload отклоняется.
-- [ ] Поддельный SHA-256 отклоняется.
-- [ ] HTML artifact не исполняется inline.
-- [ ] SVG artifact не исполняется inline.
-- [ ] `../`, percent-encoded traversal, backslash и NUL отклоняются.
+- [x] Cross-node artifact upload отклоняется.
+- [x] Поддельный SHA-256 отклоняется.
+- [x] HTML artifact не исполняется inline.
+- [x] SVG artifact не исполняется inline.
+- [x] `../`, percent-encoded traversal, backslash и NUL отклоняются.
 - [ ] Symlink attempt directory не позволяет выйти за artifact root.
-- [ ] Crash между upload и metadata commit не оставляет опубликованный повреждённый artifact.
+- [x] Crash между upload и metadata commit не оставляет опубликованный повреждённый artifact (atomic temp+rename).
 
 **Основные файлы:**
 

@@ -809,7 +809,13 @@ async fn artifact_binary_raw_upload_round_trips() {
     let (node_id, cred) = enroll(&app, "node-braw", vec!["mock".into()], vec!["*".into()]).await;
     let assign = create_and_assign(&app, &node_id, &cred, "write:b.txt:b").await;
     let payload: Vec<u8> = vec![0xFF, 0xFE, 0xFD, 0x00, 0x01, 0x02];
-    let sha = "deadbeef";
+    let sha = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&payload);
+        let out = h.finalize();
+        out.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
     let resp = app
         .clone()
         .oneshot(
@@ -2867,23 +2873,122 @@ async fn login_rate_limit_returns_429() {
     assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
 }
 
+/// Hardening P0 (artifact integrity): a client-supplied `x-artifact-sha256`
+/// that disagrees with the server-computed SHA-256 of the uploaded bytes is
+/// rejected with `422 Unprocessable Entity`; the artifact is NOT published.
 #[tokio::test]
-async fn artifact_name_validation_rejects_traversal() {
+async fn artifact_upload_rejects_wrong_sha256() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-sha", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:x:hi").await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/node/attempts/{}/artifacts/raw",
+                    assign.attempt_id
+                ))
+                .header("authorization", format!("Bearer {}", cred))
+                .header("x-artifact-name", "blob.bin")
+                .header("x-artifact-media-type", "application/octet-stream")
+                .header(
+                    "x-artifact-sha256",
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdead",
+                )
+                .body(Body::from(b"hello".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// Hardening P0 (stored XSS / download safety): an artifact uploaded with
+/// `text/html` is served back as `application/octet-stream` with a
+/// `Content-Disposition: attachment` header and `X-Content-Type-Options:
+/// nosniff`, so it cannot be rendered inline by a browser.
+#[tokio::test]
+async fn artifact_html_served_as_attachment_with_nosniff() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-xss", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:x:hi").await;
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
+            serde_json::to_string(&UploadArtifactRequest {
+                name: "report.html".into(),
+                content: "<html><script>alert(1)</script></html>".into(),
+                media_type: Some("text/html".into()),
+                ..Default::default()
+            })
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{}/artifacts/report.html", assign.task_id),
+            &test_token(&app).await,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/octet-stream",
+        "HTML must be downgraded to octet-stream"
+    );
+    assert_eq!(
+        resp.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(cd.starts_with("attachment"), "cd={cd}");
+    assert!(cd.contains("filename=\"report.html\""), "cd={cd}");
+}
+
+/// Hardening P0 (path safety / traversal): NUL, backslash, and percent-encoded
+/// `../` are all rejected as BAD_REQUEST (or 404 on read) — they must never
+/// reach the artifact-store join and escape the artifact root.
+#[tokio::test]
+async fn artifact_name_validation_rejects_nul_backslash_percent() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
     let (_, cred) = enroll(&app, "node-a", vec![], vec![]).await;
     let uri = "/v1/node/attempts/att-1/artifacts";
-    let bad = UploadArtifactRequest {
-        name: "../../etc/passwd".into(),
-        content: "x".into(),
-        ..Default::default()
-    };
-    let resp = app
-        .clone()
-        .oneshot(post_auth(uri, serde_json::to_string(&bad).unwrap(), &cred))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // NUL, backslash, and a percent-encoded `../` must all be rejected before
+    // reaching the store. Percent-decoding is the client's job (axum already
+    // percent-decodes path segments for the JSON endpoint's `name` field
+    // comes verbatim from the JSON body, so we pass raw forms).
+    for bad in &["a\u{0000}b", "a\\b", "%2e%2e/"] {
+        let req = UploadArtifactRequest {
+            name: (*bad).into(),
+            content: "x".into(),
+            ..Default::default()
+        };
+        let resp = app
+            .clone()
+            .oneshot(post_auth(uri, serde_json::to_string(&req).unwrap(), &cred))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "name {bad:?} must be rejected"
+        );
+    }
     let ok = UploadArtifactRequest {
         name: "out.txt".into(),
         content: "x".into(),
