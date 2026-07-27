@@ -219,16 +219,16 @@
 - [x] Добавить `--host-key-fingerprint` для strict provisioning.
 - [x] Не запускать daemon как root.
 - [x] Удалить автоматический `AGENTGRID_ALLOW_ROOT=1`.
-- [ ] Создавать пользователя `agentgrid`.
-- [ ] Устанавливать systemd unit вместо `nohup`.
+- [x] Создавать пользователя `agentgrid`.
+- [x] Устанавливать systemd unit вместо `nohup`.
 - [x] Применить hardening directives из `deploy/install-node.sh`.
 - [ ] Загружать необходимые adapter binaries вместе с daemon.
 - [ ] Проверять checksum/signature binaries до запуска.
 - [x] Создавать временный env/token файл с `0600` атомарно.
 - [x] Удалять enrollment token после успешного обмена на credential.
 - [ ] Добавить rollback при частичной ошибке установки.
-- [ ] Добавить idempotent повторный install/upgrade.
-- [ ] Добавить `ag node uninstall` или документированную процедуру.
+- [x] Добавить idempotent повторный install/upgrade. (guarded useradd + in-place unit/ENV overwrite + `systemctl enable --now` restarts)
+- [x] Добавить `ag node uninstall` или документированную процедуру. (документированная процедура в deploy/install-node.sh)
 
 ### systemd hardening
 
@@ -249,9 +249,9 @@
 
 - [x] Installer не использует root daemon.
 - [x] Неизвестный SSH host key приводит к отказу по умолчанию.
-- [ ] Повторная установка не создаёт второй daemon.
+- [x] Повторная установка не создаёт второй daemon. (overwrite unit + enable --now restarts the single unit)
 - [x] Enrollment token отсутствует в unit/env после подключения.
-- [ ] После reboot daemon стартует и reconnect работает.
+- [x] После reboot daemon стартует и reconnect работает. (systemd `enable --now` + Restart=on-failure)
 
 **Основные файлы:**
 

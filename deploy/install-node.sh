@@ -101,3 +101,13 @@ echo ">> enabling + starting"
 systemctl daemon-reload
 systemctl enable --now agentgrid-node.service
 echo ">> node '$NAME' enrolled and running. journalctl -u agentgrid-node -f"
+
+# Uninstall (documented procedure — no dedicated CLI yet):
+#   systemctl disable --now agentgrid-node.service
+#   rm -f /etc/systemd/system/agentgrid-node.service && systemctl daemon-reload
+#   rm -rf /var/lib/agentgrid   # also drops credential.json + workspace + artifacts
+#   userdel agentgrid            # optional: keeps no agentgrid-owned files after the rm
+# Idempotent re-run: re-running this script overwrites the unit and ENV file in
+# place; `useradd` is guarded by `id agentgrid`, and `systemctl enable --now`
+# restarts the already-enabled unit with the new config, so a second install
+# never spawns a second daemon.
