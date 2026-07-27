@@ -34,6 +34,53 @@ fn repo_lock(repo: &str) -> std::sync::Arc<Mutex<()>> {
         .clone()
 }
 
+/// Hardening P1 item 32: a cross-process `flock` on a per-repo lock file so two
+/// node-daemon processes (or a restarted daemon) cannot race the bare-mirror
+/// clone's `fetch`/`worktree add`. Held alongside the in-process `repo_lock`.
+/// Blocks up to `timeout`; returns Err on timeout so the attempt fails loudly
+/// rather than wedging.
+struct RepoFlock {
+    file: std::fs::File,
+}
+
+impl RepoFlock {
+    fn acquire(repository_root: &Path, repo: &str, timeout: std::time::Duration) -> Result<Self> {
+        std::fs::create_dir_all(repository_root).ok();
+        let lock_path = repository_root.join(format!("{repo}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open repo lock {lock_path:?}"))?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            // libc::flock: exclusive, non-blocking; retry on contention.
+            let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                return Ok(RepoFlock { file });
+            }
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(err).context("flock repo lock");
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("timed out waiting for repo lock on {repo}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for RepoFlock {
+    fn drop(&mut self) {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&self.file);
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+    }
+}
+
 pub struct Workspace {
     /// Directory the adapter runs in.
     pub path: PathBuf,
@@ -72,6 +119,26 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
         anyhow::bail!("git {:?} failed", args);
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Like [`git_out`] but returns raw bytes — required for binary diffs (`git
+/// diff --binary`), where `String::from_utf8_lossy` would corrupt non-UTF-8
+/// hunk data. (Hardening P1 item 32: preserve binary patch bytes.)
+fn git_out_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .context("failed to spawn git")?;
+    if !out.status.success() {
+        anyhow::bail!("git {:?} failed", args);
+    }
+    let mut v = out.stdout;
+    // Mirror git_out's trim of a single trailing newline.
+    if v.last() == Some(&b'\n') {
+        v.pop();
+    }
+    Ok(v)
 }
 
 /// Per-worktree path to git's `info/exclude`, resolved via `git rev-parse`
@@ -155,6 +222,9 @@ pub fn prepare_workspace(
     // add) per repository across concurrent attempts.
     let _repo_arc = repo_lock(repo);
     let _repo_guard = _repo_arc.lock().unwrap();
+    // Hardening P1 item 32: cross-process flock with a timeout so a second
+    // node-daemon process (or a restarted daemon) cannot race the mirror.
+    let _flock = RepoFlock::acquire(repository_root, repo, std::time::Duration::from_secs(60))?;
 
     // Stage 2.3 (bare mirror): keep a single bare `--mirror` clone per repo so
     // the shared clone has no working tree and no HEAD to mutate — attempts no
@@ -346,7 +416,9 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
         git_out(&ws.path, &["rev-parse", "HEAD"])?
     };
     let diff_base = ws.base_commit.clone().unwrap_or(ws.default_branch.clone());
-    let patch = git_out(repo_dir, &["diff", &diff_base, branch, "--binary"])?;
+    // Hardening P1 item 32: capture the binary diff as raw bytes so a
+    // binary patch's non-UTF-8 hunk data is not corrupted by lossy conversion.
+    let patch = git_out_bytes(repo_dir, &["diff", &diff_base, branch, "--binary"])?;
     std::fs::write(ws.path.join("changes.patch"), patch)?;
     Ok(Some(sha))
 }

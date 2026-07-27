@@ -746,9 +746,9 @@
 - [ ] Сохранять exact `resolved_base_sha` для каждого attempt.
 - [ ] Сохранять `remote_head_at_start` и `remote_head_at_finish`.
 - [ ] Показывать stale-base warning.
-- [ ] Получать binary diff как bytes, без `String::from_utf8_lossy`.
-- [ ] Добавить cross-process repository `flock`.
-- [ ] Добавить timeout ожидания repo lock.
+- [x] Получать binary diff как bytes, без `String::from_utf8_lossy`. (`git_out_bytes` в `finalize_workspace` для `git diff --binary`)
+- [x] Добавить cross-process repository `flock`. (`RepoFlock` через `libc::flock` на per-repo lock файле в `prepare_workspace`)
+- [x] Добавить timeout ожидания repo lock. (`RepoFlock::acquire` блокирует до 60s, bails с timeout ошибкой)
 - [ ] Добавить diagnostics/stale lock recovery.
 - [ ] Проверять clone/fetch URL scheme и policy.
 - [ ] Определить SSH credential policy.
