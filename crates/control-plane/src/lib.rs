@@ -2051,6 +2051,9 @@ async fn upload_artifact(
         Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
             StatusCode::UNPROCESSABLE_ENTITY.into_response()
         }
+        Err(crate::store::StoreArtifactError::InvalidAttemptId) => {
+            StatusCode::BAD_REQUEST.into_response()
+        }
         Err(e) => {
             tracing::error!("save_artifact failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -2118,6 +2121,9 @@ async fn upload_artifact_raw(
         Ok(resp) => axum::Json(resp).into_response(),
         Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
             StatusCode::UNPROCESSABLE_ENTITY.into_response()
+        }
+        Err(crate::store::StoreArtifactError::InvalidAttemptId) => {
+            StatusCode::BAD_REQUEST.into_response()
         }
         Err(e) => {
             tracing::error!("save_artifact_bytes failed: {e}");

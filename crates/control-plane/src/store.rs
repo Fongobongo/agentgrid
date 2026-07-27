@@ -119,6 +119,40 @@ fn from_snake<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
     serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
 }
 
+/// Hardening P0: an opaque ID (attempt/node/task/session id) is a short token
+/// of `[A-Za-z0-9_-]` only. No path separators, no dots, no control chars, no
+/// traversal — safe to join into a filesystem path or interpolate into a SQL
+/// bound parameter. UUIDv4 / ULID / nanoid all fit; anything else is rejected.
+fn is_safe_opaque_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+#[cfg(test)]
+mod opaque_id_tests {
+    use super::is_safe_opaque_id;
+    #[test]
+    fn accepts_uuid_and_safe_tokens() {
+        assert!(is_safe_opaque_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_safe_opaque_id("01HXYZABCDEF0123456789"));
+        assert!(is_safe_opaque_id("abc-123_def"));
+    }
+    #[test]
+    fn rejects_traversal_and_separators() {
+        assert!(!is_safe_opaque_id(".."));
+        assert!(!is_safe_opaque_id("../etc"));
+        assert!(!is_safe_opaque_id("a/b"));
+        assert!(!is_safe_opaque_id("a\\b"));
+        assert!(!is_safe_opaque_id("a.b"));
+        assert!(!is_safe_opaque_id(""));
+        assert!(!is_safe_opaque_id("has space"));
+        assert!(!is_safe_opaque_id(&"x".repeat(65)));
+    }
+}
+
 fn sha256_hex(s: &str) -> String {
     sha256_bytes_hex(s.as_bytes())
 }
@@ -142,6 +176,7 @@ fn sha256_bytes_hex(b: &[u8]) -> String {
 #[derive(Debug)]
 pub enum StoreArtifactError {
     HashMismatch { expected: String, computed: String },
+    InvalidAttemptId,
     Other(anyhow::Error),
 }
 
@@ -154,6 +189,7 @@ impl std::fmt::Display for StoreArtifactError {
                     "artifact sha256 mismatch: header={expected} computed={computed}"
                 )
             }
+            StoreArtifactError::InvalidAttemptId => write!(f, "invalid attempt_id"),
             StoreArtifactError::Other(e) => write!(f, "{e}"),
         }
     }
@@ -340,6 +376,14 @@ impl Store {
     /// the final name is a single safe segment so a symlinked worktree dir or a
     /// `..`-laden name cannot escape the root (Stage 2.2 defense-in-depth).
     fn artifact_path(&self, attempt_id: &str, name: &str) -> Result<std::path::PathBuf> {
+        // Hardening P0: validate attempt_id as a safe opaque ID before it is
+        // joined into a filesystem path. IDs are UUIDv4 (36 hex+hyphens) but we
+        // accept any short `[A-Za-z0-9_-]` token so future ID schemes stay safe.
+        // This is defense-in-depth: handler-level ownership checks already reject
+        // unknown IDs, but a malformed ID must never reach a path join.
+        if !is_safe_opaque_id(attempt_id) {
+            anyhow::bail!("invalid attempt_id");
+        }
         let dir = self.artifact_root.join(attempt_id);
         // Canonicalize the existing artifact dir; if it does not exist yet the
         // caller (save_artifact) creates it first, so this is mainly read-side.
@@ -392,6 +436,10 @@ impl Store {
         media_type: Option<&str>,
         sha256: Option<&str>,
     ) -> Result<ArtifactUploadResponse, StoreArtifactError> {
+        // Hardening P0: validate attempt_id before any filesystem path join.
+        if !is_safe_opaque_id(attempt_id) {
+            return Err(StoreArtifactError::InvalidAttemptId);
+        }
         // Hardening P0 (artifact integrity): always compute the server-side
         // SHA-256 of the uploaded bytes. If the caller supplied a sha256 hint
         // (JSON `sha256` field or raw `x-artifact-sha256` header) and it
@@ -3810,5 +3858,27 @@ mod workflow_tests {
         assert_eq!(v.decided_by.as_deref(), Some("alice"));
         // Empty discovery is a cheap no-op (does not error).
         s.upsert_discovered_skills(&[]).await.unwrap();
+    }
+
+    /// Hardening P0: a malformed attempt_id (traversal/separator) must never
+    /// reach a filesystem path join. save_artifact_bytes rejects it with
+    /// InvalidAttemptId before creating any directory.
+    #[tokio::test]
+    async fn save_artifact_rejects_traversal_attempt_id() {
+        let s = temp_store().await;
+        for bad in &["..", "../etc", "a/b", "a\\b", "a.b", "has space", ""] {
+            let err = s
+                .save_artifact_bytes(bad, "ok.txt", b"x", None, None)
+                .await
+                .expect_err("malformed attempt_id rejected");
+            assert!(
+                matches!(err, StoreArtifactError::InvalidAttemptId),
+                "{bad:?} -> {err:?}"
+            );
+        }
+        // The store rejected every malformed id at the boundary; no
+        // traversal-target directory was created. (We assert the rejection
+        // itself above; artifact_root may legitimately hold other test data,
+        // so we do not assert emptiness.)
     }
 }

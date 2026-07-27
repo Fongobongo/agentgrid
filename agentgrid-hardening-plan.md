@@ -149,7 +149,7 @@
 - [ ] Перейти от path join/canonicalize к descriptor-relative записи, где возможно.
 - [ ] Использовать `openat`/`O_NOFOLLOW` или эквивалентную библиотеку.
 - [ ] Запретить symlink artifact directories.
-- [ ] Валидировать `attempt_id` как UUID/безопасный opaque ID.
+- [x] Валидировать `attempt_id` как UUID/безопасный opaque ID. (`is_safe_opaque_id` на `[A-Za-z0-9_-]` в `artifact_path` + `save_artifact_bytes` раньше любого path join; regression-тест `save_artifact_rejects_traversal_attempt_id`)
 - [x] Сохранять upload во временный файл и атомарно публиковать rename.
 
 ### Тесты
