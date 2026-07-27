@@ -911,8 +911,8 @@
 
 ## Execution
 
-- [ ] Agent timeout.
-- [ ] Agent cancellation.
+- [x] Agent timeout. (`drive_acp_session_hang_mid_frame_times_out`)
+- [x] Agent cancellation. (`drive_acp_session_cancel_mid_prompt_turn`)
 - [ ] Validation timeout.
 - [ ] Validation cancellation.
 - [ ] Forking child cleanup.
@@ -926,21 +926,21 @@
 
 - [ ] Parallel attempts одного repo.
 - [ ] Два daemon process с одним repo root.
-- [ ] Base SHA pinning.
+- [x] Base SHA pinning. (`base_commit_pins_worktree_to_commit`)
 - [ ] Missing upstream fail-closed.
 - [ ] Conflicting upstream patch.
 - [ ] Binary patch round-trip.
-- [ ] Symlink cleanup escape запрещён.
+- [x] Symlink cleanup escape запрещён. (`cleanup_workspace_refuses_traversal_and_symlink`) 
 - [ ] Logs не попадают в commit/patch.
 
 ## Artifacts
 
-- [ ] Hash verification.
-- [ ] Binary round-trip.
-- [ ] Stored-XSS blocked.
-- [ ] Traversal blocked.
-- [ ] Symlink escape blocked.
-- [ ] Retention удаляет metadata и file.
+- [x] Hash verification. (`artifact_upload_rejects_wrong_sha256`)
+- [x] Binary round-trip. (`artifact_binary_raw_upload_round_trips`)
+- [x] Stored-XSS blocked. (`artifact_html_served_as_attachment_with_nosniff` + CSP `default-src 'none'`; `artifact_response_has_csp_and_corp`)
+- [x] Traversal blocked. (`save_artifact_rejects_traversal_attempt_id` + `static_fallback_rejects_traversal_and_caches_safe`)
+- [x] Symlink escape blocked. (`save_artifact_rejects_symlink_dir`)
+- [x] Retention удаляет metadata и file. (`cleanup_old_artifacts` проверяет unlink файла)
 - [ ] Orphan reconciliation.
 - [ ] Durable retry после restart.
 
@@ -949,37 +949,37 @@
 # Definition of Done для hardening-цикла
 
 - [ ] Все P0 закрыты и имеют regression-тесты.
-- [ ] Cross-node mutation/read невозможны по архитектуре и подтверждены тестами.
-- [ ] Lease/offline transitions используют compare-and-set или fencing.
+- [x] Cross-node mutation/read невозможны по архитектуре и подтверждены тестами. (cross_node_cannot_* + fencing_token_*; check_attempt_owner + fencing на всех node mutations)
+- [x] Lease/offline transitions используют compare-and-set или fencing. (CAS `WHERE status='queued'` в assign/cancel; `BEGIN IMMEDIATE` revert_expired_leases; fencing tokens на mutations)
 - [ ] Retry не ломает SSE/event history.
 - [ ] Kill -9 не теряет pending completion и обязательные artifacts.
 - [ ] Cancel/timeout завершают agent и validation process trees.
-- [ ] Default adapter path не отключает permissions без явного unsafe opt-in.
-- [ ] Production node не запускается как root.
-- [ ] Production compose не содержит стандартных credentials.
+- [x] Default adapter path не отключает permissions без явного unsafe opt-in. (`AGENTGRID_UNSAFE_UNATTENDED=1`; Claude `--dangerously-skip-permissions` / opencode `--auto` gated)
+- [x] Production node не запускается как root. (`install-node.sh` создаёт unprivileged `agentgrid` user; systemd `User=agentgrid`; нет `AGENTGRID_ALLOW_ROOT`)
+- [x] Production compose не содержит стандартных credentials. (`docker-compose.yml` без baked secrets; `up.sh` генерирует random JWT + admin pass; demo compose явно помечен insecure)
 - [ ] Sandbox capability соответствует реально применённой изоляции.
 - [ ] Storage имеет retention, global quotas и disk-pressure behavior.
 - [ ] Giant production modules декомпозированы до обозримых границ.
-- [ ] API ошибки не маскируются пустыми успешными responses.
+- [x] API ошибки не маскируются пустыми успешными responses. (list handlers → 503 при storage ошибке; не пустые массивы)
 - [ ] Release содержит полный набор заявленных binaries, checksums, SBOM и signatures.
 - [ ] README, threat model, changelog и maturity matrix соответствуют коду.
 - [ ] Полный CI/release gate зелёный.
 
 ## Рекомендуемый порядок выполнения
 
-1. [ ] Node ownership.
-2. [ ] Auth fail-closed и bootstrap.
-3. [ ] Lease/offline races.
-4. [ ] Fencing tokens.
+1. [x] Node ownership.
+2. [x] Auth fail-closed и bootstrap.
+3. [x] Lease/offline races.
+4. [x] Fencing tokens.
 5. [ ] Global event cursor.
 6. [ ] Crash-safe outbox.
 7. [ ] Durable artifacts.
 8. [ ] Validation lifecycle.
-9. [ ] Unsafe adapter defaults.
-10. [ ] Safe node installer.
-11. [ ] Artifact/static security.
-12. [ ] Retention/quotas/backpressure.
-13. [ ] Database constraints и reconciliation.
+9. [x] Unsafe adapter defaults.
+10. [x] Safe node installer.
+11. [x] Artifact/static security.
+12. [x] Retention/quotas/backpressure. (частично: cleanup files+dirs, line cap, event batch bounds, active_attempts reconcile)
+13. [x] Database constraints и reconciliation. (orphan preflight + active_attempts reconcile)
 14. [ ] Декомпозиция модулей.
 15. [ ] Настоящий sandbox backend.
 16. [ ] CI/release/supply-chain hardening.
