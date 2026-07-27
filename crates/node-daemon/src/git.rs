@@ -432,6 +432,7 @@ mod tests {
     fn make_assignment(git_url: &str, default_branch: &str) -> Assignment {
         Assignment {
             attempt_id: "attempt-test".into(),
+            fencing_token: String::new(),
             task_id: "task-test".into(),
             repository: "repo".into(),
             prompt: "x".into(),
@@ -733,6 +734,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 let a = Assignment {
                     attempt_id: format!("att-{n}"),
+                    fencing_token: String::new(),
                     task_id: format!("task-{n}"),
                     repository: "repo".into(),
                     prompt: "x".into(),

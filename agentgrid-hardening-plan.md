@@ -292,25 +292,25 @@
 
 ## 8. Fencing tokens — P0
 
-- [ ] Добавить migration с `lease_generation` и `fencing_token`.
-- [ ] Генерировать fencing token при каждом assignment/attempt.
-- [ ] Передавать token в `Assignment`.
-- [ ] Сохранять token в локальном attempt state node.
-- [ ] Требовать token для ACK.
-- [ ] Требовать token для event ingest.
-- [ ] Требовать token для completion.
-- [ ] Требовать token для artifact upload.
-- [ ] Требовать token для session creation.
-- [ ] Отклонять stale generation/token как `409 Conflict`.
-- [ ] Логировать stale writer без принятия payload.
-- [ ] Версионировать protocol и сохранить N/N-1 policy.
+- [x] Добавить migration с `lease_generation` и `fencing_token`.
+- [x] Генерировать fencing token при каждом assignment/attempt.
+- [x] Передавать token в `Assignment`.
+- [x] Сохранять token в локальном attempt state node.
+- [x] Требовать token для ACK.
+- [x] Требовать token для event ingest.
+- [x] Требовать token для completion.
+- [x] Требовать token для artifact upload.
+- [x] Требовать token для session creation.
+- [x] Отклонять stale generation/token как `409 Conflict`.
+- [x] Логировать stale writer без принятия payload.
+- [x] Версионировать protocol и сохранить N/N-1 policy.
 
 ### Тесты
 
-- [ ] Старый token после reassignment не может писать events.
-- [ ] Старый token после lost не может завершить attempt.
-- [ ] Retry получает новый token.
-- [ ] Duplicate request с текущим token остаётся идемпотентным.
+- [x] Старый token после reassignment не может писать events.
+- [x] Старый token после lost не может завершить attempt.
+- [x] Retry получает новый token.
+- [x] Duplicate request с текущим token остаётся идемпотентным.
 
 ## 9. Глобальный event cursor и SSE retries — P0
 

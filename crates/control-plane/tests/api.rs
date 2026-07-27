@@ -39,6 +39,20 @@ fn post_auth(uri: &str, body: String, cred: &str) -> Request<Body> {
         .unwrap()
 }
 
+/// Hardening P0 item 8: a node mutates its own attempt with its fenced token
+/// (the same one returned in its assignment). Use for /events, /complete,
+/// /ack, /session and /artifacts so the CP fence check passes.
+fn post_node(uri: &str, body: String, cred: &str, fence: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {cred}"))
+        .header("x-agentgrid-fencing-token", fence)
+        .body(Body::from(body))
+        .unwrap()
+}
+
 fn get_auth(uri: &str, cred: &str) -> Request<Body> {
     Request::builder()
         .method("GET")
@@ -277,10 +291,11 @@ async fn full_task_lifecycle() {
     };
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/events", assign.attempt_id),
             serde_json::to_string(&ev).unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -288,7 +303,7 @@ async fn full_task_lifecycle() {
 
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 0,
@@ -300,6 +315,7 @@ async fn full_task_lifecycle() {
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -318,7 +334,7 @@ async fn failure_marks_task_failed() {
     let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await;
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 3,
@@ -330,6 +346,7 @@ async fn failure_marks_task_failed() {
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -347,7 +364,7 @@ async fn completion_propagates_provenance() {
     let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 0,
@@ -363,6 +380,7 @@ async fn completion_propagates_provenance() {
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -447,7 +465,7 @@ async fn validation_failure_must_not_report_success() {
     // Agent exited 0 but validation failed -> node reports `validation_failed`.
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assignment.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 0,
@@ -459,6 +477,7 @@ async fn validation_failure_must_not_report_success() {
             })
             .unwrap(),
             &cred,
+            &assignment.fencing_token,
         ))
         .await
         .unwrap();
@@ -550,7 +569,7 @@ async fn cancel_running_then_node_confirms_cancelled() {
 
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 1,
@@ -562,6 +581,7 @@ async fn cancel_running_then_node_confirms_cancelled() {
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -580,7 +600,7 @@ async fn retry_failed_task_reques() {
     let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await;
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 3,
@@ -592,6 +612,7 @@ async fn retry_failed_task_reques() {
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -731,7 +752,7 @@ async fn artifact_upload_and_read() {
 
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 0,
@@ -743,6 +764,7 @@ async fn artifact_upload_and_read() {
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -755,10 +777,11 @@ async fn artifact_upload_and_read() {
     };
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
             serde_json::to_string(&art).unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -826,6 +849,7 @@ async fn artifact_binary_raw_upload_round_trips() {
                     assign.attempt_id
                 ))
                 .header("authorization", format!("Bearer {cred}"))
+                .header("x-agentgrid-fencing-token", &assign.fencing_token)
                 .header("x-artifact-name", "blob.bin")
                 .header("x-artifact-media-type", "image/png")
                 .header("x-artifact-sha256", sha)
@@ -1157,10 +1181,11 @@ async fn eligibility_at_capacity() {
             }],
         };
         app.clone()
-            .oneshot(post_auth(
+            .oneshot(post_node(
                 &format!("/v1/node/attempts/{}/events", a.attempt_id),
                 serde_json::to_string(&ev).unwrap(),
                 &_cred,
+                &a.fencing_token,
             ))
             .await
             .unwrap();
@@ -1369,12 +1394,13 @@ async fn scheduler_respects_requested_node() {
 }
 
 /// Acknowledge an assignment via the explicit ack endpoint.
-async fn ack_attempt(app: &Router, attempt_id: &str, cred: &str) -> StatusCode {
+async fn ack_attempt(app: &Router, attempt_id: &str, cred: &str, fence: &str) -> StatusCode {
     app.clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{attempt_id}/ack"),
             "{}".into(),
             cred,
+            fence,
         ))
         .await
         .unwrap()
@@ -1393,7 +1419,7 @@ async fn ack_attempt_moves_to_running() {
         TaskStatus::Assigned
     );
     assert_eq!(
-        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
         StatusCode::OK
     );
     assert_eq!(
@@ -1402,7 +1428,7 @@ async fn ack_attempt_moves_to_running() {
     );
     // Idempotent re-ack.
     assert_eq!(
-        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
         StatusCode::OK
     );
     assert_eq!(
@@ -1428,10 +1454,11 @@ async fn legacy_metric_event_acts_as_ack() {
     };
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/events", assign.attempt_id),
             serde_json::to_string(&ev).unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -1468,7 +1495,7 @@ async fn acked_slow_agent_keeps_assignment() {
     let (node_id, cred) = enroll(&app, "node-ack2", vec!["mock".into()], vec!["*".into()]).await;
     let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
     assert_eq!(
-        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
         StatusCode::OK
     );
     assert_eq!(
@@ -1517,7 +1544,7 @@ async fn race_ack_after_lease_expiry_is_idempotent() {
     // terminal): it returns 200 and must NOT flip the task back to running and
     // must NOT decrement the counter again.
     assert_eq!(
-        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
         StatusCode::OK
     );
     assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
@@ -1540,7 +1567,7 @@ async fn race_ack_and_lease_settle_once() {
     let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
     // ACK first (wins the CAS).
     assert_eq!(
-        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
         StatusCode::OK
     );
     // Expire the (already-superseded) ack deadline and run the sweep: it must
@@ -1577,7 +1604,7 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
     let (node_id, cred) = enroll(&app, "node-race3", vec!["mock".into()], vec!["*".into()]).await;
     let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
     assert_eq!(
-        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
         StatusCode::OK
     );
     // Age the heartbeat so the sweep flips the node offline and loses the
@@ -1744,7 +1771,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
     };
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign2.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 0,
@@ -1756,6 +1783,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
             })
             .unwrap(),
             &cred,
+            &assign2.fencing_token,
         ))
         .await
         .unwrap();
@@ -1784,7 +1812,7 @@ async fn complete_on_lost_attempt_is_idempotent() {
     // Node returns and reports a (late) completion for the lost attempt.
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 0,
@@ -1796,6 +1824,7 @@ async fn complete_on_lost_attempt_is_idempotent() {
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -2648,7 +2677,7 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
         if let Some(a) = pr.assignment {
             let resp = app
                 .clone()
-                .oneshot(post_auth(
+                .oneshot(post_node(
                     &format!("/v1/node/attempts/{}/complete", a.attempt_id),
                     serde_json::to_string(&CompleteAttemptRequest {
                         exit_code: 0,
@@ -2660,6 +2689,7 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
                     })
                     .unwrap(),
                     &cred,
+                    &a.fencing_token,
                 ))
                 .await
                 .unwrap();
@@ -2758,7 +2788,7 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
     let a = pr.assignment.expect("architect assigned");
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", a.attempt_id),
             serde_json::to_string(&CompleteAttemptRequest {
                 exit_code: 0,
@@ -2770,6 +2800,7 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
             })
             .unwrap(),
             &cred,
+            &a.fencing_token,
         ))
         .await
         .unwrap();
@@ -3029,6 +3060,7 @@ async fn artifact_upload_rejects_wrong_sha256() {
                     assign.attempt_id
                 ))
                 .header("authorization", format!("Bearer {}", cred))
+                .header("x-agentgrid-fencing-token", &assign.fencing_token)
                 .header("x-artifact-name", "blob.bin")
                 .header("x-artifact-media-type", "application/octet-stream")
                 .header(
@@ -3055,7 +3087,7 @@ async fn artifact_html_served_as_attachment_with_nosniff() {
     let assign = create_and_assign(&app, &node_id, &cred, "write:x:hi").await;
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
             serde_json::to_string(&UploadArtifactRequest {
                 name: "report.html".into(),
@@ -3065,6 +3097,7 @@ async fn artifact_html_served_as_attachment_with_nosniff() {
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -4072,10 +4105,11 @@ async fn cross_node_cannot_ingest_events() {
     };
     let r = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/events", assign.attempt_id),
             serde_json::to_string(&ev).unwrap(),
             &cred_a,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -4124,10 +4158,11 @@ async fn cross_node_cannot_complete_attempt() {
     // succeeded): own node still can complete.
     let r = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
             serde_json::to_string(&complete_req()).unwrap(),
             &cred_a,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -4139,11 +4174,12 @@ async fn cross_node_cannot_ack_attempt() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
     let (assign, cred_a, cred_b, _node_b) = setup_two_nodes(&app, "write:hello.txt:hi").await;
-    let r = ack_attempt(&app, &assign.attempt_id, &cred_b).await;
+    // Attacker sends no fence; ownership 403 fires first.
+    let r = ack_attempt(&app, &assign.attempt_id, &cred_b, "").await;
     assert_eq!(r, StatusCode::FORBIDDEN);
     // Own node ack succeeds, leaves attempt running.
     assert_eq!(
-        ack_attempt(&app, &assign.attempt_id, &cred_a).await,
+        ack_attempt(&app, &assign.attempt_id, &cred_a, &assign.fencing_token).await,
         StatusCode::OK
     );
 }
@@ -4237,10 +4273,11 @@ async fn cross_node_cannot_read_unrelated_artifact() {
     };
     let r = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
             serde_json::to_string(&req).unwrap(),
             &cred_a,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();
@@ -4368,10 +4405,11 @@ async fn consumer_node_can_read_upstream_producer_artifact() {
     };
     let r = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/artifacts", a.attempt_id),
             serde_json::to_string(&art).unwrap(),
             &cred,
+            &a.fencing_token,
         ))
         .await
         .unwrap();
@@ -4544,4 +4582,86 @@ async fn static_fallback_rejects_traversal_and_caches_safe() {
     }
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Hardening P0 item 8: a node presenting a wrong fencing token for a live
+/// attempt is rejected with 409 (stale writer — reassigned/lost descendant).
+#[tokio::test]
+async fn fencing_token_wrong_is_409_conflict() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-fence1", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    // ACK first with the right token, so the attempt is live (running).
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
+        StatusCode::OK
+    );
+    // Wrong token on a mutation must be 409.
+    let ev = IngestEventsRequest {
+        events: vec![IncomingEvent {
+            sequence: 1,
+            r#type: EventType::Stdout,
+            payload: json!({"text": "stale"}),
+        }],
+    };
+    let r = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred,
+            "definitely-not-the-token",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    // And on completion.
+    let r = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&complete_req()).unwrap(),
+            &cred,
+            "definitely-not-the-token",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    // The right token still works (state untouched by the rejected writes).
+    let r = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&complete_req()).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+/// Hardening P0 item 8: a legacy node that sends no fence header at all is
+/// still served for an attempt whose stored token is blank (N/N-1 back-compat;
+/// only happens for an attempt created before this generation was rolled out).
+/// For a freshly-assigned attempt (which has a token), the missing header is
+/// rejected with 409 — old upgraded-then-downgraded nodes don't silently win.
+#[tokio::test]
+async fn fencing_token_missing_on_live_attempt_is_409() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-fence2", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    let r = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&complete_req()).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    // Fresh attempt has a token; a no-header (legacy) send is a stale writer.
+    assert_eq!(r.status(), StatusCode::CONFLICT);
 }

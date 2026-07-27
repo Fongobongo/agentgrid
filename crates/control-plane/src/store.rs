@@ -1126,6 +1126,10 @@ impl Store {
             }
 
             let attempt_id = Uuid::new_v4().to_string();
+            // Hardening P0 item 8: a fresh fencing token per assignment. The
+            // node echoes it back on every mutation; the CP rejects a stale
+            // token (reassigned/lost) with 409.
+            let fencing_token = Uuid::new_v4().to_string();
             let number = self.attempt_count(&mut tx, &task_id).await? + 1;
             let lease = iso_plus_secs(ASSIGNMENT_LEASE_SECS);
             let ack_deadline = iso_plus_secs(ACK_DEADLINE_SECS);
@@ -1153,8 +1157,8 @@ impl Store {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             sqlx::query(
-            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
-             VALUES (?, ?, ?, ?, 'assigned', ?, ?, ?)",
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at, fencing_token) \
+             VALUES (?, ?, ?, ?, 'assigned', ?, ?, ?, ?)",
         )
         .bind(&attempt_id)
         .bind(&task_id)
@@ -1163,6 +1167,7 @@ impl Store {
         .bind(&lease)
         .bind(&ack_deadline)
         .bind(&now)
+        .bind(&fencing_token)
         .execute(&mut *tx)
         .await?;
             sqlx::query("UPDATE nodes SET active_attempts = active_attempts + 1 WHERE id = ?")
@@ -1176,6 +1181,7 @@ impl Store {
                 upstream_refs.into_iter().unzip();
             return Ok(Some(Assignment {
                 attempt_id,
+                fencing_token,
                 task_id,
                 repository,
                 prompt,

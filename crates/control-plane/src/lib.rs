@@ -604,6 +604,43 @@ async fn check_attempt_owner(
     }
 }
 
+/// Hardening P0 item 8: verify the fencing token presented by this node still
+/// matches the current attempt's stored token. Returns Ok(()) if it matches
+/// (or the attempt has no token, N-1 backcompat); Err(StatusCode) otherwise:
+/// `409 Conflict` for a stale token (the node is reporting for an attempt
+/// that was reassigned or lost), `404/500` for missing/DB error.
+async fn check_fencing_token(
+    state: &AppState,
+    attempt_id: &str,
+    presented: Option<&str>,
+) -> Result<(), StatusCode> {
+    let stored = sqlx::query_scalar::<_, String>("SELECT fencing_token FROM attempts WHERE id = ?")
+        .bind(attempt_id)
+        .fetch_optional(&state.store.pool)
+        .await;
+    match stored {
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        // N-1 backcompat: a legacy attempt (or legacy node on a freshly migrated
+        // CP) has a blank token; accept any presenter to avoid breaking
+        // in-flight nodes before they roll the token.
+        Ok(Some(s)) if s.is_empty() => Ok(()),
+        Ok(Some(s)) if Some(s.as_str()) == presented => Ok(()),
+        Ok(Some(_)) => Err(StatusCode::CONFLICT),
+        Err(e) => {
+            tracing::error!("fencing_token check failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Extract the node-presented fencing token from the request headers
+/// (`X-AgentGrid-Fencing-Token`). None when absent (N-1 nodes).
+fn fencing_token_header(h: &HeaderMap) -> Option<String> {
+    h.get("x-agentgrid-fencing-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 async fn health_live() -> StatusCode {
     StatusCode::OK
 }
@@ -1938,6 +1975,7 @@ async fn upload_artifact(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<UploadArtifactRequest>,
 ) -> StatusCode {
     // Stage 2.2: never let a crafted name escape the artifact root
@@ -1948,6 +1986,15 @@ async fn upload_artifact(
         return StatusCode::BAD_REQUEST;
     }
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
+    if let Err(code) = check_fencing_token(
+        &state,
+        &attempt_id,
+        fencing_token_header(&headers).as_deref(),
+    )
+    .await
+    {
         return code;
     }
     if req.content.len() > state.limits.artifact {
@@ -1988,6 +2035,15 @@ async fn upload_artifact_raw(
     body: Bytes,
 ) -> StatusCode {
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
+    if let Err(code) = check_fencing_token(
+        &state,
+        &attempt_id,
+        fencing_token_header(&headers).as_deref(),
+    )
+    .await
+    {
         return code;
     }
     if body.len() > state.limits.artifact {
@@ -2255,6 +2311,8 @@ async fn attempt_cancel_handler(
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
         return code.into_response();
     }
+    // No fencing check here: this is a read of cancel_requested (a polling
+    // endpoint), not a mutation.
     let requested = state
         .store
         .attempt_cancel_requested(&attempt_id)
@@ -2460,9 +2518,19 @@ async fn ingest_events(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<IngestEventsRequest>,
 ) -> StatusCode {
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
+    if let Err(code) = check_fencing_token(
+        &state,
+        &attempt_id,
+        fencing_token_header(&headers).as_deref(),
+    )
+    .await
+    {
         return code;
     }
     for e in &req.events {
@@ -2484,9 +2552,19 @@ async fn complete_attempt(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<CompleteAttemptRequest>,
 ) -> StatusCode {
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
+    if let Err(code) = check_fencing_token(
+        &state,
+        &attempt_id,
+        fencing_token_header(&headers).as_deref(),
+    )
+    .await
+    {
         return code;
     }
     match state.store.complete_attempt(&attempt_id, &req).await {
@@ -2503,8 +2581,18 @@ async fn ack_attempt_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
+    headers: HeaderMap,
 ) -> StatusCode {
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
+    if let Err(code) = check_fencing_token(
+        &state,
+        &attempt_id,
+        fencing_token_header(&headers).as_deref(),
+    )
+    .await
+    {
         return code;
     }
     match state.store.ack_attempt(&attempt_id).await {
@@ -2521,9 +2609,19 @@ async fn create_agent_session_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
     Path(attempt_id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<CreateAgentSessionRequest>,
 ) -> Response {
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code.into_response();
+    }
+    if let Err(code) = check_fencing_token(
+        &state,
+        &attempt_id,
+        fencing_token_header(&headers).as_deref(),
+    )
+    .await
+    {
         return code.into_response();
     }
     match state

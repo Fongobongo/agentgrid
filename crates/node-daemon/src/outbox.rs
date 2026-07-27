@@ -196,6 +196,12 @@ pub struct CompletionLine {
     pub commit_sha: Option<String>,
     pub error_code: Option<String>,
     pub acp_session_id: Option<String>,
+    /// Hardening P0 item 8: fencing token echoed on the redelivered completion
+    /// so the CP rejects a stale writer with 409. `#[serde(default)]` keeps old
+    /// `completions.jsonl` files (pre-token) parseable — they redeliver with a
+    /// blank token, which the CP accepts only if the attempt has no token yet.
+    #[serde(default)]
+    pub fencing_token: String,
 }
 
 impl CompletionOutbox {
@@ -210,7 +216,12 @@ impl CompletionOutbox {
     /// Record a completion durably (idempotent: replaces any existing line
     /// for this attempt so the latest exit/error wins; the CP complete_attempt
     /// is idempotent on terminal state).
-    pub fn record(&self, attempt_id: &str, req: &CompleteAttemptRequest) -> Result<()> {
+    pub fn record(
+        &self,
+        attempt_id: &str,
+        req: &CompleteAttemptRequest,
+        fencing_token: &str,
+    ) -> Result<()> {
         let _g = self.file.lock().unwrap();
         let line = CompletionLine {
             attempt_id: attempt_id.to_string(),
@@ -218,6 +229,7 @@ impl CompletionOutbox {
             commit_sha: req.commit_sha.clone(),
             error_code: req.error_code.clone(),
             acp_session_id: req.acp_session_id.clone(),
+            fencing_token: fencing_token.to_string(),
         };
         // Dedupe: drop any prior pending line for this attempt so we don't
         // redeliver a stale terminal state alongside the fresh one.
@@ -388,13 +400,14 @@ mod tests {
             plan: None,
             provenance: None,
         };
-        co.record("att-9", &req).unwrap();
+        co.record("att-9", &req, "fence-1").unwrap();
         // Reopen (fresh process) — record survives.
         let co2 = CompletionOutbox::open(&dir).unwrap();
         let pending = co2.pending().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].attempt_id, "att-9");
         assert_eq!(pending[0].commit_sha.as_deref(), Some("abc"));
+        assert_eq!(pending[0].fencing_token, "fence-1");
         let r = pending[0].to_request();
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.acp_session_id.as_deref(), Some("sess-1"));

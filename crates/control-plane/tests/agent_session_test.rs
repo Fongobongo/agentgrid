@@ -31,6 +31,19 @@ fn post_auth(uri: &str, body: String, cred: &str) -> Request<Body> {
         .unwrap()
 }
 
+/// Hardening P0 item 8: a node mutates its own attempt using its fenced token
+/// (the same token returned in its assignment).
+fn post_node(uri: &str, body: String, cred: &str, fence: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {cred}"))
+        .header("x-agentgrid-fencing-token", fence)
+        .body(Body::from(body))
+        .unwrap()
+}
+
 async fn test_token(app: &Router) -> String {
     let resp = app
         .clone()
@@ -143,13 +156,14 @@ async fn agent_session_opened_and_closed_on_complete() {
     let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
     let resp = app
         .clone()
-        .oneshot(post_auth(
+        .oneshot(post_node(
             &format!("/v1/node/attempts/{}/session", assign.attempt_id),
             serde_json::to_string(&CreateAgentSessionRequest {
                 adapter: "mock".into(),
             })
             .unwrap(),
             &cred,
+            &assign.fencing_token,
         ))
         .await
         .unwrap();

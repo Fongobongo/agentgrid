@@ -739,6 +739,9 @@ struct EventSink {
     attempt_id: String,
     client: reqwest::Client,
     server: String,
+    /// Hardening P0 item 8: fencing token echoed on every event flush so the CP
+    /// can reject a stale writer (reassigned/lost attempt) with 409.
+    fence: String,
     /// Stage 2.1: durable JSONL outbox. Events are appended here before any
     // send attempt and removed only after the CP acks the batch, so a daemon
     // kill no longer drops the in-flight tail.
@@ -759,6 +762,7 @@ impl EventSink {
         attempt_id: String,
         client: reqwest::Client,
         server: String,
+        fence: String,
         outbox: Arc<outbox::EventOutbox>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -767,6 +771,7 @@ impl EventSink {
             notify: Notify::new(),
             adapter_events: AtomicU64::new(0),
             attempt_id,
+            fence,
             client,
             server,
             outbox,
@@ -915,11 +920,15 @@ impl EventSink {
             .map(|e| e.payload.to_string().len() as u64)
             .sum();
         let req = IngestEventsRequest { events: batch };
+        let mut post = self.client.post(&url).json(&req);
+        if !self.fence.is_empty() {
+            post = post.header("x-agentgrid-fencing-token", &self.fence);
+        }
         // Stage 2.1: verify the HTTP status and retry transient/5xx failures.
         // On a still-non-2xx response the batch is returned to the front of the
         // buffer so the flusher loop keeps retrying while the daemon runs; the
         // durable outbox still holds them for redelivery after a restart.
-        match send_with_retry(self.client.post(&url).json(&req), 10).await {
+        match send_with_retry(post, 10).await {
             Ok(s) if s.is_success() => {
                 // CP acked: release the RAM budget and drop the lines from the
                 // durable outbox.
@@ -1579,14 +1588,22 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             assignment.attempt_id.clone(),
             client.clone(),
             cfg.server.clone(),
+            assignment.fencing_token.clone(),
             outbox.clone(),
         );
-        ack_attempt(&client, &cfg.server, &assignment.attempt_id).await;
+        ack_attempt(
+            &client,
+            &cfg.server,
+            &assignment.attempt_id,
+            &assignment.fencing_token,
+        )
+        .await;
         create_agent_session(
             &client,
             &cfg.server,
             &assignment.attempt_id,
             &assignment.adapter,
+            &assignment.fencing_token,
         )
         .await;
         let res = drive_acp_session(&cfg, &client, &assignment, &ws.path, sink.clone()).await?;
@@ -1635,6 +1652,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             res.session_id.clone(),
             assignment.provenance.clone().or_else(provenance_from_env),
             &cfg.completion_outbox,
+            &assignment.fencing_token,
         )
         .await;
         // Stage 2.3: reclaim the per-attempt worktree and branch now the attempt
@@ -1684,6 +1702,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
                 None,
                 assignment.provenance.clone().or_else(provenance_from_env),
                 &cfg.completion_outbox,
+                &assignment.fencing_token,
             )
             .await;
             return Ok(());
@@ -1714,6 +1733,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         assignment.attempt_id.clone(),
         client.clone(),
         cfg.server.clone(),
+        assignment.fencing_token.clone(),
         outbox.clone(),
     );
     let workdir = ws.path.clone();
@@ -1723,12 +1743,19 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     let mut last_kill_reason: Option<&'static str> = None;
 
     // Ack once; the attempt is `running` for its whole (multi-round) lifetime.
-    ack_attempt(&client, &cfg.server, &assignment.attempt_id).await;
+    ack_attempt(
+        &client,
+        &cfg.server,
+        &assignment.attempt_id,
+        &assignment.fencing_token,
+    )
+    .await;
     create_agent_session(
         &client,
         &cfg.server,
         &assignment.attempt_id,
         &assignment.adapter,
+        &assignment.fencing_token,
     )
     .await;
     let flusher = tokio::spawn(sink.clone().run_flusher());
@@ -1848,10 +1875,11 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             plan: None,
             provenance: assignment.provenance.clone().or_else(provenance_from_env),
         };
-        if let Err(e) = cfg
-            .completion_outbox
-            .record(&assignment.attempt_id, &early_req)
-        {
+        if let Err(e) = cfg.completion_outbox.record(
+            &assignment.attempt_id,
+            &early_req,
+            &assignment.fencing_token,
+        ) {
             tracing::warn!(attempt_id = %assignment.attempt_id, "early completion record failed: {e}");
         }
         // Single-shot drain: don't block for tens of seconds on a down CP; the
@@ -1945,6 +1973,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &assignment.attempt_id,
         "changes.patch",
         &patch_path,
+        &assignment.fencing_token,
     )
     .await;
     upload_if_exists(
@@ -1953,6 +1982,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &assignment.attempt_id,
         "validation.log",
         &validation_log,
+        &assignment.fencing_token,
     )
     .await;
     upload_if_exists(
@@ -1961,6 +1991,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &assignment.attempt_id,
         "agent-raw-output.log",
         &raw_path,
+        &assignment.fencing_token,
     )
     .await;
 
@@ -1981,6 +2012,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         None,
         assignment.provenance.clone().or_else(provenance_from_env),
         &cfg.completion_outbox,
+        &assignment.fencing_token,
     )
     .await;
     // Ground-truth redelivery: any events still on disk (e.g. the CP flapped
@@ -2044,23 +2076,22 @@ async fn upload_if_exists(
     attempt_id: &str,
     name: &str,
     path: &std::path::Path,
+    fence: &str,
 ) {
     if let Ok(bytes) = tokio::fs::read(path).await {
         let media = artifact_media_type(name);
         // Stage 2.1: check the response status and retry transient failures;
         // the upload is idempotent per (attempt_id, name) on the control plane.
-        match send_with_retry(
-            client
-                .post(format!(
-                    "{server}/v1/node/attempts/{attempt_id}/artifacts/raw"
-                ))
-                .header("x-artifact-name", name)
-                .header("x-artifact-media-type", media)
-                .body(bytes),
-            10,
-        )
-        .await
-        {
+        let mut post = client
+            .post(format!(
+                "{server}/v1/node/attempts/{attempt_id}/artifacts/raw"
+            ))
+            .header("x-artifact-name", name)
+            .header("x-artifact-media-type", media);
+        if !fence.is_empty() {
+            post = post.header("x-agentgrid-fencing-token", fence);
+        }
+        match send_with_retry(post.body(bytes), 10).await {
             Ok(s) if s.is_success() => {}
             Ok(s) => tracing::warn!("artifact {name} upload got {s} for {attempt_id}"),
             Err(e) => tracing::warn!("artifact {name} upload failed: {e}"),
@@ -2180,6 +2211,7 @@ async fn report_complete(
     acp_session_id: Option<String>,
     provenance: Option<agentgrid_common::ProvenanceRecord>,
     completion_outbox: &outbox::CompletionOutbox,
+    fence: &str,
 ) {
     let url = format!("{}/v1/node/attempts/{}/complete", server, attempt_id);
     let req = CompleteAttemptRequest {
@@ -2193,12 +2225,16 @@ async fn report_complete(
     // Stage 2.1: persist the completion durably so a daemon kill before the CP
     // acks it is redelivered on the next startup (complete_attempt is
     // idempotent on terminal attempts).
-    if let Err(e) = completion_outbox.record(attempt_id, &req) {
+    if let Err(e) = completion_outbox.record(attempt_id, &req, fence) {
         tracing::warn!("completion outbox record failed for {attempt_id}: {e}");
     }
     // Completion is terminal and must be delivered; retry transient and 5xx
     // failures with backoff. The durable outbox also covers the daemon-kill gap.
-    match send_with_retry(client.post(&url).json(&req), 20).await {
+    let mut post = client.post(&url).json(&req);
+    if !fence.is_empty() {
+        post = post.header("x-agentgrid-fencing-token", fence);
+    }
+    match send_with_retry(post, 20).await {
         Ok(s) if s.is_success() => {
             if let Err(e) = completion_outbox.ack(attempt_id) {
                 tracing::warn!("completion outbox ack failed for {attempt_id}: {e}");
@@ -2211,9 +2247,13 @@ async fn report_complete(
 
 /// Explicit assignment acknowledgement (Stage 1.3): tell the control plane the
 /// agent actually started so the assignment is not reverted by the ack deadline.
-async fn ack_attempt(client: &reqwest::Client, server: &str, attempt_id: &str) {
+async fn ack_attempt(client: &reqwest::Client, server: &str, attempt_id: &str, fence: &str) {
     let url = format!("{}/v1/node/attempts/{}/ack", server, attempt_id);
-    if let Err(e) = client.post(&url).send().await {
+    let mut req = client.post(&url);
+    if !fence.is_empty() {
+        req = req.header("x-agentgrid-fencing-token", fence);
+    }
+    if let Err(e) = req.send().await {
         tracing::warn!("ack failed for {attempt_id}: {e}");
     }
 }
@@ -2225,12 +2265,17 @@ async fn create_agent_session(
     server: &str,
     attempt_id: &str,
     adapter: &str,
+    fence: &str,
 ) {
     let url = format!("{}/v1/node/attempts/{}/session", server, attempt_id);
-    let req = CreateAgentSessionRequest {
+    let body = CreateAgentSessionRequest {
         adapter: adapter.to_string(),
     };
-    if let Err(e) = client.post(&url).json(&req).send().await {
+    let mut req = client.post(&url).json(&body);
+    if !fence.is_empty() {
+        req = req.header("x-agentgrid-fencing-token", fence);
+    }
+    if let Err(e) = req.send().await {
         tracing::warn!("agent session create failed for {attempt_id}: {e}");
     }
 }
@@ -2359,7 +2404,13 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
         let req = c.to_request();
         tracing::info!(attempt_id = %c.attempt_id, "redelivering durable completion");
         let url = format!("{}/v1/node/attempts/{}/complete", cfg.server, c.attempt_id);
-        match send_with_retry(client.post(&url).json(&req), 20).await {
+        let mut post = client.post(&url).json(&req);
+        // Hardening P0 item 8: redeliver with the recorded fencing token so the
+        // CP accepts (or 409-rejects) the stale writer just like a fresh send.
+        if !c.fencing_token.is_empty() {
+            post = post.header("x-agentgrid-fencing-token", &c.fencing_token);
+        }
+        match send_with_retry(post, 20).await {
             Ok(s) if s.is_success() => {
                 let _ = cfg.completion_outbox.ack(&c.attempt_id);
             }
@@ -2755,6 +2806,7 @@ mod tests {
             "a1".into(),
             reqwest::Client::new(),
             "http://x".into(),
+            String::new(),
             test_outbox("a1"),
         );
         // Each line ~ 100 bytes; 64-byte cap overflows after the first.
@@ -2797,6 +2849,7 @@ mod tests {
             "a1".into(),
             reqwest::Client::new(),
             "http://x".into(),
+            String::new(),
             test_outbox("a1"),
         );
         let code = run_validation(&dir, "echo hi; exit 2", &sink, &[])
@@ -2818,6 +2871,7 @@ mod tests {
             "a2".into(),
             reqwest::Client::new(),
             "http://x".into(),
+            String::new(),
             test_outbox("a2"),
         );
         let secrets = vec!["sk-LEAK-12345".to_string()];
@@ -2897,6 +2951,7 @@ mod tests {
             "a1".into(),
             reqwest::Client::new(),
             "http://x".into(),
+            String::new(),
             test_outbox("a1"),
         );
         read_stream(reader, sink, "stdout", vec![], Some(raw.clone())).await;
@@ -2931,6 +2986,7 @@ mod tests {
             "a1".into(),
             reqwest::Client::new(),
             "http://x".into(),
+            String::new(),
             test_outbox("a1"),
         );
         read_stream(reader, sink, "stdout", vec![], Some(raw.clone())).await;
@@ -3383,6 +3439,7 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let assignment = Assignment {
             attempt_id: format!("att-{}", uuid::Uuid::new_v4()),
+            fencing_token: String::new(),
             task_id: "t1".into(),
             repository: "*".into(),
             prompt: "do the thing".into(),
@@ -3402,6 +3459,7 @@ mod tests {
             assignment.attempt_id.clone(),
             reqwest::Client::new(),
             cfg.server.clone(),
+            String::new(),
             Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
         );
         let res = drive_acp_session(
@@ -3490,6 +3548,7 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let assignment = Assignment {
             attempt_id: format!("att-hang-{}", uuid::Uuid::new_v4()),
+            fencing_token: String::new(),
             task_id: "t1".into(),
             repository: "*".into(),
             prompt: "do the thing".into(),
@@ -3509,6 +3568,7 @@ mod tests {
             assignment.attempt_id.clone(),
             reqwest::Client::new(),
             cfg.server.clone(),
+            String::new(),
             Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
         );
         let res = tokio::time::timeout(
@@ -3594,6 +3654,7 @@ mod tests {
         let assignment = Assignment {
             attempt_id: format!("att-cancel-{}", uuid::Uuid::new_v4()),
             task_id: "t1".into(),
+            fencing_token: String::new(),
             repository: "*".into(),
             prompt: "do the thing".into(),
             adapter: "fake-acp".into(),
@@ -3613,6 +3674,7 @@ mod tests {
             assignment.attempt_id.clone(),
             reqwest::Client::new(),
             cfg.server.clone(),
+            String::new(),
             Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
         );
         let res = tokio::time::timeout(
@@ -3753,6 +3815,7 @@ mod tests {
 
             let assignment = Assignment {
                 attempt_id: format!("att-{}", uuid::Uuid::new_v4()),
+                fencing_token: String::new(),
                 task_id: "t1".into(),
                 repository: "*".into(),
                 prompt: "do the thing".into(),
@@ -3772,6 +3835,7 @@ mod tests {
                 assignment.attempt_id.clone(),
                 reqwest::Client::new(),
                 cfg.server.clone(),
+                String::new(),
                 Arc::new(
                     outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap(),
                 ),
