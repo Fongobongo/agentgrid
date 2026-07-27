@@ -1105,10 +1105,14 @@ impl Store {
     }
 
     pub async fn list_nodes(&self) -> Result<Vec<NodeView>> {
+        // Hardening P2 item 20: server-side maximum limit so a client cannot
+        // pull an unbounded node row set.
+        const MAX_NODES: i64 = 1000;
         let rows = sqlx::query(
             "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb \
-             FROM nodes ORDER BY created_at ASC",
+             FROM nodes ORDER BY created_at ASC LIMIT ?",
         )
+        .bind(MAX_NODES)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_node_view).collect())

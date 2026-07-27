@@ -555,7 +555,7 @@
 - [ ] Cursor pagination для workflow runs.
 - [ ] Cursor pagination для conversations/messages.
 - [ ] Cursor pagination для approvals/audit.
-- [x] Server-side maximum limit. (`list_tasks` capped at 1000 rows server-side)
+- [x] Server-side maximum limit. (`list_tasks` + `list_nodes` capped at 1000 rows server-side)
 - [ ] Filters: status/repository/node/created range.
 - [ ] Единый response envelope для list endpoints.
 - [ ] Версионированный OpenAPI 3.1 document.
