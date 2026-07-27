@@ -2030,6 +2030,18 @@ impl Store {
                 let _ = tokio::fs::remove_file(&path).await;
             }
         }
+        // Hardening P1 item 15: drop now-empty attempt dirs so the artifact
+        // root does not accumulate stale directories.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in &rows {
+            let attempt_id: String = r.try_get("attempt_id")?;
+            if seen.insert(attempt_id.clone()) {
+                let dir = self.artifact_root.join(&attempt_id);
+                // remove_dir_all only if empty-ish: use remove_dir which fails
+                // on non-empty, so we never delete a dir that still has files.
+                let _ = tokio::fs::remove_dir(&dir).await;
+            }
+        }
         let res = sqlx::query("DELETE FROM artifacts WHERE stored_at < ?")
             .bind(&cutoff)
             .execute(&self.pool)

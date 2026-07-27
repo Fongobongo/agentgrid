@@ -474,7 +474,7 @@
 ## 15. Storage retention и quotas — P1
 
 - [x] Удалять artifact files вместе с metadata. (`cleanup_artifacts` unlink'ает файл перед DELETE строки; regression-тест расширен проверкой файлa)
-- [ ] Удалять пустые attempt directories.
+- [x] Удалять пустые attempt directories. (`cleanup_artifacts` дропает empty attempt dirs после unlink файлов)
 - [ ] Сканировать orphan files без metadata.
 - [ ] Сканировать metadata без файлов.
 - [ ] Добавить artifact storage quota.
