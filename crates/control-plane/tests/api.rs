@@ -5044,3 +5044,56 @@ async fn state_machine_terminal_invariants_hold() {
         assert_terminal_invariants(&app, &state, &assign.task_id, &node_id).await;
     }
 }
+
+/// Hardening P0 item 3/36: artifact responses carry a strict CSP
+/// (`default-src 'none'`) and CORP `same-origin` so no browser context can
+/// execute or cross-read an artifact, even if its media type were sniffed.
+#[tokio::test]
+async fn artifact_response_has_csp_and_corp() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "n-csp", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    let req = UploadArtifactRequest {
+        name: "out.log".into(),
+        content: "hello".into(),
+        media_type: Some("text/plain".into()),
+        sha256: None,
+    };
+    let r = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
+            serde_json::to_string(&req).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{}/artifacts/out.log", assign.task_id),
+            &test_token(&app).await,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let h = resp.headers();
+    assert_eq!(
+        h.get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        h.get("content-security-policy")
+            .and_then(|v| v.to_str().ok()),
+        Some("default-src 'none'; frame-ancestors 'none'")
+    );
+    assert_eq!(
+        h.get("cross-origin-resource-policy")
+            .and_then(|v| v.to_str().ok()),
+        Some("same-origin")
+    );
+}

@@ -511,6 +511,26 @@ async fn static_fallback(State(state): State<Arc<AppState>>, uri: Uri) -> Respon
                 [
                     (CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
                     (CACHE_CONTROL, "no-cache".to_string()),
+                    // Hardening P0 item 3/36: a strict CSP for the SPA shell.
+                    // Only same-origin scripts/styles connect; no inline event
+                    // handlers, no plugins, no framing. Vite hashed bundles load
+                    // from /assets under same origin, so 'self' suffices.
+                    (
+                        header::HeaderName::from_static("content-security-policy"),
+                        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+                         img-src 'self' data:; connect-src 'self'; font-src 'self'; \
+                         object-src 'none'; base-uri 'self'; frame-ancestors 'none'; \
+                         form-action 'self'"
+                            .to_string(),
+                    ),
+                    (
+                        header::HeaderName::from_static("x-content-type-options"),
+                        "nosniff".to_string(),
+                    ),
+                    (
+                        header::HeaderName::from_static("x-frame-options"),
+                        "DENY".to_string(),
+                    ),
                 ],
                 b,
             )
@@ -2161,6 +2181,18 @@ fn artifact_response(bytes: Vec<u8>, media_type: Option<&str>, name: &str) -> Re
             (
                 header::HeaderName::from_static("x-content-type-options"),
                 "nosniff",
+            ),
+            // Hardening P0 item 3: artifacts are opaque data, never a document
+            // context. `default-src 'none'` blocks any plugin/inline execution
+            // even if a browser ignores nosniff; CORP same-origin keeps a
+            // cross-origin page from reading artifact bytes.
+            (
+                header::HeaderName::from_static("content-security-policy"),
+                "default-src 'none'; frame-ancestors 'none'",
+            ),
+            (
+                header::HeaderName::from_static("cross-origin-resource-policy"),
+                "same-origin",
             ),
         ],
         Bytes::from(bytes),

@@ -141,8 +141,8 @@
 - [x] Добавить `Content-Disposition: attachment` для потенциально активного содержимого.
 - [x] Добавить `X-Content-Type-Options: nosniff`.
 - [x] Добавить безопасный filename encoding.
-- [ ] Рассмотреть отдельный artifact origin без session cookies.
-- [ ] Добавить CSP для UI и artifact responses.
+- [x] Рассмотреть отдельный artifact origin без session cookies. (рассмотрено — отложено: тот же origin теперь изолирован строгим CSP `default-src 'none'` + CORP same-origin + nosniff + attachment; отдельный origin не нужен до cookie-authed UI)
+- [x] Добавить CSP для UI и artifact responses. (UI: default-src 'self' + frame-ancestors 'none' + nosniff + X-Frame-Options DENY; artifacts: default-src 'none' + CORP same-origin)
 
 ### Path safety
 
