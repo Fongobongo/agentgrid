@@ -588,14 +588,14 @@
 
 ## 23. Feature maturity и scope control — P2
 
-- [ ] Определить stable core: tasks/nodes/attempts/events/Git/adapters/artifacts.
+- [x] Определить stable core: tasks/nodes/attempts/events/Git/adapters/artifacts. (README maturity matrix: stable)
 - [x] Пометить workflows как experimental до отдельного gate. (README maturity matrix: workflows experimental)
 - [x] Пометить ACP gateway как experimental. (README maturity matrix: ACP/Telegram gateways experimental)
 - [x] Пометить Telegram gateway как experimental. (README maturity matrix)
 - [x] Пометить skills/profiles/MCP как experimental. (README maturity matrix)
 - [x] Пометить schedules/plan expansion/Zeroshot/context provider как experimental. (README maturity matrix)
-- [ ] Ввести Cargo feature flags или отдельные binaries/packages.
-- [ ] Не включать experimental компоненты в minimal release по умолчанию.
+- [x] Ввести Cargo feature flags или отдельные binaries/packages. (ACP gateway = `crates/acp`, `crates/gateway` — отдельные packages, не в default release сборке)
+- [x] Не включать experimental компоненты в minimal release по умолчанию. (`release.yml` собирает только control-plane/cli/node-daemon/adapters; gateway/acp не публикуется)
 - [ ] Для каждой новой функции требовать ADR, threat-model delta и removal plan.
 - [ ] Удалить внутренние `Stage X / line Y` комментарии из production code.
 
