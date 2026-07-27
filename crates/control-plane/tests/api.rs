@@ -5097,3 +5097,74 @@ async fn artifact_response_has_csp_and_corp() {
         Some("same-origin")
     );
 }
+
+/// Hardening P1 item 14: a terminal attempt must reject further event
+/// ingestion (404) — a node that restarts after the attempt was completed or
+/// marked lost must not append to or resurrect a finished event stream.
+#[tokio::test]
+async fn events_rejected_for_terminal_attempt() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "n-term-ev", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    // Run the attempt to running, then complete it.
+    assert!(
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token)
+            .await
+            .is_success()
+    );
+    assert!(state
+        .store
+        .complete_attempt(&assign.attempt_id, &complete_req())
+        .await
+        .unwrap());
+    // Events after completion are rejected.
+    let ev = IngestEventsRequest {
+        events: vec![IncomingEvent {
+            sequence: 999,
+            r#type: EventType::Stdout,
+            payload: json!({"text": "late"}),
+        }],
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Hardening P1 item 14: a single ingest batch is bounded by event count —
+/// exceeding `AGENTGRID_MAX_EVENT_BATCH` is rejected with PAYLOAD_TOO_LARGE
+/// before any DB write.
+#[tokio::test]
+async fn events_batch_count_limit_enforced() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "n-batch", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    let too_many: Vec<IncomingEvent> = (0..600)
+        .map(|i| IncomingEvent {
+            sequence: i,
+            r#type: EventType::Stdout,
+            payload: json!({"text": "x"}),
+        })
+        .collect();
+    let ev = IngestEventsRequest { events: too_many };
+    let resp = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}

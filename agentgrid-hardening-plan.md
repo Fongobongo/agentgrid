@@ -159,7 +159,7 @@
 - [x] HTML artifact не исполняется inline.
 - [x] SVG artifact не исполняется inline.
 - [x] `../`, percent-encoded traversal, backslash и NUL отклоняются.
-- [ ] Symlink attempt directory не позволяет выйти за artifact root.
+- [x] Symlink attempt directory не позволяет выйти за artifact root. (`std::fs::symlink_metadata` reject в `artifact_path`; regression-тест `save_artifact_rejects_symlink_dir`)
 - [x] Crash между upload и metadata commit не оставляет опубликованный повреждённый artifact (atomic temp+rename).
 
 **Основные файлы:**
@@ -461,10 +461,10 @@
 
 ## 14. Event ingestion hardening — P1
 
-- [ ] Не принимать events для succeeded/failed/cancelled/lost attempt.
-- [ ] Проверять fencing token и node ownership.
-- [ ] Ограничить количество events в одном batch.
-- [ ] Ограничить суммарный размер batch, а не только каждый payload.
+- [x] Не принимать events для succeeded/failed/cancelled/lost attempt. (store `ingest_events` возвращает false → 404 для terminal статусов; regression-тест `events_rejected_for_terminal_attempt`)
+- [x] Проверять fencing token и node ownership. (check_fencing_token + check_attempt_owner на всех node mutations)
+- [x] Ограничить количество events в одном batch. (`AGENTGRID_MAX_EVENT_BATCH` по умолчанию 500; regression-тест `events_batch_count_limit_enforced`)
+- [x] Ограничить суммарный размер batch, а не только каждый payload. (`AGENTGRID_MAX_EVENT_BATCH_KB` по умолчанию 4 MiB суммарно)
 - [ ] Проверять последовательность и обнаруживать gaps.
 - [ ] Возвращать `highest_contiguous_sequence` в ACK.
 - [ ] Определить обработку out-of-order batches.

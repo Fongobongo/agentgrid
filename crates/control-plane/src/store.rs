@@ -1357,6 +1357,17 @@ impl Store {
         let task_id: String = attempt.try_get("task_id")?;
         let attempt_status: String = attempt.try_get("status")?;
 
+        // Hardening P1 item 14: do not accept events for a terminal/lost
+        // attempt. A node that restarts after we marked its attempt lost must
+        // not append to (or resurrect) a finished attempt's event stream.
+        if matches!(
+            attempt_status.as_str(),
+            "succeeded" | "failed" | "cancelled" | "lost"
+        ) {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        }
+
         if attempt_status == "assigned" {
             sqlx::query("UPDATE attempts SET status = 'running' WHERE id = ?")
                 .bind(attempt_id)

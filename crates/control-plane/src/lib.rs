@@ -110,6 +110,11 @@ struct Limits {
     prompt: usize,
     event: usize,
     artifact: usize,
+    /// Hardening P1 (event ingestion): cap events per batch and the total
+    /// batch payload size, so a node cannot flood the control plane with one
+    /// giant request or O(events) inserts in a single transaction.
+    event_batch_count: usize,
+    event_batch_bytes: usize,
 }
 
 /// One-time bootstrap setup token (hardening P0). Printed to stdout once on
@@ -279,6 +284,8 @@ impl AppState {
             prompt: env_usize("AGENTGRID_MAX_PROMPT_KB", 64) * 1024,
             event: env_usize("AGENTGRID_MAX_EVENT_KB", 1024) * 1024,
             artifact: env_usize("AGENTGRID_MAX_ARTIFACT_MB", 50) * 1024 * 1024,
+            event_batch_count: env_usize("AGENTGRID_MAX_EVENT_BATCH", 500),
+            event_batch_bytes: env_usize("AGENTGRID_MAX_EVENT_BATCH_KB", 4096) * 1024,
         };
         Ok(Arc::new(Self {
             store,
@@ -2591,6 +2598,15 @@ async fn ingest_events(
         if e.payload.to_string().len() > state.limits.event {
             return StatusCode::PAYLOAD_TOO_LARGE;
         }
+    }
+    // Hardening P1 item 14: bound the batch itself — event count and the
+    // summed payload bytes — so one request cannot flood the store.
+    if req.events.len() > state.limits.event_batch_count {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+    let total: usize = req.events.iter().map(|e| e.payload.to_string().len()).sum();
+    if total > state.limits.event_batch_bytes {
+        return StatusCode::PAYLOAD_TOO_LARGE;
     }
     match state.store.ingest_events(&attempt_id, &req).await {
         Ok(true) => StatusCode::OK,
