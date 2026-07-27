@@ -102,7 +102,7 @@
 - [x] Сохранять generated secrets в файл с правами `0600`.
 - [x] Разделить `docker-compose.yml` и `docker-compose.demo.yml`.
 - [x] Не публиковать control-plane port на всех интерфейсах по умолчанию. (install-control-plane.sh LISTEN по умолчанию 127.0.0.1:7800; `--listen 0.0.0.0` только при явном запросе + TLS)
-- [ ] Удалять enrollment tokens из compose env после успешного enrollment.
+- [x] Удалять enrollment tokens из compose env после успешного enrollment. (`deploy/compose/up.sh` ждёт 2 nodes online затем перезаписывает .env без NODE*_TOKEN)
 
 ### Тесты
 
@@ -828,7 +828,7 @@
 - [ ] Стабильные exit codes.
 - [ ] Отображать attempts отдельно в logs.
 - [ ] Поддержать новый global cursor.
-- [ ] Не печатать secrets/enrollment tokens после использования.
+- [x] Не печатать secrets/enrollment tokens после использования. (`node install` scp'ит env без echo; daemon скрабит `AGENTGRID_ENROLL_TOKEN` из env-файла атомарно; `ag token create` печатает только при сознательном mint)
 - [ ] Убрать дублированные комментарии в `cli/src/main.rs`.
 
 ## 38. README и docs — P2

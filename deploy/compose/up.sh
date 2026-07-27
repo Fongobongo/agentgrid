@@ -80,5 +80,25 @@ chmod 600 "$ENV_FILE"
 echo ">> starting nodes"
 "${COMPOSE[@]}" up -d node-1 node-2
 
+# Wait for both nodes to enroll and heartbeated before stripping tokens, so a
+# container that restarts before persisting its credential can still enroll.
+echo ">> waiting for nodes to enroll"
+for _ in $(seq 1 30); do
+  NODES_UP=$(curl -fsS -H "authorization: Bearer $JWT" "$BASE/v1/nodes" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(1 for n in d if n.get("status")=="online"))' 2>/dev/null || echo 0)
+  [ "${NODES_UP:-0}" -ge 2 ] && break
+  sleep 1
+done
+
+# Hardening P0 item 6/29: the enrollment tokens are one-time and now consumed
+# by the running nodes. Strip them from the env file so the secret does not sit
+# on disk after bootstrap. The nodes reuse their persisted credential.json on
+# restart, so they do not need the token again.
+cat > "$ENV_FILE" <<EOF
+AGENTGRID_JWT_SECRET=$JWT_SECRET
+EOF
+chmod 600 "$ENV_FILE"
+
+
 echo ">> done. control plane: $BASE"
 echo ">> login: $ADMIN_USER / $ADMIN_PASS (shown this once)"
