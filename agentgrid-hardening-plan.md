@@ -771,14 +771,14 @@
 ## 34. Output backpressure — P1
 
 - [ ] Читать stdout/stderr bounded chunks, а не unbounded lines.
-- [ ] Ограничить logical line size.
-- [ ] Продолжать drain pipe после truncation, чтобы subprocess не заблокировался.
+- [x] Ограничить logical line size. (`AGENTGRID_MAX_LINE_BYTES` по умолчанию 1 MiB в `read_stream`; regression-тест `read_stream_caps_oversized_line`)
+- [x] Продолжать drain pipe после truncation, чтобы subprocess не заблокировался. (`read_stream` flushes oversized line и продолжает читать; cap-test проверяет что pipe не wedges)
 - [ ] Добавить per-stream и total budgets.
 - [ ] Резервировать место для terminal/status events.
 - [ ] Добавить `output_truncated` metadata: bytes dropped/range.
 - [ ] Не хранить весь pending spool в RAM при отправке.
 - [ ] Отправлять ограниченные batches.
-- [ ] Оптимизировать ACK без `acked.contains` O(n×m).
+- [x] Оптимизировать ACK без `acked.contains` O(n×m). (outbox `ack` использует HashSet для O(1) lookup)
 - [ ] Добавить load test с длинной строкой и десятками MB output.
 
 ## 35. Observability — P2

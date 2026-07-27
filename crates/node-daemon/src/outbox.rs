@@ -156,6 +156,9 @@ impl EventOutbox {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
+        // Hardening P1 item 34: O(1) membership via a set instead of the
+        // O(n×m) `acked.contains` scan over every line.
+        let acked_set: std::collections::HashSet<u64> = acked.iter().copied().collect();
         let mut survivors = String::new();
         for line in content.lines() {
             if line.trim().is_empty() {
@@ -170,7 +173,7 @@ impl EventOutbox {
                     continue;
                 }
             };
-            if !acked.contains(&l.seq) {
+            if !acked_set.contains(&l.seq) {
                 survivors.push_str(line);
                 survivors.push('\n');
             }

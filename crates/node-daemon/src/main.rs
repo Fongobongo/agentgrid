@@ -1064,6 +1064,14 @@ async fn read_stream<R: AsyncRead + Unpin>(
     let mut buf = tokio::io::BufReader::new(reader);
     let mut acc = Vec::new();
     let mut byte = [0u8; 1];
+    // Hardening P1 item 34: bound a single logical line so an adapter that
+    // never emits a newline cannot grow `acc` without limit. Past the cap we
+    // flush the accumulated bytes as a (truncated) line and keep draining so
+    // the subprocess pipe never blocks. Default 1 MiB per line.
+    let line_cap: usize = std::env::var("AGENTGRID_MAX_LINE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024 * 1024);
     loop {
         byte[0] = 0;
         match buf.read(&mut byte).await {
@@ -1071,6 +1079,10 @@ async fn read_stream<R: AsyncRead + Unpin>(
             Ok(_) => {
                 acc.push(byte[0]);
                 if byte[0] == b'\n' {
+                    emit_line(&acc, &sink, stream, &secrets, &raw).await;
+                    acc.clear();
+                } else if acc.len() >= line_cap {
+                    // Flush the oversized line and keep draining the pipe.
                     emit_line(&acc, &sink, stream, &secrets, &raw).await;
                     acc.clear();
                 }
@@ -3896,5 +3908,26 @@ mod tests {
         assert_eq!(native_projection_files("claude"), vec!["CLAUDE.md"]);
         assert!(native_projection_files("mock").is_empty());
         assert!(native_projection_files("unknown-adapter").is_empty());
+    }
+    /// Hardening P1 item 34: a single oversized line (no newline) is flushed
+    /// at the line cap instead of growing `acc` without bound; the pipe keeps draining.
+    #[tokio::test]
+    async fn read_stream_caps_oversized_line() {
+        std::env::set_var("AGENTGRID_MAX_LINE_BYTES", "16");
+        let sink = EventSink::new(
+            "a-cap".into(),
+            reqwest::Client::new(),
+            "http://x".into(),
+            String::new(),
+            test_outbox("a-cap"),
+        );
+        // 100 bytes, no newline — must be split into multiple flushed lines.
+        let input: Vec<u8> = vec![b'x'; 100];
+        read_stream(&input[..], sink.clone(), "stdout", vec![], None).await;
+        std::env::remove_var("AGENTGRID_MAX_LINE_BYTES");
+        let buf = sink.buf.lock().await;
+        // At least a few stdout lines were emitted despite no newline.
+        let n = buf.iter().filter(|e| e.r#type == EventType::Stdout).count();
+        assert!(n >= 2, "oversized line split into multiple flushes: {n}");
     }
 }
