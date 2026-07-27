@@ -102,6 +102,12 @@ pub struct AppState {
     /// first use. `None` once bootstrap is complete or the token has been used
     /// / has expired (15 min TTL).
     setup_token: Arc<tokio::sync::Mutex<Option<SetupToken>>>,
+    /// Hardening P2 item 35: security observability counters, surfaced in
+    /// /metrics so an operator can alert on rising cross-node rejections, stale
+    /// fencing tokens, or event-batch rejection.
+    pub cross_node_rejects: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub stale_fencing_tokens: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub event_rejections: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Request size ceilings (Stage 5.1). Overridable via env; defaults:
@@ -296,6 +302,9 @@ impl AppState {
             db_path: db_path.to_string(),
             login_rate: Arc::new(tokio::sync::Mutex::new(LoginRate::new())),
             setup_token,
+            cross_node_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            stale_fencing_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            event_rejections: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }))
     }
 
@@ -638,7 +647,12 @@ async fn check_attempt_owner(
 ) -> Result<(), StatusCode> {
     match state.store.attempt_owner(attempt_id).await {
         Ok(Some(node_id)) if node_id == auth.node_id => Ok(()),
-        Ok(Some(_)) => Err(StatusCode::FORBIDDEN),
+        Ok(Some(_)) => {
+            state
+                .cross_node_rejects
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(StatusCode::FORBIDDEN)
+        }
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
             tracing::error!("attempt_owner failed: {e}");
@@ -663,12 +677,17 @@ async fn check_fencing_token(
         .await;
     match stored {
         Ok(None) => Err(StatusCode::NOT_FOUND),
-        // N-1 backcompat: a legacy attempt (or legacy node on a freshly migrated
-        // CP) has a blank token; accept any presenter to avoid breaking
-        // in-flight nodes before they roll the token.
+        // N-1 backcompat: a legacy attempt (or legacy node on a freshly
+        // migrated CP) has a blank token; accept any presenter to avoid
+        // breaking in-flight nodes before they roll the token.
         Ok(Some(s)) if s.is_empty() => Ok(()),
         Ok(Some(s)) if Some(s.as_str()) == presented => Ok(()),
-        Ok(Some(_)) => Err(StatusCode::CONFLICT),
+        Ok(Some(_)) => {
+            state
+                .stale_fencing_tokens
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(StatusCode::CONFLICT)
+        }
         Err(e) => {
             tracing::error!("fencing_token check failed: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1368,6 +1387,41 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
         state
             .store
             .sqlite_busy
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    // Hardening P2 item 35: security-observability counters.
+    s.push_str(
+        "# HELP agentgrid_cross_node_rejects_total Cross-node mutation/read attempts rejected (wrong owner).
+",
+    );
+    s.push_str("# TYPE agentgrid_cross_node_rejects_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_cross_node_rejects_total {}\n",
+        state
+            .cross_node_rejects
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    s.push_str(
+        "# HELP agentgrid_stale_fencing_tokens_total Mutations rejected for a stale fencing token.
+",
+    );
+    s.push_str("# TYPE agentgrid_stale_fencing_tokens_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_stale_fencing_tokens_total {}\n",
+        state
+            .stale_fencing_tokens
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    s.push_str(
+        "# HELP agentgrid_event_rejections_total Event batches rejected (terminal attempt / too large / count cap).
+",
+    );
+    s.push_str("# TYPE agentgrid_event_rejections_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_event_rejections_total {}\n",
+        state
+            .event_rejections
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
 
@@ -2622,21 +2676,37 @@ async fn ingest_events(
     }
     for e in &req.events {
         if e.payload.to_string().len() > state.limits.event {
+            state
+                .event_rejections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return StatusCode::PAYLOAD_TOO_LARGE;
         }
     }
     // Hardening P1 item 14: bound the batch itself — event count and the
     // summed payload bytes — so one request cannot flood the store.
     if req.events.len() > state.limits.event_batch_count {
+        state
+            .event_rejections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return StatusCode::PAYLOAD_TOO_LARGE;
     }
     let total: usize = req.events.iter().map(|e| e.payload.to_string().len()).sum();
     if total > state.limits.event_batch_bytes {
+        state
+            .event_rejections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return StatusCode::PAYLOAD_TOO_LARGE;
     }
     match state.store.ingest_events(&attempt_id, &req).await {
         Ok(true) => StatusCode::OK,
-        Ok(false) => StatusCode::NOT_FOUND,
+        Ok(false) => {
+            // Either the attempt is gone or it is terminal — both are
+            // rejections worth surfacing in observability.
+            state
+                .event_rejections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            StatusCode::NOT_FOUND
+        }
         Err(e) => {
             tracing::error!("ingest_events failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
