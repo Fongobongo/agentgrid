@@ -2015,6 +2015,21 @@ impl Store {
     /// Files on disk are left for an operator cleanup job (metadata only here).
     pub async fn cleanup_artifacts(&self, retention_hours: i64) -> Result<u64> {
         let cutoff = iso_plus_secs(-(retention_hours * 3600));
+        // Hardening P1 item 15: delete the backing file alongside the metadata
+        // row, so retention does not leave orphan files on disk. Collect the
+        // (attempt_id, name) pairs first, unlink each, then drop the rows.
+        let rows = sqlx::query("SELECT attempt_id, name FROM artifacts WHERE stored_at < ?")
+            .bind(&cutoff)
+            .fetch_all(&self.pool)
+            .await?;
+        for r in &rows {
+            let attempt_id: String = r.try_get("attempt_id")?;
+            let name: String = r.try_get("name")?;
+            if let Ok(path) = self.artifact_path(&attempt_id, &name) {
+                // Best-effort: a missing file is not an error (already gone).
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
         let res = sqlx::query("DELETE FROM artifacts WHERE stored_at < ?")
             .bind(&cutoff)
             .execute(&self.pool)
@@ -3244,6 +3259,15 @@ mod workflow_tests {
     #[tokio::test]
     async fn cleanup_old_artifacts() {
         let s = temp_store().await;
+        // Hardening P1 item 15: plant the backing files so we can assert the
+        // reaped row's file is unlinked while the kept row's file survives.
+        let old_path = s.artifact_path("att-1", "old.txt").unwrap();
+        let new_path = s.artifact_path("att-1", "new.txt").unwrap();
+        tokio::fs::create_dir_all(old_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&old_path, b"old").await.unwrap();
+        tokio::fs::write(&new_path, b"new").await.unwrap();
         sqlx::query(
             "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at) VALUES (?,?,?,?,?)",
         )
@@ -3274,6 +3298,16 @@ mod workflow_tests {
             .await
             .unwrap();
         assert_eq!(remaining, 1);
+        // File-level invariant: the reaped artifact's file is gone; the kept
+        // artifact's file survives.
+        assert!(
+            !tokio::fs::try_exists(&old_path).await.unwrap(),
+            "reaped artifact file must be deleted"
+        );
+        assert!(
+            tokio::fs::try_exists(&new_path).await.unwrap(),
+            "kept artifact file must survive"
+        );
     }
 
     #[tokio::test]
