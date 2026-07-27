@@ -46,6 +46,11 @@ struct Config {
     heartbeat_secs: u64,
     enroll_token: Option<String>,
     credential_path: PathBuf,
+    /// Optional env file the operator provisioned (e.g. systemd
+    /// `EnvironmentFile=`). The daemon scrubs `AGENTGRID_ENROLL_TOKEN` from it
+    /// after a successful first enrollment so a rebooting node reuses the
+    /// persisted credential and the token can't be leaked off disk.
+    env_file: Option<PathBuf>,
     repository_root: PathBuf,
     /// Substrings masked to `***` in streamed logs (Stage 3.4).
     secrets: Vec<String>,
@@ -163,6 +168,7 @@ fn config_from_env() -> Config {
             .unwrap_or(10),
         enroll_token: std::env::var("AGENTGRID_ENROLL_TOKEN").ok(),
         credential_path: PathBuf::from(&data_dir).join("credential.json"),
+        env_file: std::env::var("AGENTGRID_ENV_FILE").ok().map(PathBuf::from),
         repository_root: PathBuf::from(
             std::env::var("AGENTGRID_REPOSITORY_ROOT")
                 .unwrap_or_else(|_| "./agentgrid-repos".into()),
@@ -2268,7 +2274,49 @@ async fn load_or_enroll(cfg: &Config) -> Result<SavedCredential> {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(&cfg.credential_path, serde_json::to_string(&saved)?).await?;
+    // Hardening P0 (safe node install): now that the credential is persisted,
+    // scrub the one-time enrollment token from the operator-provisioned env
+    // file so it can't be reused or leaked off disk. Atomic temp+rename at 0600.
+    scrub_enroll_token_from_env(cfg).await;
     Ok(saved)
+}
+
+/// Remove any `AGENTGRID_ENROLL_TOKEN=...` line from `Config::env_file` in
+/// place (atomic temp+rename, perm 0600). No-op if the env file is unset or
+/// missing; errors are logged but never fatal — the credential is already
+/// persisted, so a reboot will still work without the token.
+async fn scrub_enroll_token_from_env(cfg: &Config) {
+    if let Some(path) = &cfg.env_file {
+        scrub_token_from_file(path).await;
+    }
+}
+
+/// Remove any `AGENTGRID_ENROLL_TOKEN=...` line from `path` in place (atomic
+/// temp+rename, perm 0600). No-op if the file is missing; logged failures are
+/// never fatal (the credential is already persisted).
+pub(crate) async fn scrub_token_from_file(path: &std::path::Path) {
+    let Ok(text) = tokio::fs::read_to_string(path).await else {
+        return;
+    };
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("AGENTGRID_ENROLL_TOKEN="))
+        .collect();
+    let mut new = kept.join("\n");
+    if !new.is_empty() {
+        new.push('\n');
+    }
+    let tmp = path.with_extension("tmp.scrub");
+    if tokio::fs::write(&tmp, &new).await.is_err() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    if tokio::fs::rename(&tmp, path).await.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return;
+    }
+    tracing::info!("scrubbed AGENTGRID_ENROLL_TOKEN from {}", path.display());
 }
 
 fn read_load_avg() -> f64 {
@@ -2550,6 +2598,54 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::scrub_token_from_file;
+
+    /// Hardening P0 (safe node install): after a successful enroll the one-time
+    /// `AGENTGRID_ENROLL_TOKEN` line must be removed from the env file so it
+    /// can't be reused/leaked off disk; other vars are preserved; the file is
+    /// rewritten atomically at 0600.
+    #[tokio::test]
+    async fn scrub_removes_only_enroll_token_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "ag-scrub-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("enroll.env");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            "AGENTGRID_SERVER='http://cp:7800'\nAGENTGRID_ENROLL_TOKEN='secret-tok'\nAGENTGRID_NODE_NAME='n1'\n",
+        )
+        .unwrap();
+
+        scrub_token_from_file(&path).await;
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !after.contains("ENROLL_TOKEN"),
+            "token must be scrubbed: {after}"
+        );
+        assert!(
+            after.contains("AGENTGRID_SERVER='http://cp:7800'"),
+            "other vars kept: {after}"
+        );
+        assert!(
+            after.contains("AGENTGRID_NODE_NAME='n1'"),
+            "other vars kept: {after}"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "file must be 0600 after scrub");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn scrub_missing_file_is_noop() {
+        let p = std::env::temp_dir().join("ag-scrub-missing-noop");
+        let _ = std::fs::remove_file(&p);
+        scrub_token_from_file(&p).await; // must not panic
+    }
     use super::*;
 
     /// Stage 9.1: a Bash `cat` at default L2 is auto-allowed; `rm -rf` is
@@ -3263,6 +3359,7 @@ mod tests {
             heartbeat_secs: 10,
             enroll_token: None,
             credential_path: std::env::temp_dir().join("ag-acp-cred.json"),
+            env_file: None,
             repository_root: std::env::temp_dir().join("ag-acp-repos"),
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
@@ -3368,6 +3465,7 @@ mod tests {
             heartbeat_secs: 10,
             enroll_token: None,
             credential_path: std::env::temp_dir().join("ag-acp-cred-hang.json"),
+            env_file: None,
             repository_root: std::env::temp_dir().join("ag-acp-repos-hang"),
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
@@ -3470,6 +3568,7 @@ mod tests {
             heartbeat_secs: 10,
             enroll_token: None,
             credential_path: std::env::temp_dir().join("ag-acp-cred-cancel.json"),
+            env_file: None,
             repository_root: std::env::temp_dir().join("ag-acp-repos-cancel"),
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
@@ -3625,6 +3724,7 @@ mod tests {
                 heartbeat_secs: 10,
                 enroll_token: None,
                 credential_path: std::env::temp_dir().join("ag-skill-cred.json"),
+                env_file: None,
                 repository_root: std::env::temp_dir().join("ag-skill-repos"),
                 secrets: vec![],
                 sandbox: sandbox::SandboxKind::None,

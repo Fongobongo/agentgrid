@@ -213,44 +213,44 @@
 
 ### CLI installer
 
-- [ ] Удалить `StrictHostKeyChecking=no`.
-- [ ] Использовать обычный known_hosts verification по умолчанию.
-- [ ] Добавить `--accept-new-host-key` как явный opt-in.
-- [ ] Добавить `--host-key-fingerprint` для strict provisioning.
-- [ ] Не запускать daemon как root.
-- [ ] Удалить автоматический `AGENTGRID_ALLOW_ROOT=1`.
+- [x] Удалить `StrictHostKeyChecking=no`.
+- [x] Использовать обычный known_hosts verification по умолчанию.
+- [x] Добавить `--accept-new-host-key` как явный opt-in.
+- [x] Добавить `--host-key-fingerprint` для strict provisioning.
+- [x] Не запускать daemon как root.
+- [x] Удалить автоматический `AGENTGRID_ALLOW_ROOT=1`.
 - [ ] Создавать пользователя `agentgrid`.
 - [ ] Устанавливать systemd unit вместо `nohup`.
-- [ ] Применить hardening directives из `deploy/install-node.sh`.
+- [x] Применить hardening directives из `deploy/install-node.sh`.
 - [ ] Загружать необходимые adapter binaries вместе с daemon.
 - [ ] Проверять checksum/signature binaries до запуска.
-- [ ] Создавать временный env/token файл с `0600` атомарно.
-- [ ] Удалять enrollment token после успешного обмена на credential.
+- [x] Создавать временный env/token файл с `0600` атомарно.
+- [x] Удалять enrollment token после успешного обмена на credential.
 - [ ] Добавить rollback при частичной ошибке установки.
 - [ ] Добавить idempotent повторный install/upgrade.
 - [ ] Добавить `ag node uninstall` или документированную процедуру.
 
 ### systemd hardening
 
-- [ ] `NoNewPrivileges=true`.
-- [ ] `ProtectSystem=strict`.
-- [ ] `ProtectHome=true`.
-- [ ] `PrivateTmp=true`.
-- [ ] `PrivateDevices=true`, если adapters не требуют devices.
-- [ ] `ProtectKernelTunables=true`.
-- [ ] `ProtectKernelModules=true`.
-- [ ] `ProtectControlGroups=true` с учётом cgroup backend.
-- [ ] `RestrictSUIDSGID=true`.
-- [ ] `LockPersonality=true`.
-- [ ] `RestrictAddressFamilies=` по минимально необходимому набору.
-- [ ] `ReadWritePaths=` только для data/workspace/repository roots.
+- [x] `NoNewPrivileges=true`.
+- [x] `ProtectSystem=strict`.
+- [x] `ProtectHome=true`.
+- [x] `PrivateTmp=true`.
+- [x] `PrivateDevices=true`, если adapters не требуют devices.
+- [x] `ProtectKernelTunables=true`.
+- [x] `ProtectKernelModules=true`.
+- [x] `ProtectControlGroups=true` с учётом cgroup backend.
+- [x] `RestrictSUIDSGID=true`.
+- [x] `LockPersonality=true`.
+- [x] `RestrictAddressFamilies=` по минимально необходимому набору.
+- [x] `ReadWritePaths=` только для data/workspace/repository roots.
 
 ### Тесты
 
-- [ ] Installer не использует root daemon.
-- [ ] Неизвестный SSH host key приводит к отказу по умолчанию.
+- [x] Installer не использует root daemon.
+- [x] Неизвестный SSH host key приводит к отказу по умолчанию.
 - [ ] Повторная установка не создаёт второй daemon.
-- [ ] Enrollment token отсутствует в unit/env после подключения.
+- [x] Enrollment token отсутствует в unit/env после подключения.
 - [ ] После reboot daemon стартует и reconnect работает.
 
 **Основные файлы:**

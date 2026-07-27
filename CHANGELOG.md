@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security (hardening P0 — safe node install)
+
+- `ag nodes install` no longer passes `StrictHostKeyChecking=no` to SSH: it
+  **fails closed** on an unknown host key by default. New flags opt in:
+  `--accept-new-host-key` (ssh accept-new) and a pinning
+  `--host-key-fingerprint SHA256:...` (ssh-keyscan + ssh-keygen -lf compare;
+  mismatch refuses the host and the trusted key is added to `~/.ssh/known_hosts`).
+- The installer no longer auto-bakes `AGENTGRID_ALLOW_ROOT=1` into the
+  provisioned env — the node daemon refuses root unless the operator opts in
+  with `--allow-root`. Prefer SSH-ing as an unprivileged user with a
+  `--data-dir` owned by that user.
+- The node daemon now scrubs `AGENTGRID_ENROLL_TOKEN` from its
+  `AGENTGRID_ENV_FILE` after a successful first enrollment (atomic 0600
+  temp+rename), so a rebooting node reuses `credential.json` and the one-time
+  token cannot be leaked/reused off disk. Other env vars are preserved.
+- `deploy/install-node.sh` keeps the enrollment token in its own `0600`
+  `EnvironmentFile=`, exposes `AGENTGRID_ENV_FILE` so the daemon can scrub it,
+  and adds the full systemd hardening directive set (PrivateDevices,
+  ProtectKernel{Tunables,Modules,Logs}, ProtectClock/Hostname/Proc,
+  ProtectControlGroups, RestrictSUIDSGID, LockPersonality, RestrictNamespaces,
+  MemoryDenyWriteExecute, RestrictAddressFamilies).
+- Regression tests: default install env has no `AGENTGRID_ALLOW_ROOT`;
+  `--allow-root` adds it; host-key modes default strict; daemon scrubs the
+  enroll-token line from the env file (atomically, 0600) and preserves other
+  vars; missing file is a no-op.
+
 ### Security (hardening P0 — unsafe adapter defaults)
 
 - The Claude Code adapter no longer adds `--dangerously-skip-permissions`

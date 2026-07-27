@@ -36,6 +36,16 @@ if ! id agentgrid >/dev/null 2>&1; then useradd -r -m -d "$DATA_DIR" agentgrid; 
 mkdir -p "$WORKSPACE" "$REPOS" "$DATA_DIR/data" "$DATA_DIR/artifacts"
 chown -R agentgrid:agentgrid "$DATA_DIR"
 
+# Hardening P0: enrollment token lives in its own 0600 env file the daemon
+# scrubs `AGENTGRID_ENROLL_TOKEN` from after the first successful enroll, so a
+# rebooting node reuses /var/lib/agentgrid/credential.json and the token is
+# not left on disk for an attacker to reuse. The main unit references the
+# stable settings; the token lives only here.
+ENV_FILE="$DATA_DIR/enroll.env"
+( umask 077; printf 'AGENTGRID_ENROLL_TOKEN=%s\n' "$TOKEN" ) >"$ENV_FILE"
+chown agentgrid:agentgrid "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+
 echo ">> writing systemd unit"
 cat > /etc/systemd/system/agentgrid-node.service <<EOF
 [Unit]
@@ -50,18 +60,38 @@ ExecStart=$BIN_DIR/agentgrid-node-daemon
 Restart=on-failure
 RestartSec=5
 Environment=AGENTGRID_SERVER=$SERVER
-Environment=AGENTGRID_ENROLL_TOKEN=$TOKEN
 Environment=AGENTGRID_NODE_NAME=$NAME
 Environment=AGENTGRID_DATA_DIR=$DATA_DIR/data
 Environment=AGENTGRID_WORKSPACE_ROOT=$WORKSPACE
 Environment=AGENTGRID_REPOSITORY_ROOT=$REPOS
 Environment=AGENTGRID_ARTIFACT_ROOT=$DATA_DIR/artifacts
-# Hardening (Stage 5.1): no new privileges, read-only root except data dirs.
+Environment=AGENTGRID_ENV_FILE=$DATA_DIR/enroll.env
+EnvironmentFile=-$DATA_DIR/enroll.env
+# Hardening P0 (systemd): drop destructive capabilities and hide the rest of
+# the host. PrivateDevices is OFF by default; flip on only if your adapters
+# do not need a TTY/devices.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$DATA_DIR
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+# ponytail: RestrictRealtime / RestrictRealtimePriority omitted; some adapters
+# use realtime scheduling for low-latency streaming. Add when not needed.
+# A separate DropIn (/etc/systemd/system/agentgrid-node.service.d/) is the
+# upgrade-safe way to override any of these per host.
 
 [Install]
 WantedBy=multi-user.target

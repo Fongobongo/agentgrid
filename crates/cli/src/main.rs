@@ -371,6 +371,23 @@ struct NodeInstallArgs {
     /// SSH password (requires `sshpass`; passed via SSHPASS env, never argv).
     #[arg(long)]
     password: Option<String>,
+    /// Accept an unknown SSH host key on first connect (like ssh-keyscan -H).
+    /// OFF by default: an unknown host key is REFUSED (fail-closed, no MITM).
+    /// Use only for a freshly-provisioned host you trust but have not yet
+    /// pinned.
+    #[arg(long, default_value_t = false)]
+    accept_new_host_key: bool,
+    /// Pin the remote host's SSH public key fingerprint (e.g.
+    /// `SHA256:base64...`) for strict provisioning. Refuses the host if it does
+    /// not match; overrides --accept-new-host-key.
+    #[arg(long)]
+    host_key_fingerprint: Option<String>,
+    /// Allow the node daemon to run as root on the remote (sets
+    /// `AGENTGRID_ALLOW_ROOT=1`). OFF by default: the daemon refuses root, so
+    /// SSH as (or create) an unprivileged user and point --data-dir at a dir it
+    /// owns. Only enable when you cannot avoid root and understand the risk.
+    #[arg(long, default_value_t = false)]
+    allow_root: bool,
     /// Transport for the node -> control-plane link.
     #[arg(long, value_enum, default_value = "ssh-tunnel")]
     transport: Transport,
@@ -793,6 +810,14 @@ async fn cmd_node_install(client: &reqwest::Client, base: &str, a: NodeInstallAr
         );
     }
     validate_install_args(&a)?;
+    // Hardening P0 (safe node install): verify the remote SSH host key BEFORE
+    // any further install step so a MITM cannot hijack the bootstrap.
+    // - --host-key-fingerprint pins the key: ssh-keyscan the host, compute its
+    //   SHA256 fingerprint, and bail if it does not match. The matching key is
+    //   added to the local known_hosts so subsequent SSH calls use strict.
+    // - --accept-new-host-key: accept-new at SSH level.
+    // - default: strict (an unknown key is refused).
+    verify_host_key(&a)?;
     let token = create_enrollment_token(client, base).await?;
     let bin = a
         .binary
@@ -890,10 +915,99 @@ fn build_node_env_file(a: &NodeInstallArgs, token: &str, server: &str) -> String
         mc = a.max_concurrency,
         data = data,
     );
-    // nodes provisioned as root need this to start (daemon refuses root otherwise)
-    s.push_str("AGENTGRID_ALLOW_ROOT='1'\n");
+    // hardening P0 (safe node install): the node daemon refuses to run as root
+    // unless AGENTGRID_ALLOW_ROOT=1. We never set it automatically; the operator
+    // must pass --allow-root. Prefer SSH-ing as an unprivileged user and a
+    // --data-dir owned by that user.
+    if a.allow_root {
+        s.push_str("AGENTGRID_ALLOW_ROOT='1'\n");
+    }
     s.push_str(&format!("AGENTGRID_AGENT_VERSION='{}'\n", a.agent_version));
     s
+}
+
+/// Hardening P0 (safe node install): verify/PIN the remote SSH host key before
+/// any install step. `--host-key-fingerprint` pins the exact SHA256
+/// fingerprint (ssh-keyscan + ssh-keygen -lf compare, bailing on mismatch) and
+/// adds the trusted key to ~/.ssh/known_hosts; `--accept-new-host-key` opts
+/// into ssh's accept-new mode; default is strict refusal. Returns Ok only when
+/// the key is acceptable.
+fn verify_host_key(a: &NodeInstallArgs) -> Result<()> {
+    let (_user, host, port) = parse_host(&a.host);
+    if let Some(fp) = &a.host_key_fingerprint {
+        let fp = fp.trim();
+        let mut scan = std::process::Command::new("ssh-keyscan");
+        scan.stderr(std::process::Stdio::null());
+        if let Some(p) = port {
+            scan.arg("-p").arg(p.to_string());
+        }
+        scan.arg(&host);
+        let scan_out = scan
+            .output()
+            .with_context(|| format!("ssh-keyscan {host} failed to spawn"))?;
+        if !scan_out.status.success() || scan_out.stdout.is_empty() {
+            anyhow::bail!("could not ssh-keyscan host {host}: not reachable or no keys");
+        }
+        let mut kg = std::process::Command::new("ssh-keygen");
+        kg.arg("-lf").arg("-");
+        kg.stdin(std::process::Stdio::piped());
+        kg.stdout(std::process::Stdio::piped());
+        kg.stderr(std::process::Stdio::null());
+        let mut child = kg
+            .spawn()
+            .with_context(|| "ssh-keygen -lf - failed to spawn")?;
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(&scan_out.stdout).ok();
+        let kg_out = child
+            .wait_with_output()
+            .with_context(|| "ssh-keygen -lf - wait failed")?;
+        let text = String::from_utf8_lossy(&kg_out.stdout);
+        let mut matched = false;
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts[1].eq_ignore_ascii_case(fp) {
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            anyhow::bail!(
+                "host {host} SSH key fingerprint does not match --host-key-fingerprint; got:\n{text}"
+            );
+        }
+        // Add the trusted key to known_hosts so subsequent ssh uses strict.
+        let home = dirs_for_known_hosts()?;
+        let kh_path = home.join(".ssh/known_hosts");
+        if let Some(parent) = kh_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut kh = std::process::Command::new("ssh-keyscan");
+        kh.stderr(std::process::Stdio::null());
+        if let Some(p) = port {
+            kh.arg("-p").arg(p.to_string());
+        }
+        kh.arg("-H").arg(&host);
+        let out = kh.output().with_context(|| "ssh-keyscan -H failed")?;
+        if out.status.success() && !out.stdout.is_empty() {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&kh_path)?;
+            f.write_all(&out.stdout)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the per-user HOME directory for known_hosts.
+fn dirs_for_known_hosts() -> Result<std::path::PathBuf> {
+    if let Ok(h) = std::env::var("HOME") {
+        if !h.is_empty() {
+            return Ok(std::path::PathBuf::from(h));
+        }
+    }
+    anyhow::bail!("HOME unset: cannot resolve ~/.ssh/known_hosts for SSH host-key pinning")
 }
 
 /// Reject shell-breaking characters in user-supplied fields (trust boundary).
@@ -942,7 +1056,17 @@ fn run_remote(
         base.push(key.clone());
     }
     base.push("-o".into());
-    base.push("StrictHostKeyChecking=no".into());
+    // Hardening P0 (safe node install): fail CLOSED on an unknown SSH host
+    // key by default (no MITM). `--accept-new-host-key` opts into accept-new;
+    // `--host-key-fingerprint` pins the key (verified via a keyscan+compare in
+    // cmd_node_install before any remote command runs).
+    if a.host_key_fingerprint.is_some() {
+        base.push("StrictHostKeyChecking=yes".into());
+    } else if a.accept_new_host_key {
+        base.push("StrictHostKeyChecking=accept-new".into());
+    } else {
+        base.push("StrictHostKeyChecking=yes".into());
+    }
     if !is_scp && a.password.is_none() {
         base.push("-o".into());
         base.push("BatchMode=yes".into());
@@ -1821,6 +1945,9 @@ mod node_install_tests {
             host: "deploy@node-b:2222".into(),
             ssh_key: None,
             password: None,
+            accept_new_host_key: false,
+            host_key_fingerprint: None,
+            allow_root: false,
             transport: Transport::SshTunnel,
             name: "node-b".into(),
             repositories: "*".into(),
@@ -1871,6 +1998,39 @@ mod node_install_tests {
     fn wireguard_transport_not_implemented() {
         // ensured at the command layer; here we just confirm the variant exists
         let _ = Transport::Wireguard;
+    }
+
+    /// Hardening P0 (safe node install): the default install does NOT bake
+    /// `AGENTGRID_ALLOW_ROOT=1` into the provisioned env — the daemon refuses
+    /// root unless the operator explicitly opts in with --allow-root.
+    #[test]
+    fn build_env_no_allow_root_by_default() {
+        let a = sample();
+        assert!(!a.allow_root);
+        let env = build_node_env_file(&a, "tok", "http://127.0.0.1:7800");
+        assert!(
+            !env.contains("AGENTGRID_ALLOW_ROOT"),
+            "default env must not allow root: {env}"
+        );
+        // token is present (needed for the enroll) but root is not.
+        assert!(env.contains("AGENTGRID_ENROLL_TOKEN='tok'"));
+    }
+
+    #[test]
+    fn build_env_adds_allow_root_when_opted_in() {
+        let mut a = sample();
+        a.allow_root = true;
+        let env = build_node_env_file(&a, "tok", "http://127.0.0.1:7800");
+        assert!(env.contains("AGENTGRID_ALLOW_ROOT='1'"));
+    }
+
+    /// Hardening P0 (safe node install): host-key fingerprint + accept-new are
+    /// both OFF by default, so SSH fails closed on an unknown host key.
+    #[test]
+    fn host_key_mode_defaults_strict() {
+        let a = sample();
+        assert!(!a.accept_new_host_key);
+        assert!(a.host_key_fingerprint.is_none());
     }
 }
 
