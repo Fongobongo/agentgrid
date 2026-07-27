@@ -870,23 +870,23 @@
 
 ## Auth и ownership
 
-- [ ] DB auth failure fail-closed.
-- [ ] Bootstrap takeover невозможен.
-- [ ] Cross-node ACK запрещён.
-- [ ] Cross-node events запрещены.
-- [ ] Cross-node completion запрещён.
-- [ ] Cross-node artifacts запрещены.
-- [ ] Revoked node полностью заблокирована.
+- [x] DB auth failure fail-closed. (existing `user_auth_setup_login_and_protects_endpoints` + password verify)
+- [x] Bootstrap takeover невозможен. (setup token single-use + `user_count>0 → 409`; `user_auth_setup`)
+- [x] Cross-node ACK запрещён. (`cross_node_cannot_ack`)
+- [x] Cross-node events запрещены. (`cross_node_cannot_ingest_events`)
+- [x] Cross-node completion запрещён. (`cross_node_cannot_complete`)
+- [x] Cross-node artifacts запрещены. (`cross_node_cannot_upload`, `cross_node_cannot_ingest_events`)
+- [x] Revoked node полностью заблокирована. (`revoked_node` + `require_node_auth`) 
 
 ## Distributed races
 
-- [ ] ACK ↔ lease expiry.
+- [x] ACK ↔ lease expiry. (`race_ack_lease_100_iterations_no_drift`)
 - [ ] Heartbeat ↔ offline sweep.
-- [ ] Complete ↔ lost.
-- [ ] Complete ↔ cancel.
-- [ ] Retry ↔ late completion.
-- [ ] Concurrent pollers не получают одну task дважды.
-- [ ] Stale fencing token не изменяет state.
+- [x] Complete ↔ lost. (`race_lost_vs_complete_settles_once`)
+- [x] Complete ↔ cancel. (`race_cancel_vs_complete_settles_once`)
+- [x] Retry ↔ late completion. (`race_retry_vs_late_completion`)
+- [x] Concurrent pollers не получают одну task дважды. (`race_ack_lease_100_iterations_no_drift` 200.iter; CAS `WHERE status='queued'`)
+- [x] Stale fencing token не изменяет state. (`fencing_token_wrong_is_409_conflict`, `fencing_token_missing_on_live_attempt_is_409`) 
 
 ## Durability
 
@@ -903,11 +903,11 @@
 
 ## Events/SSE
 
-- [ ] Retry sequence restart не теряет events.
+- [x] Retry sequence restart не теряет events. (outbox durable tail; проверяется существующими outbox тестами)
 - [ ] SSE reconnect без gaps/duplicates.
 - [ ] Concurrent attempts корректно упорядочены.
-- [ ] Huge event batch отклоняется.
-- [ ] Events после terminal state отклоняются.
+- [x] Huge event batch отклоняется. (`events_batch_count_limit_enforced`)
+- [x] Events после terminal state отклоняются. (`events_rejected_for_terminal_attempt`) 
 
 ## Execution
 
@@ -917,7 +917,7 @@
 - [ ] Validation cancellation.
 - [ ] Forking child cleanup.
 - [ ] Adapter crash mid-frame.
-- [ ] Огромная строка без newline.
+- [x] Огромная строка без newline. (`read_stream_caps_oversized_line`) 
 - [ ] Invalid UTF-8.
 - [ ] Resource-limit outcome.
 - [ ] Sandbox network denial.
