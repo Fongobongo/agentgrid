@@ -351,14 +351,6 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
     Ok(Some(sha))
 }
 
-/// Remove the per-attempt worktree dir and (for git tasks) its branch after
-/// the attempt is done (Stage 2.3 worktree/branch cleanup). Best-effort: logs
-/// and swallows errors so a stuck worktree never turns a successful attempt
-/// terminal. For git tasks `git worktree remove --force` drops the worktree
-/// dir and its gitlink, and the branch delete (best-effort) reclaims the ref.
-/// The worktree dir is removed directly as a fallback if `worktree remove`
-/// left it behind — and as the only step for non-git tasks (plain dir).
-
 /// Hardening P1 item 33: a workspace path is safe to `remove_dir_all` only if
 /// it has no `..` component and is not itself a symlink. (No canonicalized
 /// root available in `cleanup_workspace`; the `..` + symlink checks block the
@@ -395,6 +387,14 @@ fn safe_workspace_target_under(p: &std::path::Path, root: &std::path::Path) -> b
         .unwrap_or_else(|_| parent.to_path_buf());
     canon_parent == canon_root
 }
+
+/// Remove the per-attempt worktree dir and (for git tasks) its branch after
+/// the attempt is done (Stage 2.3 worktree/branch cleanup). Best-effort: logs
+/// and swallows errors so a stuck worktree never turns a successful attempt
+/// terminal. For git tasks `git worktree remove --force` drops the worktree
+/// dir and its gitlink, and the branch delete (best-effort) reclaims the ref.
+/// The worktree dir is removed directly as a fallback if `worktree remove`
+/// left it behind — and as the only step for non-git tasks (plain dir).
 pub fn cleanup_workspace(
     ws_path: &std::path::Path,
     repo_dir: Option<&std::path::Path>,
