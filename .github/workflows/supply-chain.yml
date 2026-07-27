@@ -1,0 +1,24 @@
+name: Supply chain
+
+# Hardening P2 item 29: run `cargo audit` against the advisory database on
+# every PR and push, and nightly, so a known-vulnerable dependency fails CI
+# before it ships. Runs on the host target (no cross-compile needed).
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

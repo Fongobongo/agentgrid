@@ -7,6 +7,11 @@ COPY . .
 RUN cargo build --release --bins -p agentgrid-node-daemon -p agentgrid-adapters
 
 FROM debian:bookworm-slim
+# Hardening P2 item 31: OCI provenance labels.
+LABEL org.opencontainers.image.title="agentgrid-node-daemon" \
+      org.opencontainers.image.source="https://github.com/earendil-works/agentgrid" \
+      org.opencontainers.image.description="AgentGrid node daemon (worktree + sandbox + event spool)" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git bash curl \
     && rm -rf /var/lib/apt/lists/*

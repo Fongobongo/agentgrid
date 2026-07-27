@@ -13,8 +13,13 @@ RUN cargo build --release --bins -p agentgrid-control-plane -p agentgrid-cli
 RUN cd web && npm ci && npm run build
 
 FROM debian:bookworm-slim
+# Hardening P2 item 31: OCI provenance labels + a healthcheck.
+LABEL org.opencontainers.image.title="agentgrid-control-plane" \
+      org.opencontainers.image.source="https://github.com/earendil-works/agentgrid" \
+      org.opencontainers.image.description="AgentGrid control plane (Axum + SQLite + rustls)" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates wget \
     && rm -rf /var/lib/apt/lists/*
 # Control plane data: SQLite DB, artifacts, web root.
 RUN useradd -r -m -d /var/lib/agentgrid agentgrid \
@@ -30,4 +35,6 @@ ENV AGENTGRID_LISTEN=0.0.0.0:7800 \
     AGENTGRID_WEB_ROOT=/var/lib/agentgrid/web
 USER agentgrid
 EXPOSE 7800
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:7800/health/ready || exit 1
 ENTRYPOINT ["agentgrid-control-plane"]

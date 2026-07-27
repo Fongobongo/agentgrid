@@ -693,7 +693,7 @@
 
 - [ ] Закрепить GitHub Actions по commit SHA.
 - [ ] Настроить Renovate/Dependabot для обновления SHA.
-- [ ] `cargo audit`.
+- [x] `cargo audit`. (`.github/workflows/supply-chain.yml` → `cargo audit` на PR + nightly)
 - [ ] `cargo deny`.
 - [ ] License allowlist.
 - [ ] Secret scanning.
@@ -726,8 +726,8 @@
 - [ ] Добавить BuildKit cache mounts или cargo-chef.
 - [ ] Кэшировать Rust dependencies отдельно от source.
 - [ ] Кэшировать npm dependencies отдельно от web source.
-- [ ] Добавить OCI labels/version/revision/source.
-- [ ] Добавить image healthcheck.
+- [x] Добавить OCI labels/version/revision/source. (`Dockerfile.control-plane` + `Dockerfile.node-daemon` `org.opencontainers.image.*` LABELs)
+- [x] Добавить image healthcheck. (`Dockerfile.control-plane` HEALTHCHECK → `/health/ready`; node-daemon не открывает health port)
 - [ ] Добавить non-root verification test.
 - [ ] Добавить read-only/cap-drop security settings.
 - [ ] Выпускать base node image.
