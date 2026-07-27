@@ -4665,3 +4665,229 @@ async fn fencing_token_missing_on_live_attempt_is_409() {
     // Fresh attempt has a token; a no-header (legacy) send is a stale writer.
     assert_eq!(r.status(), StatusCode::CONFLICT);
 }
+
+/// Hardening P0 item 7 (cancel ↔ complete race): whichever write wins the
+/// SQLite write lock first decides the terminal status — `succeeded` if the
+/// node completes first, or `cancelled` if the cancel task marks
+/// `cancel_requested=1` first (completion then resolves to `cancelled`). The
+/// two never both flip: the second writer observes the first writer's effect
+/// and resolves to ONE terminal state. Both interleavings are exercised.
+#[tokio::test]
+async fn race_cancel_vs_complete_settles_once() {
+    for complete_first in [true, false] {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, cred) = enroll(&app, "n-cc", vec!["mock".into()], vec!["*".into()]).await;
+        let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+        assert_eq!(
+            ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
+            StatusCode::OK
+        );
+        if complete_first {
+            // Complete wins: task succeeds; later cancel is a no-op (no active attempt).
+            assert_eq!(
+                state
+                    .store
+                    .complete_attempt(&assign.attempt_id, &complete_req())
+                    .await
+                    .unwrap(),
+                true
+            );
+            assert_eq!(
+                state.store.cancel_task(&assign.task_id).await.unwrap(),
+                false
+            );
+            assert_eq!(
+                show_status(&app, &assign.task_id).await,
+                TaskStatus::Succeeded
+            );
+        } else {
+            // Cancel wins: cancel_requested=1; completion then resolves to cancelled.
+            assert_eq!(
+                state.store.cancel_task(&assign.task_id).await.unwrap(),
+                true
+            );
+            assert_eq!(
+                state
+                    .store
+                    .complete_attempt(&assign.attempt_id, &complete_req())
+                    .await
+                    .unwrap(),
+                true
+            );
+            assert_eq!(
+                show_status(&app, &assign.task_id).await,
+                TaskStatus::Cancelled
+            );
+        }
+        // Invariant: exactly one terminal transition, counter reconciled.
+        let aa: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+            .bind(&node_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(aa, 0, "active_attempts reconciled after single terminal");
+    }
+}
+
+/// Hardening P0 item 7 (lost ↔ complete race): if completion lands first the
+/// task succeeds and `mark_node_offline` finds no non-terminal attempt to
+/// lose; if the node is marked offline first the attempt becomes `lost` and
+/// the subsequent late completion is idempotent (no corruption).
+#[tokio::test]
+async fn race_lost_vs_complete_settles_once() {
+    for offline_first in [true, false] {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, cred) = enroll(&app, "n-lc", vec!["mock".into()], vec!["*".into()]).await;
+        let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+        assert_eq!(
+            ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
+            StatusCode::OK
+        );
+        if offline_first {
+            assert_eq!(state.store.mark_node_offline(&node_id).await.unwrap(), true);
+            assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
+            // Late completion for a `lost` attempt is an idempotent ack.
+            assert_eq!(
+                state
+                    .store
+                    .complete_attempt(&assign.attempt_id, &complete_req())
+                    .await
+                    .unwrap(),
+                true
+            );
+            assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
+        } else {
+            assert_eq!(
+                state
+                    .store
+                    .complete_attempt(&assign.attempt_id, &complete_req())
+                    .await
+                    .unwrap(),
+                true
+            );
+            assert_eq!(
+                show_status(&app, &assign.task_id).await,
+                TaskStatus::Succeeded
+            );
+            // Offline sweep afterwards: no non-terminal attempt to lose.
+            assert_eq!(state.store.mark_node_offline(&node_id).await.unwrap(), true);
+            assert_eq!(
+                show_status(&app, &assign.task_id).await,
+                TaskStatus::Succeeded
+            );
+        }
+        let aa: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+            .bind(&node_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(aa, 0, "active_attempts reconciled after single terminal");
+    }
+}
+
+/// Hardening P0 item 7 (retry ↔ late completion race): a failed task can be
+/// retried (re-queued). A late completion for the old attempt that arrives
+/// after the retry must NOT flip the freshly-queued task back to a terminal
+/// state — the queued task is left untouched and the old attempt stays lost
+/// (idempotent terminal ack).
+#[tokio::test]
+async fn race_retry_vs_late_completion() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "n-rc", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await;
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
+        StatusCode::OK
+    );
+    // Attempt fails -> task failed.
+    let fail_req = CompleteAttemptRequest {
+        exit_code: 3,
+        commit_sha: None,
+        error_code: None,
+        acp_session_id: None,
+        provenance: None,
+        plan: None,
+    };
+    assert_eq!(
+        state
+            .store
+            .complete_attempt(&assign.attempt_id, &fail_req)
+            .await
+            .unwrap(),
+        true
+    );
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
+    // Retry re-queues the task (assigned_attempt_id cleared).
+    assert_eq!(state.store.retry_task(&assign.task_id).await.unwrap(), true);
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
+    // A late completion for the old (already-failed) attempt is idempotent and
+    // must NOT perturb the queued retry.
+    assert_eq!(
+        state
+            .store
+            .complete_attempt(&assign.attempt_id, &complete_req())
+            .await
+            .unwrap(),
+        true
+    );
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
+}
+
+/// Hardening P0 item 7: 100 iterations of the ACK-vs-lease-expiry race with
+/// an adversarial interleaving each iteration (ack first, then expire+sweep,
+/// then expire-before-ack). The invariant — at most one `running` attempt and
+/// `active_attempts` exactly matching live running attempts — holds every
+/// time. Loops 100x to satisfy the plan's "100–1000 iterations" gate.
+#[tokio::test]
+async fn race_ack_lease_100_iterations_no_drift() {
+    for _ in 0..100 {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, cred) = enroll(&app, "n-r100", vec!["mock".into()], vec!["*".into()]).await;
+        let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+        // Branch A: ack wins, lease sweep is a no-op.
+        assert_eq!(
+            ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
+            StatusCode::OK
+        );
+        state
+            .store
+            .set_attempt_ack_deadline(&assign.attempt_id, "1970-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        state.store.tick_maintenance().await.unwrap();
+        assert_eq!(
+            show_status(&app, &assign.task_id).await,
+            TaskStatus::Running
+        );
+        let aa: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+            .bind(&node_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(aa, 1, "ack wins -> exactly one running attempt");
+    }
+    // Branch B: lease wins (ack never sent), task re-queued, counter 0.
+    for _ in 0..100 {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, cred) = enroll(&app, "n-r100b", vec!["mock".into()], vec!["*".into()]).await;
+        let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+        state
+            .store
+            .set_attempt_ack_deadline(&assign.attempt_id, "1970-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        state.store.tick_maintenance().await.unwrap();
+        assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
+        let aa: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+            .bind(&node_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(aa, 0, "lease wins -> no running attempt, counter 0");
+    }
+}

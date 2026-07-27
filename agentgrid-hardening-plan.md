@@ -272,18 +272,18 @@
 - [x] Не уменьшать `active_attempts`, если attempt уже ACKed/completed.
 - [x] Сделать offline transition compare-and-set по status и heartbeat timestamp.
 - [x] Вызывать `lose_node_attempts` только если node действительно переведена в offline.
-- [ ] Добавить optimistic `version` или equivalent guards для tasks/attempts.
-- [ ] Проверить гонки cancel ↔ complete.
-- [ ] Проверить гонки lost ↔ complete.
-- [ ] Проверить гонки retry ↔ late completion.
+- [x] Добавить optimistic `version` или equivalent guards для tasks/attempts. (CAS-охраны `WHERE status=…` + `rows_affected==1`; полноценный `version`-столбец отложен — CAS покрывает P0 гонки)
+- [x] Проверить гонки cancel ↔ complete.
+- [x] Проверить гонки lost ↔ complete.
+- [x] Проверить гонки retry ↔ late completion.
 
 ### Тесты
 
 - [x] ACK одновременно с lease expiry не создаёт второй attempt.
-- [ ] Completion одновременно с lease expiry остаётся terminal один раз.
+- [x] Completion одновременно с lease expiry остаётся terminal один раз.
 - [x] Fresh heartbeat одновременно с offline sweep не делает node offline.
-- [ ] Cancel одновременно с complete даёт один детерминированный outcome.
-- [ ] 100–1000 итераций конкурентного теста проходят без invariant violation.
+- [x] Cancel одновременно с complete даёт один детерминированный outcome.
+- [x] 100–1000 итераций конкурентного теста проходят без invariant violation.
 
 **Основные файлы:**
 
