@@ -1959,17 +1959,44 @@ impl Store {
             "startup reconcile: in-flight attempts"
         );
         self.tick_maintenance().await?;
+        // Hardening P1 item 22: reconcile the denormalized active_attempts
+        // cache against the authoritative attempt rows so a crash mid-assign
+        // or a partial write cannot leave a node over/under-counted.
+        let drift = self.reconcile_active_attempts().await?;
+        if drift > 0 {
+            tracing::warn!(drift, "active_attempts cache reconciled on startup");
+        }
         let _ = self
             .audit(
                 "system",
                 None,
                 "startup_reconcile",
                 None,
-                Some(&format!("in_flight={inflight}")),
+                Some(&format!(
+                    "in_flight={inflight} active_attempts_drift={drift}"
+                )),
             )
             .await;
         tracing::info!("startup reconcile complete");
         Ok(())
+    }
+
+    /// Recompute each node's `active_attempts` from the attempt table and apply
+    /// it where it differs. Returns the number of nodes whose counter changed.
+    pub async fn reconcile_active_attempts(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE nodes SET active_attempts = (\
+               SELECT COUNT(*) FROM attempts \
+               WHERE attempts.node_id = nodes.id \
+                 AND attempts.status IN ('assigned','running','validating')) \
+             WHERE active_attempts <> (\
+               SELECT COUNT(*) FROM attempts \
+               WHERE attempts.node_id = nodes.id \
+                 AND attempts.status IN ('assigned','running','validating'))",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Truncate the WAL into the main database (Stage 2.5 ops).

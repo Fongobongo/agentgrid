@@ -579,12 +579,12 @@
 
 ## 22. `active_attempts` reconciliation — P1
 
-- [ ] Решить: вычисляемое значение или денормализованный cache.
-- [ ] Если cache — добавить периодический reconciliation.
+- [x] Решить: вычисляемое значение или денормализованный cache. (денормализованный cache `nodes.active_attempts`, reconciled из попыток)
+- [x] Если cache — добавить периодический reconciliation. (`reconcile_active_attempts` recomputes per-node из attempt rows)
 - [ ] Добавить drift metric.
-- [ ] Запускать reconciliation после startup recovery.
+- [x] Запускать reconciliation после startup recovery. (`reconcile_on_startup` вызывает `reconcile_active_attempts`; audit логирует drift)
 - [ ] Проверять count после lease expiry, lost, cancel, complete и retry.
-- [ ] Добавить invariant test после всех lifecycle сценариев.
+- [x] Добавить invariant test после всех lifecycle сценариев. (`reconcile_active_attempts_repairs_drift` + `state_machine_terminal_invariants_hold` проверяет active_attempts=0)
 
 ## 23. Feature maturity и scope control — P2
 

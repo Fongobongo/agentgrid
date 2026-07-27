@@ -5168,3 +5168,37 @@ async fn events_batch_count_limit_enforced() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+/// Hardening P1 item 22: the denormalized `active_attempts` counter can drift
+/// from the authoritative attempt rows after a crash/partial write.
+/// `reconcile_active_attempts` re-derives it and runs on every startup.
+#[tokio::test]
+async fn reconcile_active_attempts_repairs_drift() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "n-rec", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    assert!(
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token)
+            .await
+            .is_success()
+    );
+    // Force a drift: bump the counter without a matching running attempt.
+    sqlx::query("UPDATE nodes SET active_attempts = 9 WHERE id = ?")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    let fixed = state.store.reconcile_active_attempts().await.unwrap();
+    assert_eq!(fixed, 1, "the drifted node was reconciled");
+    let aa: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    // The one running attempt is the only live row.
+    assert_eq!(aa, 1, "active_attempts recomputed from attempt rows");
+    // Idempotent: a second reconcile touches no rows.
+    let again = state.store.reconcile_active_attempts().await.unwrap();
+    assert_eq!(again, 0, "reconcile is idempotent when already consistent");
+}
