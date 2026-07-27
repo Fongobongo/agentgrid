@@ -574,7 +574,7 @@
 - [ ] Добавить CHECK constraints для всех status/autonomy/role полей.
 - [ ] Добавить уникальный `(conversation_id, seq)`.
 - [ ] Выделять conversation sequence атомарно.
-- [ ] Добавить migration preflight для orphan rows.
+- [x] Добавить migration preflight для orphan rows. (`count_orphan_rows` детектит attempts/events/artifacts без родителя; запускается в `reconcile_on_startup`, логирует drift; regression-тест `orphan_row_detection_works`)
 - [ ] Добавить baseline schema для новых установок, сохранив upgrade migrations.
 
 ## 22. `active_attempts` reconciliation — P1

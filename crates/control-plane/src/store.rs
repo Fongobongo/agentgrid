@@ -1966,6 +1966,14 @@ impl Store {
         if drift > 0 {
             tracing::warn!(drift, "active_attempts cache reconciled on startup");
         }
+        // Hardening P1 item 21: detect orphan rows (events/artifacts pointing
+        // at missing attempts, attempts pointing at missing tasks). These
+        // should be impossible with FKs but currently only logged so the
+        // operator notices data-integrity drift early.
+        let orphans = self.count_orphan_rows().await?;
+        if orphans > 0 {
+            tracing::warn!(orphans, "orphan rows detected on startup");
+        }
         let _ = self
             .audit(
                 "system",
@@ -1997,6 +2005,31 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
+    }
+
+    /// Count orphan rows: attempts whose task_id no longer exists, events whose
+    /// attempt no longer exists, and artifacts whose attempt no longer exists.
+    /// Returns the sum; 0 on a healthy DB. (Detection only — no auto-repair.)
+    pub async fn count_orphan_rows(&self) -> Result<i64> {
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attempts a LEFT JOIN tasks t ON a.task_id = t.id \
+             WHERE t.id IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_events e LEFT JOIN attempts a ON e.attempt_id = a.id \
+             WHERE a.id IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let artifacts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifacts ar LEFT JOIN attempts a ON ar.attempt_id = a.id \
+             WHERE a.id IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(attempts + events + artifacts)
     }
 
     /// Truncate the WAL into the main database (Stage 2.5 ops).
@@ -4003,5 +4036,33 @@ mod workflow_tests {
         assert!(matches!(err, StoreArtifactError::Other(_)), "{err:?}");
         // The escape never reached the outside target.
         assert!(tokio::fs::read(outside.join("ok.txt")).await.is_err());
+    }
+
+    /// Hardening P1 item 21: count_orphan_rows is 0 on a healthy DB and >0
+    /// once a parent row is removed out-of-band (simulating corruption).
+    #[tokio::test]
+    async fn orphan_row_detection_works() {
+        let s = temp_store().await;
+        // Healthy: no orphans.
+        assert_eq!(s.count_orphan_rows().await.unwrap(), 0);
+        // Plant a task + attempt + event, then delete the task out-of-band,
+        // leaving the attempt (and transitively the event) orphaned.
+        sqlx::query("INSERT INTO tasks (id, repository, prompt, adapter, status, created_at) VALUES ('t-orphan','r','p','mock','queued','2024-01-01T00:00:00Z')")
+            .execute(&s.pool).await.unwrap();
+        sqlx::query("INSERT INTO attempts (id, task_id, node_id, number, status, started_at) VALUES ('a-orphan','t-orphan','n-x',1,'running','2024-01-01T00:00:00Z')")
+            .execute(&s.pool).await.unwrap();
+        sqlx::query("INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at) VALUES ('e-orphan','a-orphan',1,'log','{}','2024-01-01T00:00:00Z')")
+            .execute(&s.pool).await.unwrap();
+        assert_eq!(
+            s.count_orphan_rows().await.unwrap(),
+            0,
+            "no orphans while parents exist"
+        );
+        sqlx::query("DELETE FROM tasks WHERE id = 't-orphan'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        let orphans = s.count_orphan_rows().await.unwrap();
+        assert!(orphans >= 1, "detected orphaned attempt: {orphans}");
     }
 }
