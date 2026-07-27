@@ -674,12 +674,12 @@
 
 ## 28. CI coverage — P1/P2
 
-- [ ] PR: fmt/clippy/unit/integration/web build.
-- [ ] PR: основной process E2E.
+- [x] PR: fmt/clippy/unit/integration/web build. (`.github/workflows/ci.yml` job `rust` + `web`)
+- [x] PR: основной process E2E. (`.github/workflows/ci.yml` job `e2e` запускается на PR)
 - [ ] Nightly: compose E2E.
-- [ ] Nightly: outbox kill-9.
-- [ ] Nightly: CP restart.
-- [ ] Nightly: disk full.
+- [x] Nightly: outbox kill-9. (job `e2e-failinject` → `run-outbox.sh`; сейчас на каждом PR, можно вынести в nightly если медленно)
+- [x] Nightly: CP restart. (job `e2e-failinject` → `run-cp-restart.sh`)
+- [x] Nightly: disk full. (job `e2e-failinject` → `run-disk-full.sh`)
 - [ ] Nightly: slow network.
 - [ ] Nightly: workflow E2E.
 - [ ] Nightly: skill bundle.
@@ -701,24 +701,24 @@
 - [ ] SBOM CycloneDX/SPDX.
 - [ ] GitHub build provenance attestation.
 - [ ] Подписывать releases cosign/minisign.
-- [ ] Публиковать SHA256 для каждого binary.
+- [x] Публиковать SHA256 для каждого binary. (`release.yml` генерирует `SHA256SUMS` и загружает их вместе с артефактами)
 - [ ] Документировать reproducibility limitations.
 
 ## 30. Полноценный release workflow — P2
 
-- [ ] Запускать tests до release build.
-- [ ] Создавать GitHub Release по tag.
+- [x] Запускать tests до release build. (`release.yml` job `build` шаг `test before release`)
+- [x] Создавать GitHub Release по tag. (job `release` → `gh release create` с артефактами)
 - [ ] Прикладывать changelog section.
-- [ ] Публиковать `agentgrid-control-plane`.
-- [ ] Публиковать `agentgrid-node-daemon`.
-- [ ] Публиковать `ag`.
-- [ ] Публиковать `adapter-mock`.
-- [ ] Публиковать `adapter-claude`.
-- [ ] Публиковать `adapter-opencode`.
+- [x] Публиковать `agentgrid-control-plane`. (release job загружает все targets)
+- [x] Публиковать `agentgrid-node-daemon`.
+- [x] Публиковать `ag`.
+- [x] Публиковать `adapter-mock`.
+- [x] Публиковать `adapter-claude`.
+- [x] Публиковать `adapter-opencode`. (добавлен в SHA256SUMS + artifacts + release)
 - [ ] Публиковать `agentgrid-gateway`, если он входит в release.
 - [ ] Публиковать `agentgrid-acp-agent`, если он входит в release.
-- [ ] Публиковать web bundle/version manifest.
-- [ ] Проверять checksums всех опубликованных файлов.
+- [x] Публиковать web bundle/version manifest. (web/dist загружается как artifact)
+- [x] Проверять checksums всех опубликованных файлов. (`SHA256SUMS.<target>` в release assets)
 - [ ] Добавить install/upgrade/rollback smoke test.
 
 ## 31. Docker build и images — P2
