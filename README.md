@@ -7,6 +7,20 @@ control-plane instance.
 
 > Status: MVP 0.1 — see [CHANGELOG.md](CHANGELOG.md).
 
+## Feature maturity
+
+| Area | Status | Notes |
+|------|--------|-------|
+| tasks / nodes / attempts / events / Git worktrees / adapters / artifacts | **stable** | core lifecycle, cross-node isolation, fencing tokens, retention |
+| auth (JWT, setup-token bootstrap), CLI (`ag`), web UI shell | **beta** | usable, APIs still settling pre-1.0 |
+| workflows (DAG / schedule / run projection) | **experimental** | gate behind an opt-in before relying on it |
+| ACP gateway / Telegram gateway | **experimental** | separate binaries, not in the minimal release by default |
+| skills / profiles / MCP registry | **experimental** | operator registry, semantics may change |
+| schedules / plan expansion / zeroshot / context provider | **experimental** | subject to change |
+| Docker/Podman sandbox backend | **beta** | the worktree is **not** a security sandbox — run untrusted agents in the Docker sandbox with a restrictive network/secrets policy |
+
+Untrusted agents must run under the Docker/Podman sandbox with `permission_interception` and a network/secrets policy. A plain git worktree is **not** isolation against hostile code — see [`docs/decisions/threat-model.md`](docs/decisions/threat-model.md).
+
 ## Architecture
 
 - **control-plane** (Axum + SQLite): task/attempt state machine, scheduler,
@@ -27,11 +41,12 @@ writes `deploy/compose/.env`:
     ./deploy/compose/up.sh
     docker compose up -d
 
-Control plane: http://127.0.0.1:7800 (default login `admin` / `changeme`). Two
-node daemons (mock adapters) come online; submit a task:
+Control plane: http://127.0.0.1:7800. `up.sh` generates a random admin
+password and prints it once (no baked-in `admin/changeme`). Two node daemons
+(mock adapters) come online; submit a task:
 
     export AGENTGRID_SERVER=http://127.0.0.1:7800
-    ag login admin changeme
+    ag login admin <password-printed-by-up.sh>
     ag run <repo> "your prompt here" --adapter mock
 
 Tear down: `./deploy/compose/down.sh` (or `docker compose down`).

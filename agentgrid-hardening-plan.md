@@ -589,11 +589,11 @@
 ## 23. Feature maturity и scope control — P2
 
 - [ ] Определить stable core: tasks/nodes/attempts/events/Git/adapters/artifacts.
-- [ ] Пометить workflows как experimental до отдельного gate.
-- [ ] Пометить ACP gateway как experimental.
-- [ ] Пометить Telegram gateway как experimental.
-- [ ] Пометить skills/profiles/MCP как experimental.
-- [ ] Пометить schedules/plan expansion/Zeroshot/context provider как experimental.
+- [x] Пометить workflows как experimental до отдельного gate. (README maturity matrix: workflows experimental)
+- [x] Пометить ACP gateway как experimental. (README maturity matrix: ACP/Telegram gateways experimental)
+- [x] Пометить Telegram gateway как experimental. (README maturity matrix)
+- [x] Пометить skills/profiles/MCP как experimental. (README maturity matrix)
+- [x] Пометить schedules/plan expansion/Zeroshot/context provider как experimental. (README maturity matrix)
 - [ ] Ввести Cargo feature flags или отдельные binaries/packages.
 - [ ] Не включать experimental компоненты в minimal release по умолчанию.
 - [ ] Для каждой новой функции требовать ADR, threat-model delta и removal plan.
@@ -833,9 +833,9 @@
 
 ## 38. README и docs — P2
 
-- [ ] Обновить README по реальному feature scope.
-- [ ] Добавить maturity matrix: stable/beta/experimental/prototype.
-- [ ] Явно написать: worktree не является security sandbox.
+- [x] Обновить README по реальному feature scope. (Quickstart credentials исправлены на random; threat-model ссылка)
+- [x] Добавить maturity matrix: stable/beta/experimental/prototype. (README "Feature maturity" table)
+- [x] Явно написать: worktree не является security sandbox. (README maturity notes + threat-model)
 - [ ] Явно написать unsafe behavior wrapper adapters.
 - [ ] Разделить demo и production quickstart.
 - [ ] Документировать node trust/ownership model.
