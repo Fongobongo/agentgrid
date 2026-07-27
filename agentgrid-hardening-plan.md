@@ -148,7 +148,7 @@
 
 - [ ] Перейти от path join/canonicalize к descriptor-relative записи, где возможно.
 - [ ] Использовать `openat`/`O_NOFOLLOW` или эквивалентную библиотеку.
-- [ ] Запретить symlink artifact directories.
+- [x] Запретить symlink artifact directories. (`std::fs::symlink_metadata` reject на dir и file в `artifact_path`; regression-тест `save_artifact_rejects_symlink_dir`)
 - [x] Валидировать `attempt_id` как UUID/безопасный opaque ID. (`is_safe_opaque_id` на `[A-Za-z0-9_-]` в `artifact_path` + `save_artifact_bytes` раньше любого path join; regression-тест `save_artifact_rejects_traversal_attempt_id`)
 - [x] Сохранять upload во временный файл и атомарно публиковать rename.
 

@@ -395,6 +395,14 @@ impl Store {
         if !canon_dir.starts_with(&canon_root) {
             anyhow::bail!("artifact dir escapes root");
         }
+        // Hardening P0: reject symlinked artifact directories / files. A symlink
+        // inside artifact_root pointing outside (or to a sensitive file) would
+        // let a read/write escape the root even though the *name* was safe.
+        if let Ok(md) = std::fs::symlink_metadata(&dir) {
+            if md.file_type().is_symlink() {
+                anyhow::bail!("artifact dir is a symlink");
+            }
+        }
         // Single safe segment: no separators / traversal / NUL / control chars.
         if name.is_empty()
             || name.len() > 255
@@ -407,7 +415,14 @@ impl Store {
         {
             anyhow::bail!("invalid artifact name");
         }
-        Ok(canon_dir.join(name))
+        let file_path = canon_dir.join(name);
+        // Hardening P0: the resolved file itself must not be a symlink.
+        if let Ok(md) = std::fs::symlink_metadata(&file_path) {
+            if md.file_type().is_symlink() {
+                anyhow::bail!("artifact file is a symlink");
+            }
+        }
+        Ok(file_path)
     }
 
     pub async fn save_artifact(
@@ -3880,5 +3895,29 @@ mod workflow_tests {
         // traversal-target directory was created. (We assert the rejection
         // itself above; artifact_root may legitimately hold other test data,
         // so we do not assert emptiness.)
+    }
+    /// Hardening P0: a symlinked artifact directory must be rejected — a node
+    /// (or a prior compromise) must not redirect artifact writes outside root.
+    #[tokio::test]
+    async fn save_artifact_rejects_symlink_dir() {
+        let s = temp_store().await;
+        // Plant a symlink where the attempt dir would live, pointing outside.
+        let real_id = "550e8400-e29b-41d4-a716-446655440000";
+        let attempt_dir = s.artifact_root.join(real_id);
+        tokio::fs::create_dir_all(&s.artifact_root).await.unwrap();
+        let outside = std::env::temp_dir().join("ag-symlink-outside");
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        // Clean any symlink/dir left by a prior run so the test is repeatable.
+        let _ = tokio::fs::remove_file(&attempt_dir).await;
+        let _ = tokio::fs::remove_dir_all(&attempt_dir).await;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &attempt_dir).unwrap();
+        let err = s
+            .save_artifact_bytes(real_id, "ok.txt", b"x", None, None)
+            .await
+            .expect_err("symlinked attempt dir rejected");
+        assert!(matches!(err, StoreArtifactError::Other(_)), "{err:?}");
+        // The escape never reached the outside target.
+        assert!(tokio::fs::read(outside.join("ok.txt")).await.is_err());
     }
 }
