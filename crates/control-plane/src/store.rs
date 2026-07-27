@@ -1486,13 +1486,18 @@ impl Store {
             TaskStatus::Cancelled => Some("cancelled".into()),
             _ => None,
         };
-        sqlx::query("UPDATE tasks SET status = ?, finished_at = ?, error_code = ? WHERE id = ?")
-            .bind(status_str(task_target))
-            .bind(&now)
-            .bind(&task_error_code)
-            .bind(&task_id)
-            .execute(&mut *tx)
-            .await?;
+        // Hardening P1 item 13: a terminal task has no active attempt — clear
+        // assigned_attempt_id so the invariant "terminal task has no active
+        // attempt" / "assigned_attempt_id points at the same task" holds.
+        sqlx::query(
+            "UPDATE tasks SET status = ?, finished_at = ?, error_code = ?, assigned_attempt_id = NULL WHERE id = ?",
+        )
+        .bind(status_str(task_target))
+        .bind(&now)
+        .bind(&task_error_code)
+        .bind(&task_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("UPDATE nodes SET active_attempts = MAX(0, active_attempts - 1) WHERE id = ?")
             .bind(&node_id)
             .execute(&mut *tx)
@@ -1633,8 +1638,9 @@ impl Store {
         let status: String = row.try_get("status")?;
         if status == "queued" {
             sqlx::query(
-                "UPDATE tasks SET status = 'cancelled', assigned_attempt_id = NULL WHERE id = ?",
+                "UPDATE tasks SET status = 'cancelled', finished_at = ?, assigned_attempt_id = NULL WHERE id = ?",
             )
+            .bind(now_iso())
             .bind(task_id)
             .execute(&mut *tx)
             .await?;
@@ -2046,8 +2052,10 @@ async fn lose_node_attempts(
             .execute(&mut **tx)
             .await?;
         // Fail the task only if it has not already reached a terminal state.
+        // Hardening P1 item 13: clear assigned_attempt_id so a terminal task
+        // has no active attempt.
         sqlx::query(
-            "UPDATE tasks SET status = 'failed', error_code = 'node_lost', finished_at = ? \
+            "UPDATE tasks SET status = 'failed', error_code = 'node_lost', finished_at = ?, assigned_attempt_id = NULL \
              WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'cancelled')",
         )
         .bind(&now)

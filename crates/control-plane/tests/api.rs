@@ -4939,3 +4939,108 @@ async fn artifact_upload_response_carries_metadata_and_hash() {
     assert_eq!(body.media_type.as_deref(), Some("image/png"));
     assert_eq!(body.sha256, expected);
 }
+
+/// Hardening P1 item 13 (state-machine invariants): after every lifecycle
+/// terminal the task satisfies: status is terminal, `finished_at` is set,
+/// `assigned_attempt_id` is NULL, and the owning node's `active_attempts` is
+/// 0. Walked for succeed, fail, cancel, and node-lost outcomes.
+#[tokio::test]
+async fn state_machine_terminal_invariants_hold() {
+    async fn assert_terminal_invariants(
+        app: &Router,
+        state: &AppState,
+        task_id: &str,
+        node_id: &str,
+    ) {
+        let tv = show_task_view(app, task_id).await;
+        assert!(
+            matches!(
+                tv.status,
+                TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+            ),
+            "terminal status, got {:?}",
+            tv.status
+        );
+        assert!(
+            tv.finished_at.is_some(),
+            "finished_at must be set on terminal task"
+        );
+        assert!(
+            tv.assigned_attempt_id.is_none(),
+            "terminal task must have no active attempt"
+        );
+        let aa: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+            .bind(node_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(aa, 0, "active_attempts reconciled to 0 after terminal");
+    }
+
+    // Succeed.
+    {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, cred) = enroll(&app, "n-inv-s", vec!["mock".into()], vec!["*".into()]).await;
+        let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+        assert!(
+            ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token)
+                .await
+                .is_success()
+        );
+        assert!(state
+            .store
+            .complete_attempt(&assign.attempt_id, &complete_req())
+            .await
+            .unwrap());
+        assert_terminal_invariants(&app, &state, &assign.task_id, &node_id).await;
+    }
+    // Fail.
+    {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, cred) = enroll(&app, "n-inv-f", vec!["mock".into()], vec!["*".into()]).await;
+        let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await;
+        assert!(
+            ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token)
+                .await
+                .is_success()
+        );
+        assert!(state
+            .store
+            .complete_attempt(
+                &assign.attempt_id,
+                &CompleteAttemptRequest {
+                    exit_code: 3,
+                    ..complete_req()
+                }
+            )
+            .await
+            .unwrap());
+        assert_terminal_invariants(&app, &state, &assign.task_id, &node_id).await;
+    }
+    // Cancel (queued task).
+    {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, _cred) = enroll(&app, "n-inv-c", vec!["mock".into()], vec!["*".into()]).await;
+        // A queued (never-assigned) task: cancel moves it straight to Cancelled.
+        let task_id = create_task(&app, "mock", None).await;
+        assert!(state.store.cancel_task(&task_id).await.unwrap());
+        assert_terminal_invariants(&app, &state, &task_id, &node_id).await;
+    }
+    // Node lost.
+    {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, cred) = enroll(&app, "n-inv-l", vec!["mock".into()], vec!["*".into()]).await;
+        let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+        assert!(
+            ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token)
+                .await
+                .is_success()
+        );
+        assert!(state.store.mark_node_offline(&node_id).await.unwrap());
+        assert_terminal_invariants(&app, &state, &assign.task_id, &node_id).await;
+    }
+}

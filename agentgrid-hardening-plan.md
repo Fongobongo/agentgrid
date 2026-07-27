@@ -453,10 +453,10 @@
 - [ ] Добавить audit event с source state/event.
 - [ ] Отделить legacy compatibility transitions от основного автомата.
 - [ ] Проверить terminal idempotency явно до transition.
-- [ ] Добавить invariants: один active attempt на task.
-- [ ] Добавить invariants: terminal task не имеет active attempt.
-- [ ] Добавить invariants: `finished_at` согласован со status.
-- [ ] Добавить invariants: `assigned_attempt_id` указывает на тот же task.
+- [x] Добавить invariants: один active attempt на task. (CAS-охраны `WHERE status='queued'` + unique assigned_attempt_id; `complete_attempt`/`lose_node_attempts`/`cancel_task` очищают `assigned_attempt_id`)
+- [x] Добавить invariants: terminal task не имеет active attempt. (enforced + regression-тест `state_machine_terminal_invariants_hold`)
+- [x] Добавить invariants: `finished_at` согласован со status. (set on complete/cancel/lost; invariant test)
+- [x] Добавить invariants: `assigned_attempt_id` указывает на тот же task. (cleared on terminal; invariant test)
 - [ ] Добавить property-based tests для state machine.
 
 ## 14. Event ingestion hardening — P1
