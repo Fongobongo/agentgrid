@@ -257,6 +257,24 @@ impl AppState {
                     })
                 })
             });
+        // Hardening P0 item 4: canonicalize the web root once at startup so the
+        // static fallback can compare against a fixed canonical root on every
+        // request (symlinks escaping the source dir are caught at request time
+        // by re-canonicalizing the served file). Fails closed if the resolved
+        // root does not exist by startup time.
+        let web_root = match web_root {
+            Some(r) => match r.canonicalize() {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(
+                        root = %r.display(),
+                        "web root failed to canonicalize at startup, static UI disabled: {e}"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         let limits = Limits {
             prompt: env_usize("AGENTGRID_MAX_PROMPT_KB", 64) * 1024,
             event: env_usize("AGENTGRID_MAX_EVENT_KB", 1024) * 1024,
@@ -456,13 +474,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// escape. Axum percent-decodes the URI path before we see it.
 async fn static_fallback(State(state): State<Arc<AppState>>, uri: Uri) -> Response {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-    let root = match &state.web_root {
+    // Hardening P0 item 4: the web root was canonicalized once at startup
+    // (see AppState::open). Reuse it directly; no per-request canonicalize.
+    let canon_root = match &state.web_root {
         Some(r) => r.clone(),
         None => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let canon_root = match root.canonicalize() {
-        Ok(c) => c,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
 
     let rel = uri.path().trim_start_matches('/');

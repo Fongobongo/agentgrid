@@ -174,7 +174,7 @@
 - [ ] Заменить самописный `static_fallback` на `tower_http::services::ServeDir` либо эквивалент.
 - [x] Если handler сохраняется — percent-decode path до проверки.
 - [x] Отклонять `ParentDir`, `RootDir` и platform prefix components.
-- [ ] Canonicalize web root один раз при старте.
+- [x] Canonicalize web root один раз при старте.
 - [x] Проверять canonical candidate внутри canonical root.
 - [x] Не следовать symlinks за пределы web root.
 - [x] Добавить `Cache-Control` для hashed assets и `no-cache` для `index.html`.
