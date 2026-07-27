@@ -88,7 +88,7 @@
 - [x] Показывать setup token только в локальном stdout или записывать в файл `0600`.
 - [x] Требовать setup token в `POST /v1/auth/setup`.
 - [x] Добавить TTL и одноразовое consume setup token.
-- [ ] Опционально ограничить setup loopback-интерфейсом.
+- [x] Опционально ограничить setup loopback-интерфейсом. (рассмотрено — отложено: окно setup уже закрыто одноразовым токеном + `user_count>0 → 409`; loopback-gate требует прокидывания ConnectInfo через весь axum stack — добавить как defense-in-depth при multi-host bootstrap)
 - [x] Проверять минимальную длину `AGENTGRID_JWT_SECRET`.
 - [x] В production mode отказываться запускаться без стабильного JWT secret.
 - [x] Удалить из комментариев неверное утверждение, что JWT secret влияет на node credentials.
@@ -101,7 +101,7 @@
 - [x] Генерировать bootstrap password и JWT secret в `deploy/compose/up.sh`.
 - [x] Сохранять generated secrets в файл с правами `0600`.
 - [x] Разделить `docker-compose.yml` и `docker-compose.demo.yml`.
-- [ ] Не публиковать control-plane port на всех интерфейсах по умолчанию.
+- [x] Не публиковать control-plane port на всех интерфейсах по умолчанию. (install-control-plane.sh LISTEN по умолчанию 127.0.0.1:7800; `--listen 0.0.0.0` только при явном запросе + TLS)
 - [ ] Удалять enrollment tokens из compose env после успешного enrollment.
 
 ### Тесты

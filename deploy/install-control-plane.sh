@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage 5.3: install the agentgrid control plane on a clean Linux host.
 #
-#   ./install-control-plane.sh [--listen 0.0.0.0:7800] [--data-dir /var/lib/agentgrid]
+#   ./install-control-plane.sh [--listen 127.0.0.1:7800] [--data-dir /var/lib/agentgrid]
 #
 # Creates the unprivileged 'agentgrid' user, data + artifact directories, a
 # systemd unit with hardened sandboxing (Stage 5.1), and starts the control
@@ -9,7 +9,9 @@
 # process. Requires systemd.
 set -euo pipefail
 
-LISTEN="${AGENTGRID_LISTEN:-0.0.0.0:7800}"
+# Hardening P0: default to loopback only. Pass --listen 0.0.0.0:7800 (with
+# TLS configured) only when nodes on other hosts must reach the control plane.
+LISTEN="${AGENTGRID_LISTEN:-127.0.0.1:7800}"
 BIN_DIR="/usr/local/bin"
 DATA_DIR="/var/lib/agentgrid"
 DB_DIR="$DATA_DIR/data"
