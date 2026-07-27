@@ -664,6 +664,18 @@ pub struct ArtifactMeta {
     pub sha256: Option<String>,
 }
 
+/// Hardening P0 item 3: the upload response carries back the artifact name,
+/// stored size, media type and the server-computed SHA-256 so a client can
+/// verify integrity without a separate GET. (Supersedes the old bare `200`.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactUploadResponse {
+    pub name: String,
+    pub size_bytes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventsQuery {
     #[serde(default)]

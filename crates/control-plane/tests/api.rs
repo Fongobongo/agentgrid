@@ -4891,3 +4891,75 @@ async fn race_ack_lease_100_iterations_no_drift() {
         assert_eq!(aa, 0, "lease wins -> no running attempt, counter 0");
     }
 }
+
+/// Hardening P0 item 3: a successful artifact upload returns the stored
+/// metadata (name, size, media type) and the server-computed SHA-256, so a
+/// client can verify integrity without a separate GET. Both the JSON and the
+/// raw endpoints return the same `ArtifactUploadResponse` body.
+#[tokio::test]
+async fn artifact_upload_response_carries_metadata_and_hash() {
+    use agentgrid_common::ArtifactUploadResponse;
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-meta", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    let payload = b"hello world".to_vec();
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    sha2::Digest::update(&mut h, &payload);
+    let expected = sha2::Digest::finalize(h)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    // JSON endpoint.
+    let req = UploadArtifactRequest {
+        name: "out.txt".into(),
+        content: String::from_utf8(payload.clone()).unwrap(),
+        media_type: Some("text/plain".into()),
+        sha256: None,
+    };
+    let r = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
+            serde_json::to_string(&req).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: ArtifactUploadResponse =
+        serde_json::from_slice(&to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body.name, "out.txt");
+    assert_eq!(body.size_bytes, payload.len() as i64);
+    assert_eq!(body.media_type.as_deref(), Some("text/plain"));
+    assert_eq!(body.sha256, expected);
+
+    // Raw endpoint.
+    let r = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/node/attempts/{}/artifacts/raw",
+                    assign.attempt_id
+                ))
+                .header("authorization", format!("Bearer {cred}"))
+                .header("x-agentgrid-fencing-token", &assign.fencing_token)
+                .header("x-artifact-name", "blob.bin")
+                .header("x-artifact-media-type", "image/png")
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: ArtifactUploadResponse =
+        serde_json::from_slice(&to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body.name, "blob.bin");
+    assert_eq!(body.size_bytes, payload.len() as i64);
+    assert_eq!(body.media_type.as_deref(), Some("image/png"));
+    assert_eq!(body.sha256, expected);
+}

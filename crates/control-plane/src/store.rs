@@ -9,12 +9,12 @@ use std::time::Duration;
 
 use agentgrid_common::{
     next_attempt_status, next_task_status, AgentProfile, AgentSession, ApprovalStatus,
-    ApprovalView, ArtifactMeta, Assignment, AttemptStatus, AttemptTransition,
-    CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest, EnrollRequest,
-    EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, McpServer, NodeEligibility,
-    NodeStatus, NodeView, PollRequest, RepositoryView, SkillTrustView, TaskEligibility, TaskEvent,
-    TaskStatus, TaskTransition, TaskView, UploadArtifactRequest, WorkflowBudget, WorkflowRole,
-    WorkflowSchedule,
+    ApprovalView, ArtifactMeta, ArtifactUploadResponse, Assignment, AttemptStatus,
+    AttemptTransition, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest,
+    EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, McpServer,
+    NodeEligibility, NodeStatus, NodeView, PollRequest, RepositoryView, SkillTrustView,
+    TaskEligibility, TaskEvent, TaskStatus, TaskTransition, TaskView, UploadArtifactRequest,
+    WorkflowBudget, WorkflowRole, WorkflowSchedule,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -370,7 +370,7 @@ impl Store {
         &self,
         attempt_id: &str,
         req: &UploadArtifactRequest,
-    ) -> Result<(), StoreArtifactError> {
+    ) -> Result<ArtifactUploadResponse, StoreArtifactError> {
         self.save_artifact_bytes(
             attempt_id,
             &req.name,
@@ -391,7 +391,7 @@ impl Store {
         bytes: &[u8],
         media_type: Option<&str>,
         sha256: Option<&str>,
-    ) -> Result<(), StoreArtifactError> {
+    ) -> Result<ArtifactUploadResponse, StoreArtifactError> {
         // Hardening P0 (artifact integrity): always compute the server-side
         // SHA-256 of the uploaded bytes. If the caller supplied a sha256 hint
         // (JSON `sha256` field or raw `x-artifact-sha256` header) and it
@@ -434,7 +434,12 @@ impl Store {
         .bind(&computed)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(ArtifactUploadResponse {
+            name: name.to_string(),
+            size_bytes: size,
+            media_type: media_type.map(|s| s.to_string()),
+            sha256: computed,
+        })
     }
 
     /// Read a stored artifact's metadata by task id + name (latest attempt).

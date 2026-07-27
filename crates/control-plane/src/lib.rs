@@ -1977,16 +1977,16 @@ async fn upload_artifact(
     Path(attempt_id): Path<String>,
     headers: HeaderMap,
     Json(req): Json<UploadArtifactRequest>,
-) -> StatusCode {
+) -> Response {
     // Stage 2.2: never let a crafted name escape the artifact root
     // (../../etc/passwd, absolute paths, separators). Validated before the
     // ownership check so a traversal attempt never reaches the store and
     // never discloses attempt existence.
     if !is_safe_artifact_name(&req.name) {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code;
+        return code.into_response();
     }
     if let Err(code) = check_fencing_token(
         &state,
@@ -1995,10 +1995,10 @@ async fn upload_artifact(
     )
     .await
     {
-        return code;
+        return code.into_response();
     }
     if req.content.len() > state.limits.artifact {
-        return StatusCode::PAYLOAD_TOO_LARGE;
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     match state
         .store
@@ -2011,13 +2011,13 @@ async fn upload_artifact(
         )
         .await
     {
-        Ok(()) => StatusCode::OK,
+        Ok(resp) => axum::Json(resp).into_response(),
         Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
-            StatusCode::UNPROCESSABLE_ENTITY
+            StatusCode::UNPROCESSABLE_ENTITY.into_response()
         }
         Err(e) => {
             tracing::error!("save_artifact failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }
@@ -2033,9 +2033,9 @@ async fn upload_artifact_raw(
     Path(attempt_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
+) -> Response {
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code;
+        return code.into_response();
     }
     if let Err(code) = check_fencing_token(
         &state,
@@ -2044,10 +2044,10 @@ async fn upload_artifact_raw(
     )
     .await
     {
-        return code;
+        return code.into_response();
     }
     if body.len() > state.limits.artifact {
-        return StatusCode::PAYLOAD_TOO_LARGE;
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let name = match headers
         .get("x-artifact-name")
@@ -2055,10 +2055,10 @@ async fn upload_artifact_raw(
         .map(|s| s.to_string())
     {
         Some(n) => n,
-        None => return StatusCode::BAD_REQUEST,
+        None => return StatusCode::BAD_REQUEST.into_response(),
     };
     if !is_safe_artifact_name(&name) {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
     let media_type = headers
         .get("x-artifact-media-type")
@@ -2079,13 +2079,13 @@ async fn upload_artifact_raw(
         )
         .await
     {
-        Ok(()) => StatusCode::OK,
+        Ok(resp) => axum::Json(resp).into_response(),
         Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
-            StatusCode::UNPROCESSABLE_ENTITY
+            StatusCode::UNPROCESSABLE_ENTITY.into_response()
         }
         Err(e) => {
             tracing::error!("save_artifact_bytes failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }

@@ -132,7 +132,7 @@
 - [x] Сравнивать вычисленный hash с `x-artifact-sha256`, если header передан.
 - [x] Возвращать `422` при hash mismatch.
 - [x] Хранить только вычисленный server-side hash.
-- [ ] Возвращать artifact metadata и hash в upload response.
+- [x] Возвращать artifact metadata и hash в upload response.
 
 ### Stored XSS и download safety
 
