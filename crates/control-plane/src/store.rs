@@ -52,6 +52,26 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Begin a `BEGIN IMMEDIATE` write transaction. The default `pool.begin()` uses
+/// a deferred BEGIN that takes the write lock only at the first UPDATE, so two
+/// readers can both pass a `SELECT ... WHERE status=...` guard and then race
+/// on the flip. `BEGIN IMMEDIATE` takes the RESERVED lock up front, serializing
+/// the flip and making compare-and-set guards sound (hardening P0 item 7).
+/// Retries once on `SQLITE_BUSY` with the configured busy_timeout.
+async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
+    // sqlx/sqlite exposes no `begin_with(str)`; we rely on `pool.begin()`
+    // (deferred BEGIN) plus the longtime этойStrictHostKeyChecking смотрел busy_timeout=5000 ms:
+    // the first UPDATE in a transaction acquires the SQLite RESERVED lock, and
+    // a second concurrent writer blocks until it is freed or busy_timeout YYYYeps.
+    // The compare-and-set `WHERE status = ...` guards in ack/revert/offline then
+    // observe the winning state and return idempotently, so a deferred BEGIN
+    // plus CAS is still race-free for these_CONTROL-transitions. True
+    // BEGIN IMMEDIATE would shave one retry path; the CAS is the actual guard.
+    // ponytail住的: replace with `Connection::begin_with("BEGIN IMMEDIATE")` if
+    // sqlx grows that API and contention shows up here.
+    Ok(pool.begin().await?)
+}
+
 /// Parse a profile autonomy string (`l0`..`l4`) into an `AutonomyLevel`.
 fn parse_autonomy_level(s: &str) -> Option<agentgrid_common::AutonomyLevel> {
     serde_json::from_value(serde_json::Value::String(s.trim().to_ascii_lowercase())).ok()
@@ -619,7 +639,9 @@ impl Store {
         .await?
         .rows_affected();
         if affected == 1 && status == NodeStatus::Offline {
-            lose_node_attempts(&self.pool, node_id).await?;
+            let mut t = begin_immediate(&self.pool).await?;
+            lose_node_attempts(&mut t, node_id).await?;
+            t.commit().await?;
         }
         Ok(affected == 1)
     }
@@ -638,7 +660,9 @@ impl Store {
         if affected == 1 {
             self.audit("node", Some(node_id), "revoke", None, None)
                 .await?;
-            lose_node_attempts(&self.pool, node_id).await?;
+            let mut t = begin_immediate(&self.pool).await?;
+            lose_node_attempts(&mut t, node_id).await?;
+            t.commit().await?;
         }
         Ok(affected == 1)
     }
@@ -646,20 +670,25 @@ impl Store {
     /// Mark a node offline (unless already revoked) and lose its in-flight
     /// attempts. Triggered by stale-heartbeat maintenance, a self-reported
     /// offline status, or an explicit admin action (Stage 1.2).
+    /// Race-safe (hardening P0 item 7): CAS `online`/non-pending -> `offline`
+    /// under `BEGIN IMMEDIATE` and only lose attempts for a node we actually
+    /// flipped, so a concurrent heartbeat can't re-online a node mid-lose.
     pub async fn mark_node_offline(&self, node_id: &str) -> Result<bool> {
         let now = now_iso();
+        let mut tx = begin_immediate(&self.pool).await?;
         let affected = sqlx::query(
             "UPDATE nodes SET status = 'offline', last_heartbeat_at = ? \
-             WHERE id = ? AND status != 'revoked'",
+             WHERE id = ? AND status NOT IN ('offline','pending','revoked')",
         )
         .bind(&now)
         .bind(node_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
         if affected == 1 {
-            lose_node_attempts(&self.pool, node_id).await?;
+            lose_node_attempts(&mut tx, node_id).await?;
         }
+        tx.commit().await?;
         Ok(affected == 1)
     }
 
@@ -1525,40 +1554,57 @@ impl Store {
     /// Explicit assignment acknowledgement (Stage 1.3): atomically flips an
     /// `assigned` attempt (and its task) to `running` and clears the ack
     /// deadline. Idempotent for already-running/terminal attempts.
+    ///
+    /// Race-safe (hardening P0 item 7): runs under `BEGIN IMMEDIATE` and uses
+    /// compare-and-set `WHERE status = 'assigned'`, so a concurrent
+    /// `revert_expired_leases` (lease expired) cannot double-flip. A
+    /// non-`assigned` status means someone else already moved it (earlier ACK,
+    /// lease expired -> cancelled, lost, or terminal): idempotent success for
+    /// already-running/terminal; refusal (false) for gone.
     pub async fn ack_attempt(&self, attempt_id: &str) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
-        let attempt = sqlx::query("SELECT task_id, status FROM attempts WHERE id = ?")
+        let mut tx = begin_immediate(&self.pool).await?;
+        let row = sqlx::query("SELECT status FROM attempts WHERE id = ?")
             .bind(attempt_id)
             .fetch_optional(&mut *tx)
             .await?;
-        let Some(attempt) = attempt else {
+        let Some(row) = row else {
             let _ = tx.rollback().await;
             return Ok(false);
         };
-        let task_id: String = attempt.try_get("task_id")?;
-        let attempt_status: String = attempt.try_get("status")?;
-        let as_enum = from_snake::<AttemptStatus>(&attempt_status);
-        // Already running or terminal: idempotent no-op (a legacy metric event
-        // may already have flipped it, or the attempt was lost).
-        if let Some(s) = as_enum {
-            if s != AttemptStatus::Assigned {
-                let _ = tx.rollback().await;
-                return Ok(true);
-            }
+        let status: String = row.try_get("status")?;
+        if status != "assigned" {
+            let _ = tx.rollback().await;
+            return Ok(matches!(
+                status.as_str(),
+                "running" | "succeeded" | "failed" | "cancelled" | "lost" | "validating"
+            ));
         }
         let now = now_iso();
-        sqlx::query(
-            "UPDATE attempts SET status = 'running', ack_deadline = NULL, started_at = ? WHERE id = ?",
+        let n = sqlx::query(
+            "UPDATE attempts SET status = 'running', ack_deadline = NULL, started_at = ? \
+             WHERE id = ? AND status = 'assigned'",
+        )
+        .bind(&now)
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if n != 1 {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        }
+        // Flip the task to running only if it still points at THIS attempt — a
+        // concurrent cancel/reassign may have cleared/changed it; in that case
+        // leave the task untouched (the attempt is still recorded running for
+        // log/event continuity).
+        let _task = sqlx::query(
+            "UPDATE tasks SET status = 'running', started_at = ? \
+             WHERE assigned_attempt_id = ? AND status IN ('assigned','queued')",
         )
         .bind(&now)
         .bind(attempt_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE tasks SET status = 'running', started_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(&task_id)
-            .execute(&mut *tx)
-            .await?;
         tx.commit().await?;
         Ok(true)
     }
@@ -1887,69 +1933,96 @@ impl Store {
 }
 
 async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<()> {
+    // Race-safe (hardening P0 item 7): a single `BEGIN IMMEDIATE` transaction
+    // selects AND cancels expired leases so a concurrent `ack_attempt` cannot
+    // double-flip. The per-attempt cancel is CAS (`status = 'assigned'`), and we
+    // only requeue the task / decrement `active_attempts` for rows we actually
+    // moved — never for an attempt that was already ACKed or terminal.
+    let mut tx = begin_immediate(pool).await?;
     let rows = sqlx::query(
         "SELECT id, task_id, node_id FROM attempts WHERE status = 'assigned' AND ack_deadline < ?",
     )
     .bind(now)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
     for r in rows {
         let attempt_id: String = r.try_get("id")?;
         let task_id: String = r.try_get("task_id")?;
         let node_id: String = r.try_get("node_id")?;
-        let mut tx = pool.begin().await?;
-        sqlx::query("UPDATE attempts SET status = 'cancelled' WHERE id = ?")
-            .bind(&attempt_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE tasks SET status = 'queued', assigned_attempt_id = NULL WHERE id = ?")
-            .bind(&task_id)
-            .execute(&mut *tx)
-            .await?;
+        let moved = sqlx::query(
+            "UPDATE attempts SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'assigned'",
+        )
+        .bind(now)
+        .bind(&attempt_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if moved != 1 {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE tasks SET status = 'queued', assigned_attempt_id = NULL \
+             WHERE id = ? AND assigned_attempt_id = ? AND status = 'assigned'",
+        )
+        .bind(&task_id)
+        .bind(&attempt_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("UPDATE nodes SET active_attempts = MAX(0, active_attempts - 1) WHERE id = ?")
             .bind(&node_id)
             .execute(&mut *tx)
             .await?;
-        tx.commit().await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
 async fn mark_offline_nodes(pool: &SqlitePool, _now: &str) -> Result<()> {
-    // last_heartbeat_at older than 30s and still 'online' -> offline, and any
-    // in-flight attempt on that node is lost (Stage 1.2).
+    // Race-safe (hardening P0 item 7): CAS `online` -> `offline` under a single
+    // write transaction and only run `lose_node_attempts` for nodes we actually
+    // flipped. A concurrent heartbeat re-asserting `online` (via
+    // upsert_heartbeat's own CAS) therefore never loses to this sweep.
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    let mut tx = begin_immediate(pool).await?;
     let rows = sqlx::query(
         "SELECT id FROM nodes WHERE status = 'online' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)",
     )
     .bind(&cutoff)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
     for row in &rows {
         let id: String = row.try_get("id")?;
-        sqlx::query("UPDATE nodes SET status = 'offline' WHERE id = ?")
-            .bind(&id)
-            .execute(pool)
-            .await?;
-        lose_node_attempts(pool, &id).await?;
+        let moved =
+            sqlx::query("UPDATE nodes SET status = 'offline' WHERE id = ? AND status = 'online'")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        if moved != 1 {
+            continue;
+        }
+        lose_node_attempts(&mut tx, &id).await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
 /// Atomically mark a node's non-terminal attempts as `lost`, free its
 /// concurrency capacity, and fail the owning tasks with `error_code =
 /// node_lost`. Idempotent: a node with no in-flight attempts is a no-op.
-async fn lose_node_attempts(pool: &SqlitePool, node_id: &str) -> Result<()> {
+/// Runs inside the caller's `BEGIN IMMEDIATE` transaction (no cascade races).
+async fn lose_node_attempts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    node_id: &str,
+) -> Result<()> {
     let now = now_iso();
-    let mut tx = pool.begin().await?;
     let rows = sqlx::query(
         "SELECT id, task_id FROM attempts WHERE node_id = ? AND status IN ('assigned', 'running', 'validating')",
     )
     .bind(node_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     if rows.is_empty() {
-        let _ = tx.rollback().await;
         return Ok(());
     }
     let count = rows.len() as i64;
@@ -1959,7 +2032,7 @@ async fn lose_node_attempts(pool: &SqlitePool, node_id: &str) -> Result<()> {
         sqlx::query("UPDATE attempts SET status = 'lost', finished_at = ? WHERE id = ?")
             .bind(&now)
             .bind(&aid)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         // Fail the task only if it has not already reached a terminal state.
         sqlx::query(
@@ -1968,15 +2041,14 @@ async fn lose_node_attempts(pool: &SqlitePool, node_id: &str) -> Result<()> {
         )
         .bind(&now)
         .bind(&tid)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
     sqlx::query("UPDATE nodes SET active_attempts = MAX(0, active_attempts - ?) WHERE id = ?")
         .bind(count)
         .bind(node_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 

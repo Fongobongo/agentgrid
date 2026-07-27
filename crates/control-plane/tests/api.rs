@@ -1488,6 +1488,143 @@ async fn acked_slow_agent_keeps_assignment() {
     );
 }
 
+/// Hardening P0 item 7 (lease/ACK race): a lease that has expired MUST be
+/// reverted to the queue with the concurrency counter decremented exactly
+/// once, and a late ACK arriving afterward MUST be idempotent (not flip back
+/// to running, not double-decrement the node).
+#[tokio::test]
+async fn race_ack_after_lease_expiry_is_idempotent() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-race1", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    // Expire the ack deadline, then run the maintenance sweep that reverts it.
+    state
+        .store
+        .set_attempt_ack_deadline(&assign.attempt_id, "1970-01-01T00:00:00Z")
+        .await
+        .unwrap();
+    state.store.tick_maintenance().await.unwrap();
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
+    // Capacity was freed exactly once.
+    let aa: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(aa, 0, "active_attempts decremented once by lease revert");
+    // Late ACK for the reverted attempt is idempotent (status already
+    // terminal): it returns 200 and must NOT flip the task back to running and
+    // must NOT decrement the counter again.
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        StatusCode::OK
+    );
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
+    let aa2: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(aa2, 0, "late ack must not double-decrement");
+}
+
+/// Hardening P0 item 7 (lease/ACK race): ACK racing WITH the lease sweep must
+/// settle in ONE terminal transition — the attempt is exactly `running` and
+/// the concurrency counter is exactly 1 after both have run.
+#[tokio::test]
+async fn race_ack_and_lease_settle_once() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-race2", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    // ACK first (wins the CAS).
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        StatusCode::OK
+    );
+    // Expire the (already-superseded) ack deadline and run the sweep: it must
+    // find status != 'assigned' and leave the running attempt + counter alone.
+    state
+        .store
+        .set_attempt_ack_deadline(&assign.attempt_id, "1970-01-01T00:00:00Z")
+        .await
+        .unwrap();
+    state.store.tick_maintenance().await.unwrap();
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Running
+    );
+    let aa: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        aa, 1,
+        "ack wins; lease sweep is a no-op on a running attempt"
+    );
+}
+
+/// Hardening P0 item 7 (offline sweep race): a fresh heartbeat that
+/// re-online a node must NOT keep it offline after a subsequent sweep (the
+/// sweep CAS `online`->`offline` only fires on a stale heartbeat, so a fresh
+/// heartbeat re-asserts `online` and the next sweep is a no-op).
+#[tokio::test]
+async fn race_fresh_heartbeat_beats_offline_sweep() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-race3", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred).await,
+        StatusCode::OK
+    );
+    // Age the heartbeat so the sweep flips the node offline and loses the
+    // running attempt (attempt=lost, task=failed/node_lost).
+    sqlx::query("UPDATE nodes SET last_heartbeat_at = '1970-01-01T00:00:00Z' WHERE id = ?")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    state.store.tick_maintenance().await.unwrap();
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
+    // A fresh heartbeat re-online the node; the very next sweep must find it
+    // `online` with a recent last_heartbeat_at and leave it online (no
+    // double-flip, no spurious second lose of the already-terminal attempt).
+    state
+        .store
+        .heartbeat(
+            &node_id,
+            &agentgrid_common::HeartbeatRequest {
+                status: Some(agentgrid_common::NodeStatus::Online),
+                name: "node-race3".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 1,
+                agent_version: "mock".into(),
+                active_attempts: 0,
+                load_avg: 0.0,
+                free_disk_mb: 1000,
+                capabilities: vec![],
+                protocol_version: None,
+                discovered_skills: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    state.store.tick_maintenance().await.unwrap();
+    let st: String = sqlx::query_scalar("SELECT status FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(st, "online", "fresh heartbeat beats offline sweep");
+}
+
+/// Stage 1.2: a node going offline with an in-flight attempt must lose it
+/// (attempt=lost, task=failed/node_lost, capacity freed) and the task must be
+/// retryable once the node is back online.
 #[tokio::test]
 async fn node_offline_loses_attempt_then_retry_succeeds() {
     // Stage 1.2: a node going offline with an in-flight attempt must lose it

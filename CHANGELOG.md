@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Correctness (hardening P0 item 7 — lease/ACK race conditions)
+
+- `ack_attempt`, `revert_expired_leases`, `mark_offline_nodes`,
+  `mark_node_offline`, and `revoke_node` now run under a single write
+  transaction with compare-and-set `WHERE status = ...` guards and
+  `rows_affected()` checks. The task is only flipped when
+  `assigned_attempt_id` still points at the attempt; `active_attempts` is
+  decremented only for attempts the CAS actually moved.
+- This removes the double-flip and concurrency-counter-drift races between a
+  late ACK and the lease sweep, and between an offline sweep and a fresh
+  heartbeat.
+- Regression tests: late ACK after lease expiry is idempotent (task stays
+  queued, counter decremented once); ACK-then-expire leaves the running
+  attempt untouched; a fresh heartbeat beats a subsequent offline sweep.
+
 ### Security (hardening P0 — safe node install)
 
 - `ag nodes install` no longer passes `StrictHostKeyChecking=no` to SSH: it

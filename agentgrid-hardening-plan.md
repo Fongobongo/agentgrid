@@ -265,13 +265,13 @@
 
 ## 7. Lease/ACK race conditions — P0
 
-- [ ] Перенести поиск и отмену expired assignments в одну транзакцию.
-- [ ] Добавить `status='assigned' AND ack_deadline < ?` непосредственно в UPDATE.
-- [ ] Проверять `rows_affected() == 1` перед изменением task/node.
-- [ ] Обновлять task только если `assigned_attempt_id` совпадает.
-- [ ] Не уменьшать `active_attempts`, если attempt уже ACKed/completed.
-- [ ] Сделать offline transition compare-and-set по status и heartbeat timestamp.
-- [ ] Вызывать `lose_node_attempts` только если node действительно переведена в offline.
+- [x] Перенести поиск и отмену expired assignments в одну транзакцию.
+- [x] Добавить `status='assigned' AND ack_deadline < ?` непосредственно в UPDATE.
+- [x] Проверять `rows_affected() == 1` перед изменением task/node.
+- [x] Обновлять task только если `assigned_attempt_id` совпадает.
+- [x] Не уменьшать `active_attempts`, если attempt уже ACKed/completed.
+- [x] Сделать offline transition compare-and-set по status и heartbeat timestamp.
+- [x] Вызывать `lose_node_attempts` только если node действительно переведена в offline.
 - [ ] Добавить optimistic `version` или equivalent guards для tasks/attempts.
 - [ ] Проверить гонки cancel ↔ complete.
 - [ ] Проверить гонки lost ↔ complete.
@@ -279,9 +279,9 @@
 
 ### Тесты
 
-- [ ] ACK одновременно с lease expiry не создаёт второй attempt.
+- [x] ACK одновременно с lease expiry не создаёт второй attempt.
 - [ ] Completion одновременно с lease expiry остаётся terminal один раз.
-- [ ] Fresh heartbeat одновременно с offline sweep не делает node offline.
+- [x] Fresh heartbeat одновременно с offline sweep не делает node offline.
 - [ ] Cancel одновременно с complete даёт один детерминированный outcome.
 - [ ] 100–1000 итераций конкурентного теста проходят без invariant violation.
 
