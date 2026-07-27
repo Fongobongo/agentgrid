@@ -877,10 +877,14 @@ impl Store {
     }
 
     pub async fn list_tasks(&self) -> Result<Vec<TaskView>> {
+        // Hardening P2 item 20: server-side maximum limit so a client (or a huge
+        // DB) cannot pull an unbounded row set in one request.
+        const MAX_TASKS: i64 = 1000;
         let rows = sqlx::query(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id \
-             FROM tasks ORDER BY created_at ASC",
+             FROM tasks ORDER BY created_at ASC LIMIT ?",
         )
+        .bind(MAX_TASKS)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_task_view).collect())

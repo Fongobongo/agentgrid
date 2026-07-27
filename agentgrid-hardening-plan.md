@@ -555,7 +555,7 @@
 - [ ] Cursor pagination для workflow runs.
 - [ ] Cursor pagination для conversations/messages.
 - [ ] Cursor pagination для approvals/audit.
-- [ ] Server-side maximum limit.
+- [x] Server-side maximum limit. (`list_tasks` capped at 1000 rows server-side)
 - [ ] Filters: status/repository/node/created range.
 - [ ] Единый response envelope для list endpoints.
 - [ ] Версионированный OpenAPI 3.1 document.
@@ -840,11 +840,11 @@
 - [ ] Разделить demo и production quickstart.
 - [ ] Документировать node trust/ownership model.
 - [ ] Документировать event delivery semantics.
-- [ ] Документировать fencing tokens.
+- [x] Документировать fencing tokens. (threat-model T15 обновлён + invariant section про fencing tokens)
 - [ ] Документировать artifact retention и quotas.
 - [ ] Документировать backup/restore.
 - [ ] Документировать upgrade/rollback.
-- [ ] Добавить `SECURITY.md` с vulnerability reporting.
+- [x] Добавить `SECURITY.md` с vulnerability reporting.
 - [ ] Добавить compatibility matrix.
 - [ ] Добавить API/OpenAPI docs.
 
