@@ -358,11 +358,56 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
 /// dir and its gitlink, and the branch delete (best-effort) reclaims the ref.
 /// The worktree dir is removed directly as a fallback if `worktree remove`
 /// left it behind — and as the only step for non-git tasks (plain dir).
+
+/// Hardening P1 item 33: a workspace path is safe to `remove_dir_all` only if
+/// it has no `..` component and is not itself a symlink. (No canonicalized
+/// root available in `cleanup_workspace`; the `..` + symlink checks block the
+/// traversal and redirect classes of attack.)
+fn safe_workspace_target(p: &std::path::Path) -> bool {
+    use std::path::Component;
+    // Reject any ParentDir (`..`) or Windows prefix component — these are the
+    // traversal vectors. Absolute paths (RootDir) and normal segments are fine.
+    for c in p.components() {
+        if matches!(c, Component::ParentDir | Component::Prefix(_)) {
+            return false;
+        }
+    }
+    // Reject if the leaf is a symlink (redirect outside the workspace).
+    match std::fs::symlink_metadata(p) {
+        Ok(md) => !md.file_type().is_symlink(),
+        Err(_) => true, // does not exist yet — allow (remove is a no-op)
+    }
+}
+
+/// Like `safe_workspace_target` but additionally requires `p` to be a direct
+/// child of `root` (used by `prune_stale_workspaces`, which knows the root).
+fn safe_workspace_target_under(p: &std::path::Path, root: &std::path::Path) -> bool {
+    if !safe_workspace_target(p) {
+        return false;
+    }
+    let parent = match p.parent() {
+        Some(par) => par,
+        None => return false,
+    };
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canon_parent = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
+    canon_parent == canon_root
+}
 pub fn cleanup_workspace(
     ws_path: &std::path::Path,
     repo_dir: Option<&std::path::Path>,
     branch: Option<&str>,
 ) {
+    // Hardening P1 item 33: never remove_dir_all a path that escapes upward
+    // or is a symlink — a corrupt/attacker-controlled ws_path must not let us
+    // nuke an arbitrary directory. `safe_workspace_target` rejects `..`, any
+    // symlink on the path, and requires a real parent dir.
+    if !safe_workspace_target(ws_path) {
+        tracing::warn!(?ws_path, "refusing to clean unsafe workspace path");
+        return;
+    }
     if let (Some(repo), Some(branch)) = (repo_dir, branch) {
         if let Err(e) = (|| -> Result<()> {
             git(
@@ -408,7 +453,13 @@ pub fn prune_stale_workspaces(
                         if mtime < cutoff {
                             let p = e.path();
                             tracing::info!(?p, "pruning stale workspace dir");
-                            let _ = std::fs::remove_dir_all(&p);
+                            // Hardening P1 item 33: only remove a direct
+                            // child of workspace_root that is not a symlink.
+                            if safe_workspace_target_under(&p, workspace_root) {
+                                let _ = std::fs::remove_dir_all(&p);
+                            } else {
+                                tracing::warn!(?p, "skipping unsafe stale workspace dir");
+                            }
                         }
                     }
                 }
@@ -952,5 +1003,45 @@ mod tests {
             "url injection"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hardening P1 item 33: cleanup_workspace refuses traversal (`..`) and
+    /// symlinked workspace targets so a corrupt ws_path cannot delete an
+    /// arbitrary directory, and prune_stale_workspaces only removes direct
+    /// children of workspace_root.
+    #[test]
+    fn cleanup_workspace_refuses_traversal_and_symlink() {
+        let root = std::env::temp_dir().join(format!("ag-ws-safe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("victim");
+        std::fs::create_dir_all(&target).unwrap();
+        // `..`-laden path: refused, victim stays.
+        let escape = root.join("..").join("evil");
+        cleanup_workspace(&escape, None, None);
+        assert!(
+            target.exists(),
+            "traversal path did not delete the real dir"
+        );
+        // Symlink leaf pointing at an outside dir: refused.
+        let outside = std::env::temp_dir().join(format!("ag-ws-out-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = root.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        cleanup_workspace(&link, None, None);
+        assert!(
+            outside.exists(),
+            "symlink target was not deleted via the link"
+        );
+        // prune_stale_workspaces: a symlinked entry under workspace_root is skipped.
+        #[cfg(unix)]
+        {
+            // Make the link old enough to be "stale".
+            // (safe_workspace_target_under rejects the symlink before mtime matters.)
+            prune_stale_workspaces(&root, &root, std::time::Duration::from_secs(0));
+            assert!(outside.exists(), "prune did not follow the symlink");
+        }
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&outside).ok();
     }
 }

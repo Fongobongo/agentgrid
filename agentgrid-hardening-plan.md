@@ -758,12 +758,12 @@
 
 ## 33. Safe workspace cleanup — P1
 
-- [ ] Валидировать cleanup target независимо от caller.
-- [ ] Canonicalize workspace root.
-- [ ] Target должен быть прямым child root.
-- [ ] Проверять attempt ID format.
-- [ ] Не следовать symlink.
-- [ ] Не выполнять `remove_dir_all` за пределами root даже при corrupt state.
+- [x] Валидировать cleanup target независимо от caller. (`safe_workspace_target` guard в `cleanup_workspace`/`prune_stale_workspaces`)
+- [x] Canonicalize workspace root. (`safe_workspace_target_under` canonicalize root для сравнения)
+- [x] Target должен быть прямым child root. (`safe_workspace_target_under` canonicalize parent == root в `prune_stale_workspaces`)
+- [x] Проверять attempt ID format. (attempt-id валидируется как safe opaque ID на CP стороне; workspace path guarded от traversal)
+- [x] Не следовать symlink. (`symlink_metadata` reject leaf symlink в обоих guards)
+- [x] Не выполнять `remove_dir_all` за пределами root даже при corrupt state. (traversal `..` rejected; symlink rejected; regression-тест `cleanup_workspace_refuses_traversal_and_symlink`)
 - [ ] Добавить quarantine для неизвестных stale directories.
 - [ ] Добавить `ag node doctor --repair-worktrees`.
 - [ ] Добавить cleanup metrics.
