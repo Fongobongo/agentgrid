@@ -541,8 +541,8 @@
 - [ ] Ввести общий `ApiError`.
 - [ ] Добавить стабильные machine-readable codes.
 - [ ] Добавить `request_id`.
-- [ ] Не возвращать пустые списки при DB errors.
-- [ ] Возвращать `503` при storage outage.
+- [x] Не возвращать пустые списки при DB errors. (list handlers(nodes/tasks/workflows/runs/schedules/repos/events/mcp) возвращают 503 вместо пустого массива при storage ошибке)
+- [x] Возвращать `503` при storage outage. (list handlers mapped DB Err → SERVICE_UNAVAILABLE)
 - [ ] Не возвращать raw internal error клиенту.
 - [ ] Включать internal error chain только в structured logs.
 - [ ] Добавить единый JSON error schema.

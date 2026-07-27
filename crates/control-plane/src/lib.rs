@@ -1038,12 +1038,16 @@ async fn untrust_skill_handler(
 }
 
 /// Stage 13: list all registered MCP servers.
-async fn list_mcp_servers_handler(State(state): State<Arc<AppState>>) -> Json<Vec<McpServer>> {
+async fn list_mcp_servers_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<McpServer>>, StatusCode> {
+    // Hardening P2 item 19: never return an empty list on a DB error — surface
+    // storage outage as 503 so the client does not read it as "no servers".
     match state.store.list_mcp_servers().await {
-        Ok(s) => Json(s),
+        Ok(s) => Ok(Json(s)),
         Err(e) => {
             tracing::error!("list_mcp_servers failed: {e}");
-            Json(vec![])
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
@@ -1410,12 +1414,14 @@ async fn create_task(
     }
 }
 
-async fn list_tasks(State(state): State<Arc<AppState>>) -> Json<Vec<TaskView>> {
+async fn list_tasks(State(state): State<Arc<AppState>>) -> Result<Json<Vec<TaskView>>, StatusCode> {
+    // Hardening P2 item 19: never return an empty list on a DB error — that
+    // would read as "no tasks" to the client. Surface storage outage as 503.
     match state.store.list_tasks().await {
-        Ok(t) => Json(t),
+        Ok(t) => Ok(Json(t)),
         Err(e) => {
             tracing::error!("list_tasks failed: {e}");
-            Json(vec![])
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
@@ -1512,12 +1518,16 @@ async fn create_workflow(
         })
 }
 
-async fn list_workflows(State(state): State<Arc<AppState>>) -> Json<Vec<WorkflowTemplate>> {
+async fn list_workflows(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<WorkflowTemplate>>, StatusCode> {
+    // Hardening P2 item 19: never return an empty list on a DB error — surface
+    // storage outage as 503 so the client does not read it as "no workflows".
     match state.store.list_workflow_templates().await {
-        Ok(t) => Json(t),
+        Ok(t) => Ok(Json(t)),
         Err(e) => {
             tracing::error!("list_workflows failed: {e}");
-            Json(vec![])
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
@@ -1577,12 +1587,14 @@ async fn create_workflow_schedule(
 async fn list_workflow_schedules(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Json<Vec<WorkflowSchedule>> {
+) -> Result<Json<Vec<WorkflowSchedule>>, StatusCode> {
+    // Hardening P2 item 19: never return an empty list on a DB error — surface
+    // storage outage as 503 so the client does not read it as "no schedules".
     match state.store.list_workflow_schedules(Some(&id)).await {
-        Ok(s) => Json(s),
+        Ok(s) => Ok(Json(s)),
         Err(e) => {
             tracing::error!("list_workflow_schedules failed: {e}");
-            Json(vec![])
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
@@ -1601,12 +1613,16 @@ async fn delete_workflow_schedule(
     }
 }
 
-async fn list_workflow_runs(State(state): State<Arc<AppState>>) -> Json<Vec<WorkflowRun>> {
+async fn list_workflow_runs(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<WorkflowRun>>, StatusCode> {
+    // Hardening P2 item 19: never return an empty list on a DB error — surface
+    // storage outage as 503 so the client does not read it as "no runs".
     match state.store.list_workflow_runs().await {
-        Ok(r) => Json(r),
+        Ok(r) => Ok(Json(r)),
         Err(e) => {
             tracing::error!("list_workflow_runs failed: {e}");
-            Json(vec![])
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
@@ -1665,12 +1681,16 @@ async fn tick_workflow_run(
     }
 }
 
-async fn list_nodes(State(state): State<Arc<AppState>>) -> Json<Vec<agentgrid_common::NodeView>> {
+async fn list_nodes(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<agentgrid_common::NodeView>>, StatusCode> {
+    // Hardening P2 item 19: never return an empty list on a DB error — that
+    // would read as "no nodes" to the client. Surface storage outage as 503.
     match state.store.list_nodes().await {
-        Ok(n) => Json(n),
+        Ok(n) => Ok(Json(n)),
         Err(e) => {
             tracing::error!("list_nodes failed: {e}");
-            Json(vec![])
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
@@ -1788,12 +1808,16 @@ async fn create_repository(
     }
 }
 
-async fn list_repositories(State(state): State<Arc<AppState>>) -> Json<Vec<RepositoryView>> {
+async fn list_repositories(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<RepositoryView>>, StatusCode> {
+    // Hardening P2 item 19: never return an empty list on a DB error — surface
+    // storage outage as 503 so the client does not read it as "no repos".
     match state.store.list_repositories().await {
-        Ok(r) => Json(r),
+        Ok(r) => Ok(Json(r)),
         Err(e) => {
             tracing::error!("list_repositories failed: {e}");
-            Json(vec![])
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
@@ -2303,12 +2327,14 @@ async fn get_events(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     Query(q): Query<EventsQuery>,
-) -> Json<Vec<agentgrid_common::TaskEvent>> {
+) -> Result<Json<Vec<agentgrid_common::TaskEvent>>, StatusCode> {
+    // Hardening P2 item 19: never return an empty list on a DB error — surface
+    // storage outage as 503 so the client does not read it as "no events".
     match state.store.get_events(&task_id, q.after_sequence).await {
-        Ok(e) => Json(e),
+        Ok(e) => Ok(Json(e)),
         Err(e) => {
             tracing::error!("get_events failed: {e}");
-            Json(vec![])
+            Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
