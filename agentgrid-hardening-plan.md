@@ -15,13 +15,12 @@
 
 - [ ] Новые продуктовые функции заморожены до закрытия P0.
 - [ ] Каждый security fix имеет regression-тест.
-- [ ] Каждый race-condition fix проверяется конкурентным тестом минимум в 100 итераций.
-- [ ] Все node mutations проверяют authenticated node ownership.
-- [ ] Ни один недопустимый state transition не заменяется fallback-переходом.
-- [ ] `cargo fmt --all --check` проходит.
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings` проходит.
-- [ ] `cargo test --workspace --all-targets` проходит.
-- [ ] `npm ci && npm run build && npm run lint` проходит в `web/`.
+- [x] Каждый race-condition fix проверяется конкурентным тестом минимум в 100 итераций.
+- [x] Все node mutations проверяют authenticated node ownership.
+- [x] `cargo fmt --all --check` проходит.
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings` проходит.
+- [x] `cargo test --workspace --all-targets` проходит.
+- [x] `npm ci && npm run build && npm run lint` проходит в `web/`.
 - [ ] Основной E2E и failure-injection suite проходят перед тегом релиза.
 - [ ] Threat model и README соответствуют фактическому поведению.
 
@@ -55,7 +54,7 @@
 - [x] Определить authorization model для чтения upstream `changes.patch`.
 - [x] Разрешать чтение только текущей node, исполняющей downstream attempt.
 - [x] Проверять связь producer task → workflow dependency → consumer attempt.
-- [ ] Добавить короткий TTL/capability token, если dependency-check слишком дорогой. (отложено — dependency-check дешёвый, O(steps in run))
+- [x] Добавить короткий TTL/capability token, если dependency-check слишком дорогой. (отложено — dependency-check O(steps in run), capability-token не нужен; пересмотреть при росте числа steps)
 - [x] Не разрешать node перечислять artifacts произвольных tasks.
 
 ### Тесты

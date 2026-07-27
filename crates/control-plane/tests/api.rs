@@ -4685,36 +4685,24 @@ async fn race_cancel_vs_complete_settles_once() {
         );
         if complete_first {
             // Complete wins: task succeeds; later cancel is a no-op (no active attempt).
-            assert_eq!(
-                state
-                    .store
-                    .complete_attempt(&assign.attempt_id, &complete_req())
-                    .await
-                    .unwrap(),
-                true
-            );
-            assert_eq!(
-                state.store.cancel_task(&assign.task_id).await.unwrap(),
-                false
-            );
+            assert!(state
+                .store
+                .complete_attempt(&assign.attempt_id, &complete_req())
+                .await
+                .unwrap());
+            assert!(!(state.store.cancel_task(&assign.task_id).await.unwrap()));
             assert_eq!(
                 show_status(&app, &assign.task_id).await,
                 TaskStatus::Succeeded
             );
         } else {
             // Cancel wins: cancel_requested=1; completion then resolves to cancelled.
-            assert_eq!(
-                state.store.cancel_task(&assign.task_id).await.unwrap(),
-                true
-            );
-            assert_eq!(
-                state
-                    .store
-                    .complete_attempt(&assign.attempt_id, &complete_req())
-                    .await
-                    .unwrap(),
-                true
-            );
+            assert!(state.store.cancel_task(&assign.task_id).await.unwrap());
+            assert!(state
+                .store
+                .complete_attempt(&assign.attempt_id, &complete_req())
+                .await
+                .unwrap());
             assert_eq!(
                 show_status(&app, &assign.task_id).await,
                 TaskStatus::Cancelled
@@ -4746,33 +4734,27 @@ async fn race_lost_vs_complete_settles_once() {
             StatusCode::OK
         );
         if offline_first {
-            assert_eq!(state.store.mark_node_offline(&node_id).await.unwrap(), true);
+            assert!(state.store.mark_node_offline(&node_id).await.unwrap());
             assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
             // Late completion for a `lost` attempt is an idempotent ack.
-            assert_eq!(
-                state
-                    .store
-                    .complete_attempt(&assign.attempt_id, &complete_req())
-                    .await
-                    .unwrap(),
-                true
-            );
+            assert!(state
+                .store
+                .complete_attempt(&assign.attempt_id, &complete_req())
+                .await
+                .unwrap());
             assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
         } else {
-            assert_eq!(
-                state
-                    .store
-                    .complete_attempt(&assign.attempt_id, &complete_req())
-                    .await
-                    .unwrap(),
-                true
-            );
+            assert!(state
+                .store
+                .complete_attempt(&assign.attempt_id, &complete_req())
+                .await
+                .unwrap());
             assert_eq!(
                 show_status(&app, &assign.task_id).await,
                 TaskStatus::Succeeded
             );
             // Offline sweep afterwards: no non-terminal attempt to lose.
-            assert_eq!(state.store.mark_node_offline(&node_id).await.unwrap(), true);
+            assert!(state.store.mark_node_offline(&node_id).await.unwrap());
             assert_eq!(
                 show_status(&app, &assign.task_id).await,
                 TaskStatus::Succeeded
@@ -4811,28 +4793,22 @@ async fn race_retry_vs_late_completion() {
         provenance: None,
         plan: None,
     };
-    assert_eq!(
-        state
-            .store
-            .complete_attempt(&assign.attempt_id, &fail_req)
-            .await
-            .unwrap(),
-        true
-    );
+    assert!(state
+        .store
+        .complete_attempt(&assign.attempt_id, &fail_req)
+        .await
+        .unwrap());
     assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Failed);
     // Retry re-queues the task (assigned_attempt_id cleared).
-    assert_eq!(state.store.retry_task(&assign.task_id).await.unwrap(), true);
+    assert!(state.store.retry_task(&assign.task_id).await.unwrap());
     assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
     // A late completion for the old (already-failed) attempt is idempotent and
     // must NOT perturb the queued retry.
-    assert_eq!(
-        state
-            .store
-            .complete_attempt(&assign.attempt_id, &complete_req())
-            .await
-            .unwrap(),
-        true
-    );
+    assert!(state
+        .store
+        .complete_attempt(&assign.attempt_id, &complete_req())
+        .await
+        .unwrap());
     assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
 }
 
