@@ -94,7 +94,42 @@ Binaries: `agentgrid-control-plane`, `agentgrid-node-daemon`, `ag`,
 - A warning is logged when an adapter exits 0 but produces no events, surfacing
   silent agents that yield empty "succeeded" tasks.
 
-See `docs/decisions/0001-mvp-scope.md` (ADR) and `docs/deploy/`.
+### Trust & ownership model
+
+The control plane is the trust root. A node is only trusted for the attempt it
+was assigned: every `/v1/node/attempts/*` mutation checks authenticated node
+**ownership** of the target attempt (a foreign attempt yields `403`/`404`) and
+a per-attempt **fencing token** (`X-AgentGrid-Fencing-Token`); a stale token from
+a superseded attempt/lease yields `409`. A revoked node fails auth at
+`require_node_auth`. See [`docs/decisions/threat-model.md`](docs/decisions/threat-model.md).
+
+### Event delivery semantics
+
+Node → control-plane events are **idempotent** (`ON CONFLICT (attempt_id,
+sequence) DO NOTHING`) and **durable**: the node persists each event to an on-disk
+outbox before sending, so a kill `-9` or CP outage does not lose in-flight
+events; on reconnect the un-acked tail is replayed. Event batches are bounded
+(`AGENTGRID_MAX_EVENT_BATCH` count, `AGENTGRID_MAX_EVENT_BATCH_KB` bytes), and
+events for a terminal attempt are rejected. A long-poll assignment never
+double-delivers a task to two pollers (`WHERE status='queued'` CAS).
+
+### Artifact retention, backup, upgrade & rollback
+
+- **Artifacts:** per-attempt under `AGENTGRID_ARTIFACT_ROOT/<attempt_id>/<name>`;
+  atomic upload (temp+rename) with server-side SHA-256 verification
+  (client hash mismatch → 422). `cleanup_artifacts(<hours>)` drops the metadata
+  row **and** the backing file, then removes now-empty attempt dirs. Upload size
+  is capped (`AGENTGRID_MAX_ARTIFACT_MB`).
+- **Backup:** `VACUUM INTO '<path>'` on the SQLite DB; back up the DB file plus
+  the `AGENTGRID_ARTIFACT_ROOT` tree.
+- **Upgrade:** forward-only migrations run on startup (`sqlx::migrate`); restart
+  the control plane after replacing the binary. A node re-enrolls only if its
+  persisted credential is gone.
+- **Rollback:** keep the pre-upgrade DB snapshot; a downgraded binary fails loud
+  against a DB with newer migrations. See
+  [`docs/upgrade-0.1.0-to-0.1.1.md`](docs/upgrade-0.1.0-to-0.1.1.md).
+
+See `docs/decisions/0001-mvp-scope.md` (ADR) and `docs/decisions/threat-model.md`.
 
 ## License
 

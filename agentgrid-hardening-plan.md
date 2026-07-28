@@ -838,12 +838,12 @@
 - [x] Явно написать: worktree не является security sandbox. (README maturity notes + threat-model)
 - [ ] Явно написать unsafe behavior wrapper adapters.
 - [ ] Разделить demo и production quickstart.
-- [ ] Документировать node trust/ownership model.
-- [ ] Документировать event delivery semantics.
+- [x] Документировать node trust/ownership model. (README "Trust & ownership model")
+- [x] Документировать event delivery semantics. (README "Event delivery semantics")
 - [x] Документировать fencing tokens. (threat-model T15 обновлён + invariant section про fencing tokens)
-- [ ] Документировать artifact retention и quotas.
-- [ ] Документировать backup/restore.
-- [ ] Документировать upgrade/rollback.
+- [x] Документировать artifact retention и quotas. (README artifact retention; storage quota noted P1)
+- [x] Документировать backup/restore. (README VACUUM INTO + artifact tree)
+- [x] Документировать upgrade/rollback. (README migrations + downgrade fails loud + upgrade doc link)
 - [x] Добавить `SECURITY.md` с vulnerability reporting.
 - [ ] Добавить compatibility matrix.
 - [ ] Добавить API/OpenAPI docs.
