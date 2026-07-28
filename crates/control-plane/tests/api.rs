@@ -5202,3 +5202,47 @@ async fn reconcile_active_attempts_repairs_drift() {
     let again = state.store.reconcile_active_attempts().await.unwrap();
     assert_eq!(again, 0, "reconcile is idempotent when already consistent");
 }
+
+#[tokio::test]
+async fn request_id_echoed_and_generated_when_absent() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    // No X-Request-Id header: server mints one and echoes it.
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/health/live").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let echoed = resp
+        .headers()
+        .get("x-request-id")
+        .expect("server echos a request id")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        agentgrid_control_plane::store::is_safe_opaque_id(&echoed),
+        "minted id is a safe opaque id: {echoed}"
+    );
+    // Client supplies a safe id: server accepts and echoes it back unchanged.
+    let rid = "abc123_valid-id-TOKEN";
+    let resp = app
+        .oneshot(
+            Request::get("/health/live")
+                .header("X-Request-Id", rid)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        rid,
+    );
+}

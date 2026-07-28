@@ -123,7 +123,7 @@ fn from_snake<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
 /// of `[A-Za-z0-9_-]` only. No path separators, no dots, no control chars, no
 /// traversal — safe to join into a filesystem path or interpolate into a SQL
 /// bound parameter. UUIDv4 / ULID / nanoid all fit; anything else is rejected.
-fn is_safe_opaque_id(id: &str) -> bool {
+pub fn is_safe_opaque_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id

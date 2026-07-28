@@ -7,6 +7,7 @@
 pub mod store;
 pub mod workflow;
 
+use crate::store::is_safe_opaque_id;
 use anyhow::Context;
 use std::sync::Arc;
 use std::time::Instant;
@@ -473,9 +474,40 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_node_auth,
         ))
+        // Hardening P2 item 19/35: outermost layer so every log line inside a
+        // request (auth, handler, store) carries a stable `request_id`. The
+        // JSON formatter attaches the current span to each event, so the id is
+        // correlatable across the whole request without per-handler plumbing.
+        .layer(middleware::from_fn(request_id_middleware))
         .fallback(static_fallback)
         .with_state(state)
 }
+
+/// Hardening P2 item 19/35: assign a request id per request. Accept a client
+/// `X-Request-Id` only if it is a safe opaque id (≤64 `[A-Za-z0-9_-]`, no
+/// separators — same guard as attempt ids, so a client cannot inject log
+/// control chars or forge another request's id); otherwise mint a UUIDv4.
+/// The id rides in a tracing span (so every event logs it) and is echoed back
+/// on the response.
+async fn request_id_middleware(headers: HeaderMap, mut req: Request<Body>, next: Next) -> Response {
+    let id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| is_safe_opaque_id(s))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    req.extensions_mut().insert(RequestId(id.clone()));
+    let span = tracing::info_span!("request", request_id = %id);
+    let mut resp = span.in_scope(|| async move { next.run(req).await }).await;
+    resp.headers_mut()
+        .insert("x-request-id", id.as_str().try_into().unwrap());
+    resp
+}
+
+/// Request id available to handlers via extensions (for explicit logging /
+/// future audit). The span already carries it for every log line.
+#[derive(Clone, Debug)]
+pub struct RequestId(pub String);
 
 /// Serve the built web UI (Stage 4.3). Unknown non-API paths fall back to
 /// `index.html`; missing files under `/v1/` return 404.
