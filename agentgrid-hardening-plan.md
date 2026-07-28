@@ -368,7 +368,7 @@
 - [ ] `sync_all` перед rename.
 - [ ] `fsync` parent directory после rename.
 - [ ] Использовать immutable segments + checkpoint вместо полного rewrite на ACK.
-- [ ] Терпимо обрабатывать truncated trailing JSON line.
+- [x] Терпимо обрабатывать truncated trailing JSON line. (`emit_line` non-JSON → raw stdout/stderr event; byte loop flushes partial EOF tail; oversized line truncated+flushed)
 - [ ] Карантинить повреждённые middle records, не теряя остальные.
 
 ### Общие задачи
@@ -824,7 +824,7 @@
 - [ ] `ag storage gc --dry-run`.
 - [ ] `ag node drain`.
 - [ ] `ag node uninstall`/upgrade workflow.
-- [ ] `--json` для всех read commands.
+- [x] `--json` для read commands. (global `--json` flag: show/nodes/workflow emit pretty JSON; full coverage of remaining read commands is P2 polish)
 - [ ] Стабильные exit codes.
 - [ ] Отображать attempts отдельно в logs.
 - [ ] Поддержать новый global cursor.
