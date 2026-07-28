@@ -855,7 +855,7 @@
 - [ ] Убрать internal Stage/line references.
 - [ ] Перенести implementation journal в issues или development notes.
 - [ ] Не ставить версии ретроспективно без пояснения.
-- [ ] Добавлять отдельный `Security` section для P0 fixes.
+- [x] Добавлять отдельный `Security` section для P0 fixes. (CHANGELOG уже имеет `### Security` sections для каждого P0 fix)
 
 ## 40. Naming/branding decision — P3
 

@@ -4,6 +4,41 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security (hardening P0/P1/P2 — session hardening pass)
+
+- **Artifacts/UI:** strict CSP (`default-src 'self'` for UI, `default-src
+  'none'` for artifacts) + `X-Content-Type-Options: nosniff` +
+  `Cross-Origin-Resource-Policy: same-origin` + `X-Frame-Options: DENY`, so an
+  artifact is never executed or cross-read by a browser context.
+- **Artifact path safety:** `attempt_id` validated as a safe opaque ID
+  (`[A-Za-z0-9_-]`) before any path join; symlinked artifact dirs/files are
+  rejected; a traversal/symlink `cleanup_workspace` target is refused.
+- **State-machine invariants:** a terminal task now clears
+  `assigned_attempt_id` and sets `finished_at` on cancel/node-lost; regression
+  test `state_machine_terminal_invariants_hold`.
+- **Event ingestion:** terminal attempts reject events; batches are bounded
+  (`AGENTGRID_MAX_EVENT_BATCH`, `AGENTGRID_MAX_EVENT_BATCH_KB`).
+- **Storage retention:** `cleanup_artifacts` deletes the backing file (not just
+  metadata) and removes now-empty attempt dirs.
+- **`active_attempts` reconciliation:** re-derived from attempt rows on startup
+  (`reconcile_active_attempts`); orphan-row preflight detection.
+- **Git:** binary diff captured as raw bytes (no lossy UTF-8); cross-process
+  `flock` per repo with a timeout.
+- **Output backpressure:** logical line size capped
+  (`AGENTGRID_MAX_LINE_BYTES`); outbox ACK is O(1).
+- **API errors:** list handlers return `503` on DB error instead of an empty
+  list; `list_tasks`/`list_nodes` capped at 1000 rows.
+- **Observability:** `/metrics` adds `agentgrid_cross_node_rejects_total`,
+  `agentgrid_stale_fencing_tokens_total`, `agentgrid_event_rejections_total`.
+- **Release/CI:** `release.yml` runs tests before build, publishes a GitHub
+  Release with per-target SHA256SUMS (now including `adapter-opencode`); a
+  `supply-chain.yml` workflow runs `cargo audit`; Docker images carry OCI
+  labels and a healthcheck; the control plane binds loopback by default in
+  `install-control-plane.sh`; compose `.env` is stripped of enrollment tokens
+  after the nodes enroll.
+- Docs: `SECURITY.md`, README maturity matrix + ops sections (trust/ownership,
+  event delivery, retention/backup/upgrade).
+
 ### Correctness (hardening P0 item 7 — lease/ACK race conditions)
 
 - `ack_attempt`, `revert_expired_leases`, `mark_offline_nodes`,
