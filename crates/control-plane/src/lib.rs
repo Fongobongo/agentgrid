@@ -1847,9 +1847,26 @@ async fn heartbeat(
     }
 }
 
-async fn revoke_node(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
+async fn revoke_node(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
+    Path(id): Path<String>,
+) -> StatusCode {
     match state.store.revoke_node(&id).await {
-        Ok(true) => StatusCode::OK,
+        Ok(true) => {
+            // Hardening P2 item 35: audit the security-sensitive mutation.
+            let _ = state
+                .store
+                .audit(
+                    "user",
+                    auth.as_ref().map(|e| e.0.username.as_str()),
+                    "node.revoke",
+                    Some(&id),
+                    None,
+                )
+                .await;
+            StatusCode::OK
+        }
         Ok(false) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("revoke_node failed: {e}");
