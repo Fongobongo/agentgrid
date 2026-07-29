@@ -1479,6 +1479,17 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
             .active_attempt_drift
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
+    s.push_str(
+        "# HELP agentgrid_artifact_cleanup_bytes_total Cumulative bytes reclaimed by artifact retention.",
+    );
+    s.push_str("\n# TYPE agentgrid_artifact_cleanup_bytes_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_artifact_cleanup_bytes_total {}\n",
+        state
+            .store
+            .artifact_cleanup_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
 
     (
         StatusCode::OK,

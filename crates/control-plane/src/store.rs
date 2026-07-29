@@ -52,6 +52,8 @@ pub struct Store {
     /// Hardening P2 item 35: cumulative count of nodes whose `active_attempts`
     /// counter was found drifted from the live attempt rows on a reconcile.
     pub(crate) active_attempt_drift: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Hardening P2 item 35: cumulative bytes reclaimed by artifact retention.
+    pub(crate) artifact_cleanup_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn now_iso() -> String {
@@ -312,6 +314,7 @@ impl Store {
             sqlite_busy: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             lease_reverts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             active_attempt_drift: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            artifact_cleanup_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -2162,6 +2165,14 @@ impl Store {
             let name: String = r.try_get("name")?;
             if let Ok(path) = self.artifact_path(&attempt_id, &name) {
                 // Best-effort: a missing file is not an error (already gone).
+                // Hardening P2 item 35: tally reclaimed bytes before unlink.
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    let bytes = meta.len();
+                    if bytes > 0 {
+                        self.artifact_cleanup_bytes
+                            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
                 let _ = tokio::fs::remove_file(&path).await;
             }
         }

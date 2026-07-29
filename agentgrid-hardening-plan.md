@@ -789,7 +789,7 @@
 - [x] Event duplicate/gap/rejection counts. (`agentgrid_event_rejections_total` покрывает terminal/batch rejection)
 - [ ] Outbox bytes и oldest age.
 - [ ] Artifact spool bytes и retry count.
-- [ ] Artifact cleanup bytes/failures.
+- [x] Artifact cleanup bytes/failures. (`agentgrid_artifact_cleanup_bytes_total` накапливает reclaimined bytes)
 - [x] Active-attempt drift. (`agentgrid_active_attempt_drift_total` накапливает drifted counters repaired reconcile)
 - [ ] Repository lock wait.
 - [ ] Validation duration/outcomes.
