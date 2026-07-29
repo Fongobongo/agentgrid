@@ -67,6 +67,18 @@ impl RepoFlock {
                 return Err(err).context("flock repo lock");
             }
             if std::time::Instant::now() >= deadline {
+                // Hardening P1 item 32: diagnostics + recovery note. A
+                // `flock(LOCK_EX)` is released by the kernel when the holder
+                // dies, so a genuine stale lock is rare — a timeout here almost
+                // always means a long-running clone/fetch by a sibling process.
+                // Surface the repo + the lock file path so an operator can check
+                // the holder. The kernel auto-releases on holder exit, so no
+                // manual stale-lock deletion is needed.
+                tracing::warn!(
+                    repo = %repo,
+                    lock = %lock_path.display(),
+                    "timed out waiting for cross-process repo lock — a sibling clone/fetch may be in progress; kernel releases flock on holder exit"
+                );
                 anyhow::bail!("timed out waiting for repo lock on {repo}");
             }
             std::thread::sleep(std::time::Duration::from_millis(50));

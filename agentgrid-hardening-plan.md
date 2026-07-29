@@ -749,11 +749,11 @@
 - [x] Получать binary diff как bytes, без `String::from_utf8_lossy`. (`git_out_bytes` в `finalize_workspace` для `git diff --binary`)
 - [x] Добавить cross-process repository `flock`. (`RepoFlock` через `libc::flock` на per-repo lock файле в `prepare_workspace`)
 - [x] Добавить timeout ожидания repo lock. (`RepoFlock::acquire` блокирует до 60s, bails с timeout ошибкой)
-- [ ] Добавить diagnostics/stale lock recovery.
+- [x] Добавить diagnostics/stale lock recovery. (timeout warn показывает repo+lock path; kernel auto-releases flock при exit holder — manual recovery не нужен)
 - [x] Проверять clone/fetch URL scheme и policy. (`validate_git_url`: allow http/https/git/ssh/file + scp-style; reject javascript:/data:/ftp:/empty/newlines)
 - [ ] Определить SSH credential policy.
 - [x] Обнаруживать submodules и Git LFS. (prepare_workspace warns on `.gitmodules` / Git LFS `.gitattributes`)
-- [ ] Не запускать task на неполностью подготовленном repository.
+- [x] Не запускать task на неполностью подготовленном repository. (run_attempt: `prepare_workspace()?` возвращает раньше — adapter не запускается, если worktree/fetch не готовы)
 - [ ] Добавить repository cache size/GC policy.
 
 ## 33. Safe workspace cleanup — P1
