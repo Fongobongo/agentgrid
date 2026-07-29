@@ -1500,16 +1500,39 @@ async fn create_task(
     }
 }
 
-async fn list_tasks(State(state): State<Arc<AppState>>) -> Result<Json<Vec<TaskView>>, StatusCode> {
+async fn list_tasks(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<TaskListQuery>,
+) -> Result<Json<Vec<TaskView>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — that
     // would read as "no tasks" to the client. Surface storage outage as 503.
-    match state.store.list_tasks().await {
+    match state
+        .store
+        .list_tasks_filtered(
+            q.status.as_deref(),
+            q.repository.as_deref(),
+            q.node_id.as_deref(),
+        )
+        .await
+    {
         Ok(t) => Ok(Json(t)),
         Err(e) => {
             tracing::error!("list_tasks failed: {e}");
             Err(StatusCode::SERVICE_UNAVAILABLE)
         }
     }
+}
+
+/// Hardening P2 item 20: optional server-side filters for `GET /v1/tasks`.
+/// All are exact-match strings; absent = no filter. Combined with the row cap.
+#[derive(Debug, Default, serde::Deserialize)]
+struct TaskListQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    repository: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
 }
 
 async fn show_task(

@@ -5294,3 +5294,84 @@ async fn create_repo_raw(app: &Router, req: CreateRepositoryRequest, cred: &str)
         .unwrap()
         .status()
 }
+
+#[tokio::test]
+async fn list_tasks_filters_by_status_repository_node() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (id1, cred) = enroll(&app, "nf-node", vec!["mock".into()], vec!["*".into()]).await;
+    let cred_user = test_token(&app).await;
+    // registered node 1 ("nf-node") will receive assignment; we also add
+    // node_id filter against assigned_attempt_id later.
+
+    // Create two tasks with different repositories directly via the store
+    // (reuse TaskView creation through the API).
+    let mk = |repo: &str| {
+        serde_json::to_string(&CreateTaskRequest {
+            prompt: "p".into(),
+            repository: repo.into(),
+            adapter: "mock".into(),
+            requested_node_id: None,
+            timeout_secs: None,
+            validation_command: None,
+            base_commit: None,
+            parent_acp_session_id: None,
+        })
+        .unwrap()
+    };
+    // Task A: repoA (queued). Task B: repoB (queued).
+    let a = app
+        .clone()
+        .oneshot(post_auth("/v1/tasks", mk("repoA"), &cred_user))
+        .await
+        .unwrap();
+    assert_eq!(a.status(), StatusCode::CREATED);
+    let _b = app
+        .clone()
+        .oneshot(post_auth("/v1/tasks", mk("repoB"), &cred_user))
+        .await
+        .unwrap();
+
+    async fn list_repos(app: &Router, cred: &str, qs: &str) -> Vec<String> {
+        let resp = app
+            .clone()
+            .oneshot(get_auth(&format!("/v1/tasks{qs}"), cred))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tasks: Vec<TaskView> =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        tasks.into_iter().map(|t| t.repository).collect()
+    }
+
+    // No filter -> both repos present.
+    let all = list_repos(&app, &cred_user, "").await;
+    assert!(all.contains(&"repoA".to_string()) && all.contains(&"repoB".to_string()));
+
+    // Repository filter narrows.
+    let only_a = list_repos(&app, &cred_user, "?repository=repoA").await;
+    assert_eq!(only_a, vec!["repoA".to_string()]);
+
+    // Status filter narrows to queued (both still queued here).
+    let queued = list_repos(&app, &cred_user, "?status=queued").await;
+    assert_eq!(queued.len(), 2);
+
+    // Unknown status -> no rows (but 200, not error).
+    assert!(list_repos(&app, &cred_user, "?status=nonexistent")
+        .await
+        .is_empty());
+
+    // Assign node so node_id has a target.
+    let assign = create_and_assign(&app, &id1, &cred, "p").await;
+    assert!(
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token)
+            .await
+            .is_success()
+    );
+    let by_node = list_repos(&app, &cred_user, &format!("?node_id={id1}")).await;
+    assert_eq!(by_node.len(), 1, "node filter narrows to assigned task");
+    // No match -> empty.
+    assert!(list_repos(&app, &cred_user, "?node_id=does-not-exist")
+        .await
+        .is_empty());
+}

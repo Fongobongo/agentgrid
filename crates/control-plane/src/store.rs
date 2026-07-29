@@ -890,6 +890,48 @@ impl Store {
         Ok(rows.iter().map(row_to_task_view).collect())
     }
 
+    /// Hardening P2 item 20: list tasks with optional server-side filters
+    /// (`status`, `repository`, `node_id`) plus the same row cap. Each filter
+    /// is exact match; `None` means no predicate. Symbol/leftover lexic of
+    /// `active_attempts` are not involved.
+    pub async fn list_tasks_filtered(
+        &self,
+        status: Option<&str>,
+        repository: Option<&str>,
+        node_id: Option<&str>,
+    ) -> Result<Vec<TaskView>> {
+        const MAX_TASKS: i64 = 1000;
+        // Build the query with only the present filters as bound params. The
+        // `node_id` filter joins the latest attempt's node via a correlated
+        // subquery on `assigned_attempt_id`.
+        let mut sql = String::from(
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id \
+             FROM tasks WHERE 1=1",
+        );
+        if status.is_some() {
+            sql.push_str(" AND status = ?");
+        }
+        if repository.is_some() {
+            sql.push_str(" AND repository = ?");
+        }
+        if node_id.is_some() {
+            sql.push_str(" AND assigned_attempt_id IN (SELECT id FROM attempts WHERE node_id = ?)");
+        }
+        sql.push_str(" ORDER BY created_at ASC LIMIT ?");
+        let mut q = sqlx::query(&sql);
+        if let Some(s) = status {
+            q = q.bind(s);
+        }
+        if let Some(r) = repository {
+            q = q.bind(r);
+        }
+        if let Some(n) = node_id {
+            q = q.bind(n);
+        }
+        let rows = q.bind(MAX_TASKS).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(row_to_task_view).collect())
+    }
+
     pub async fn show_task(&self, id: &str) -> Result<Option<TaskView>> {
         let row = sqlx::query(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id \
