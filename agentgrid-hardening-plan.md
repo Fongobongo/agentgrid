@@ -785,7 +785,7 @@
 
 - [x] Cross-node authorization rejection count. (`agentgrid_cross_node_rejects_total` в /metrics)
 - [x] Stale fencing token count. (`agentgrid_stale_fencing_tokens_total` в /metrics)
-- [ ] Lease expiry/ACK race prevention count.
+- [x] Lease expiry/ACK race prevention count. (`agentgrid_lease_reverts_total` накапливает reverted expired-lease assignments)
 - [x] Event duplicate/gap/rejection counts. (`agentgrid_event_rejections_total` покрывает terminal/batch rejection)
 - [ ] Outbox bytes и oldest age.
 - [ ] Artifact spool bytes и retry count.

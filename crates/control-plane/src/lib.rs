@@ -1456,6 +1456,18 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
             .event_rejections
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
+    // Hardening P2 item 35: lease-expiry reverts (the lease/ACK race path).
+    s.push_str(
+        "# HELP agentgrid_lease_reverts_total Expired-lease assignments re-queued by the sweep.",
+    );
+    s.push_str("\n# TYPE agentgrid_lease_reverts_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_lease_reverts_total {}\n",
+        state
+            .store
+            .lease_reverts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
 
     (
         StatusCode::OK,

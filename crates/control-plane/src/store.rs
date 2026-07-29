@@ -46,6 +46,9 @@ pub struct Store {
     pub(crate) checkpoint_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Stage 2.5 ops: cumulative count of `SQLITE_BUSY`-class failures.
     pub(crate) sqlite_busy: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Hardening P2 item 35: cumulative count of expired-lease reverts
+    /// (the lease/ACK race path that re-queues an unconfirmed assignment).
+    pub(crate) lease_reverts: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn now_iso() -> String {
@@ -304,6 +307,7 @@ impl Store {
             scheduler_assignments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             checkpoint_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sqlite_busy: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            lease_reverts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -1905,7 +1909,11 @@ impl Store {
     /// task and exposed for tests/ops).
     pub async fn tick_maintenance(&self) -> Result<()> {
         let now = now_iso();
-        revert_expired_leases(&self.pool, &now).await?;
+        let reverted = revert_expired_leases(&self.pool, &now).await?;
+        if reverted > 0 {
+            self.lease_reverts
+                .fetch_add(reverted as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         mark_offline_nodes(&self.pool, &now).await?;
         // Housekeeping: drop expired artifacts and truncate the WAL so the
         // database file does not grow without bound.
@@ -1942,8 +1950,14 @@ impl Store {
             loop {
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 let now = now_iso();
-                if let Err(e) = revert_expired_leases(&store.pool, &now).await {
-                    tracing::warn!("lease maintenance failed: {e}");
+                match revert_expired_leases(&store.pool, &now).await {
+                    Ok(n) if n > 0 => {
+                        store
+                            .lease_reverts
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(e) => tracing::warn!("lease maintenance failed: {e}"),
+                    _ => {}
                 }
                 if let Err(e) = mark_offline_nodes(&store.pool, &now).await {
                     tracing::warn!("node maintenance failed: {e}");
@@ -2160,7 +2174,7 @@ impl Store {
     }
 }
 
-async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<()> {
+async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<usize> {
     // Race-safe (hardening P0 item 7): a single `BEGIN IMMEDIATE` transaction
     // selects AND cancels expired leases so a concurrent `ack_attempt` cannot
     // double-flip. The per-attempt cancel is CAS (`status = 'assigned'`), and we
@@ -2173,6 +2187,7 @@ async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<()> {
     .bind(now)
     .fetch_all(&mut *tx)
     .await?;
+    let mut reverted = 0usize;
     for r in rows {
         let attempt_id: String = r.try_get("id")?;
         let task_id: String = r.try_get("task_id")?;
@@ -2188,6 +2203,7 @@ async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<()> {
         if moved != 1 {
             continue;
         }
+        reverted += 1;
         sqlx::query(
             "UPDATE tasks SET status = 'queued', assigned_attempt_id = NULL \
              WHERE id = ? AND assigned_attempt_id = ? AND status = 'assigned'",
@@ -2202,7 +2218,7 @@ async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<()> {
             .await?;
     }
     tx.commit().await?;
-    Ok(())
+    Ok(reverted)
 }
 
 async fn mark_offline_nodes(pool: &SqlitePool, _now: &str) -> Result<()> {
