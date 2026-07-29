@@ -374,6 +374,27 @@ pub fn prepare_workspace(
         }
         std::fs::write(&p, cur)?;
     }
+    // Hardening P1 item 32: surface submodules / Git LFS so an operator is
+    // warned that the worktree pulls additional sources (submodules) or
+    // out-of-band object stores (LFS) the adapter may not fetch. We only
+    // warn here (not refuse): a real policy belongs in the sandbox network /
+    // mount layer.
+    if ws.join(".gitmodules").exists() {
+        tracing::warn!(
+            "worktree {:?} contains git submodules (.gitmodules) — ensure the sandbox blocks network unless intended",
+            ws
+        );
+    }
+    if ws.join(".gitattributes").exists()
+        && std::fs::read_to_string(ws.join(".gitattributes"))
+            .unwrap_or_default()
+            .contains("filter=lfs")
+    {
+        tracing::warn!(
+            "worktree {:?} references Git LFS objects — agent will not have the LFS blobs unless smudge is enabled",
+            ws
+        );
+    }
     Ok(Workspace {
         path: ws,
         repo_dir: Some(repo_dir),
