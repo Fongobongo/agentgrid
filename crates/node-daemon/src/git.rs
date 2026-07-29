@@ -121,6 +121,20 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Hardening P1 item 32: true if `maybe_ancestor` is an ancestor of (or equal
+/// to) `descendant`. Uses `git merge-base --is-ancestor`; best-effort — returns
+/// false on any git error so the call site falls back to "not stale".
+fn is_ancestor_or_equal(repo: &Path, maybe_ancestor: &str, descendant: &str) -> bool {
+    let out = Command::new("git")
+        .args(["merge-base", "--is-ancestor", maybe_ancestor, descendant])
+        .current_dir(repo)
+        .output();
+    match out {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
+    }
+}
+
 /// Like [`git_out`] but returns raw bytes — required for binary diffs (`git
 /// diff --binary`), where `String::from_utf8_lossy` would corrupt non-UTF-8
 /// hunk data. (Hardening P1 item 32: preserve binary patch bytes.)
@@ -254,6 +268,21 @@ pub fn prepare_workspace(
                 .args(["fetch", "origin", c])
                 .current_dir(&repo_dir)
                 .status();
+            // Hardening P1 item 32: warn if the pinned base commit is behind
+            // the remote default branch HEAD (stale base). The agent still runs
+            // (operator pinned it on purpose), but the warning surfaces drift
+            // so a rebase/follow-up is not forgotten.
+            if let Ok(remote_head) = git_out(&repo_dir, &["rev-parse", &format!("refs/heads/{db}")]) {
+                let remote_head = remote_head.trim();
+                if !remote_head.is_empty() && !is_ancestor_or_equal(&repo_dir, remote_head, c) {
+                    tracing::warn!(
+                        "pinned base_commit {} is not an ancestor of remote {} HEAD {} — running against a stale base",
+                        c,
+                        db,
+                        remote_head
+                    );
+                }
+            }
             Ok::<&str, anyhow::Error>(c.as_str())
         })
         .transpose()?;
