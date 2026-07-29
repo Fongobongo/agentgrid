@@ -49,6 +49,9 @@ pub struct Store {
     /// Hardening P2 item 35: cumulative count of expired-lease reverts
     /// (the lease/ACK race path that re-queues an unconfirmed assignment).
     pub(crate) lease_reverts: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Hardening P2 item 35: cumulative count of nodes whose `active_attempts`
+    /// counter was found drifted from the live attempt rows on a reconcile.
+    pub(crate) active_attempt_drift: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn now_iso() -> String {
@@ -308,6 +311,7 @@ impl Store {
             checkpoint_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sqlite_busy: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             lease_reverts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            active_attempt_drift: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -2068,7 +2072,14 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
-        Ok(res.rows_affected())
+        // Hardening P2 item 35: surface how many nodes had a drifted counter we
+        // repaired (a non-zero value here indicates a scheduler/counter bug).
+        let repaired = res.rows_affected();
+        if repaired > 0 {
+            self.active_attempt_drift
+                .fetch_add(repaired, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(repaired)
     }
 
     /// Count orphan rows: attempts whose task_id no longer exists, events whose

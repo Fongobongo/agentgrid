@@ -790,7 +790,7 @@
 - [ ] Outbox bytes и oldest age.
 - [ ] Artifact spool bytes и retry count.
 - [ ] Artifact cleanup bytes/failures.
-- [ ] Active-attempt drift.
+- [x] Active-attempt drift. (`agentgrid_active_attempt_drift_total` накапливает drifted counters repaired reconcile)
 - [ ] Repository lock wait.
 - [ ] Validation duration/outcomes.
 - [ ] Sandbox backend и enforced limits labels.

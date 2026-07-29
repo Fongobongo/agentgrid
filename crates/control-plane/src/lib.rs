@@ -1468,6 +1468,17 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
             .lease_reverts
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
+    s.push_str(
+        "# HELP agentgrid_active_attempt_drift_total Drifted active_attempts counters repaired by reconcile.",
+    );
+    s.push_str("\n# TYPE agentgrid_active_attempt_drift_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_active_attempt_drift_total {}\n",
+        state
+            .store
+            .active_attempt_drift
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
 
     (
         StatusCode::OK,
