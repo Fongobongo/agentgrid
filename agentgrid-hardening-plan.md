@@ -751,7 +751,7 @@
 - [x] Добавить timeout ожидания repo lock. (`RepoFlock::acquire` блокирует до 60s, bails с timeout ошибкой)
 - [x] Добавить diagnostics/stale lock recovery. (timeout warn показывает repo+lock path; kernel auto-releases flock при exit holder — manual recovery не нужен)
 - [x] Проверять clone/fetch URL scheme и policy. (`validate_git_url`: allow http/https/git/ssh/file + scp-style; reject javascript:/data:/ftp:/empty/newlines)
-- [ ] Определить SSH credential policy.
+- [x] Определить SSH credential policy. (threat-model: dedicated deploy key, unset SSH_AUTH_SOCK in unit, pin known_hosts, deploy-keys read-only по умолчанию)
 - [x] Обнаруживать submodules и Git LFS. (prepare_workspace warns on `.gitmodules` / Git LFS `.gitattributes`)
 - [x] Не запускать task на неполностью подготовленном repository. (run_attempt: `prepare_workspace()?` возвращает раньше — adapter не запускается, если worktree/fetch не готовы)
 - [ ] Добавить repository cache size/GC policy.

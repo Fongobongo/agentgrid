@@ -80,6 +80,11 @@ External ACP clients can drive the grid as an ACP agent (Stage 6) since 0.2.
   autonomy without an explicit policy + budget.
 - Disk low → node self-marks `degraded` (< `AGENTGRID_DISK_LOW_MB`).
 - **Fencing tokens (0.4.2):** every attempt mutation (events/ack/complete/artifact/session) must carry the per-attempt `X-AgentGrid-Fencing-Token` minted at assignment. A token that does not match the attempt's current fencing token yields `409 Conflict` and mutates nothing, so a stale writer — a node daemon that restarted after its lease expired, or two nodes racing for the same attempt — cannot corrupt an attempt the scheduler has already superseded. The token rotates on each re-assignment.
+- **SSH credential policy (0.4.2):** git over SSH must use a dedicated deployment key the operator provisions, not the daemon user's interactive agent.
+  - Run the node daemon under a dedicated system user with a minimal `~/.ssh/config` (deploy keys only). Do **not** forward `SSH_AUTH_SOCK` into the daemon environment — unset it in the unit file so a logged-in operator's agent is never used by a clone/fetch.
+  - Prefer `git@` (scp) or `ssh://` URLs over `file://` for remote repos; `file://` is permitted only for trusted local test repos (the `validate_git_url` scheme allowlist rejects `javascript:`/`data:`/`ftp:`/arbitrary schemes).
+  - Pin repository hosts with a known `~/.ssh/known_hosts` (no `StrictHostKeyChecking=no`); the node install path fails closed on an unknown host key by default.
+  - A deploy key grants only repo clone/fetch; never place a key that can push unless a workflow explicitly requires upstream push (none does in 0.4.2).
 
 ## Out of scope for 0.1.1
 
