@@ -750,7 +750,7 @@
 - [x] Добавить cross-process repository `flock`. (`RepoFlock` через `libc::flock` на per-repo lock файле в `prepare_workspace`)
 - [x] Добавить timeout ожидания repo lock. (`RepoFlock::acquire` блокирует до 60s, bails с timeout ошибкой)
 - [ ] Добавить diagnostics/stale lock recovery.
-- [ ] Проверять clone/fetch URL scheme и policy.
+- [x] Проверять clone/fetch URL scheme и policy. (`validate_git_url`: allow http/https/git/ssh/file + scp-style; reject javascript:/data:/ftp:/empty/newlines)
 - [ ] Определить SSH credential policy.
 - [ ] Обнаруживать submodules и Git LFS.
 - [ ] Не запускать task на неполностью подготовленном repository.

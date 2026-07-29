@@ -5246,3 +5246,51 @@ async fn request_id_echoed_and_generated_when_absent() {
         rid,
     );
 }
+
+#[tokio::test]
+async fn repository_create_rejects_unsafe_git_url_scheme() {
+    let app = build_router(AppState::open_temp().await.unwrap());
+    let cred = test_token(&app).await;
+    let mk = |url: &str, name: &str| CreateRepositoryRequest {
+        name: name.into(),
+        git_url: url.into(),
+        default_branch: "main".into(),
+        validation_command: None,
+    };
+    let mut n = 0;
+    for bad in ["javascript://evil/x", "data:text/plain,a", "ftp://x", ""] {
+        n += 1;
+        assert_eq!(
+            create_repo_raw(&app, mk(bad, &format!("bad-{n}")), &cred).await,
+            StatusCode::BAD_REQUEST,
+            "expected 400 for git_url={bad:?}"
+        );
+    }
+    let oks = [
+        "https://github.com/o/r.git",
+        "git://github.com/o/r.git",
+        "ssh://git@github.com/o/r.git",
+        "file:///srv/repos/r.git",
+        "git@github.com:o/r.git",
+    ];
+    for ok in oks {
+        n += 1;
+        assert_eq!(
+            create_repo_raw(&app, mk(ok, &format!("ok-{n}")), &cred).await,
+            StatusCode::CREATED,
+            "expected 201 for git_url={ok:?}"
+        );
+    }
+}
+
+async fn create_repo_raw(app: &Router, req: CreateRepositoryRequest, cred: &str) -> StatusCode {
+    app.clone()
+        .oneshot(post_auth(
+            "/v1/repositories",
+            serde_json::to_string(&req).unwrap(),
+            cred,
+        ))
+        .await
+        .unwrap()
+        .status()
+}

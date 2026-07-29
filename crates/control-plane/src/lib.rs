@@ -1862,7 +1862,18 @@ async fn create_repository(
     State(state): State<Arc<AppState>>,
     auth: Option<Extension<AuthedUser>>,
     Json(req): Json<CreateRepositoryRequest>,
-) -> (StatusCode, Json<RepositoryView>) {
+) -> Result<(StatusCode, Json<RepositoryView>), (StatusCode, Json<serde_json::Value>)> {
+    // Hardening P1 item 32: vet the git_url scheme at the trust boundary so an
+    // operator cannot register a `javascript:`/`data:`/arbitrary URI git remote.
+    // Allow only git transports; `file://` is permitted for trusted local clones
+    // (test repos) — narrowing `file://` to a policy flag is a P1 follow-up.
+    if let Err(msg) = validate_git_url(&req.git_url) {
+        tracing::warn!("create_repository rejected git_url: {msg}");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        ));
+    }
     match state.store.create_repository(&req).await {
         Ok(v) => {
             let _ = state
@@ -1875,23 +1886,41 @@ async fn create_repository(
                     None,
                 )
                 .await;
-            (StatusCode::CREATED, Json(v))
+            Ok((StatusCode::CREATED, Json(v)))
         }
         Err(e) => {
             tracing::error!("create_repository failed: {e}");
-            (
+            Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(RepositoryView {
-                    id: String::new(),
-                    name: String::new(),
-                    git_url: String::new(),
-                    default_branch: String::new(),
-                    validation_command: None,
-                    created_at: String::new(),
-                }),
-            )
+                Json(serde_json::json!({"error": "internal error"})),
+            ))
         }
     }
+}
+
+/// Hardening P1 item 32: accept only git-class URL schemes. Returns Err(msg)
+/// for a scheme that could never be a legitimate git remote or that carries
+/// injection risk (`javascript:`, `data:`, ...). `scp`-style (`user@host:path`)
+/// and bare relative paths are allowed as git does.
+fn validate_git_url(url: &str) -> Result<(), &'static str> {
+    if url.is_empty() || url.trim().is_empty() {
+        return Err("git_url must not be empty");
+    }
+    if url.contains('\n') || url.contains('\r') {
+        return Err("git_url must not contain newlines");
+    }
+    if let Some(idx) = url.find(':') {
+        if url[idx..].starts_with("://") {
+            if !matches!(&url[..idx], "http" | "https" | "git" | "ssh" | "file") {
+                return Err("git_url scheme not allowed");
+            }
+        } else if !url[..idx].contains('@') {
+            // single colon, no `@host` -> a `scheme:path` URI (javascript:/data:),
+            // which git never accepts. scp-style `user@host:path` is fine.
+            return Err("git_url scheme not allowed");
+        }
+    }
+    Ok(())
 }
 
 async fn list_repositories(
