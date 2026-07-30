@@ -815,7 +815,7 @@
 - [ ] Добавить pagination для длинных списков.
 - [ ] Добавить error states вместо пустых таблиц при API failure.
 - [ ] Добавить component/API tests.
-- [ ] Добавить CSP и security headers.
+- [x] Добавить CSP и security headers. (per-route CSP already set on the SPA shell + artifact responses; new `security_headers_middleware` applies default `Referrer-Policy: no-referrer` + a restrictive `Permissions-Policy` (no camera/mic/geolocation/etc.) to every response; HSTS opt-in via `AGENTGRID_HSTS=1` so a plain-HTTP/reverse-proxixed TLS CP does not pin the wrong cert. Test `security_headers_applied_by_default`.)
 
 ## 37. CLI/TUI — P2/P3
 

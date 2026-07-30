@@ -516,6 +516,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_node_auth,
         ))
+        // Hardening P2 item 36: default security headers on every response
+        // (Referrer-Policy + a restrictive Permissions-Policy). HSTS is opt-in
+        // via AGENTGRID_HSTS=1 so a plain-HTTP-control-plane-terminated TLS at
+        // a reverse proxy does not pin a self-signed cert. The per-route CSP
+        // (set on the SPA shell + artifact responses) stays untouched.
+        .layer(middleware::from_fn(security_headers_middleware))
         // Hardening P2 item 19/35: outermost layer so every log line inside a
         // request (auth, handler, store) carries a stable `request_id`. The
         // JSON formatter attaches the current span to each event, so the id is
@@ -529,6 +535,35 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// `X-Request-Id` only if it is a safe opaque id (≤64 `[A-Za-z0-9_-]`, no
 /// separators — same guard as attempt ids, so a client cannot inject log
 /// control chars or forge another request's id); otherwise mint a UUIDv4.
+/// Hardening P2 item 36: apply a small set of default security headers to
+/// every response. Referrer-Policy + a restrictive Permissions-Policy
+/// (no camera/mic/geolocation/USB/etc.) keep the API/UI safe even when a
+/// browser somehow loads a response context. HSTS is opt-in behind
+/// AGENTGRID_HSTS=1 so a loopback / reverse-proxied TLS control plane does
+/// not pin the wrong cert; the per-route CSP (SPA shell + artifacts) is set
+/// downstream and is left untouched here.
+async fn security_headers_middleware(req: Request<Body>, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+    let _ = headers.try_insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    let _ = headers.try_insert(
+        header::HeaderName::from_static("permissions-policy"),
+        header::HeaderValue::from_static(
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+        ),
+    );
+    if std::env::var("AGENTGRID_HSTS").as_deref() == Ok("1") {
+        let _ = headers.try_insert(
+            header::HeaderName::from_static("strict-transport-security"),
+            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
+    }
+    res
+}
+
 /// The id rides in a tracing span (so every event logs it) and is echoed back
 /// on the response.
 async fn request_id_middleware(headers: HeaderMap, mut req: Request<Body>, next: Next) -> Response {

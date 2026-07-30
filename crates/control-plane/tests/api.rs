@@ -5416,6 +5416,45 @@ async fn request_id_echoed_and_generated_when_absent() {
     );
 }
 
+/// Hardening P2 item 36: the server applies default security headers to every
+/// response (here the health endpoint): Referrer-Policy + Permissions-Policy.
+/// HSTS is opt-in (AGENTGRID_HSTS=1) and absent by default.
+#[tokio::test]
+async fn security_headers_applied_by_default() {
+    let app = build_router(AppState::open_temp().await.unwrap());
+    std::env::remove_var("AGENTGRID_HSTS");
+    let resp = app
+        .oneshot(Request::get("/health/live").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("referrer-policy")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "no-referrer",
+        "Referrer-Policy default",
+    );
+    let pp = resp
+        .headers()
+        .get("permissions-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        pp.contains("camera=()"),
+        "Permissions-Policy denies camera: {pp}"
+    );
+    assert!(pp.contains("microphone=()"), "denies microphone: {pp}");
+    assert!(pp.contains("geolocation=()"), "denies geolocation: {pp}");
+    assert!(
+        resp.headers().get("strict-transport-security").is_none(),
+        "HSTS must be opt-in (not set by default)"
+    );
+}
+
 #[tokio::test]
 async fn repository_create_rejects_unsafe_git_url_scheme() {
     let app = build_router(AppState::open_temp().await.unwrap());
