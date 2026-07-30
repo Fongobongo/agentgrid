@@ -1184,6 +1184,12 @@ async fn drive_acp_session(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
+    // Hardening P0/P1 item 5: never let an unsandboxed agent run unsafe-unattended
+    // unless the operator opted in — strip the bypass env the adapter otherwise
+    // inherits from the daemon's parent process.
+    for k in sandbox::unsafe_env_guard(cfg.sandbox) {
+        cmd.env_remove(k);
+    }
     for (k, v) in &cfg.adapter_env {
         cmd.env(k, v);
     }
@@ -1798,6 +1804,9 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     // the program from the prefix args because ProcessBackend appends its own
     // `--prompt <prompt>` after the prefix.
     let (sb_program, sb_prefix) = sandbox::sandbox_prefix(cfg.sandbox, &ws.path, &bin);
+    // Hardening P0/P1 item 5: never let the agent run unsafe-unattended in an
+    // unsandboxed environment unless the operator explicitly opted in.
+    let env_remove = sandbox::unsafe_env_guard(cfg.sandbox);
     let validation_passed = loop {
         let req = agentgrid_adapters::SpawnRequest {
             bin: sb_program.clone(),
@@ -1807,6 +1816,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             attempt_id: assignment.attempt_id.clone(),
             timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
             env: cfg.adapter_env.clone(),
+            env_remove: env_remove.clone(),
             limits: profile_limits(cp_profile.as_ref()),
         };
         let bp = match agentgrid_adapters::ProcessBackend.spawn(req) {

@@ -103,6 +103,44 @@ pub fn sandbox_command(
     }
 }
 
+/// Hardening P0/P1 (item 5): an unsafe-unattended adapter run (one that
+/// bypasses interactive permission prompts / auto-runs every tool call) must
+/// NOT happen when the agent is unsandboxed (shares the node environment),
+/// unless the operator sets the explicit `AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX=1`
+/// override. Returns the env-var names to remove from the adapter subprocess so
+/// it falls back to safe mode. Composing the spawn with `cmd.env_remove(name)`
+/// for each entry keeps the inherited parent env honest.
+///
+/// Callers: any path that runs the agent adapter (`ProcessBackend::spawn` and
+/// the wrapper-binary spawn) should apply this so the parent's env cannot
+/// silently make an unsandboxed run unsafe.
+pub fn unsafe_env_guard(kind: SandboxKind) -> Vec<String> {
+    if kind != SandboxKind::None {
+        return Vec::new();
+    }
+    let allow = std::env::var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if allow {
+        return Vec::new();
+    }
+    let mut remove = vec!["AGENTGRID_UNSAFE_UNATTENDED".to_string()];
+    // Per-adapter auto knobs are the other way an operator can opt into a
+    // dangerous unattended run; gate them too so the override is the single
+    // explicit path.
+    if std::env::var("AGENTGRID_OPENCODE_AUTO").is_ok() {
+        remove.push("AGENTGRID_OPENCODE_AUTO".to_string());
+    }
+    tracing::warn!(
+        kind = ?kind,
+        removed = ?remove,
+        "unsafe adapter mode gated off: AGENTGRID_SANDBOX=none and no \
+         AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX override; removing the bypass env \
+         so the adapter runs in safe mode"
+    );
+    remove
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +199,29 @@ mod tests {
         assert!(a.contains(&"-v".to_string()));
         assert_eq!(a[a.len() - 2], "img:1");
         assert_eq!(a[a.len() - 1], "adapter-claude");
+    }
+
+    #[test]
+    fn unsafe_guard_strips_unset_env_when_unsandboxed() {
+        std::env::remove_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX");
+        let remove = unsafe_env_guard(SandboxKind::None);
+        assert!(
+            remove.contains(&"AGENTGRID_UNSAFE_UNATTENDED".to_string()),
+            "unsafe unattended env must be stripped when unsandboxed"
+        );
+    }
+
+    #[test]
+    fn unsafe_guard_keeps_env_when_sandboxed() {
+        let remove = unsafe_env_guard(SandboxKind::Docker);
+        assert!(remove.is_empty(), "sandboxed runs may keep the unsafe env");
+    }
+
+    #[test]
+    fn unsafe_guard_keeps_env_with_override() {
+        std::env::set_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX", "1");
+        let remove = unsafe_env_guard(SandboxKind::None);
+        assert!(remove.is_empty(), "explicit override keeps the unsafe env");
+        std::env::remove_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX");
     }
 }

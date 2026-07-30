@@ -45,6 +45,7 @@ async fn start_stream_collect(f: &AdapterFixture) {
         attempt_id: format!("attempt-conform-{}", f.name),
         timeout: Duration::from_secs(10),
         env: vec![],
+        env_remove: vec![],
         limits: Default::default(),
     };
     let mut bp = ProcessBackend.spawn(req).unwrap();
@@ -80,6 +81,7 @@ async fn start_cancel(f: &AdapterFixture) {
         attempt_id: format!("attempt-cancel-{}", f.name),
         timeout: Duration::from_secs(30),
         env: vec![],
+        env_remove: vec![],
         limits: Default::default(),
     };
     let bp = ProcessBackend.spawn(req).unwrap();

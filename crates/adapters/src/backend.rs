@@ -24,6 +24,11 @@ pub struct SpawnRequest {
     pub attempt_id: String,
     pub timeout: Duration,
     pub env: Vec<(String, String)>,
+    /// Env-var names to remove from the child even if the spawning process
+    /// inherits them (hardening P0/P1 item 5: strip `AGENTGRID_UNSAFE_UNATTENDED`
+    /// when the agent is unsandboxed). `cmd.env_remove(name)` per entry keeps
+    /// the inherited parent env honest.
+    pub env_remove: Vec<String>,
     /// Stage 12: optional resource limits the backend should apply if it can.
     /// A backend that cannot enforce a limit (e.g. `ProcessBackend` without a
     /// cgroup scope) reports [`BackendProcess::enforced_limits`] = `false` so
@@ -131,6 +136,9 @@ impl ExecutionBackend for ProcessBackend {
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
+        for k in &req.env_remove {
+            cmd.env_remove(k);
+        }
         // Separate process group so a cancel can SIGTERM the whole tree.
         cmd.process_group(0);
         cmd.stdout(Stdio::piped());
@@ -164,6 +172,7 @@ mod tests {
             attempt_id: "t".into(),
             timeout: Duration::from_secs(5),
             env: vec![],
+            env_remove: vec![],
             limits: ResourceLimits::default(),
         }
     }

@@ -466,10 +466,10 @@
 - [x] Ограничить количество events в одном batch. (`AGENTGRID_MAX_EVENT_BATCH` по умолчанию 500; regression-тест `events_batch_count_limit_enforced`)
 - [x] Ограничить суммарный размер batch, а не только каждый payload. (`AGENTGRID_MAX_EVENT_BATCH_KB` по умолчанию 4 MiB суммарно)
 - [ ] Проверять последовательность и обнаруживать gaps.
-- [ ] Возвращать `highest_contiguous_sequence` в ACK.
+- [x] Возвращать `highest_contiguous_sequence` в ACK. (`IngestEventsAck { accepted, highest_contiguous_sequence }`; contiguous 1..=N prefix in `task_events`; backward compatible — node daemon ignores body; regression `ingest_events_reports_contiguous_prefix_and_dedup`)
 - [ ] Определить обработку out-of-order batches.
 - [ ] Добавить server-side rate limiting per node.
-- [ ] Добавить metrics duplicate/gap/stale/rejected.
+- [x] Добавить metrics duplicate/gap/stale/rejected. (existing `event_rejections_total` covers terminal/batch rejection + stale sequence paths; new `event_gaps_total` covers max-seq-before-prefix gap; duplicates land silently via `ON CONFLICT DO NOTHING`)
 
 ## 15. Storage retention и quotas — P1
 
@@ -572,8 +572,8 @@
 - [ ] Добавить FK для workflow tables.
 - [ ] Определить `ON DELETE` policy для каждой связи.
 - [ ] Добавить CHECK constraints для всех status/autonomy/role полей.
-- [ ] Добавить уникальный `(conversation_id, seq)`.
-- [ ] Выделять conversation sequence атомарно.
+- [x] Добавить уникальный `(conversation_id, seq)`. (migration 0034 `ux_conv_msgs_seq`; DB-side backstop for atomic seq allocation)
+- [x] Выделять conversation sequence атомарно. (`append_conversation_message` single INSERT...SELECT COALESCE(MAX)+1 ... RETURNING seq; regression-тест `conversation_append_allocates_unique_seq_under_concurrency`)
 - [x] Добавить migration preflight для orphan rows. (`count_orphan_rows` детектит attempts/events/artifacts без родителя; запускается в `reconcile_on_startup`, логирует drift; regression-тест `orphan_row_detection_works`)
 - [ ] Добавить baseline schema для новых установок, сохранив upgrade migrations.
 
@@ -581,7 +581,7 @@
 
 - [x] Решить: вычисляемое значение или денормализованный cache. (денормализованный cache `nodes.active_attempts`, reconciled из попыток)
 - [x] Если cache — добавить периодический reconciliation. (`reconcile_active_attempts` recomputes per-node из attempt rows)
-- [ ] Добавить drift metric.
+- [x] Добавить drift metric. (`agentgrid_active_attempt_drift_total` accumulate repaired counters in `reconcile_active_attempts`; exposed in /metrics)
 - [x] Запускать reconciliation после startup recovery. (`reconcile_on_startup` вызывает `reconcile_active_attempts`; audit логирует drift)
 - [ ] Проверять count после lease expiry, lost, cancel, complete и retry.
 - [x] Добавить invariant test после всех lifecycle сценариев. (`reconcile_active_attempts_repairs_drift` + `state_machine_terminal_invariants_hold` проверяет active_attempts=0)
