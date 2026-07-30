@@ -2936,8 +2936,14 @@ async fn create_agent_session_handler(
         )
             .into_response(),
         Err(e) => {
+            // Hardening P2 item 19: log the full internal error chain here, but
+            // never send it to the client — return an opaque 500 body.
             tracing::error!("create_agent_session failed: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
         }
     }
 }

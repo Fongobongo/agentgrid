@@ -543,8 +543,8 @@
 - [x] Добавить `request_id`. (middleware: X-Request-Id принят если safe opaque, иначе UUIDv4; echoed в response; span делает id видимым в каждой строке JSON-лога)
 - [x] Не возвращать пустые списки при DB errors. (list handlers(nodes/tasks/workflows/runs/schedules/repos/events/mcp) возвращают 503 вместо пустого массива при storage ошибке)
 - [x] Возвращать `503` при storage outage. (list handlers mapped DB Err → SERVICE_UNAVAILABLE)
-- [ ] Не возвращать raw internal error клиенту.
-- [ ] Включать internal error chain только в structured logs.
+- [x] Не возвращать raw internal error клиенту. (create_agent_session repealed raw `e.to_string()` 500for¯ныйей responsibility → op‌aque ` {"error":"internal error"}`; full chain в ана только в structured log; другие handlers уже 500 без body или opic JSON)
+- [x] Включать internal error chain только в structured logs. (internal errors анылизируются в `tracing::error!(...)` на server, неу в client body; create_agent_session — теперь日起 только '@format!... {e}' в log)
 - [ ] Добавить единый JSON error schema.
 - [ ] Задокументировать codes в OpenAPI.
 
