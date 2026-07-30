@@ -4,6 +4,12 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Nightly gate: the same jobs re-run on a schedule so a flaky/new failure
+  # surfaces even on a quiet master, matching the hardening plan's
+  # "Nightly" release gates.
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

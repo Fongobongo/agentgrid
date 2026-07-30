@@ -1,0 +1,26 @@
+# Dependabot keeps GitHub Actions and Rust dependencies current. Pair it with
+# SHA-pinned actions (hardening plan #29) so Dependabot opens PRs bumping the
+# pin to the latest release's commit SHA, not just a moving tag.
+version: 2
+updates:
+  # GitHub Actions used by the workflows — bumps pinned action versions / SHAs.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"
+  # Cargo crates (control-plane / node-daemon / cli / adapters / common).
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"

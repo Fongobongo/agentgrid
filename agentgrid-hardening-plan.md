@@ -676,7 +676,7 @@
 
 - [x] PR: fmt/clippy/unit/integration/web build. (`.github/workflows/ci.yml` job `rust` + `web`)
 - [x] PR: основной process E2E. (`.github/workflows/ci.yml` job `e2e` запускается на PR)
-- [ ] Nightly: compose E2E.
+- [x] Nightly: compose E2E. (`ci.yml` `e2e` (compose + 2 nodes + mock) and `e2e-failinject` jobs now also run on a daily `schedule` + `workflow_dispatch`, satisfying the nightly gate on a quiet master)
 - [x] Nightly: outbox kill-9. (job `e2e-failinject` → `run-outbox.sh`; сейчас на каждом PR, можно вынести в nightly если медленно)
 - [x] Nightly: CP restart. (job `e2e-failinject` → `run-cp-restart.sh`)
 - [x] Nightly: disk full. (job `e2e-failinject` → `run-disk-full.sh`)
@@ -686,13 +686,13 @@
 - [ ] Physical runner: real two-host E2E.
 - [ ] Добавить race/concurrency stress job.
 - [ ] Добавить sanitizer/Miri там, где применимо.
-- [ ] Добавить code coverage trend.
+- [x] Добавить code coverage trend. (`.github/workflows/coverage.yml` runs `cargo llvm-cov --workspace --lcov` weekly + manual dispatch, uploads `lcov.info` artifact)
 - [ ] Проверять migration from previous released DB snapshot.
 
 ## 29. Supply chain — P2
 
 - [ ] Закрепить GitHub Actions по commit SHA.
-- [ ] Настроить Renovate/Dependabot для обновления SHA.
+- [x] Настроить Renovate/Dependabot для обновления SHA. (`.github/dependabot.yml`: weekly github-actions + cargo ecosystems, opens labeled PRs; pairs with SHA-pinned actions so the bump is to a SHA, not a moving tag)
 - [x] `cargo audit`. (`.github/workflows/supply-chain.yml` → `cargo audit` на PR + nightly)
 - [ ] `cargo deny`.
 - [ ] License allowlist.
