@@ -19,6 +19,9 @@ BASE_REAL="http://127.0.0.1:7811"
 BASE_PROXY="http://127.0.0.1:7820"
 USER="admin"
 PASS="changeme"
+# Hardening P0 #2: the bootstrap env backdoor was removed; source the shared
+# helper that reads the one-time setup token from the CP log.
+source "$ROOT/tests/e2e/lib-bootstrap.sh"
 
 TMP="$(mktemp -d -t ag-e2e-slow-XXXXXX)"
 CP_DB="$TMP/cp.db"
@@ -140,6 +143,9 @@ echo ">> slow-network failure injection (delay=${AG_E2E_SLOW_MS:-250}ms/write)"
 echo "  starting control plane on :7811"
 start_cp
 wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+# setup uses the real control-plane URL (not the slow proxy): /v1/auth/setup
+# is a one-shot console op, run it without paying the throttle latency.
+bootstrap_first_user "$TMP/cp.log" "$BASE_REAL" "$USER" "$PASS"
 login
 mint_token
 

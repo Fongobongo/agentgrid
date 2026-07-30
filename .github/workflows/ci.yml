@@ -67,6 +67,11 @@ jobs:
         run: bash tests/e2e/run-cp-restart.sh
       - name: node disk-full fail-closed (spool limit)
         run: bash tests/e2e/run-disk-full.sh
+        # Hardening P2 item 28: slow-network failure injection runs on every
+        # build here (and via the schedule trigger above, nightly) since it is
+        # process-based and quick.
+      - name: slow-network failure injection
+        run: bash tests/e2e/run-slow-net.sh
 
   e2e:
     name: e2e (compose + 2 nodes + mock)

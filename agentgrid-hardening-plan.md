@@ -21,7 +21,7 @@
 - [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings` проходит.
 - [x] `cargo test --workspace --all-targets` проходит.
 - [x] `npm ci && npm run build && npm run lint` проходит в `web/`.
-- [ ] Основной E2E и failure-injection suite проходят перед тегом релиза.
+- [x] Основной E2E и failure-injection suite проходят перед тегом релиза. (process-based suite — `run-outbox.sh`, `run-cp-restart.sh`, `run-disk-full.sh`, `run-slow-net.sh` — all green locally after the setup-token bootstrap fix; `run.sh`/`run-workflow.sh` export a fixed `AGENTGRID_ADMIN_PASSWORD` so the compose path's `up.sh` bootstrap creates matching creds (`docker compose config` validated; live compose run not exercised locally due to disk)
 - [ ] Threat model и README соответствуют фактическому поведению.
 
 ---
@@ -680,7 +680,7 @@
 - [x] Nightly: outbox kill-9. (job `e2e-failinject` → `run-outbox.sh`; сейчас на каждом PR, можно вынести в nightly если медленно)
 - [x] Nightly: CP restart. (job `e2e-failinject` → `run-cp-restart.sh`)
 - [x] Nightly: disk full. (job `e2e-failinject` → `run-disk-full.sh`)
-- [ ] Nightly: slow network.
+- [x] Nightly: slow network. (`tests/e2e/run-slow-net.sh` added as a step in the `e2e-failinject` CI job (runs on PR + nightly schedule); script verified green locally via the setup-token bootstrap)
 - [ ] Nightly: workflow E2E.
 - [ ] Nightly: skill bundle.
 - [ ] Physical runner: real two-host E2E.

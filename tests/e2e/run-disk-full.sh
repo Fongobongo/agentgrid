@@ -24,6 +24,9 @@ BIN="$ROOT/target/debug"
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7813}"
 PORT="${AGENTGRID_PORT:-7813}"
 USER="admin"
+# Hardening P0 #2: the bootstrap env backdoor was removed; source the shared
+# helper that reads the one-time setup token from the CP log.
+source "$ROOT/tests/e2e/lib-bootstrap.sh"
 PASS="changeme"
 SPOOL_BYTES="${AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES:-4096}"
 
@@ -152,6 +155,7 @@ wait_terminal() {
 echo ">> node disk-full fail-closed (spool limit ${SPOOL_BYTES} bytes)"
 start_cp
 wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
 login
 mint_token
 start_node "$ENROLL_TOKEN"

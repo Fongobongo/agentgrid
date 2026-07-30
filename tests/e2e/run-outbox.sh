@@ -24,6 +24,9 @@ BIN="$ROOT/target/debug"
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7811}"
 PORT="${AGENTGRID_PORT:-7811}"
 USER="admin"
+# Hardening P0 #2: the bootstrap env backdoor was removed; source the shared
+# helper that reads the one-time setup token from the CP log.
+source "$ROOT/tests/e2e/lib-bootstrap.sh"
 PASS="changeme"
 
 TMP="$(mktemp -d -t ag-e2e-outbox-XXXXXX)"
@@ -159,6 +162,7 @@ echo ">> Scenario A: kill -9 node + completion durability"
 echo "  starting control plane"
 start_cp
 wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
 login
 echo "  minting enrollment token"
 mint_token

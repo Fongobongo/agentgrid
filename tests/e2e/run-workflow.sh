@@ -24,6 +24,10 @@ cleanup() { bash deploy/compose/down.sh; }
 trap cleanup EXIT
 
 echo ">> bringing up stack (control plane + 2 nodes)"
+# Hardening P0 #2: up.sh reads AGENTGRID_ADMIN_PASSWORD to run the one-shot
+# /v1/auth/setup bootstrap. Pin it to the test creds used below for login.
+export AGENTGRID_ADMIN_USER="$USER"
+export AGENTGRID_ADMIN_PASSWORD="$PASS"
 bash deploy/compose/up.sh >/dev/null
 
 echo ">> waiting for health"

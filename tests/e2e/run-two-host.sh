@@ -32,6 +32,9 @@ BASE_REMOTE="http://${PUBLIC_IP}:${LISTEN_PORT}"
 BASE_LOCAL="http://127.0.0.1:${LISTEN_PORT}"
 USER="admin"
 PASS="changeme"
+# Hardening P0 #2: the bootstrap env backdoor was removed; source the shared
+# helper that reads the one-time setup token from the CP log.
+source "$ROOT/tests/e2e/lib-bootstrap.sh"
 REMOTE_BIN_DIR="/root/ag-two-host"
 REMOTE_DATA="/tmp/ag-two-host-node"
 
@@ -209,6 +212,7 @@ wait_terminal() {  # $1 id, $2 max secs; sets STATUS
 echo "  starting control plane on 0.0.0.0:$LISTEN_PORT"
 start_cp
 wait_ready || { echo "  CP not ready; log:"; cat "$TMP/cp.log"; exit 1; }
+bootstrap_first_user "$TMP/cp.log" "$BASE_LOCAL" "$USER" "$PASS"
 login
 mint_token
 

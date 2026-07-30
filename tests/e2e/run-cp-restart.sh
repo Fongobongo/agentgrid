@@ -22,6 +22,9 @@ BIN="$ROOT/target/debug"
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7812}"
 PORT="${AGENTGRID_PORT:-7812}"
 USER="admin"
+# Hardening P0 #2: the bootstrap env backdoor was removed; source the shared
+# helper that reads the one-time setup token from the CP log.
+source "$ROOT/tests/e2e/lib-bootstrap.sh"
 PASS="changeme"
 
 TMP="$(mktemp -d -t ag-e2e-cprestart-XXXXXX)"
@@ -175,9 +178,9 @@ PYEOF
 echo ">> CP restart under load — bring up CP + 2 nodes"
 start_cp
 wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
 login
 mint_token
-# Stagger node starts: concurrent enrollment against the same enrollment
 # token races the SQLite write path. Start node-a, let it enroll, then node-b.
 # Each enrollment token is one-shot (store.enroll_node marks it used).
 # Mint one per node to avoid a 400 on the second enroll.
