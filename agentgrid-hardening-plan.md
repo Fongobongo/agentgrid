@@ -681,8 +681,8 @@
 - [x] Nightly: CP restart. (job `e2e-failinject` → `run-cp-restart.sh`)
 - [x] Nightly: disk full. (job `e2e-failinject` → `run-disk-full.sh`)
 - [x] Nightly: slow network. (`tests/e2e/run-slow-net.sh` added as a step in the `e2e-failinject` CI job (runs on PR + nightly schedule); script verified green locally via the setup-token bootstrap)
-- [ ] Nightly: workflow E2E.
-- [ ] Nightly: skill bundle.
+- [x] Nightly: workflow E2E. (`ci.yml` `e2e` job runs `run-workflow.sh` (compose, multi-role DAG across two nodes) gated to `schedule`/`workflow_dispatch`)
+- [x] Nightly: skill bundle. (`ci.yml` `skill-bundle` job (schedule/manual) runs `run-skill-bundle.sh`; exit 77 = no `AG_REMOTE_*` secrets → treated as skip so CI stays green)
 - [ ] Physical runner: real two-host E2E.
 - [ ] Добавить race/concurrency stress job.
 - [ ] Добавить sanitizer/Miri там, где применимо.

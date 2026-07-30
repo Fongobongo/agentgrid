@@ -82,3 +82,33 @@ jobs:
       - uses: actions/checkout@v4
       - name: bring up stack and run a task
         run: bash tests/e2e/run.sh
+        # Nightly-only (and manual): the workflow E2E brings up its own
+        # compose stack and exercises a multi-role DAG across two nodes —
+        # heavier than the per-PR smoke, so it runs only on schedule.
+      - name: workflow E2E (multi-role DAG across two nodes)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: bash tests/e2e/run-workflow.sh
+
+  skill-bundle:
+    name: skill bundle materializes identically local vs remote
+    runs-on: ubuntu-latest
+    # Hardening P2 item 28: needs AG_REMOTE_* in repo secrets (.env is
+    # gitignored). exit 77 = "no remote configured" → treated as skip so CI
+    # without a spare box stays green; runs nightly + manually.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: materialize skill bundle on local + remote and compare hashes
+        env:
+          AG_REMOTE_HOST: ${{ secrets.AG_REMOTE_HOST }}
+          AG_REMOTE_USER: ${{ secrets.AG_REMOTE_USER }}
+          AG_REMOTE_PASS: ${{ secrets.AG_REMOTE_PASS }}
+        run: |
+          bash tests/e2e/run-skill-bundle.sh
+          rc=$?
+          if [ "$rc" = "77" ]; then
+            echo "no AG_REMOTE_* configured — skipping skill-bundle job"
+            exit 0
+          fi
+          exit "$rc"
