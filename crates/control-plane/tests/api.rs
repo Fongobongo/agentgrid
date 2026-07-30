@@ -5058,6 +5058,50 @@ async fn state_machine_terminal_invariants_hold() {
         assert!(state.store.mark_node_offline(&node_id).await.unwrap());
         assert_terminal_invariants(&app, &state, &assign.task_id, &node_id).await;
     }
+    // Hardening P1 item 22: retry of a failed task leaves `active_attempts`
+    // 0 (the task is queued but not yet reassigned), and the counter stays 0
+    // while the retried task is pending, then a new assign bumps it back to 1.
+    {
+        let state = AppState::open_temp().await.unwrap();
+        let app = build_router(state.clone());
+        let (node_id, cred) = enroll(&app, "n-inv-r", vec!["mock".into()], vec!["*".into()]).await;
+        let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await;
+        assert!(
+            ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token)
+                .await
+                .is_success()
+        );
+        assert!(state
+            .store
+            .complete_attempt(
+                &assign.attempt_id,
+                &CompleteAttemptRequest {
+                    exit_code: 3,
+                    ..complete_req()
+                }
+            )
+            .await
+            .unwrap());
+        // After fail the counter is 0 (terminal invariant already covers this).
+        assert_terminal_invariants(&app, &state, &assign.task_id, &node_id).await;
+        // Retry re-queues; no new attempt yet → counter still 0.
+        assert!(state.store.retry_task(&assign.task_id).await.unwrap());
+        let aa_retry: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+            .bind(&node_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(aa_retry, 0, "retry leaves active_attempts 0 before reassign");
+        // A fresh assign bumps it back to 1.
+        let a2 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+        let aa_run: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
+            .bind(&node_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(aa_run, 1, "reassign bumps active_attempts to 1");
+        let _ = a2;
+    }
 }
 
 /// Hardening P0 item 3/36: artifact responses carry a strict CSP

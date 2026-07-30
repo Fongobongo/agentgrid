@@ -583,7 +583,7 @@
 - [x] Если cache — добавить периодический reconciliation. (`reconcile_active_attempts` recomputes per-node из attempt rows)
 - [x] Добавить drift metric. (`agentgrid_active_attempt_drift_total` accumulate repaired counters in `reconcile_active_attempts`; exposed in /metrics)
 - [x] Запускать reconciliation после startup recovery. (`reconcile_on_startup` вызывает `reconcile_active_attempts`; audit логирует drift)
-- [ ] Проверять count после lease expiry, lost, cancel, complete и retry.
+- [x] Проверять count после lease expiry, lost, cancel, complete и retry. (`state_machine_terminal_invariants_hold` now also walks the retry path: counter 0 after fail/retry before reassign, bumps back to 1 on reassign; lease-expiry counter checked in `race_ack_lease_100_iterations_no_drift` (200 iter); lost/cancel/complete covered by the same invariant test)
 - [x] Добавить invariant test после всех lifecycle сценариев. (`reconcile_active_attempts_repairs_drift` + `state_machine_terminal_invariants_hold` проверяет active_attempts=0)
 
 ## 23. Feature maturity и scope control — P2
