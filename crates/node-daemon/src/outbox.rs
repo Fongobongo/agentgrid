@@ -327,10 +327,11 @@ impl CompletionLine {
             // Hardening P2 item 32-5: base was already persisted on the first
             // delivery; redelivery does not need to re-send it.
             resolved_base_sha: None,
+            // Hardening P1 item 32: remote head snapshots were persisted on the
+            // first delivery; redelivery does not re-send them.
+            remote_head_at_start: None,
+            remote_head_at_finish: None,
             acp_session_id: self.acp_session_id.clone(),
-            // Provenance is not durable beyond this redelivery (outbox stores
-            // only the outcome); the CP already persisted the original record
-            // from the first delivery, so no need to store it again.
             plan: None,
             provenance: None,
         }
@@ -403,6 +404,8 @@ mod tests {
             commit_sha: Some("abc".into()),
             error_code: None,
             resolved_base_sha: None,
+            remote_head_at_start: None,
+            remote_head_at_finish: None,
             acp_session_id: Some("sess-1".into()),
             plan: None,
             provenance: None,

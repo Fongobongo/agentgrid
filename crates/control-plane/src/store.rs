@@ -1647,6 +1647,21 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        // Hardening P1 item 32: persist the remote HEAD at start / finish.
+        if let Some(sha) = &req.remote_head_at_start {
+            sqlx::query("UPDATE attempts SET remote_head_at_start = ? WHERE id = ?")
+                .bind(sha)
+                .bind(attempt_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(sha) = &req.remote_head_at_finish {
+            sqlx::query("UPDATE attempts SET remote_head_at_finish = ? WHERE id = ?")
+                .bind(sha)
+                .bind(attempt_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         if let Some(ec) = &req.error_code {
             sqlx::query("UPDATE attempts SET error_code = ? WHERE id = ?")
                 .bind(ec)
@@ -2766,6 +2781,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: None,
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2883,6 +2900,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2903,6 +2922,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: None,
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2946,6 +2967,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("merge_conflict".into()),
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3013,6 +3036,8 @@ mod workflow_tests {
                 commit_sha: Some("sha-worker-1".into()),
                 error_code: None,
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3030,6 +3055,8 @@ mod workflow_tests {
                 commit_sha: Some("sha-worker-2".into()),
                 error_code: None,
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3110,6 +3137,8 @@ mod workflow_tests {
                 commit_sha: Some("sha-worker-1".into()),
                 error_code: None,
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3182,6 +3211,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3199,6 +3230,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3248,6 +3281,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3347,6 +3382,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3395,6 +3432,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: None,
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3731,6 +3770,8 @@ mod workflow_tests {
                 commit_sha: None,
                 error_code: None,
                 resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
                 acp_session_id: Some("sess-1".into()),
                 provenance: None,
                 plan: None,

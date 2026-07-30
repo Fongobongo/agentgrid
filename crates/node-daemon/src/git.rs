@@ -609,6 +609,22 @@ pub fn prune_stale_workspaces(
     }
 }
 
+/// Hardening P1 item 32: capture the remote (upstream) HEAD of the bare-mirror
+/// at the current moment by querying `origin` via `ls-remote`. Used once before
+/// the agent runs and once before completion, so the attempt row records what
+/// upstream looked like at start and how it moved during the attempt. Returns
+/// `None` on any git/network failure (audit data — must never block the attempt).
+/// ponytail: a full `git fetch` is not needed; `ls-remote` hits `origin` (the
+/// configured remote URL) directly and reads only the tip.
+pub fn remote_head_at(repo_dir: &Path) -> Option<String> {
+    let out = git_out(repo_dir, &["ls-remote", "origin", "HEAD"]).ok()?;
+    let sha = out.split_whitespace().next()?;
+    // Hardening P1 item 32: accept only a plausible hex git SHA (>= 7 hex
+    // chars); any other output (e.g. a git error line) yields None.
+    let valid = sha.len() >= 7 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    valid.then_some(sha.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1177,5 +1193,17 @@ mod tests {
         }
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    /// Hardening P1 item 32: `remote_head_at` returns None when there is no
+    /// `origin` remote / git fails, instead of panicking — audit data must
+    /// never block the attempt.
+    #[test]
+    fn remote_head_at_returns_none_on_missing_origin() {
+        let dir = std::env::temp_dir().join(format!("ag-rh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No git repo at all: git ls-remote fails => None (no panic).
+        assert_eq!(remote_head_at(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

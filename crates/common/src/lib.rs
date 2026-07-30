@@ -550,6 +550,18 @@ pub struct CompleteAttemptRequest {
     /// non-git tasks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_base_sha: Option<String>,
+    /// Hardening P1 item 32: the remote HEAD SHA captured at attempt *start*
+    /// (before the agent ran), so audits/diffs can reconstruct what upstream
+    /// looked like when the attempt began — independent of the resolved base.
+    /// Populated by the node daemon; NULL when not a git repo / not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_head_at_start: Option<String>,
+    /// Hardening P1 item 32: the remote HEAD SHA captured at attempt *finish*
+    /// (after the agent ran / before completion). Captures upstream moves that
+    /// happened during the attempt; useful for quarantine / re-run decisions.
+    /// Populated by the node daemon; NULL when not a git repo / not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_head_at_finish: Option<String>,
     /// Distinct failure category: `agent_failed` vs `validation_failed` etc.
     #[serde(default)]
     pub error_code: Option<String>,

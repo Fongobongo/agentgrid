@@ -119,12 +119,7 @@ async fn migrations_serve_legacy_happy_path() {
         &assign.attempt_id,
         &CompleteAttemptRequest {
             exit_code: 0,
-            commit_sha: None,
-            error_code: None,
-            resolved_base_sha: None,
-            acp_session_id: None,
-            plan: None,
-            provenance: None,
+            ..Default::default()
         },
     )
     .await

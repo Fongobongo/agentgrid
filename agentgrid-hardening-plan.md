@@ -744,7 +744,7 @@
 - [ ] Fail closed при отсутствующем upstream commit/patch по умолчанию.
 - [ ] Добавить explicit workflow policy `allow_missing_upstream`.
 - [x] Сохранять exact `resolved_base_sha` для каждого attempt. (migration 0033: attempts.resolved_base_sha; CompleteAttemptRequest.resolved_base_sha serialised; complete_attempt persist; node-daemon reports from worktree base_commit; test `complete_persists_resolved_base_sha`. потолок P1: default-branch checkout не резолвит HEAD — только pinned path)
-- [ ] Сохранять `remote_head_at_start` и `remote_head_at_finish`.
+- [x] Сохранять `remote_head_at_start` и `remote_head_at_finish`. (migration 0035 adds both attempt columns; `CompleteAttemptRequest` carries them; node-daemon captures origin HEAD via `git ls-remote origin HEAD` before agent execution and before completion; `complete_attempt` persists both. Tests: `complete_persists_remote_head_at_start_and_finish`, `remote_head_at_returns_none_on_missing_origin`; migration compat passes.)
 - [x] Показывать stale-base warning. (node-daemon: pinned base_commit проверяется через `merge-base --is-ancestor`; если позади remote HEAD, warn)
 - [x] Получать binary diff как bytes, без `String::from_utf8_lossy`. (`git_out_bytes` в `finalize_workspace` для `git diff --binary`)
 - [x] Добавить cross-process repository `flock`. (`RepoFlock` через `libc::flock` на per-repo lock файле в `prepare_workspace`)

@@ -1669,6 +1669,8 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             error_code,
             res.session_id.clone(),
             None,
+            None,
+            None,
             assignment.provenance.clone().or_else(provenance_from_env),
             &cfg.completion_outbox,
             &assignment.fencing_token,
@@ -1718,6 +1720,8 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
                 127,
                 None,
                 Some("infrastructure_failed".into()),
+                None,
+                None,
                 None,
                 None,
                 assignment.provenance.clone().or_else(provenance_from_env),
@@ -1896,6 +1900,8 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             commit_sha: None,
             error_code: kill_reason.map(|k| k.to_string()),
             resolved_base_sha: None,
+            remote_head_at_start: None,
+            remote_head_at_finish: None,
             acp_session_id: None,
             plan: None,
             provenance: assignment.provenance.clone().or_else(provenance_from_env),
@@ -1976,6 +1982,14 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     // Hardening P2 item 32-5: capture the resolved base before `ws` is moved
     // into `finalize_workspace`, so the completion can persist it.
     let resolved_base_sha = ws.base_commit.clone();
+    // Hardening P1 item 32: capture the remote HEAD at attempt *start* (right
+    // after prepare_workspace fetched origin). Best-effort — None on any git
+    // failure; audit data must never block the attempt.
+    let remote_head_at_start = if ws.is_git {
+        ws.repo_dir.as_deref().and_then(git::remote_head_at)
+    } else {
+        None
+    };
     let commit_sha =
         tokio::task::spawn_blocking(move || git::finalize_workspace(ws, node_name.as_str()))
             .await??;
@@ -2030,6 +2044,10 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     // in-flight batch is gone from RAM but still on disk here.
     sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(60))
         .await;
+    // Hardening P1 item 32: capture the remote HEAD at attempt *finish*
+    // (after the agent ran). Best-effort — None on any git failure or when
+    // not a git task; audit data must never block the completion.
+    let remote_head_at_finish = cleanup_repo.as_deref().and_then(git::remote_head_at);
     report_complete(
         &client,
         &cfg.server,
@@ -2039,6 +2057,8 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         error_code,
         None,
         resolved_base_sha,
+        remote_head_at_start,
+        remote_head_at_finish,
         assignment.provenance.clone().or_else(provenance_from_env),
         &cfg.completion_outbox,
         &assignment.fencing_token,
@@ -2239,6 +2259,8 @@ async fn report_complete(
     error_code: Option<String>,
     acp_session_id: Option<String>,
     resolved_base_sha: Option<String>,
+    remote_head_at_start: Option<String>,
+    remote_head_at_finish: Option<String>,
     provenance: Option<agentgrid_common::ProvenanceRecord>,
     completion_outbox: &outbox::CompletionOutbox,
     fence: &str,
@@ -2249,6 +2271,8 @@ async fn report_complete(
         commit_sha,
         error_code,
         resolved_base_sha,
+        remote_head_at_start,
+        remote_head_at_finish,
         acp_session_id,
         plan: None,
         provenance,
