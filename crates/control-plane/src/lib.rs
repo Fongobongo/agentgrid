@@ -109,6 +109,10 @@ pub struct AppState {
     pub cross_node_rejects: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub stale_fencing_tokens: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub event_rejections: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Hardening P1 item 14: cumulative count of event-sequence gaps a batch
+    /// introduced (a sequence > current contiguous-prefix+1). Out-of-order /
+    /// skipped-sequence redelivery bumps this monotonically.
+    pub event_gaps: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Request size ceilings (Stage 5.1). Overridable via env; defaults:
@@ -306,6 +310,7 @@ impl AppState {
             cross_node_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             stale_fencing_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             event_rejections: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            event_gaps: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }))
     }
 
@@ -1455,6 +1460,17 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
         state
             .event_rejections
             .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    // Hardening P1 item 14: event-sequence gaps a batch introduced (max
+    // sequence in the batch exceeded the contiguous prefix). Monotonic across
+    // batches; the durable outbox still redrives the missing sequences.
+    s.push_str(
+        "# HELP agentgrid_event_gaps_total Event-sequence gaps introduced by a batch (max seq > contiguous prefix).",
+    );
+    s.push_str("\n# TYPE agentgrid_event_gaps_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_event_gaps_total {}\n",
+        state.event_gaps.load(std::sync::atomic::Ordering::Relaxed)
     ));
     // Hardening P2 item 35: lease-expiry reverts (the lease/ACK race path).
     s.push_str(
@@ -2796,9 +2812,9 @@ async fn ingest_events(
     Path(attempt_id): Path<String>,
     headers: HeaderMap,
     Json(req): Json<IngestEventsRequest>,
-) -> StatusCode {
+) -> Response {
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code;
+        return code.into_response();
     }
     if let Err(code) = check_fencing_token(
         &state,
@@ -2807,14 +2823,14 @@ async fn ingest_events(
     )
     .await
     {
-        return code;
+        return code.into_response();
     }
     for e in &req.events {
         if e.payload.to_string().len() > state.limits.event {
             state
                 .event_rejections
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return StatusCode::PAYLOAD_TOO_LARGE;
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         }
     }
     // Hardening P1 item 14: bound the batch itself — event count and the
@@ -2823,28 +2839,43 @@ async fn ingest_events(
         state
             .event_rejections
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return StatusCode::PAYLOAD_TOO_LARGE;
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let total: usize = req.events.iter().map(|e| e.payload.to_string().len()).sum();
     if total > state.limits.event_batch_bytes {
         state
             .event_rejections
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return StatusCode::PAYLOAD_TOO_LARGE;
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     match state.store.ingest_events(&attempt_id, &req).await {
-        Ok(true) => StatusCode::OK,
-        Ok(false) => {
-            // Either the attempt is gone or it is terminal — both are
-            // rejections worth surfacing in observability.
+        Ok(ack) if ack.accepted > 0 || ack.highest_contiguous_sequence.is_some() => {
+            // Hardening P1 item 14: a batch whose max sequence exceeds the
+            // contiguous prefix (highest_contiguous_sequence) introduced a
+            // gap — out-of-order or skipped-sequence delivery. Count it once
+            // per such batch for observability; the durable outbox still
+            // redrives the missing sequences.
+            let max_seq = req.events.iter().map(|e| e.sequence).max();
+            if let (Some(max_seq), Some(prefix)) = (max_seq, ack.highest_contiguous_sequence) {
+                if max_seq > prefix {
+                    state
+                        .event_gaps
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            (StatusCode::OK, Json(ack)).into_response()
+        }
+        // Either the attempt is gone or it is terminal — both are
+        // rejections worth surfacing in observability.
+        Ok(_) => {
             state
                 .event_rejections
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            StatusCode::NOT_FOUND
+            StatusCode::NOT_FOUND.into_response()
         }
         Err(e) => {
             tracing::error!("ingest_events failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }

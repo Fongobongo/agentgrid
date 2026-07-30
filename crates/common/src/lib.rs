@@ -522,6 +522,21 @@ pub struct IngestEventsRequest {
     pub events: Vec<IncomingEvent>,
 }
 
+/// Response to `POST /v1/node/attempts/{id}/events`.
+///
+/// `highest_contiguous_sequence` is the largest in-order sequence the control
+/// plane currently holds for this attempt: the contiguous run of sequences
+/// 1..=N present in `task_events`. A client that batched up to S and gets back
+/// `highest_contiguous_sequence < S` knows the CP has a gap (some earlier batch
+/// did not land); one that gets `>= S` knows the full prefix landed. This is
+/// purely advisory today (hardening P1 item 14): the durable outbox still
+/// drives redelivery, so a client may safely ignore it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct IngestEventsAck {
+    pub accepted: u64,
+    pub highest_contiguous_sequence: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CompleteAttemptRequest {
     pub exit_code: i32,

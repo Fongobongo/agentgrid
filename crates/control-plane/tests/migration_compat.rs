@@ -91,7 +91,7 @@ async fn migrations_serve_legacy_happy_path() {
     assert_eq!(assign.adapter, "mock");
 
     // 6. Node ingests a couple of events (migration 0010 + later).
-    assert!(s
+    let ack = s
         .ingest_events(
             &assign.attempt_id,
             &agentgrid_common::IngestEventsRequest {
@@ -110,7 +110,9 @@ async fn migrations_serve_legacy_happy_path() {
             },
         )
         .await
-        .unwrap());
+        .unwrap();
+    assert_eq!(ack.accepted, 2);
+    assert_eq!(ack.highest_contiguous_sequence, Some(2));
 
     // 7. Node completes the attempt → task succeeded (legacy outcome).
     s.complete_attempt(

@@ -1092,24 +1092,24 @@ impl Store {
         task_id: Option<&str>,
     ) -> Result<i64> {
         let now = now_iso();
+        // Hardening P2 item 21: allocate the message sequence atomically inside
+        // a single INSERT (subquery + INSERT are one statement in SQLite, so
+        // the MAX/INSERT pair cannot interleave across concurrent appends).
+        // The UNIQUE(conversation_id, seq) index is the DB-side backstop.
+        let id = Uuid::new_v4().to_string();
         let seq: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_messages WHERE conversation_id = ?",
-        )
-        .bind(conversation_id)
-        .fetch_one(&self.pool)
-        .await?;
-        sqlx::query(
             "INSERT INTO conversation_messages (id, conversation_id, seq, role, content, task_id, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_messages WHERE conversation_id = ?), ?, ?, ?, ?) \
+             RETURNING seq",
         )
-        .bind(Uuid::new_v4().to_string())
+        .bind(&id)
         .bind(conversation_id)
-        .bind(seq)
+        .bind(conversation_id)
         .bind(role)
         .bind(content)
         .bind(task_id)
         .bind(&now)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
         Ok(seq)
     }
@@ -1405,7 +1405,12 @@ impl Store {
         }))
     }
 
-    pub async fn ingest_events(&self, attempt_id: &str, req: &IngestEventsRequest) -> Result<bool> {
+    pub async fn ingest_events(
+        &self,
+        attempt_id: &str,
+        req: &IngestEventsRequest,
+    ) -> Result<agentgrid_common::IngestEventsAck> {
+        use agentgrid_common::IngestEventsAck;
         let mut tx = self.pool.begin().await?;
         let attempt = sqlx::query("SELECT task_id, status FROM attempts WHERE id = ?")
             .bind(attempt_id)
@@ -1413,7 +1418,7 @@ impl Store {
             .await?;
         let Some(attempt) = attempt else {
             let _ = tx.rollback().await;
-            return Ok(false);
+            return Ok(IngestEventsAck::default());
         };
         let task_id: String = attempt.try_get("task_id")?;
         let attempt_status: String = attempt.try_get("status")?;
@@ -1426,7 +1431,7 @@ impl Store {
             "succeeded" | "failed" | "cancelled" | "lost"
         ) {
             let _ = tx.rollback().await;
-            return Ok(false);
+            return Ok(IngestEventsAck::default());
         }
 
         if attempt_status == "assigned" {
@@ -1441,10 +1446,11 @@ impl Store {
                 .await?;
         }
 
+        let mut accepted = 0u64;
         for ev in &req.events {
             let payload = serde_json::to_string(&ev.payload)?;
             let id = Uuid::new_v4().to_string();
-            sqlx::query(
+            let r = sqlx::query(
                 "INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at) \
                  VALUES (?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(attempt_id, sequence) DO NOTHING",
@@ -1457,9 +1463,44 @@ impl Store {
             .bind(now_iso())
             .execute(&mut *tx)
             .await?;
+            accepted += r.rows_affected();
         }
+        // Hardening P1 item 14: report the contiguous event-sequence prefix we
+        // hold for this attempt (1..=N with no gaps), so a client can detect a
+        // gap when the durable outbox redelivers. Computed after commit so the
+        // prefix reflects the rows this batch landed; cheap for typical event
+        // counts, but O(rows) load — ponytail住的: switch to a recursive CTE /
+        // tracked cursor once an attempt surfaces millions of events.
         tx.commit().await?;
-        Ok(true)
+        let highest_contiguous = self.contiguous_event_prefix(attempt_id).await?;
+        Ok(IngestEventsAck {
+            accepted,
+            highest_contiguous_sequence: highest_contiguous,
+        })
+    }
+
+    /// Largest `N` such that sequences `1..=N` all exist in `task_events` for
+    /// this attempt (the contiguous prefix). `0` if no events. O(rows) load —
+    /// see `ingest_events` for the ceiling.
+    async fn contiguous_event_prefix(&self, attempt_id: &str) -> Result<Option<u64>> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT sequence FROM task_events WHERE attempt_id = ? GROUP BY sequence ORDER BY sequence",
+        )
+        .bind(attempt_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut prev = 0i64;
+        for s in rows {
+            if s != prev + 1 {
+                break;
+            }
+            prev = s;
+        }
+        if prev <= 0 {
+            Ok(None)
+        } else {
+            Ok(Some(prev as u64))
+        }
     }
 
     pub async fn complete_attempt(
@@ -2525,7 +2566,7 @@ fn role_str_status<T: serde::Serialize>(t: T) -> String {
 #[cfg(test)]
 mod workflow_tests {
     use super::*;
-    use agentgrid_common::{WorkflowRunStatus, WorkflowStep, WorkflowStepStatus};
+    use agentgrid_common::{IncomingEvent, WorkflowRunStatus, WorkflowStep, WorkflowStepStatus};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3706,6 +3747,144 @@ mod workflow_tests {
             Some("sess-1"),
             "assignment carries the resume parent"
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_append_allocates_unique_seq_under_concurrency() {
+        // Hardening P2 item 21: concurrent appends to the same conversation
+        // must each get a distinct, gap-free sequence. The per-message seq is
+        // now allocated atomically by a single INSERT ... (SELECT MAX+1), with
+        // a UNIQUE(conversation_id, seq) index backstopping the invariant.
+        let s = temp_store().await;
+        let conv = s.create_conversation("mock", "").await.unwrap();
+        const N: usize = 32;
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let s = s.clone();
+            let id = conv.id.clone();
+            handles.push(tokio::spawn(async move {
+                s.append_conversation_message(&id, "user", &format!("m{i}"), None)
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut seqs = Vec::with_capacity(N);
+        for h in handles {
+            seqs.push(h.await.unwrap());
+        }
+        // Each append returned a distinct seq in 1..=N.
+        seqs.sort_unstable();
+        let expected: Vec<i64> = (1..=N as i64).collect();
+        assert_eq!(seqs, expected, "sequences must be unique and gap-free");
+        // And the persisted rows agree with the returned seqs.
+        let msgs = s.list_conversation_messages(&conv.id).await.unwrap();
+        let persisted: Vec<i64> = msgs.iter().map(|m| m.seq).collect();
+        assert_eq!(persisted, expected);
+    }
+
+    #[tokio::test]
+    async fn ingest_events_reports_contiguous_prefix_and_dedup() {
+        // Hardening P1 item 14: the ACK returns the contiguous sequence prefix
+        // (1..=N) and dedups repeated sequence ids via the unique index.
+        let s = temp_store().await;
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec![String::new()],
+                max_concurrency: 2,
+                agent_version: "test".into(),
+                protocol_version: None,
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        let _task = s
+            .create_task(&CreateTaskRequest {
+                prompt: "p".into(),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: Some(60),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+            })
+            .await
+            .unwrap();
+        let a = s.try_assign(&node_id).await.unwrap().unwrap();
+
+        let mk = |seq, text: &str| IncomingEvent {
+            sequence: seq,
+            r#type: EventType::Stdout,
+            payload: serde_json::json!({"text": text}),
+        };
+        // Land 1,2 then 3,4 → contiguous prefix 4.
+        let ack = s
+            .ingest_events(
+                &a.attempt_id,
+                &IngestEventsRequest {
+                    events: vec![mk(1, "a"), mk(2, "b")],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ack.accepted, 2);
+        assert_eq!(ack.highest_contiguous_sequence, Some(2));
+
+        let ack = s
+            .ingest_events(
+                &a.attempt_id,
+                &IngestEventsRequest {
+                    events: vec![mk(3, "c"), mk(4, "d")],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ack.accepted, 2);
+        assert_eq!(ack.highest_contiguous_sequence, Some(4));
+
+        // Re-send 4 (duplicate) → accepted 0, prefix still 4 (idempotent replay).
+        let ack = s
+            .ingest_events(
+                &a.attempt_id,
+                &IngestEventsRequest {
+                    events: vec![mk(4, "d")],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ack.accepted, 0);
+        assert_eq!(ack.highest_contiguous_sequence, Some(4));
+
+        // Send 6 (gap at 5) → contiguous prefix stays at 4 until 5 arrives.
+        let ack = s
+            .ingest_events(
+                &a.attempt_id,
+                &IngestEventsRequest {
+                    events: vec![mk(6, "f")],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ack.accepted, 1);
+        assert_eq!(ack.highest_contiguous_sequence, Some(4));
+
+        // Backfill 5 → prefix advances to 6 (the prior gap closes).
+        let ack = s
+            .ingest_events(
+                &a.attempt_id,
+                &IngestEventsRequest {
+                    events: vec![mk(5, "e")],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ack.accepted, 1);
+        assert_eq!(ack.highest_contiguous_sequence, Some(6));
     }
 
     #[tokio::test]
