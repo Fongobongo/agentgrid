@@ -98,6 +98,11 @@ pub struct AppState {
     db_path: String,
     /// Brute-force protection on `/v1/auth/login` (Stage 2.5).
     login_rate: Arc<tokio::sync::Mutex<LoginRate>>,
+    /// Hardening P1 item 14: per-node event-ingest rate limit (requests per
+    /// window). A node that floods the control plane with event batches beyond
+    /// `event_rate_max` / `event_rate_window_secs` gets 429 instead of more
+    /// DB writes. Defaults: 60 req / 10s (covers a healthy streamer).
+    event_rate: Arc<tokio::sync::Mutex<EventRate>>,
     /// One-time bootstrap setup token (hardening P0): printed once to stdout
     /// when no users exist; required to create the first user; consumed on
     /// first use. `None` once bootstrap is complete or the token has been used
@@ -166,7 +171,6 @@ struct LoginRate {
     max: u32,
     window_secs: i64,
 }
-
 impl LoginRate {
     fn new() -> Self {
         Self {
@@ -184,6 +188,38 @@ impl LoginRate {
         }
         self.count += 1;
         self.count <= self.max
+    }
+}
+
+/// Hardening P1 item 14: per-node event-ingest rate limiter. Each node has its
+/// own fixed window counter, pruned lazily when next touched past the window.
+/// Defaults are tuned via `AGENTGRID_EVENT_RATE_MAX` (req / window) and
+/// `AGENTGRID_EVENT_RATE_WINDOW_SECS`.
+struct EventRate {
+    per_node: std::collections::HashMap<String, (i64, u32)>,
+    max: u32,
+    window_secs: i64,
+}
+
+impl EventRate {
+    fn new() -> Self {
+        Self {
+            per_node: std::collections::HashMap::new(),
+            max: env_usize("AGENTGRID_EVENT_RATE_MAX", 60) as u32,
+            window_secs: env_usize("AGENTGRID_EVENT_RATE_WINDOW_SECS", 10) as i64,
+        }
+    }
+
+    /// `true` if this request is under the per-node budget; the first request of
+    /// a new window resets the counter.
+    fn admit(&mut self, node_id: &str, now: i64) -> bool {
+        let entry = self.per_node.entry(node_id.to_string()).or_insert((now, 0));
+        if now - entry.0 >= self.window_secs {
+            entry.0 = now;
+            entry.1 = 0;
+        }
+        entry.1 += 1;
+        entry.1 <= self.max
     }
 }
 
@@ -306,6 +342,7 @@ impl AppState {
             limits,
             db_path: db_path.to_string(),
             login_rate: Arc::new(tokio::sync::Mutex::new(LoginRate::new())),
+            event_rate: Arc::new(tokio::sync::Mutex::new(EventRate::new())),
             setup_token,
             cross_node_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             stale_fencing_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2831,6 +2868,19 @@ async fn ingest_events(
                 .event_rejections
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
+    }
+    // Hardening P1 item 14: per-node rate limit so a single node cannot flood
+    // the control plane with event batches. Over the limit → 429, with a
+    // counted rejection so it shows in metrics.
+    {
+        let now = chrono::Utc::now().timestamp();
+        let allowed = state.event_rate.lock().await.admit(&auth.node_id, now);
+        if !allowed {
+            state
+                .event_rejections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
     }
     // Hardening P1 item 14: bound the batch itself — event count and the

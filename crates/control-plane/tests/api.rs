@@ -5091,7 +5091,10 @@ async fn state_machine_terminal_invariants_hold() {
             .fetch_one(&state.store.pool)
             .await
             .unwrap();
-        assert_eq!(aa_retry, 0, "retry leaves active_attempts 0 before reassign");
+        assert_eq!(
+            aa_retry, 0,
+            "retry leaves active_attempts 0 before reassign"
+        );
         // A fresh assign bumps it back to 1.
         let a2 = state.store.try_assign(&node_id).await.unwrap().unwrap();
         let aa_run: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
@@ -5226,6 +5229,83 @@ async fn events_batch_count_limit_enforced() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// Hardening P1 item 14: a single node flooding the event endpoint beyond the
+/// per-node rate limit is throttled with 429 after the budget is spent.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn events_rate_limit_throttles_one_node() {
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_max = std::env::var("AGENTGRID_EVENT_RATE_MAX").ok();
+    let prev_win = std::env::var("AGENTGRID_EVENT_RATE_WINDOW_SECS").ok();
+    // Tiny budget so we exhaust it without firing many requests; long window so
+    // the test does not race a rolling reset.
+    std::env::set_var("AGENTGRID_EVENT_RATE_MAX", "2");
+    std::env::set_var("AGENTGRID_EVENT_RATE_WINDOW_SECS", "3600");
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "n-rate", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    let mk = |seq| IncomingEvent {
+        sequence: seq,
+        r#type: EventType::Stdout,
+        payload: json!({"text":"x"}),
+    };
+    for seq in 0..2u64 {
+        let req = IngestEventsRequest {
+            events: vec![mk(seq)],
+        };
+        let resp = app
+            .clone()
+            .oneshot(post_node(
+                &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+                serde_json::to_string(&req).unwrap(),
+                &cred,
+                &assign.fencing_token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "req {seq} under limit must be OK"
+        );
+    }
+    for seq in 2..4u64 {
+        let req = IngestEventsRequest {
+            events: vec![mk(seq)],
+        };
+        let resp = app
+            .clone()
+            .oneshot(post_node(
+                &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+                serde_json::to_string(&req).unwrap(),
+                &cred,
+                &assign.fencing_token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "req {seq} over limit must be 429"
+        );
+    }
+    std::env::remove_var("AGENTGRID_EVENT_RATE_MAX");
+    std::env::remove_var("AGENTGRID_EVENT_RATE_WINDOW_SECS");
+    for (k, v) in [
+        ("AGENTGRID_EVENT_RATE_MAX", prev_max),
+        ("AGENTGRID_EVENT_RATE_WINDOW_SECS", prev_win),
+    ] {
+        match v {
+            Some(p) => std::env::set_var(k, p),
+            None => std::env::remove_var(k),
+        }
+    }
+    let _ = node_id;
 }
 
 /// Hardening P1 item 22: the denormalized `active_attempts` counter can drift

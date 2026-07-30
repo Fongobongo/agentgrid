@@ -465,10 +465,10 @@
 - [x] Проверять fencing token и node ownership. (check_fencing_token + check_attempt_owner на всех node mutations)
 - [x] Ограничить количество events в одном batch. (`AGENTGRID_MAX_EVENT_BATCH` по умолчанию 500; regression-тест `events_batch_count_limit_enforced`)
 - [x] Ограничить суммарный размер batch, а не только каждый payload. (`AGENTGRID_MAX_EVENT_BATCH_KB` по умолчанию 4 MiB суммарно)
-- [ ] Проверять последовательность и обнаруживать gaps.
+- [x] Проверять последовательность и обнаруживать gaps. (`IngestEventsAck.highest_contiguous_sequence` exposes the contiguous prefix; `agentgrid_event_gaps_total` bumps when a batch's max sequence exceeds the prefix — gaps are detected and surfaced even though out-of-order redelivery is still honoured)
 - [x] Возвращать `highest_contiguous_sequence` в ACK. (`IngestEventsAck { accepted, highest_contiguous_sequence }`; contiguous 1..=N prefix in `task_events`; backward compatible — node daemon ignores body; regression `ingest_events_reports_contiguous_prefix_and_dedup`)
-- [ ] Определить обработку out-of-order batches.
-- [ ] Добавить server-side rate limiting per node.
+- [x] Определить обработку out-of-order batches. (decision: accept every well-formed (attempt_id, sequence) via `ON CONFLICT DO NOTHING`; an out-of-order / skipped sequence lands out of order but the ack's `highest_contiguous_sequence` plus the `event_gaps_total` metric surface the gap so the durable outbox can redrive the missing sequences)
+- [x] Добавить server-side rate limiting per node. (`EventRate` per-node fixed-window limiter in `AppState`; `ingest_events` returns 429 over `AGENTGRID_EVENT_RATE_MAX` (default 60/window) within `AGENTGRID_EVENT_RATE_WINDOW_SECS` (default 10s); counted in `event_rejections_total`; regression `events_rate_limit_throttles_one_node`)
 - [x] Добавить metrics duplicate/gap/stale/rejected. (existing `event_rejections_total` covers terminal/batch rejection + stale sequence paths; new `event_gaps_total` covers max-seq-before-prefix gap; duplicates land silently via `ON CONFLICT DO NOTHING`)
 
 ## 15. Storage retention и quotas — P1
