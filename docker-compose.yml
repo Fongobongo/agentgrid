@@ -13,6 +13,17 @@ services:
     restart: unless-stopped
     ports:
       - "7800:7800"
+    # Hardening P2 item 31: harden the production container runtime.
+    # read-only root fs (data lives under /var/lib/agentgrid on the volume);
+    # tmpfs /tmp for any transient scratch; drop all Linux caps; no setuid;
+    # deny privilege escalation.
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       AGENTGRID_ENV: production
       AGENTGRID_JWT_SECRET: ${AGENTGRID_JWT_SECRET:?AGENTGRID_JWT_SECRET must be set (>=32 bytes)}
@@ -25,11 +36,25 @@ services:
     restart: unless-stopped
     depends_on:
       - control-plane
+    # Hardening: read-only root + tmpfs /tmp + cap-drop all + no-new-privileges.
+    # The agent worktrees live under /var/lib/agentgrid/data (volume) so the
+    # read-only root does not block workspace prep.
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       AGENTGRID_SERVER: http://control-plane:7800
       AGENTGRID_ENROLL_TOKEN: ${NODE1_TOKEN:?NODE1_TOKEN must be set}
       AGENTGRID_NODE_NAME: node-1
       AGENTGRID_MAX_CONCURRENCY: "2"
+      # Redirect workspace/repo roots onto the mounted /var/lib/agentgrid/data
+      # volume so the read-only rootfs above does not block workspace prep.
+      AGENTGRID_WORKSPACE_ROOT: /var/lib/agentgrid/data/workspace
+      AGENTGRID_REPOSITORY_ROOT: /var/lib/agentgrid/data/repos
     volumes:
       - agentgrid-node1-data:/var/lib/agentgrid/data
 
@@ -38,11 +63,20 @@ services:
     restart: unless-stopped
     depends_on:
       - control-plane
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       AGENTGRID_SERVER: http://control-plane:7800
       AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:?NODE2_TOKEN must be set}
       AGENTGRID_NODE_NAME: node-2
       AGENTGRID_MAX_CONCURRENCY: "2"
+      AGENTGRID_WORKSPACE_ROOT: /var/lib/agentgrid/data/workspace
+      AGENTGRID_REPOSITORY_ROOT: /var/lib/agentgrid/data/repos
     volumes:
       - agentgrid-node2-data:/var/lib/agentgrid/data
 

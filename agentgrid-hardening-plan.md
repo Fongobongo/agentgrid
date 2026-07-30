@@ -694,8 +694,8 @@
 - [ ] Закрепить GitHub Actions по commit SHA.
 - [x] Настроить Renovate/Dependabot для обновления SHA. (`.github/dependabot.yml`: weekly github-actions + cargo ecosystems, opens labeled PRs; pairs with SHA-pinned actions so the bump is to a SHA, not a moving tag)
 - [x] `cargo audit`. (`.github/workflows/supply-chain.yml` → `cargo audit` на PR + nightly)
-- [ ] `cargo deny`.
-- [ ] License allowlist.
+- [x] `cargo deny`. (`deny.toml` policy + `cargo-deny` job in `supply-chain.yml`; verified `cargo deny check` green locally — advisories/licenses/bans/sources all ok)
+- [x] License allowlist. (`deny.toml [licenses] allow` MIT/Apache/BSD/ISC/Zlib/CC0/CDLA-Permissive-2.0/Unicode; rejects unlisted)
 - [ ] Secret scanning.
 - [ ] CodeQL.
 - [ ] SBOM CycloneDX/SPDX.
@@ -728,8 +728,8 @@
 - [ ] Кэшировать npm dependencies отдельно от web source.
 - [x] Добавить OCI labels/version/revision/source. (`Dockerfile.control-plane` + `Dockerfile.node-daemon` `org.opencontainers.image.*` LABELs)
 - [x] Добавить image healthcheck. (`Dockerfile.control-plane` HEALTHCHECK → `/health/ready`; node-daemon не открывает health port)
-- [ ] Добавить non-root verification test.
-- [ ] Добавить read-only/cap-drop security settings.
+- [x] Добавить non-root verification test. (`tests/e2e/run.sh` execs `id -u` in the control-plane container after health and fails the E2E if it returns root)
+- [x] Добавить read-only/cap-drop security settings. (`docker-compose.yml` (production): `read_only: true` + tmpfs `/tmp:noexec,nosuid,nodev` + `cap_drop: [ALL]` + `security_opt: [no-new-privileges:true]` on control-plane and both nodes; node workspace/repo roots env-redirected onto the `/var/lib/agentgrid/data` volume so the read-only root does not block workspace prep)
 - [ ] Выпускать base node image.
 - [ ] Выпускать отдельные images с Claude/OpenCode runtimes либо документировать custom image.
 - [ ] Pin base images по digest для releases.

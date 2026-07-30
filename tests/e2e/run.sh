@@ -30,6 +30,12 @@ for _ in $(seq 1 30); do
 done
 curl -fsS "$BASE/health/ready" >/dev/null || { echo "control plane never became ready"; exit 1; }
 
+# Hardening P2 item 31: assert the control-plane ran as a non-root user
+# (USER agentgrid in the image). root inside the container is a fail.
+cp_user="$(docker compose -f docker-compose.yml exec -T control-plane id -u 2>/dev/null || true)"
+[ "$cp_user" = "0" ] && { echo "E2E FAILED: control-plane running as root (uid 0)"; exit 1; }
+[ -n "$cp_user" ] && echo "control-plane running as non-root uid $cp_user"
+
 JWT=$(curl -fsS -X POST "$BASE/v1/auth/login" \
   -H 'content-type: application/json' \
   -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
