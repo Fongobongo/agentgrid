@@ -128,6 +128,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Attach the CHANGELOG's [Unreleased] section as the release body so
+          # the GitHub Release page mirrors the changelog instead of only the
+          # auto-generated commit/PR notes.
+          set -e
+          notes=release-assets/RELEASE_NOTES.md
+          awk '
+            /^## \[Unreleased\]/ { in_un=1; next }
+            /^## \[/ { in_un=0 }
+            in_un { print }
+          ' CHANGELOG.md > "$notes"
+          if [ ! -s "$notes" ]; then
+            echo "_No changelog entries under \[Unreleased\]._" > "$notes"
+          fi
           gh release create "${GITHUB_REF_NAME}" release-assets/* \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+            --notes-file "$notes"
