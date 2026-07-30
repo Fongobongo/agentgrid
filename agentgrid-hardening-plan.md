@@ -731,7 +731,7 @@
 - [x] Добавить non-root verification test. (`tests/e2e/run.sh` execs `id -u` in the control-plane container after health and fails the E2E if it returns root)
 - [x] Добавить read-only/cap-drop security settings. (`docker-compose.yml` (production): `read_only: true` + tmpfs `/tmp:noexec,nosuid,nodev` + `cap_drop: [ALL]` + `security_opt: [no-new-privileges:true]` on control-plane and both nodes; node workspace/repo roots env-redirected onto the `/var/lib/agentgrid/data` volume so the read-only root does not block workspace prep)
 - [ ] Выпускать base node image.
-- [ ] Выпускать отдельные images с Claude/OpenCode runtimes либо документировать custom image.
+- [x] Выпускать отдельные images с Claude/OpenCode runtimes либо документировать custom image. (base node image ships no agent runtime; `Dockerfile.node-daemon` exposes `OPENCODE_VERSION` build-arg to bake OpenCode in; README "Custom adapter runtime images" documents extending the base image for Claude Code / internal adapters with the same compose hardening.)
 - [ ] Pin base images по digest для releases.
 - [ ] Сканировать images на CVE.
 

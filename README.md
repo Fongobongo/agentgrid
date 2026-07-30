@@ -71,6 +71,22 @@ the node, and provide the model key (e.g. `GOOGLE_GENERATIVE_AI_API_KEY`). See
 `docs/deploy/reverse-proxy.md` for TLS termination in front of the plain-HTTP
 control plane.
 
+**Custom adapter runtime images.** The base node image does NOT ship a coding
+agent runtime — adapters are operator-provided on the host or layered into a
+derivative image, matching the `permissionInterception`/sandbox threat model.
+For `opencode` use the `OPENCODE_VERSION` build-arg above. For a custom
+runtime (Claude Code, an internal agent, etc.) extend the base image with a
+`Dockerfile` like:
+
+    FROM ag-node:test
+    # install your runtime / adapter binary, then:
+    ENV AGENTGRID_ADAPTERS=your-adapter
+
+and run it with the same `docker-compose` hardening (`read_only`,
+`cap_drop: ALL`, `security_opt: no-new-privileges`, workspace/repo on a
+writable volume). See `Dockerfile.node-daemon` for the build-time
+`OPENCODE_VERSION` pattern to mimic.
+
 **Unattended permission bypass (unsafe).** By default the `claude` and
 `opencode` adapters run **safe**: they do NOT pass `--dangerously-skip-permissions`
 / `--auto`, so an unattended run blocks on the first interactive prompt rather
