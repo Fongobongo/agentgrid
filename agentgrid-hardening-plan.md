@@ -452,7 +452,7 @@
 - [ ] Не изменять task/attempt при invalid transition.
 - [ ] Добавить audit event с source state/event.
 - [ ] Отделить legacy compatibility transitions от основного автомата.
-- [ ] Проверить terminal idempotency явно до transition.
+- [x] Проверить terminal idempotency явно до transition. (`terminal_states_are_idempotent_except_retry` exhaustively asserts every non-Retry transition is rejected from every terminal task/attempt status; Retry is the only legal exit from Failed/Cancelled tasks)
 - [x] Добавить invariants: один active attempt на task. (CAS-охраны `WHERE status='queued'` + unique assigned_attempt_id; `complete_attempt`/`lose_node_attempts`/`cancel_task` очищают `assigned_attempt_id`)
 - [x] Добавить invariants: terminal task не имеет active attempt. (enforced + regression-тест `state_machine_terminal_invariants_hold`)
 - [x] Добавить invariants: `finished_at` согласован со status. (set on complete/cancel/lost; invariant test)

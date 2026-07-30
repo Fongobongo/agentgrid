@@ -226,4 +226,70 @@ mod tests {
         // b was computed from the same pre-state; the *store* must re-read after locking.
         let _ = b;
     }
+
+    #[test]
+    fn terminal_states_are_idempotent_except_retry() {
+        // Hardening P1 item 13: a terminal task/attempt is a sink. Every
+        // non-Retry transition applied to a terminal status must be rejected
+        // (no spurious flip out of Succeeded/Failed/Cancelled/Lost), and Retry
+        // is the only legal exit (Failed/Cancelled → Queued) — explicit so the
+        // caller never relies on a "happens to be terminal" implicit invariant.
+        let task_terminals = [
+            TaskStatus::Succeeded,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+        ];
+        let attempt_terminals = [
+            AttemptStatus::Succeeded,
+            AttemptStatus::Failed,
+            AttemptStatus::Cancelled,
+            AttemptStatus::Lost,
+        ];
+        let non_retry_task = [
+            TaskTransition::Assign,
+            TaskTransition::Start,
+            TaskTransition::BeginValidate,
+            TaskTransition::Succeed,
+            TaskTransition::Fail,
+            TaskTransition::Cancel,
+            TaskTransition::NodeLost,
+        ];
+        let non_retry_attempt = [
+            AttemptTransition::Start,
+            AttemptTransition::BeginValidate,
+            AttemptTransition::Succeed,
+            AttemptTransition::Fail,
+            AttemptTransition::Cancel,
+            AttemptTransition::NodeLost,
+        ];
+        for s in task_terminals {
+            for t in non_retry_task {
+                assert!(
+                    next_task_status(s, t).is_err(),
+                    "task {s:?} + {t:?} must be rejected (terminal idempotency)"
+                );
+            }
+        }
+        for s in attempt_terminals {
+            for t in non_retry_attempt {
+                assert!(
+                    next_attempt_status(s, t).is_err(),
+                    "attempt {s:?} + {t:?} must be rejected (terminal idempotency)"
+                );
+            }
+        }
+        // Retry is the only legal exit from a terminal *task*; from Succeeded /
+        // Lost attempts (= task Succeeded / task Failed via NodeLost) Retry is
+        // not an attempt transition at all, only a task one.
+        assert_eq!(
+            next_task_status(TaskStatus::Failed, TaskTransition::Retry).unwrap(),
+            TaskStatus::Queued
+        );
+        assert_eq!(
+            next_task_status(TaskStatus::Cancelled, TaskTransition::Retry).unwrap(),
+            TaskStatus::Queued
+        );
+        assert!(next_task_status(TaskStatus::Succeeded, TaskTransition::Retry).is_err());
+        // No attempt transition escapes the terminal set at all.
+    }
 }
