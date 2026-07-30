@@ -1662,6 +1662,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             commit_sha,
             error_code,
             res.session_id.clone(),
+            None,
             assignment.provenance.clone().or_else(provenance_from_env),
             &cfg.completion_outbox,
             &assignment.fencing_token,
@@ -1711,6 +1712,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
                 127,
                 None,
                 Some("infrastructure_failed".into()),
+                None,
                 None,
                 assignment.provenance.clone().or_else(provenance_from_env),
                 &cfg.completion_outbox,
@@ -1883,6 +1885,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             exit_code: code,
             commit_sha: None,
             error_code: kill_reason.map(|k| k.to_string()),
+            resolved_base_sha: None,
             acp_session_id: None,
             plan: None,
             provenance: assignment.provenance.clone().or_else(provenance_from_env),
@@ -1960,6 +1963,9 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     let cleanup_branch =
         (ws.is_git && ws.branch.is_some()).then(|| ws.branch.clone().unwrap_or_default());
     let cleanup_path = ws.path.clone();
+    // Hardening P2 item 32-5: capture the resolved base before `ws` is moved
+    // into `finalize_workspace`, so the completion can persist it.
+    let resolved_base_sha = ws.base_commit.clone();
     let commit_sha =
         tokio::task::spawn_blocking(move || git::finalize_workspace(ws, node_name.as_str()))
             .await??;
@@ -2022,6 +2028,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         commit_sha,
         error_code,
         None,
+        resolved_base_sha,
         assignment.provenance.clone().or_else(provenance_from_env),
         &cfg.completion_outbox,
         &assignment.fencing_token,
@@ -2221,6 +2228,7 @@ async fn report_complete(
     commit_sha: Option<String>,
     error_code: Option<String>,
     acp_session_id: Option<String>,
+    resolved_base_sha: Option<String>,
     provenance: Option<agentgrid_common::ProvenanceRecord>,
     completion_outbox: &outbox::CompletionOutbox,
     fence: &str,
@@ -2230,6 +2238,7 @@ async fn report_complete(
         exit_code,
         commit_sha,
         error_code,
+        resolved_base_sha,
         acp_session_id,
         plan: None,
         provenance,

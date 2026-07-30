@@ -528,6 +528,13 @@ pub struct CompleteAttemptRequest {
     /// Commit SHA produced by the attempt, if it ran in a git worktree.
     #[serde(default)]
     pub commit_sha: Option<String>,
+    /// Hardening P2 item 32-5: the exact upstream commit this attempt started
+    /// from (the resolved base). Persisted on the attempt row so the prepared
+    /// base can be reconstructed later. Populated by the node daemon; NULL when
+    /// the node did not pin/report a base (default-branch checkout, or plain
+    /// non-git tasks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_base_sha: Option<String>,
     /// Distinct failure category: `agent_failed` vs `validation_failed` etc.
     #[serde(default)]
     pub error_code: Option<String>,

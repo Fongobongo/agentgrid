@@ -190,6 +190,7 @@ async fn agent_session_opened_and_closed_on_complete() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,

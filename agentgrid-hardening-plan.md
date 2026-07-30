@@ -743,7 +743,7 @@
 
 - [ ] Fail closed при отсутствующем upstream commit/patch по умолчанию.
 - [ ] Добавить explicit workflow policy `allow_missing_upstream`.
-- [ ] Сохранять exact `resolved_base_sha` для каждого attempt.
+- [x] Сохранять exact `resolved_base_sha` для каждого attempt. (migration 0033: attempts.resolved_base_sha; CompleteAttemptRequest.resolved_base_sha serialised; complete_attempt persist; node-daemon reports from worktree base_commit; test `complete_persists_resolved_base_sha`. потолок P1: default-branch checkout не резолвит HEAD — только pinned path)
 - [ ] Сохранять `remote_head_at_start` и `remote_head_at_finish`.
 - [x] Показывать stale-base warning. (node-daemon: pinned base_commit проверяется через `merge-base --is-ancestor`; если позади remote HEAD, warn)
 - [x] Получать binary diff как bytes, без `String::from_utf8_lossy`. (`git_out_bytes` в `finalize_workspace` для `git diff --binary`)

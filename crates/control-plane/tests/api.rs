@@ -309,6 +309,7 @@ async fn full_task_lifecycle() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -340,6 +341,7 @@ async fn failure_marks_task_failed() {
                 exit_code: 3,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -370,6 +372,7 @@ async fn completion_propagates_provenance() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 plan: None,
                 provenance: Some(agentgrid_common::ProvenanceRecord {
@@ -471,6 +474,7 @@ async fn validation_failure_must_not_report_success() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: Some("validation_failed".into()),
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -575,6 +579,7 @@ async fn cancel_running_then_node_confirms_cancelled() {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -606,6 +611,7 @@ async fn retry_failed_task_reques() {
                 exit_code: 3,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -758,6 +764,7 @@ async fn artifact_upload_and_read() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -1777,6 +1784,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -1818,6 +1826,7 @@ async fn complete_on_lost_attempt_is_idempotent() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2412,6 +2421,7 @@ async fn architect_expandable_plan_pauses_planready_then_approve_expands_steps()
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 plan: Some(plan.into()),
                 provenance: None,
@@ -2539,6 +2549,7 @@ async fn typed_mailbox_emits_output_and_renders_handoff_block_in_pending_step_pr
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 plan: None,
                 provenance: None,
@@ -2683,6 +2694,7 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
                         exit_code: 0,
                         commit_sha: None,
                         error_code: None,
+                        resolved_base_sha: None,
                         acp_session_id: None,
                         provenance: None,
                         plan: None,
@@ -2794,6 +2806,7 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -4084,6 +4097,7 @@ fn complete_req() -> CompleteAttemptRequest {
         exit_code: 0,
         commit_sha: None,
         error_code: None,
+        resolved_base_sha: None,
         acp_session_id: None,
         provenance: None,
         plan: None,
@@ -4789,6 +4803,7 @@ async fn race_retry_vs_late_completion() {
         exit_code: 3,
         commit_sha: None,
         error_code: None,
+        resolved_base_sha: None,
         acp_session_id: None,
         provenance: None,
         plan: None,
@@ -5374,4 +5389,58 @@ async fn list_tasks_filters_by_status_repository_node() {
     assert!(list_repos(&app, &cred_user, "?node_id=does-not-exist")
         .await
         .is_empty());
+}
+
+#[tokio::test]
+async fn complete_persists_resolved_base_sha() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "n-rbs", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    // First event -> running, so the attempt is assignable to a terminal path.
+    let ev = IngestEventsRequest {
+        events: vec![IncomingEvent {
+            sequence: 1,
+            r#type: EventType::Stdout,
+            payload: json!({"text": "start"}),
+        }],
+    };
+    let r = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: Some("deadbeef".into()),
+                error_code: None,
+                resolved_base_sha: Some("BASECAFE".into()),
+                acp_session_id: None,
+                provenance: None,
+                plan: None,
+            })
+            .unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let base: Option<String> =
+        sqlx::query_scalar("SELECT resolved_base_sha FROM attempts WHERE id = ?")
+            .bind(&assign.attempt_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(base.as_deref(), Some("BASECAFE"));
 }

@@ -1584,6 +1584,14 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        // Hardening P2 item 32-5: persist the exact resolved base commit.
+        if let Some(base) = &req.resolved_base_sha {
+            sqlx::query("UPDATE attempts SET resolved_base_sha = ? WHERE id = ?")
+                .bind(base)
+                .bind(attempt_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         if let Some(ec) = &req.error_code {
             sqlx::query("UPDATE attempts SET error_code = ? WHERE id = ?")
                 .bind(ec)
@@ -2690,6 +2698,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2806,6 +2815,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2825,6 +2835,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2867,6 +2878,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("merge_conflict".into()),
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2933,6 +2945,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: Some("sha-worker-1".into()),
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -2949,6 +2962,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: Some("sha-worker-2".into()),
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3028,6 +3042,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: Some("sha-worker-1".into()),
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3099,6 +3114,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3115,6 +3131,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3163,6 +3180,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3261,6 +3279,7 @@ mod workflow_tests {
                 exit_code: 1,
                 commit_sha: None,
                 error_code: Some("agent_failed".into()),
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3308,6 +3327,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
@@ -3643,6 +3663,7 @@ mod workflow_tests {
                 exit_code: 0,
                 commit_sha: None,
                 error_code: None,
+                resolved_base_sha: None,
                 acp_session_id: Some("sess-1".into()),
                 provenance: None,
                 plan: None,

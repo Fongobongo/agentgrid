@@ -324,6 +324,9 @@ impl CompletionLine {
             exit_code: self.exit_code,
             commit_sha: self.commit_sha.clone(),
             error_code: self.error_code.clone(),
+            // Hardening P2 item 32-5: base was already persisted on the first
+            // delivery; redelivery does not need to re-send it.
+            resolved_base_sha: None,
             acp_session_id: self.acp_session_id.clone(),
             // Provenance is not durable beyond this redelivery (outbox stores
             // only the outcome); the CP already persisted the original record
@@ -399,6 +402,7 @@ mod tests {
             exit_code: 0,
             commit_sha: Some("abc".into()),
             error_code: None,
+            resolved_base_sha: None,
             acp_session_id: Some("sess-1".into()),
             plan: None,
             provenance: None,
