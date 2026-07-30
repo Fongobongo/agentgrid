@@ -173,9 +173,11 @@ See `docs/decisions/0001-mvp-scope.md` (ADR) and `docs/decisions/threat-model.md
 | Migrations | forward-only; downgrades fail loud against a newer-DB. | enforced |
 | Release targets | `x86_64`/`aarch64`-`unknown-linux-musl` (+ `x86_64-gnu` fallback). | in `release.yml` |
 
-OpenAPI is not yet generated; the `/v1` HTTP surface is documented inline in
-`crates/control-plane/src/lib.rs` route declarations and `docs/decisions/`. Track
-`#21` (Typed API errors / OpenAPI) for the generated document.
+OpenAPI is not yet auto-generated; the `/v1` HTTP surface is documented inline in
+`crates/control-plane/src/lib.rs` route declarations and `docs/decisions/`. A
+hand-maintained OpenAPI 3.0 summary of the public surface lives at
+[`docs/openapi.yaml`](docs/openapi.yaml). Track `#21` (Typed API errors /
+OpenAPI) for the generated document.
 
 ## License
 

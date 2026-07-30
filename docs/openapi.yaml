@@ -1,0 +1,215 @@
+openapi: 3.0.3
+info:
+  title: AgentGrid Control Plane API
+  version: 0.1.0
+  description: |
+    Public REST API of the AgentGrid control plane (`/v1` prefix). All
+    node-facing routes (`/v1/node/*`) require node credentials; user-facing
+    routes require a JWT obtained from `/v1/auth/setup` (first user) or
+    `/v1/auth/login`. WebSocket is **not** part of the MVP — event streaming
+    uses SSE at `/v1/tasks/{id}/events/stream`.
+
+    This document is a generated summary of the public surface; see
+    `crates/control-plane/src/lib.rs` for the authoritative route table.
+
+paths:
+  /v1/auth/setup:
+    post:
+      summary: Create the first admin user (one-time)
+      description: Fails with 409 once a user exists. Returns a JWT on success.
+  /v1/auth/login:
+    post:
+      summary: Exchange credentials for a JWT
+  /v1/auth/logout:
+    post:
+      summary: Invalidate the current JWT
+  /v1/admin/backup:
+    post:
+      summary: Snapshot the SQLite DB (VACUUM INTO) to a downloadable artifact
+  /v1/tasks:
+    get:
+      summary: List tasks
+    post:
+      summary: Create a task
+  /v1/tasks/{id}:
+    get:
+      summary: Fetch a task by id
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+  /v1/tasks/{id}/cancel:
+    post:
+      summary: Request cancellation of a running task
+  /v1/tasks/{id}/retry:
+    post:
+      summary: Re-queue a failed/cancelled task
+  /v1/tasks/{id}/events:
+    get:
+      summary: List task events (polling)
+  /v1/tasks/{id}/events/stream:
+    get:
+      summary: SSE event stream (Last-Event-ID resume supported)
+  /v1/tasks/{id}/approvals:
+    get:
+      summary: List pending approvals for a task
+  /v1/tasks/{id}/eligibility:
+    get:
+      summary: Show scheduler eligibility reasoning for a task
+  /v1/tasks/{id}/artifacts/{name}:
+    get:
+      summary: Download a named artifact by content
+  /v1/nodes:
+    get:
+      summary: List registered nodes
+  /v1/nodes/{id}:
+    get:
+      summary: Fetch a node by id
+  /v1/nodes/enrollment-token:
+    post:
+      summary: Mint a one-time node enrollment token (admin)
+  /v1/node/enroll:
+    post:
+      summary: Enroll a new node with a one-time token (node credentials)
+  /v1/node/heartbeat:
+    post:
+      summary: Publish node status/load/capabilities (node credentials)
+  /v1/node/poll:
+    post:
+      summary: Long-poll a node for an assignment (node credentials)
+  /v1/node/attempts/{id}/ack:
+    post:
+      summary: Acknowledge an assignment started (node credentials)
+  /v1/node/attempts/{id}/events:
+    post:
+      summary: Ingest a batch of adapter events (node credentials)
+  /v1/node/attempts/{id}/complete:
+    post:
+      summary: Report a terminal completion (node credentials)
+      description: |
+        Idempotent on terminal attempts — a late/stale completion is
+        rejected, audited as `complete.rejected_terminal` (with the source
+        attempt status), and acked without corrupting the task status.
+  /v1/node/attempts/{id}/cancel:
+    get:
+      summary: Poll whether cancellation was requested (node credentials)
+  /v1/node/attempts/{id}/session:
+    post:
+      summary: Open an agent session for an attempt (node credentials)
+  /v1/node/attempts/{id}/artifacts:
+    post:
+      summary: Upload a JSON artifact (node credentials)
+  /v1/node/attempts/{id}/artifacts/raw:
+    post:
+      summary: Upload a binary artifact (node credentials)
+  /v1/node/tasks/{id}/artifacts/{name}:
+    get:
+      summary: Fetch an artifact for streaming (node credentials)
+  /v1/repositories:
+    get:
+      summary: List repositories
+    post:
+      summary: Register a repository (admin)
+  /v1/workflows:
+    get:
+      summary: List workflow definitions
+    post:
+      summary: Create a workflow definition
+  /v1/workflows/{id}:
+    get:
+      summary: Fetch a workflow definition
+  /v1/workflows/{id}/runs:
+    post:
+      summary: Start a workflow run from a definition
+  /v1/workflows/{id}/schedules:
+    get:
+      summary: List schedules for a workflow
+    post:
+      summary: Create a schedule for a workflow
+  /v1/workflows/{id}/schedules/{sid}:
+    delete:
+      summary: Delete a schedule
+  /v1/workflow-runs:
+    get:
+      summary: List workflow runs
+  /v1/workflow-runs/{id}:
+    get:
+      summary: Fetch a workflow run
+  /v1/workflow-runs/{id}/approve-plan:
+    post:
+      summary: Approve an architect plan (PlanReady -> expand)
+  /v1/workflow-runs/{id}/cancel:
+    post:
+      summary: Cancel a workflow run
+  /v1/workflow-runs/{id}/plan:
+    get:
+      summary: Fetch the emitted plan (PlanReady)
+  /v1/workflow-runs/{id}/projection:
+    get:
+      summary: Fetch the run projection (roles/nodes/verdicts)
+  /v1/workflow-runs/{id}/tick:
+    post:
+      summary: Advance the run one scheduler tick (admin/debug)
+  /v1/approvals:
+    get:
+      summary: List pending approvals
+  /v1/approvals/{id}/allow:
+    post:
+      summary: Allow a pending approval
+  /v1/approvals/{id}/deny:
+    post:
+      summary: Deny a pending approval
+  /v1/approvals/{id}:
+    get:
+      summary: Fetch an approval
+  /v1/conversations:
+    get:
+      summary: List conversations
+  /v1/conversations/{id}:
+    get:
+      summary: Fetch a conversation
+  /v1/conversations/{id}/messages:
+    get:
+      summary: List messages in a conversation
+  /v1/profiles:
+    get:
+      summary: List agent profiles
+    post:
+      summary: Create/revise an agent profile
+  /v1/profiles/{id}:
+    get:
+      summary: Fetch a profile
+  /v1/profiles/{id}/activate:
+    post:
+      summary: Mark a profile revision active
+  /v1/mcp-servers:
+    get:
+      summary: List MCP server registry entries
+    post:
+      summary: Create an MCP server registry entry
+  /v1/mcp-servers/{id}:
+    get:
+      summary: Fetch an MCP server registry entry
+  /v1/policy/evaluate:
+    post:
+      summary: Evaluate an autonomy policy decision
+  /v1/skills:
+    get:
+      summary: List discovered skills (operator-trusted)
+  /v1/skills/{name}/trust:
+    post:
+      summary: Trust a skill
+  /v1/skills/{name}/untrust:
+    post:
+      summary: Untrust a skill (fail-closed)
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    nodeCred:
+      type: http
+      scheme: bearer
+      description: Node credential issued at enrollment.

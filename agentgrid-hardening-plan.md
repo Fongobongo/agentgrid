@@ -846,7 +846,7 @@
 - [x] Документировать upgrade/rollback. (README migrations + downgrade fails loud + upgrade doc link)
 - [x] Добавить `SECURITY.md` с vulnerability reporting.
 - [x] Добавить compatibility matrix. (README "Compatibility matrix" table: OS/SQLite/TLS/runtime deps/Rust/transport/migrations/release targets + OpenAPI deferral note)
-- [ ] Добавить API/OpenAPI docs.
+- [x] Добавить API/OpenAPI docs. (`docs/openapi.yaml` OpenAPI 3.0 summary of the public `/v1` surface — tasks/nodes/approvals/workflows/profiles/skills/MCP/conversations, plus all node-facing routes, with security schemes; README points to it)
 
 ## 39. Changelog cleanup — P2
 
