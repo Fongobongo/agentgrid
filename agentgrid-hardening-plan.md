@@ -187,7 +187,7 @@
 - [x] Сделать OpenCode `--auto` выключенным по умолчанию.
 - [x] Добавить явный unsafe flag/profile для unattended execution.
 - [x] Требовать `AGENTGRID_UNSAFE_UNATTENDED=1` для полного bypass permissions.
-- [ ] Не разрешать unsafe mode при `sandbox=none`, если не указан отдельный override.
+- [x] Не разрешать unsafe mode при `sandbox=none`, если не указан отдельный override. (`sandbox::unsafe_env_guard` strips `AGENTGRID_UNSAFE_UNATTENDED` / `AGENTGRID_OPENCODE_AUTO` on unsandboxed runs unless `AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX=1`; applied in both ProcessBackend + wrapper-binary spawn paths; tests in `sandbox::tests::unsafe_guard_*`)
 - [ ] Показывать unsafe badge/warning в CLI, TUI и web UI.
 - [ ] Записывать выбранный security profile в attempt provenance.
 - [ ] Добавить capability `permission_interception: structured|wrapper|none`.
@@ -708,7 +708,7 @@
 
 - [x] Запускать tests до release build. (`release.yml` job `build` шаг `test before release`)
 - [x] Создавать GitHub Release по tag. (job `release` → `gh release create` с артефактами)
-- [ ] Прикладывать changelog section.
+- [x] Прикладывать changelog section. (`release.yml` extracts the CHANGELOG `[Unreleased]` section to `RELEASE_NOTES.md` and passes `--notes-file` to `gh release create`)
 - [x] Публиковать `agentgrid-control-plane`. (release job загружает все targets)
 - [x] Публиковать `agentgrid-node-daemon`.
 - [x] Публиковать `ag`.
@@ -836,8 +836,8 @@
 - [x] Обновить README по реальному feature scope. (Quickstart credentials исправлены на random; threat-model ссылка)
 - [x] Добавить maturity matrix: stable/beta/experimental/prototype. (README "Feature maturity" table)
 - [x] Явно написать: worktree не является security sandbox. (README maturity notes + threat-model)
-- [ ] Явно написать unsafe behavior wrapper adapters.
-- [ ] Разделить demo и production quickstart.
+- [x] Явно написать unsafe behavior wrapper adapters. (README unsafe-bypass note: wrapper adapters have `permission_interception: wrapper` not structured; bypass flag is the only knob; unsandboxed unsafe = full host access)
+- [x] Разделить demo и production quickstart. (README Quickstart (Docker) marked demo/eval; production path points to `install-control-plane.sh` + `install-node.sh` systemd installers, loopback bind by default)
 - [x] Документировать node trust/ownership model. (README "Trust & ownership model")
 - [x] Документировать event delivery semantics. (README "Event delivery semantics")
 - [x] Документировать fencing tokens. (threat-model T15 обновлён + invariant section про fencing tokens)
