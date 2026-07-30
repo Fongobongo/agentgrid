@@ -450,7 +450,7 @@
 - [ ] Возвращать typed `InvalidTransition`.
 - [ ] Маппить invalid transition на `409 Conflict`.
 - [ ] Не изменять task/attempt при invalid transition.
-- [ ] Добавить audit event с source state/event.
+- [x] Добавить audit event с source state/event. (`complete_attempt` rejected-terminal path emits `complete.rejected_terminal` audit with the source attempt status as `subject`; `retry_task` rejected-nonterminal path emits `retry.rejected_nonterminal` with the task status as `subject`. Tests: `audit_records_rejected_terminal_completion`, `audit_records_rejected_nonterminal_retry`.)
 - [ ] Отделить legacy compatibility transitions от основного автомата.
 - [x] Проверить terminal idempotency явно до transition. (`terminal_states_are_idempotent_except_retry` exhaustively asserts every non-Retry transition is rejected from every terminal task/attempt status; Retry is the only legal exit from Failed/Cancelled tasks)
 - [x] Добавить invariants: один active attempt на task. (CAS-охраны `WHERE status='queued'` + unique assigned_attempt_id; `complete_attempt`/`lose_node_attempts`/`cancel_task` очищают `assigned_attempt_id`)

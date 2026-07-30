@@ -1536,10 +1536,24 @@ impl Store {
                     | AttemptStatus::Cancelled
                     | AttemptStatus::Lost
             ) {
+                let source_state = attempt_status_str(s);
                 let _ = tx.rollback().await;
+                // Hardening P1 item 13: audit the rejected transition so a
+                // stale/late completion from an already-terminal attempt (a node
+                // coming back after we marked it `lost`) is traceable in the
+                // audit log without leaking the payload.
+                let _ = self
+                    .audit(
+                        "attempt",
+                        Some(attempt_id),
+                        "complete.rejected_terminal",
+                        Some(&source_state),
+                        None,
+                    )
+                    .await;
                 // Already terminal: a node reporting a completion for an attempt
-                // we already finalized (e.g. marked `lost` after it died) gets an
-                // idempotent ack without corrupting the task status.
+                // we already finalized (e.g. marked `lost` after it died) gets
+                // an idempotent ack without corrupting the task status.
                 return Ok(true);
             }
         }
@@ -1956,6 +1970,18 @@ impl Store {
             return Ok(true);
         }
         let _ = tx.rollback().await;
+        // Hardening P1 item 13: audit the rejected retry so a retry against a
+        // non-terminal task (queued/running/succeeded) is traceable, with the
+        // source state recorded and no payload.
+        let _ = self
+            .audit(
+                "task",
+                Some(task_id),
+                "retry.rejected_nonterminal",
+                Some(&status),
+                None,
+            )
+            .await;
         Ok(false)
     }
 
@@ -4352,5 +4378,92 @@ mod workflow_tests {
             .unwrap();
         let orphans = s.count_orphan_rows().await.unwrap();
         assert!(orphans >= 1, "detected orphaned attempt: {orphans}");
+    }
+
+    #[tokio::test]
+    async fn audit_records_rejected_terminal_completion() {
+        // Hardening P1 item 13: a late/stale completion for an attempt we
+        // already finalized is rejected but audited (with the source state),
+        // so a stale node redelivery is traceable.
+        let s = temp_store().await;
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec![String::new()],
+                max_concurrency: 2,
+                agent_version: "test".into(),
+                protocol_version: None,
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        let _task = s
+            .create_task(&CreateTaskRequest {
+                prompt: "p".into(),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: Some(60),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+            })
+            .await
+            .unwrap();
+        let a = s.try_assign(&node_id).await.unwrap().unwrap();
+        // First completion succeeds (running -> succeeded).
+        assert!(s
+            .complete_attempt(&a.attempt_id, &CompleteAttemptRequest::default())
+            .await
+            .unwrap());
+        // Second (late) completion is an idempotent Ok(true) but audited.
+        assert!(s
+            .complete_attempt(&a.attempt_id, &CompleteAttemptRequest::default())
+            .await
+            .unwrap());
+        let audits = s.list_audit(None, 100).await.unwrap();
+        let rejs: Vec<_> = audits
+            .iter()
+            .filter(|e| e.action == "complete.rejected_terminal")
+            .collect();
+        assert_eq!(rejs.len(), 1, "exactly one rejected-terminal audit");
+        assert_eq!(rejs[0].actor_type, "attempt");
+        assert_eq!(rejs[0].actor_id.as_deref(), Some(a.attempt_id.as_str()));
+        assert_eq!(rejs[0].subject.as_deref(), Some("succeeded"));
+    }
+
+    #[tokio::test]
+    async fn audit_records_rejected_nonterminal_retry() {
+        // Hardening P1 item 13: a retry against a non-terminal task (queued)
+        // is rejected and audited with the source state.
+        let s = temp_store().await;
+        let task = s
+            .create_task(&CreateTaskRequest {
+                prompt: "p".into(),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: Some(60),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+            })
+            .await
+            .unwrap();
+        // The task is queued (never failed); retry must be rejected.
+        assert!(!s.retry_task(&task.id).await.unwrap());
+        let audits = s.list_audit(None, 100).await.unwrap();
+        let rejs: Vec<_> = audits
+            .iter()
+            .filter(|e| e.action == "retry.rejected_nonterminal")
+            .collect();
+        assert_eq!(rejs.len(), 1, "exactly one rejected-retry audit");
+        assert_eq!(rejs[0].actor_type, "task");
+        assert_eq!(rejs[0].actor_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(rejs[0].subject.as_deref(), Some("queued"));
     }
 }
