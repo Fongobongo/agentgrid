@@ -845,7 +845,7 @@
 - [x] Документировать backup/restore. (README VACUUM INTO + artifact tree)
 - [x] Документировать upgrade/rollback. (README migrations + downgrade fails loud + upgrade doc link)
 - [x] Добавить `SECURITY.md` с vulnerability reporting.
-- [ ] Добавить compatibility matrix.
+- [x] Добавить compatibility matrix. (README "Compatibility matrix" table: OS/SQLite/TLS/runtime deps/Rust/transport/migrations/release targets + OpenAPI deferral note)
 - [ ] Добавить API/OpenAPI docs.
 
 ## 39. Changelog cleanup — P2

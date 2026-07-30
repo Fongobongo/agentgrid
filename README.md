@@ -144,6 +144,23 @@ double-delivers a task to two pollers (`WHERE status='queued'` CAS).
 
 See `docs/decisions/0001-mvp-scope.md` (ADR) and `docs/decisions/threat-model.md`.
 
+### Compatibility matrix
+
+| Component | Requirement | Status |
+|-----------|-------------|--------|
+| OS | Linux only — x86_64 tier 1 (Ubuntu 24.04, Debian 12/13), aarch64 tier 2. No kernel < 5.10, 32-bit, big-endian, or NFS workspaces. | enforced |
+| SQLite | bundled `libsqlite3-sys` (3.40+); WAL, `synchronous=NORMAL`, `busy_timeout=5000`. No system SQLite lib. | bundled |
+| TLS | `rustls` only — no system OpenSSL. | enforced |
+| Runtime deps | none required — no Docker/Node/Python/Java/external DB at runtime (Node.js only for building the web UI). | documented |
+| Rust | edition 2021, stable toolchain. | enforced |
+| Transport (node channel) | long polling (WebSocket deferred). Public API under `/v1`. | as documented |
+| Migrations | forward-only; downgrades fail loud against a newer-DB. | enforced |
+| Release targets | `x86_64`/`aarch64`-`unknown-linux-musl` (+ `x86_64-gnu` fallback). | in `release.yml` |
+
+OpenAPI is not yet generated; the `/v1` HTTP surface is documented inline in
+`crates/control-plane/src/lib.rs` route declarations and `docs/decisions/`. Track
+`#21` (Typed API errors / OpenAPI) for the generated document.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
