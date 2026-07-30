@@ -522,6 +522,34 @@ fn safe_workspace_target_under(p: &std::path::Path, root: &std::path::Path) -> b
     canon_parent == canon_root
 }
 
+/// Hardening P1 item 33: quarantine (rather than delete) a stale workspace
+/// entry that `safe_workspace_target_under` rejected (symlink leaf / outside
+/// the root / traversal). The entry is moved to
+/// `<workspace_root>/.quarantine/<original-name>-<timestamp>` so the
+/// misconfigured/stale dir is preserved for forensics instead of silently
+/// surviving or being rm-rf'd outside the root. Returns early on any IO
+/// error (it is best-effort cleanup, never panic-safe-blocking).
+pub(crate) fn quarantine_stale_workspace(p: &std::path::Path, workspace_root: &std::path::Path) {
+    let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+        tracing::warn!(?p, "quarantine: cannot read entry name; skipping");
+        return;
+    };
+    let qdir = workspace_root.join(".quarantine");
+    if let Err(e) = std::fs::create_dir_all(&qdir) {
+        tracing::warn!(?p, ?qdir, error = %e, "quarantine: mkdir failed; skipping");
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = qdir.join(format!("{name}-{ts}"));
+    match std::fs::rename(p, &dest) {
+        Ok(()) => tracing::warn!(?p, ?dest, "quarantined unsafe stale workspace entry"),
+        Err(e) => tracing::warn!(?p, ?dest, error = %e, "quarantine: rename failed; skipped"),
+    }
+}
+
 /// Remove the per-attempt worktree dir and (for git tasks) its branch after
 /// the attempt is done (Stage 2.3 worktree/branch cleanup). Best-effort: logs
 /// and swallows errors so a stuck worktree never turns a successful attempt
@@ -589,10 +617,15 @@ pub fn prune_stale_workspaces(
                             tracing::info!(?p, "pruning stale workspace dir");
                             // Hardening P1 item 33: only remove a direct
                             // child of workspace_root that is not a symlink.
+                            // Unsafe entries (symlink/traversal) are
+                            // quarantined under <workspace_root>/.quarantine/
+                            // instead of being deleted, so a misconfigured
+                            // stale dir is preserved forensics instead of
+                            // silently surviving / corrupting the cleanup.
                             if safe_workspace_target_under(&p, workspace_root) {
                                 let _ = std::fs::remove_dir_all(&p);
                             } else {
-                                tracing::warn!(?p, "skipping unsafe stale workspace dir");
+                                quarantine_stale_workspace(&p, workspace_root);
                             }
                         }
                     }
@@ -1183,14 +1216,51 @@ mod tests {
             outside.exists(),
             "symlink target was not deleted via the link"
         );
-        // prune_stale_workspaces: a symlinked entry under workspace_root is skipped.
+        // prune_stale_workspaces: a symlinked entry under workspace_root is
+        // skipped by the is_dir() filter (DirEntry::metadata does not follow
+        // the symlink), so the target is left intact. Quarantine of such
+        // entries is covered by quarantine_stale_workspace_moves_unsafe_entry.
         #[cfg(unix)]
         {
-            // Make the link old enough to be "stale".
-            // (safe_workspace_target_under rejects the symlink before mtime matters.)
             prune_stale_workspaces(&root, &root, std::time::Duration::from_secs(0));
             assert!(outside.exists(), "prune did not follow the symlink");
         }
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    /// Hardening P1 item 33: an entry `safe_workspace_target_under` rejects
+    /// (here a symlink leaf pointing outside the root) is moved into
+    /// <root>/.quarantine/ instead of being rm-rf'd or left alone. The entry
+    /// may never reach the prune branch via `read_dir` (`DirEntry::metadata`
+    /// does not follow symlinks, so a symlink is not `is_dir()`), so the
+    /// quarantine helper is exercised directly — that's the actual unit under
+    /// test for the quarantine decision.
+    #[cfg(unix)]
+    #[test]
+    fn quarantine_stale_workspace_moves_unsafe_entry() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("ag-ws-quar-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = std::env::temp_dir().join(format!("ag-ws-out2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("flag"), "x").unwrap();
+        let link = root.join("escapes");
+        symlink(&outside, &link).unwrap();
+        quarantine_stale_workspace(&link, &root);
+        assert!(outside.join("flag").exists(), "outside target preserved");
+        assert!(!link.exists(), "unsafe entry removed from workspace_root");
+        let qdir = root.join(".quarantine");
+        assert!(qdir.exists(), "quarantine dir present");
+        let moved = std::fs::read_dir(&qdir)
+            .unwrap()
+            .flatten()
+            .next()
+            .expect("exactly one quarantined entry");
+        assert!(
+            moved.file_name().to_string_lossy().starts_with("escapes-"),
+            "quarantined entry named from original"
+        );
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
     }

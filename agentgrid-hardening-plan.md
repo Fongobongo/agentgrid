@@ -764,7 +764,7 @@
 - [x] Проверять attempt ID format. (attempt-id валидируется как safe opaque ID на CP стороне; workspace path guarded от traversal)
 - [x] Не следовать symlink. (`symlink_metadata` reject leaf symlink в обоих guards)
 - [x] Не выполнять `remove_dir_all` за пределами root даже при corrupt state. (traversal `..` rejected; symlink rejected; regression-тест `cleanup_workspace_refuses_traversal_and_symlink`)
-- [ ] Добавить quarantine для неизвестных stale directories.
+- [x] Добавить quarantine для неизвестных stale directories. (`quarantine_stale_workspace` helper in node-daemon git.rs moves entries `safe_workspace_target_under` rejects (symlink/traversal/outside) into `<workspace_root>/.quarantine/<name>-<ts>` instead of leaving or rm-rf'ing them; `prune_stale_workspaces` calls it instead of the old `skip` warning. Test: `quarantine_stale_workspace_moves_unsafe_entry`.)
 - [ ] Добавить `ag node doctor --repair-worktrees`.
 - [ ] Добавить cleanup metrics.
 
