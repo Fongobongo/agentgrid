@@ -51,6 +51,14 @@ password and prints it once (no baked-in `admin/changeme`). Two node daemons
 
 Tear down: `./deploy/compose/down.sh` (or `docker compose down`).
 
+> This is the **demo/eval** path: `docker-compose.demo.yml` makes the control
+> plane reachable on the loopback address and runs mock adapters. For a
+> **production** single-host install use the systemd installers instead —
+> `deploy/install-control-plane.sh` (binds `127.0.0.1:7800` by default; pass
+> `--listen 0.0.0.0` only with TLS) and `deploy/install-node.sh` (creates an
+> unprivileged `agentgrid` user, installs a hardened systemd unit, and scrubs the
+> enrollment token after first connect). Both are idempotent.
+
 ## OpenCode node (optional)
 
 The `opencode` CLI is operator-provided by default. To bake it into a portable
@@ -70,8 +78,13 @@ than auto-running destructive tools. To allow an unattended agent to proceed
 without prompts you must opt in explicitly with
 `AGENTGRID_UNSAFE_UNATTENDED=1` (or the per-adapter `AGENTGRID_OPENCODE_AUTO`
 knob for opencode). The adapter prints a stderr warning when the bypass is on.
-Do NOT enable this without a sandbox; structured permission interception is a
-follow-up.
+Agent must run in a sandbox before enabling the bypass. Wrapper adapters
+(`adapter-claude` / `adapter-opencode`) drive the agent CLI as a subprocess:
+their `permission_interception` capability is `wrapper`, **not** structured —
+the bypass flag is the only knob they apply, so an unsandboxed wrapper adapter in
+unsafe mode gives the agent full host access. Only structured-interception /
+container backends count as isolation; the worktree is **not** a security
+boundary.
 
 ## Build from source
 
