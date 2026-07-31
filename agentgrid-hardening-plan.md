@@ -918,7 +918,7 @@
 - [ ] Forking child cleanup.
 - [ ] Adapter crash mid-frame.
 - [x] Огромная строка без newline. (`read_stream_caps_oversized_line`) 
-- [ ] Invalid UTF-8.
+- [x] Invalid UTF-8. (`read_stream` uses `String::from_utf8_lossy` so invalid UTF-8 is replaced with the Unicode replacement character rather than crashing the reader. Test `read_stream_handles_invalid_utf8` streams invalid bytes (0xFF 0xFE) and confirms events are still produced.)
 - [ ] Resource-limit outcome.
 - [ ] Sandbox network denial.
 

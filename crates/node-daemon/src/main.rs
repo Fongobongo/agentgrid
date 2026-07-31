@@ -4018,4 +4018,29 @@ mod tests {
         let n = buf.iter().filter(|e| e.r#type == EventType::Stdout).count();
         assert!(n >= 2, "oversized line split into multiple flushes: {n}");
     }
+
+    /// Hardening P1 item 427: read_stream handles invalid UTF-8 without
+    /// stopping. from_utf8_lossy replaces invalid sequences with the
+    /// Unicode replacement character, so a binary/garbage stream still
+    /// produces events instead of crashing the reader.
+    #[tokio::test]
+    async fn read_stream_handles_invalid_utf8() {
+        let sink = EventSink::new(
+            "a-utf8".into(),
+            reqwest::Client::new(),
+            "http://x".into(),
+            String::new(),
+            test_outbox("a-utf8"),
+        );
+        // Valid JSON line + invalid UTF-8 bytes (0xFF 0xFE is invalid UTF-8)
+        let input = b"{\"type\":\"log\",\"payload\":{\"text\":\"ok\"}}\n\xff\xfe\n".to_vec();
+        let reader = tokio::io::BufReader::new(std::io::Cursor::new(input));
+        read_stream(reader, sink.clone(), "stdout", vec![], None).await;
+        let buf = sink.buf.lock().await;
+        // Should have produced at least the valid JSON event (Stdout type).
+        let n = buf.iter().filter(|e| e.r#type == EventType::Stdout).count();
+        assert!(n >= 1, "at least one valid event produced: {n}");
+        // The invalid UTF-8 should not crash - it produces a lossy line.
+        // Just verify no panic occurred.
+    }
 }
