@@ -2162,8 +2162,16 @@ fn artifact_media_type(name: &str) -> &'static str {
 /// Replace any known secret substring with `***` (Stage 3.4).
 fn mask_secrets(line: &str, secrets: &[String]) -> String {
     let mut s = line.to_string();
+    // Hardening P1 item 27: ignore secret candidates shorter than a minimum
+    // length (default 6, override via AGENTGRID_REDACT_MIN_LEN) so a single
+    // shared common short substring doesn't get turned into a wall of `***`
+    // and obscure the real diagnostic. Empty is always skipped.
+    let min_len = std::env::var("AGENTGRID_REDACT_MIN_LEN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(6);
     for sec in secrets {
-        if !sec.is_empty() {
+        if sec.len() >= min_len {
             s = s.replace(sec, "***");
         }
     }
@@ -3062,6 +3070,25 @@ mod tests {
         );
         // No secrets configured -> unchanged.
         assert_eq!(mask_secrets("nothing", &[]), "nothing");
+    }
+
+    /// Hardening P1 item 27: a short secret candidate (below the default 6
+    /// char floor) is NOT redacted — turning a common 3-char substring into a
+    /// wall of `***` obscures real diagnostics. A normal-length secret is.
+    #[test]
+    fn mask_secrets_ignores_too_short_candidates() {
+        std::env::remove_var("AGENTGRID_REDACT_MIN_LEN");
+        // "abc" is below the 6-char floor -> left untouched.
+        assert_eq!(
+            mask_secrets("xabc yabc zabctx", &["abc".to_string()]),
+            "xabc yabc zabctx",
+            "sub-min-length secret candidate is not redacted"
+        );
+        // A cfg-secret of exactly 6 chars redacts (floor is exclusive below).
+        assert_eq!(
+            mask_secrets("tok=abcdef", &["abcdef".to_string()]),
+            "tok=***"
+        );
     }
 
     #[test]

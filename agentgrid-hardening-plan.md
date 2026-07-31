@@ -665,7 +665,7 @@
 - [ ] Не передавать весь daemon environment subprocess.
 - [ ] Рассмотреть credential broker/short-lived tokens.
 - [ ] Добавить streaming redactor с chunk overlap.
-- [ ] Добавить минимальную длину redactable secret.
+- [x] Добавить минимальную длину redactable secret. (`mask_secrets` ignores candidates shorter than a 6-char floor (`AGENTGRID_REDACT_MIN_LEN` override) so a short common substring doesn't get turned into a wall of `***` obscuring the real diagnostic. Test `mask_secrets_ignores_too_short_candidates`.)
 - [ ] Добавить encoded variants для критичных secrets.
 
 ---
