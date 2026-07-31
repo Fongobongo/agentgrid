@@ -379,8 +379,8 @@
 - [ ] Добавить per-attempt quota.
 - [ ] Добавить high/critical watermarks.
 - [ ] При quota pressure сохранять status/error раньше stdout.
-- [ ] Эмитить `output_truncated` ровно один раз.
-- [ ] Не пытаться записать terminal event в уже полностью заполненный spool без reserved capacity.
+- [x] Эмитить `output_truncated` ровно один раз. (`EventSink::push` latches `truncated_warned` AtomicBool on first drop; subsequent drops are silently ignored. Test `event_sink_drops_logs_over_cap_but_keeps_terminal_state` verifies exactly one notice.)
+- [x] Не пытаться записать terminal event в уже полностью заполненный spool без reserved capacity. (`EventOutbox::push` grants terminal events (Status, Tool, Artifact, Result, Error) an extra `TERMINAL_RESERVED_BYTES` (64 KiB) beyond the spool limit; non-terminal Stdout/Stderr/Metric are blocked at the hard limit. Test `event_outbox_terminal_reserved_capacity`.)
 - [ ] Добавить metrics: bytes, rows/segments, oldest pending age, corruption count.
 
 ### Тесты
@@ -774,7 +774,7 @@
 - [x] Ограничить logical line size. (`AGENTGRID_MAX_LINE_BYTES` по умолчанию 1 MiB в `read_stream`; regression-тест `read_stream_caps_oversized_line`)
 - [x] Продолжать drain pipe после truncation, чтобы subprocess не заблокировался. (`read_stream` flushes oversized line и продолжает читать; cap-test проверяет что pipe не wedges)
 - [ ] Добавить per-stream и total budgets.
-- [ ] Резервировать место для terminal/status events.
+- [x] Резервировать место для terminal/status events. (`EventSink::push` drop-filter covers only `Stdout`/`Stderr`/`Metric`; `Status`/`Result`/`Error`/`ToolCall` are never dropped even after the buffer exceeds the cap — terminal-state events always find room. See `event_sink_drops_logs_over_cap_but_keeps_terminal_state`.)
 - [ ] Добавить `output_truncated` metadata: bytes dropped/range.
 - [ ] Не хранить весь pending spool в RAM при отправке.
 - [ ] Отправлять ограниченные batches.

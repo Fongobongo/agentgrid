@@ -10,6 +10,10 @@
 //!   acked ones by rewriting the file under a Mutex.
 //! - Completion: one line per attempt in `completions.jsonl`; redelivered
 //!   completions are no-ops on the CP (idempotent terminal ack).
+//!
+//! Terminal events (Status, Tool, Artifact, Result, Error) have reserved
+//! capacity in the spool (TERMINAL_RESERVED_BYTES) so they can always be
+//! written even when the log event spool hits the limit.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -18,6 +22,11 @@ use std::sync::Mutex;
 use agentgrid_common::{CompleteAttemptRequest, IncomingEvent};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+// Reserved capacity for terminal events beyond the spool limit (64 KiB).
+// Allows terminal state transitions to be durably recorded even when
+// the outbox is full of Stdout/Stderr/Metric events.
+const TERMINAL_RESERVED_BYTES: u64 = 64 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct EventLine {
@@ -94,7 +103,27 @@ impl EventOutbox {
         // is a safety ceiling, not an exact bound (one event may overshoot).
         if self.spool_limit_bytes > 0 {
             if let Ok(meta) = std::fs::metadata(&self.path) {
-                if meta.len() >= self.spool_limit_bytes {
+                // Hardening P1 item 34: reserve capacity for terminal events
+                // (Status, Tool, Artifact, Result, Error) so they can always
+                // get through even when the spool is full of log events.
+                // Non-terminal events (Stdout, Stderr, Metric) are blocked at
+                // the hard limit. Terminal events can exceed the limit by
+                // TERMINAL_RESERVED_BYTES.
+                let is_terminal = matches!(
+                    ev.r#type,
+                    agentgrid_common::EventType::Status
+                        | agentgrid_common::EventType::Tool
+                        | agentgrid_common::EventType::Artifact
+                        | agentgrid_common::EventType::Result
+                        | agentgrid_common::EventType::Error
+                );
+                let effective_limit = if is_terminal {
+                    self.spool_limit_bytes
+                        .saturating_add(TERMINAL_RESERVED_BYTES)
+                } else {
+                    self.spool_limit_bytes
+                };
+                if meta.len() >= effective_limit {
                     return Err(PushError::SpoolFull);
                 }
             }
@@ -572,6 +601,80 @@ mod tests {
         }) {
             Err(PushError::SpoolFull) => {}
             other => panic!("expected SpoolFull, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hardening P1 item 34: terminal events can exceed the spool limit by
+    /// TERMINAL_RESERVED_BYTES, while non-terminal (Stdout/Stderr/Metric)
+    /// events are blocked at the hard limit.
+    #[test]
+    fn event_outbox_terminal_reserved_capacity() {
+        let dir = tmpdir("spool-terminal");
+        std::env::remove_var("AGENTGRID_OUTBOX_SPOOL_LIMIT_MB");
+        let ob = EventOutbox::open(&dir, "att-term").unwrap();
+        // Set a small limit: 200 bytes.
+        let ob = EventOutbox {
+            path: ob.path.clone(),
+            file: Mutex::new(()),
+            spool_limit_bytes: 200,
+        };
+        // Push several Stdout events until we're near the limit.
+        // Each event is roughly 40-50 bytes. 4 events should put us near 200.
+        for i in 1..=4 {
+            let ev = IncomingEvent {
+                sequence: i,
+                r#type: EventType::Stdout,
+                payload: json!({ "t": "x".repeat(10) }),
+            };
+            ob.push(&ev)
+                .unwrap_or_else(|e| panic!("push {} failed: {e}", i));
+        }
+        // Next Stdout should fail (SpoolFull).
+        let stdout_ev = IncomingEvent {
+            sequence: 5,
+            r#type: EventType::Stdout,
+            payload: json!({ "t": "y" }),
+        };
+        match ob.push(&stdout_ev) {
+            Err(PushError::SpoolFull) => {}
+            other => panic!("expected SpoolFull for Stdout, got {other:?}"),
+        }
+        // But a terminal event (Result) should still succeed due to reserved capacity.
+        let term_ev = IncomingEvent {
+            sequence: 6,
+            r#type: EventType::Result,
+            payload: json!({ "exit_code": 0 }),
+        };
+        ob.push(&term_ev)
+            .unwrap_or_else(|e| panic!("terminal push failed: {e}"));
+        // Another terminal should also succeed (still within reserved).
+        let term_ev2 = IncomingEvent {
+            sequence: 7,
+            r#type: EventType::Error,
+            payload: json!({ "message": "oops" }),
+        };
+        ob.push(&term_ev2)
+            .unwrap_or_else(|e| panic!("second terminal push failed: {e}"));
+        // Eventually even terminal events hit the extended limit.
+        // Fill up the reserved capacity with more terminal events.
+        for i in 8..=800 {
+            let term_ev = IncomingEvent {
+                sequence: i,
+                r#type: EventType::Status,
+                payload: json!({ "msg": "x".repeat(200) }),
+            };
+            let _ = ob.push(&term_ev); // may succeed or fail
+        }
+        // Final terminal should fail (exceeded reserved capacity).
+        let term_ev_final = IncomingEvent {
+            sequence: 999,
+            r#type: EventType::Result,
+            payload: json!({ "exit_code": 1 }),
+        };
+        match ob.push(&term_ev_final) {
+            Err(PushError::SpoolFull) => {}
+            other => panic!("expected SpoolFull after reserved exhausted, got {other:?}"),
         }
         std::fs::remove_dir_all(&dir).ok();
     }
