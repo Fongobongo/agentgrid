@@ -35,3 +35,24 @@ jobs:
         run: cargo install cargo-deny --locked
       - name: cargo deny check
         run: cargo deny check
+
+  trivy-fs:
+    name: trivy filesystem (IaC + secrets + misconfig)
+    runs-on: ubuntu-latest
+    # Hardening P2 item 29: scan the repo filesystem (config, IaC, secrets,
+    # misconfig) with trivy — no image build needed. Catches leaked secrets /
+    # policy-as-code issues that cargo-audit/deny (Rust-crate only) miss.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: trivy fs scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # Fail on HIGH/CRITICAL vulns + secrets; ignore unverifiable tool
+          # updates so a flaky upstream GitHub API does not block the gate.
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
