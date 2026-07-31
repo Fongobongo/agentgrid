@@ -684,7 +684,7 @@
 - [x] Nightly: workflow E2E. (`ci.yml` `e2e` job runs `run-workflow.sh` (compose, multi-role DAG across two nodes) gated to `schedule`/`workflow_dispatch`)
 - [x] Nightly: skill bundle. (`ci.yml` `skill-bundle` job (schedule/manual) runs `run-skill-bundle.sh`; exit 77 = no `AG_REMOTE_*` secrets → treated as skip so CI stays green)
 - [ ] Physical runner: real two-host E2E.
-- [ ] Добавить race/concurrency stress job.
+- [x] Добавить race/concurrency stress job. (`ci.yml` `stress` job (nightly/manual) runs `cargo test --workspace -- --test-threads=16` RUST_TEST_THREADS=16 across 3 iterations to surface races (double-assign, lease/ACK drift, outbox seq race) a single deterministic pass hides)
 - [ ] Добавить sanitizer/Miri там, где применимо.
 - [x] Добавить code coverage trend. (`.github/workflows/coverage.yml` runs `cargo llvm-cov --workspace --lcov` weekly + manual dispatch, uploads `lcov.info` artifact)
 - [ ] Проверять migration from previous released DB snapshot.

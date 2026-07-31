@@ -112,3 +112,29 @@ jobs:
             exit 0
           fi
           exit "$rc"
+
+  stress:
+    name: race/concurrency stress (high parallelism, repeat)
+    runs-on: ubuntu-latest
+    # Hardening P2 item 28: churn runware tests at 16-way parallelism across
+    # repeated invocations to surface races (double-assign, lease/ACK drift,
+    # outbox seq race) that a single deterministic pass hides. Nightly + manual.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Use a cheap shallow-ish fetch; conservative to not break cargo.
+          submodules: false
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build tests once
+        run: cargo test --workspace --no-run --locked
+      - name: run workspace tests x3 at high parallelism
+        run: |
+          for i in 1 2 3; do
+            echo "::group::stress iteration $i"
+            RUST_TEST_THREADS=16 cargo test --workspace -- --test-threads=16
+            echo "::endgroup::"
+          done
