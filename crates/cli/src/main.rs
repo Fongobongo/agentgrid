@@ -348,6 +348,11 @@ enum NodeSub {
     List,
     /// Provision a remote host as a node over SSH and link it to this control plane.
     Install(Box<NodeInstallArgs>),
+    /// Diagnose a node: fetch its control-plane view and surface known
+    /// symptoms (status, missing adapters, low disk, stale heartbeat). Doctor
+    /// is report-only — it does not mutate the node. Use `ag node install` /
+    /// the node daemon for repair; this surfaces the symptoms there.
+    Doctor { node_id: String },
 }
 
 /// Transport used for the node -> control-plane runtime link.
@@ -800,7 +805,88 @@ async fn cmd_nodes(client: &reqwest::Client, base: &str, json: bool, a: NodeArgs
     match a.command {
         NodeSub::List => cmd_node_list(client, base, json).await,
         NodeSub::Install(i) => cmd_node_install(client, base, *i).await,
+        NodeSub::Doctor { node_id } => cmd_node_doctor(client, base, &node_id).await,
     }
+}
+
+async fn cmd_node_doctor(client: &reqwest::Client, base: &str, node_id: &str) -> Result<()> {
+    let resp = client
+        .get(format!("{base}/v1/nodes/{node_id}"))
+        .send()
+        .await
+        .context("node fetch request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("node lookup failed: HTTP {}", resp.status());
+    }
+    let n: serde_json::Value = resp.json().await.context("parse node")?;
+    let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("-");
+    let name = n.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+    let status = n.get("status").and_then(|v| v.as_str()).unwrap_or("-");
+    let last_hb = n
+        .get("last_heartbeat_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    println!("node {id} ({name})");
+    println!("  status      : {status}");
+    println!("  last_heartbeat: {last_hb}");
+    let mut symptoms: Vec<String> = Vec::new();
+    let active = n
+        .get("active_attempts")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let max = n
+        .get("max_concurrency")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!("  active/max  : {active}/{max}");
+    let free_disk = n.get("free_disk_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+    let load = n.get("load_avg").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    println!("  free disk   : {free_disk} MB");
+    println!("  load_avg    : {load}");
+    let adapters = n
+        .get("adapters")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    println!("  adapters    : {adapters}");
+    if status == "offline" {
+        symptoms.push("node is OFFLINE (heartbeat lost or just started)".into());
+    }
+    if status == "degraded" {
+        symptoms.push(
+            "node is DEGRADED (a configured adapter binary is missing, or disk low, or protocol mismatch)"
+                .into(),
+        );
+    }
+    if status == "revoked" {
+        symptoms.push("node is REVOKED; it can no longer service tasks".into());
+    }
+    if free_disk > 0 && free_disk < 1024 {
+        symptoms.push(format!("free disk low ({free_disk} MB < 1 GiB)"));
+    }
+    if max > 0 && active == max {
+        symptoms.push(format!(
+            "at capacity ({active}/{max}); new tasks will not assign"
+        ));
+    }
+    if last_hb.is_empty() {
+        symptoms
+            .push("no heartbeat yet; daemon may not have started or cannot reach the CP".into());
+    }
+    if symptoms.is_empty() {
+        println!("  doctor      : OK — no symptoms");
+    } else {
+        println!("  doctor      : {} symptom(s):", symptoms.len());
+        for s in &symptoms {
+            println!("    - {s}");
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_node_install(client: &reqwest::Client, base: &str, a: NodeInstallArgs) -> Result<()> {
