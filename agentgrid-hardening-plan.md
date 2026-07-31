@@ -741,8 +741,8 @@
 
 ## 32. Git correctness — P1/P2
 
-- [ ] Fail closed при отсутствующем upstream commit/patch по умолчанию.
-- [ ] Добавить explicit workflow policy `allow_missing_upstream`.
+- [x] Fail closed при отсутствующем upstream commit/patch по умолчанию. (`prepare_workspace`: when an explicitly-pinned `base_commit` cannot be fetched and is not present locally, `git cat-file -e` fails → `prepare_workspace` errors with a named "could not be fetched / not present locally" message instead of silently falling back to the default branch. Test `prepare_workspace_fail_closed_on_missing_pinned_base`.)
+- [x] Добавить explicit workflow policy `allow_missing_upstream`. (`AGENTGRID_ALLOW_MISSING_UPSTREAM=1` opts into the relaxed policy — a missing pinned base logs a warn and falls back to the default branch (useful for distributed workflows without a shared remote). The opt-in is the only escape hatch; the default stays fail-closed.)
 - [x] Сохранять exact `resolved_base_sha` для каждого attempt. (migration 0033: attempts.resolved_base_sha; CompleteAttemptRequest.resolved_base_sha serialised; complete_attempt persist; node-daemon reports from worktree base_commit; test `complete_persists_resolved_base_sha`. потолок P1: default-branch checkout не резолвит HEAD — только pinned path)
 - [x] Сохранять `remote_head_at_start` и `remote_head_at_finish`. (migration 0035 adds both attempt columns; `CompleteAttemptRequest` carries them; node-daemon captures origin HEAD via `git ls-remote origin HEAD` before agent execution and before completion; `complete_attempt` persists both. Tests: `complete_persists_remote_head_at_start_and_finish`, `remote_head_at_returns_none_on_missing_origin`; migration compat passes.)
 - [x] Показывать stale-base warning. (node-daemon: pinned base_commit проверяется через `merge-base --is-ancestor`; если позади remote HEAD, warn)

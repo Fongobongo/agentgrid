@@ -276,10 +276,46 @@ pub fn prepare_workspace(
         .filter(|c| !c.is_empty())
         .map(|c| {
             validate_token(c)?;
-            let _ = Command::new("git")
+            let fetch_ok = Command::new("git")
                 .args(["fetch", "origin", c])
                 .current_dir(&repo_dir)
-                .status();
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            // Hardening P1 item 32 / §32 correctness: fail CLOSED when an
+            // explicitly-pinned base commit cannot be fetched, unless the
+            // operator opts into the relaxed policy with
+            // `AGENTGRID_ALLOW_MISSING_UPSTREAM=1` (then we fall back to the
+            // default branch and warn loudly). The explicit opt-in is the
+            // documented escape hatch for distributed workflows without a
+            // shared remote; a silent fall-through to the default branch would
+            // run the agent against the wrong base without any signal.
+            let allow_missing = std::env::var("AGENTGRID_ALLOW_MISSING_UPSTREAM")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let present_locally = Command::new("git")
+                .args(["cat-file", "-e", c])
+                .current_dir(&repo_dir)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !fetch_ok && !present_locally {
+                if allow_missing {
+                    tracing::warn!(
+                        c,
+                        "base_commit fetch failed and not present locally; \
+                         AGENTGRID_ALLOW_MISSING_UPSTREAM=1 → falling back to {} \
+                         (operator opt-in)",
+                        db,
+                    );
+                    return Ok(None::<&str>);
+                }
+                anyhow::bail!(
+                    "pinned base commit {c} could not be fetched and is not present \
+                     locally; set AGENTGRID_ALLOW_MISSING_UPSTREAM=1 to fall back to \
+                     the default branch",
+                );
+            }
             // Hardening P1 item 32: warn if the pinned base commit is behind
             // the remote default branch HEAD (stale base). The agent still runs
             // (operator pinned it on purpose), but the warning surfaces drift
@@ -295,9 +331,12 @@ pub fn prepare_workspace(
                     );
                 }
             }
-            Ok::<&str, anyhow::Error>(c.as_str())
+            Ok(Some(c.as_str()))
         })
-        .transpose()?;
+        .transpose()?
+        // Flatten Option<Option<&str>> -> Option<&str>: a fall-back to the
+        // default branch yields None (let start_point = db).
+        .flatten();
 
     let start_point = base_commit.unwrap_or(db);
     git(
@@ -1265,15 +1304,59 @@ mod tests {
         std::fs::remove_dir_all(&outside).ok();
     }
 
-    /// Hardening P1 item 32: `remote_head_at` returns None when there is no
-    /// `origin` remote / git fails, instead of panicking — audit data must
-    /// never block the attempt.
+    /// Hardening P1 item 32 / §32 correctness: an explicitly-pinned base
+    /// commit that cannot be fetched and is not present locally must fail
+    /// closed (prepare_workspace errors) unless the operator opts into the
+    /// relaxed policy with AGENTGRID_ALLOW_MISSING_UPSTREAM=1.
     #[test]
-    fn remote_head_at_returns_none_on_missing_origin() {
-        let dir = std::env::temp_dir().join(format!("ag-rh-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // No git repo at all: git ls-remote fails => None (no panic).
-        assert_eq!(remote_head_at(&dir), None);
+    fn prepare_workspace_fail_closed_on_missing_pinned_base() {
+        let dir = std::env::temp_dir().join(format!("ag-fc-base-{}", uuid::Uuid::new_v4()));
+        let origin = dir.join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(origin.join("base.txt"), "base").unwrap();
+        git(&origin, &["add", "-A"]).unwrap();
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+        let repos = dir.join("repos");
+        let ws_root = dir.join("ws");
+        let url = origin.to_str().unwrap().to_string();
+        let mut a = make_assignment(&url, "main");
+        a.base_commit = Some("deadcafedeadcafe".into()); // not an ancestor/present
+
+        // Default policy: fail closed.
+        std::env::remove_var("AGENTGRID_ALLOW_MISSING_UPSTREAM");
+        let res = prepare_workspace(&repos, &ws_root.join("a1"), &a, &[], &[]);
+        let err = match res {
+            Err(e) => e,
+            Ok(_) => panic!("missing pinned base must fail closed by default"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("could not be fetched") || msg.contains("not present locally"),
+            "error must name the missing base: {msg}"
+        );
+
+        // Relaxed policy: falls back to default branch and returns Ok.
+        std::env::set_var("AGENTGRID_ALLOW_MISSING_UPSTREAM", "1");
+        let ws = prepare_workspace(&repos, &ws_root.join("a2"), &a, &[], &[]).unwrap();
+        assert!(
+            ws.base_commit.is_none(),
+            "relaxed policy falls back to the default branch (base_commit=None)"
+        );
+        std::env::remove_var("AGENTGRID_ALLOW_MISSING_UPSTREAM");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
