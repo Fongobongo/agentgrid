@@ -178,9 +178,14 @@ impl EventOutbox {
                 survivors.push('\n');
             }
         }
-        // Atomic replace: write tmp + rename.
+        // Atomic replace: write tmp + fsync + rename (Hardening P1 item 11).
         let tmp = self.path.with_extension("jsonl.tmp");
         std::fs::write(&tmp, &survivors)?;
+        {
+            let f = std::fs::OpenOptions::new().write(true).open(&tmp)?;
+            f.sync_all()?;
+        }
+        fsync_parent(&tmp)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -190,6 +195,37 @@ impl EventOutbox {
 pub struct CompletionOutbox {
     path: PathBuf,
     file: Mutex<()>,
+}
+
+/// Hardening P1 item 11: fsync the parent directory of `path` so a rename /
+/// temp-file replace is durable on power loss. Without this, a successful
+/// rename in the page cache can disappear after a crash even though the file
+/// data is durable. No-op (warns) on platforms without `fdatasync`; best-effort
+/// — errors are surfaced so the caller can decide, but never panic.
+fn fsync_parent(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let dir = match std::fs::File::open(parent) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    // SAFETY: fdatasync(fd) on an open directory fd is a safe POSIX op.
+    let rc = unsafe { libc_fdatasync(dir.as_raw_fd()) };
+    drop(dir);
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+/// libc::fdatasync shim — kept here so the module compiles on unix only (the
+/// daemon is Linux-only per ADR). Returns 0 on success, -1 with errno on error.
+#[cfg(unix)]
+unsafe fn libc_fdatasync(fd: std::os::unix::io::RawFd) -> i32 {
+    libc::fdatasync(fd)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -254,14 +290,24 @@ impl CompletionOutbox {
         let mut s = serde_json::to_string(&line)?;
         s.push('\n');
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.path)?;
-        f.write_all(survivors.as_bytes())?;
-        f.write_all(s.as_bytes())?;
-        f.sync_data()?;
+        // Hardening P1 item 11: NEVER truncate the durable completion file
+        // in-place. Write to a sibling temp file, fsync its data, fsync the
+        // parent dir, then atomically rename over the live file — so a kill /
+        // power loss during the record leaves either the old file intact or
+        // the new file fully durable, never a torn / empty file.
+        let tmp = self.path.with_extension("jsonl.tmp-rec");
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)?;
+            f.write_all(survivors.as_bytes())?;
+            f.write_all(s.as_bytes())?;
+            f.sync_all()?;
+        }
+        fsync_parent(&tmp)?;
+        std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 
@@ -293,6 +339,13 @@ impl CompletionOutbox {
         }
         let tmp = self.path.with_extension("jsonl.tmp");
         std::fs::write(&tmp, &survivors)?;
+        // Hardening P1 item 11: fsync the temp file size/data and the parent
+        // dir before the rename so the ack compaction survives a power loss.
+        {
+            let f = std::fs::OpenOptions::new().write(true).open(&tmp)?;
+            f.sync_all()?;
+        }
+        fsync_parent(&tmp)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -423,6 +476,64 @@ mod tests {
         assert_eq!(r.acp_session_id.as_deref(), Some("sess-1"));
         co2.ack("att-9").unwrap();
         assert!(co2.pending().unwrap().is_empty(), "acked completion gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hardening P1 item 11: record() never truncates the live completion
+    /// file in-place — it writes a sibling temp file and atomically renames
+    /// over the live file. After a successful record the temp file must be
+    /// gone, the live file must contain both the surviving and new lines, and
+    /// a second record that dedupes the first collapses to exactly one line
+    /// (latest-wins) without corruption.
+    #[test]
+    fn completion_outbox_record_is_atomic_no_truncate() {
+        let dir = tmpdir("comp-atomic");
+        let co = CompletionOutbox::open(&dir).unwrap();
+        let path = co.path.clone();
+        let req = CompleteAttemptRequest {
+            exit_code: 0,
+            commit_sha: Some("abc".into()),
+            ..Default::default()
+        };
+        co.record("att-keep", &req, "f-1").unwrap();
+        // No leftover temp file from record().
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp-rec")),
+            "record must not leave a temp file behind"
+        );
+        // record again with a different attempt → file has 2 lines, live file
+        // is intact (atomic replace preserved the prior line).
+        let req2 = CompleteAttemptRequest {
+            exit_code: 1,
+            commit_sha: Some("def".into()),
+            ..Default::default()
+        };
+        co.record("att-2", &req2, "f-2").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content.lines().filter(|l| !l.trim().is_empty()).count(),
+            2,
+            "two distinct attempts preserved atomically"
+        );
+        // Redeliver the same attempt: dedup → latest wins, file keeps att-2
+        // and the fresh att-keep line.
+        let req3 = CompleteAttemptRequest {
+            exit_code: 7,
+            commit_sha: Some("upd".into()),
+            ..Default::default()
+        };
+        co.record("att-keep", &req3, "f-1b").unwrap();
+        let pending = co.pending().unwrap();
+        assert_eq!(pending.len(), 2, "dedup: still exactly two completion rows");
+        let keep = pending
+            .iter()
+            .find(|p| p.attempt_id == "att-keep")
+            .expect("att-keep survived");
+        assert_eq!(keep.exit_code, 7, "latest record wins the dedup");
+        assert_eq!(keep.fencing_token, "f-1b", "latest fence wins the dedup");
         std::fs::remove_dir_all(&dir).ok();
     }
 

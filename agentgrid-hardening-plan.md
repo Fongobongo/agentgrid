@@ -363,10 +363,10 @@
 
 ### Если segmented files
 
-- [ ] Никогда не truncate durable completion file in-place.
-- [ ] Писать временный файл с уникальным именем.
-- [ ] `sync_all` перед rename.
-- [ ] `fsync` parent directory после rename.
+- [x] Никогда не truncate durable completion file in-place. (node-daemon `CompletionOutbox::record` builds the new content in a sibling `.jsonl.tmp-rec` temp file and atomically renames over the live file; no path takes the live file through truncate+rewrite, so a kill/power loss mid-record leaves the prior file intact. Test `completion_outbox_record_is_atomic_no_truncate`.)
+- [x] Писать временный файл с уникальным именем. (`record`/`ack` use sibling `<path>.jsonl.tmp[-rec]` files unique per path; consumed by rename.)
+- [x] `sync_all` перед rename. (temp file `sync_all()` before the rename in both record and ack compaction paths.)
+- [x] `fsync` parent directory после rename. (new `fsync_parent(path)` helper fdatasyncs the parent directory after sync_all+before/around rename in record and both ack paths; covers the durability gap where a renamed-in change survives data sync but the directory entry change is still in the page cache.)
 - [ ] Использовать immutable segments + checkpoint вместо полного rewrite на ACK.
 - [x] Терпимо обрабатывать truncated trailing JSON line. (`emit_line` non-JSON → raw stdout/stderr event; byte loop flushes partial EOF tail; oversized line truncated+flushed)
 - [ ] Карантинить повреждённые middle records, не теряя остальные.
