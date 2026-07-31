@@ -424,7 +424,7 @@
 - [ ] Применять sandbox policy.
 - [ ] Применять resource limits.
 - [ ] Ограничить stdout/stderr bytes.
-- [ ] Обрабатывать invalid UTF-8 без остановки чтения.
+- [x] Обрабатывать invalid UTF-8 без остановки чтения. (`read_stream` uses `String::from_utf8_lossy` — invalid UTF-8 is replaced with the Unicode replacement character rather than crashing the reader. Test `read_stream_handles_invalid_utf8`.)
 - [ ] Различать `validation_failed`, `validation_timeout`, `validation_cancelled`, `validation_infrastructure_failed`.
 - [ ] Не собирать command через `format!("{command} 2>&1")`, если можно передать structured argv.
 - [ ] Для shell validation явно маркировать trusted shell command.
