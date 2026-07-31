@@ -751,6 +751,12 @@ struct EventSink {
     /// Stage 2.1: latched once an `output_truncated` notice has been emitted,
     // so a chatty agent produces one truncation notice, not one per dropped line.
     truncated_warned: std::sync::atomic::AtomicBool,
+    /// Stage 2.1: count of droppable events dropped due to backpressure
+    // (for `output_truncated` metadata).
+    dropped_count: std::sync::atomic::AtomicU64,
+    /// Stage 2.1: approximate bytes of droppable events dropped due to
+    // backpressure (for `output_truncated` metadata).
+    dropped_bytes: std::sync::atomic::AtomicU64,
     /// Latched once the on-disk outbox hit its spool limit. Further `push`
     // calls become no-ops and `run_attempt` should fail the attempt with
     // `error_code=spool_full` (disk-full fail-closed).
@@ -777,6 +783,8 @@ impl EventSink {
             outbox,
             buf_bytes: AtomicU64::new(0),
             truncated_warned: std::sync::atomic::AtomicBool::new(false),
+            dropped_count: AtomicU64::new(0),
+            dropped_bytes: AtomicU64::new(0),
             spool_full: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -807,6 +815,12 @@ impl EventSink {
                 .unwrap_or(4 * 1024 * 1024);
             let cur = self.buf_bytes.load(Ordering::Relaxed);
             if cur >= cap {
+                // Hardening P1 item 34: track dropped events/bytes for
+                // output_truncated metadata (bytes dropped/range).
+                let approx_bytes = payload.to_string().len() as u64;
+                self.dropped_count.fetch_add(1, Ordering::Relaxed);
+                self.dropped_bytes
+                    .fetch_add(approx_bytes, Ordering::Relaxed);
                 if !self
                     .truncated_warned
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -858,6 +872,8 @@ impl EventSink {
 
     async fn emit_truncated_notice(&self, cap: u64) {
         let seq = self.next.fetch_add(1, Ordering::SeqCst);
+        let dropped_count = self.dropped_count.load(Ordering::Relaxed);
+        let dropped_bytes = self.dropped_bytes.load(Ordering::Relaxed);
         let ev = IncomingEvent {
             sequence: seq,
             r#type: EventType::Status,
@@ -865,6 +881,8 @@ impl EventSink {
                 "event": "output_truncated",
                 "reason": "event buffer over cap",
                 "cap_bytes": cap,
+                "dropped_count": dropped_count,
+                "dropped_bytes": dropped_bytes,
             }),
         };
         if let Err(e) = self.outbox.push(&ev) {

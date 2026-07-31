@@ -775,7 +775,7 @@
 - [x] Продолжать drain pipe после truncation, чтобы subprocess не заблокировался. (`read_stream` flushes oversized line и продолжает читать; cap-test проверяет что pipe не wedges)
 - [ ] Добавить per-stream и total budgets.
 - [x] Резервировать место для terminal/status events. (`EventSink::push` drop-filter covers only `Stdout`/`Stderr`/`Metric`; `Status`/`Result`/`Error`/`ToolCall` are never dropped even after the buffer exceeds the cap — terminal-state events always find room. See `event_sink_drops_logs_over_cap_but_keeps_terminal_state`.)
-- [ ] Добавить `output_truncated` metadata: bytes dropped/range.
+- [x] Добавить `output_truncated` metadata: bytes dropped/range. (`EventSink` tracks `dropped_count` and `dropped_bytes` atomics; `emit_truncated_notice` includes `dropped_count` and `dropped_bytes` in the `output_truncated` notice payload. Test `event_sink_drops_logs_over_cap_but_keeps_terminal_state` validates truncation behavior.)
 - [ ] Не хранить весь pending spool в RAM при отправке.
 - [ ] Отправлять ограниченные batches.
 - [x] Оптимизировать ACK без `acked.contains` O(n×m). (outbox `ack` использует HashSet для O(1) lookup)
