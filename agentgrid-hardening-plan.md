@@ -853,7 +853,7 @@
 - [x] Перевести changelog на Keep a Changelog style.
 - [x] Оставлять только Added/Changed/Fixed/Security/Breaking/Known limitations.
 - [x] Убрать internal Stage/line references.
-- [ ] Перенести implementation journal в issues или development notes.
+- [x] Перенести implementation journal в issues или development notes. (журнал ведётся в agentgrid-development-plan.md / implementation-plan.md; CHANGELOG остаётся Keep a Changelog)
 - [x] Не ставить версии ретроспективно без пояснения.
 - [x] Добавлять отдельный `Security` section для P0 fixes. (CHANGELOG уже имеет `### Security` sections для каждого P0 fix)
 
