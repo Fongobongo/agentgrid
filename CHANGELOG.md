@@ -107,6 +107,11 @@ All notable changes to this project are documented in this file.
   `AGENTGRID_ADAPTER_ENV` allowlist and profile-declared secrets; the daemon's
   credentials/API keys/`AGENTGRID_SECRETS` never reach the agent. Test:
   `spawn_does_not_inherit_daemon_env`.
+- **Secret redaction variants (hardening P1 item 27):** `mask_secrets` now
+  also masks base64- and percent-encoded forms of each configured secret, so
+  a diagnostic that printed an encoded secret cannot leak the raw value.
+  Tests: `mask_secrets_masks_encoded_variants`,
+  `base64_encoder_known_values`.
 
 ### Security (hardening P0/P1/P2 — session hardening pass)
 

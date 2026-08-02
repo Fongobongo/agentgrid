@@ -2554,12 +2554,56 @@ fn mask_secrets(line: &str, secrets: &[String]) -> String {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(6);
+    // Hardening P1 item 27: also mask encoded variants of each secret so a
+    // diagnostic that printed a base64 or percent-encoded form does not leak
+    // the raw secret.
     for sec in secrets {
         if sec.len() >= min_len {
             s = s.replace(sec, "***");
+            s = s.replace(&base64_encode(sec.as_bytes()), "***");
+            s = s.replace(&url_encode(sec), "***");
         }
     }
     s
+}
+
+/// Minimal base64 encoder (no external dep) for secret-variant masking.
+fn base64_encode(bytes: &[u8]) -> String {
+    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).map(|&b| b as u32).unwrap_or(0);
+        let b2 = chunk.get(2).map(|&b| b as u32).unwrap_or(0);
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TBL[(n >> 18) as usize & 63] as char);
+        out.push(TBL[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(TBL[(n >> 6) as usize & 63] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TBL[n as usize & 63] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Minimal percent-encoder (non-alphanumeric → %XX) for secret-variant masking.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Whether an HTTP status from the control plane is worth retrying from the
@@ -3557,6 +3601,38 @@ mod tests {
             mask_secrets("tok=abcdef", &["abcdef".to_string()]),
             "tok=***"
         );
+    }
+
+    /// Hardening P1 item 27: base64 and percent-encoded variants of a secret
+    /// are masked too, so a diagnostic that printed an encoded form does not
+    /// leak the raw value.
+    #[test]
+    fn mask_secrets_masks_encoded_variants() {
+        std::env::remove_var("AGENTGRID_REDACT_MIN_LEN");
+        let sec = "sk-SUPER-SECRET-42";
+        let b64 = base64_encode(sec.as_bytes());
+        let url = url_encode(sec);
+        // Sanity: base64 form is well-formed; percent form encodes `-` as-is
+        // (it is an unreserved char) and would percent-encode non-alnum only.
+        assert_eq!(b64, "c2stU1VQRVItU0VDUkVULTQy");
+        // Raw, base64, and percent-encoded forms all become ***.
+        assert_eq!(mask_secrets(sec, &[sec.to_string()]), "***");
+        assert_eq!(
+            mask_secrets(&format!("auth={b64}"), &[sec.to_string()]),
+            "auth=***"
+        );
+        assert_eq!(
+            mask_secrets(&format!("q={url}"), &[sec.to_string()]),
+            "q=***"
+        );
+    }
+
+    #[test]
+    fn base64_encoder_known_values() {
+        assert_eq!(base64_encode(b"a"), "YQ==");
+        assert_eq!(base64_encode(b"ab"), "YWI=");
+        assert_eq!(base64_encode(b"abc"), "YWJj");
+        assert_eq!(base64_encode(b"hello world!"), "aGVsbG8gd29ybGQh");
     }
 
     #[test]
