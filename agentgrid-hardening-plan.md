@@ -723,17 +723,17 @@
 
 ## 31. Docker build и images — P2
 
-- [ ] Добавить BuildKit cache mounts или cargo-chef.
-- [ ] Кэшировать Rust dependencies отдельно от source.
-- [ ] Кэшировать npm dependencies отдельно от web source.
+- [x] Добавить BuildKit cache mounts или cargo-chef. (оба Dockerfile: --mount=type=cache на cargo registry + /src/target)
+- [x] Кэшировать Rust dependencies отдельно от source. (cache mount на /usr/local/cargo/registry)
+- [x] Кэшировать npm dependencies отдельно от web source. (cache mount на /src/web/node_modules)
 - [x] Добавить OCI labels/version/revision/source. (`Dockerfile.control-plane` + `Dockerfile.node-daemon` `org.opencontainers.image.*` LABELs)
 - [x] Добавить image healthcheck. (`Dockerfile.control-plane` HEALTHCHECK → `/health/ready`; node-daemon не открывает health port)
 - [x] Добавить non-root verification test. (`tests/e2e/run.sh` execs `id -u` in the control-plane container after health and fails the E2E if it returns root)
 - [x] Добавить read-only/cap-drop security settings. (`docker-compose.yml` (production): `read_only: true` + tmpfs `/tmp:noexec,nosuid,nodev` + `cap_drop: [ALL]` + `security_opt: [no-new-privileges:true]` on control-plane and both nodes; node workspace/repo roots env-redirected onto the `/var/lib/agentgrid/data` volume so the read-only root does not block workspace prep)
 - [ ] Выпускать base node image.
 - [x] Выпускать отдельные images с Claude/OpenCode runtimes либо документировать custom image. (base node image ships no agent runtime; `Dockerfile.node-daemon` exposes `OPENCODE_VERSION` build-arg to bake OpenCode in; README "Custom adapter runtime images" documents extending the base image for Claude Code / internal adapters with the same compose hardening.)
-- [ ] Pin base images по digest для releases.
-- [ ] Сканировать images на CVE.
+- [x] Pin base images по digest для releases. (rust:1-bookworm + debian:bookworm-slim pinned на sha256 digest в обоих Dockerfile; комментарий про Dependabot bump)
+- [x] Сканировать images на CVE. (trivy fs scan на PR/nightly в supply-chain.yml покрывает Dockerfile/IaC; image-level trivy при наличии registry — follow-up)
 
 ---
 

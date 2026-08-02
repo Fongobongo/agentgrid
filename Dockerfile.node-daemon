@@ -1,12 +1,17 @@
 # Multi-stage build for the agentgrid node daemon + mock adapter.
 # Stage 5.3 packaging. Bundled SQLite + rustls; no system OpenSSL/SQLite.
 # Runtime needs git + sh (bash) for worktree prep and validation commands.
-FROM rust:1-bookworm AS builder
+# Hardening P2 item 31: base images pinned by digest (immutable).
+FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
 WORKDIR /src
 COPY . .
-RUN cargo build --release --bins -p agentgrid-node-daemon -p agentgrid-adapters
+# Hardening P2 item 31: BuildKit cache mount keeps cargo registry + target
+# across rebuilds.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --bins -p agentgrid-node-daemon -p agentgrid-adapters
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 # Hardening P2 item 31: OCI provenance labels.
 LABEL org.opencontainers.image.title="agentgrid-node-daemon" \
       org.opencontainers.image.source="https://github.com/earendil-works/agentgrid" \

@@ -1,6 +1,8 @@
 # Multi-stage build for the agentgrid control plane + CLI + web UI.
 # Stage 5.3 packaging. Bundled SQLite + rustls; no system OpenSSL/SQLite.
-FROM rust:1-bookworm AS builder
+# Hardening P2 item 31: base images pinned by digest (immutable); Dependabot
+# bumps the digest when a new rust/debian bookworm image is published.
+FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
 # Node is needed only to build the web UI static bundle.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm \
@@ -8,11 +10,17 @@ RUN apt-get update \
 WORKDIR /src
 COPY . .
 # Build the control plane and CLI binaries (release profile tuned in Cargo.toml).
-RUN cargo build --release --bins -p agentgrid-control-plane -p agentgrid-cli
+# Hardening P2 item 31: BuildKit cache mount keeps the registry + incremental
+# artifacts across rebuilds so a dependency change does not re-download/re-build
+# the world.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --bins -p agentgrid-control-plane -p agentgrid-cli
 # Build the web UI static bundle.
-RUN cd web && npm ci && npm run build
+RUN --mount=type=cache,target=/src/web/node_modules \
+    cd web && npm ci && npm run build
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 # Hardening P2 item 31: OCI provenance labels + a healthcheck.
 LABEL org.opencontainers.image.title="agentgrid-control-plane" \
       org.opencontainers.image.source="https://github.com/earendil-works/agentgrid" \
