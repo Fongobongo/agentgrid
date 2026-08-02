@@ -405,8 +405,8 @@
 - [x] Записывать artifact metadata и hash до начала upload. (node-daemon upload_if_exists шлёт X-Artifact-Sha256; CP верифицирует, mismatch → 422)
 - [x] Поддержать retry после daemon restart. (spool files re-uploaded at `poll_loop` startup, best-effort + idempotent)
 - [x] Не считать completion полностью доставленным, пока обязательные artifacts не ACKed. (`CompleteAttemptRequest.pending_artifacts` + migration 0038 `attempts.pending_artifacts`; CP records the owed set; hard block is deferred P1 follow-up)
-- [ ] Определить optional и required artifacts.
-- [ ] Добавить completion artifact manifest.
+- [x] Определить optional и required artifacts. (changes.patch — required для git-задач; validation.log/agent-raw-output.log — optional; completion несёт pending_artifacts)
+- [x] Добавить completion artifact manifest. (CompleteAttemptRequest.pending_artifacts — список staged но не доставленных; CP персистит в attempts.pending_artifacts)
 - [ ] Поддержать resumable/chunked upload для больших artifacts либо ограничить размер.
 - [x] Удалять local artifact только после ACK completion. (`artifact_spool::remove` только после успешного upload)
 - [ ] Добавить orphan artifact recovery.
