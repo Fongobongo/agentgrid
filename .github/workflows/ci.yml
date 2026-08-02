@@ -156,3 +156,37 @@ jobs:
           components: miri
       - name: miri test common
         run: cargo +nightly miri test -p agentgrid-common
+
+  two-host:
+    name: physical two-host E2E (local CP + remote node)
+    runs-on: ubuntu-latest
+    # Hardening P2 item 28: the same workflow manifest runs with roles spread
+    # across two physical hosts (remote box reached via tests/e2e/remote-ssh.py
+    # with AG_REMOTE_* secrets). exit 77 = "no remote configured" → treated as
+    # skip so CI without a spare box stays green; nightly + manual.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: [rust]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: build debug binaries
+        run: cargo build --workspace
+      - name: two-host workflow E2E
+        env:
+          AG_REMOTE_HOST: ${{ secrets.AG_REMOTE_HOST }}
+          AG_REMOTE_USER: ${{ secrets.AG_REMOTE_USER }}
+          AG_REMOTE_PASS: ${{ secrets.AG_REMOTE_PASS }}
+        run: |
+          if [ -z "$AG_REMOTE_HOST" ] || [ -z "$AG_REMOTE_USER" ] || [ -z "$AG_REMOTE_PASS" ]; then
+            echo "no AG_REMOTE_* configured — skipping two-host job"
+            exit 0
+          fi
+          # The script reads AG_REMOTE_* from .env; point it at the CI env.
+          cat > .env <<EOF
+          AG_REMOTE_HOST=$AG_REMOTE_HOST
+          AG_REMOTE_USER=$AG_REMOTE_USER
+          AG_REMOTE_PASS=$AG_REMOTE_PASS
+          EOF
+          bash tests/e2e/run-two-host.sh

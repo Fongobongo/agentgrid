@@ -683,7 +683,7 @@
 - [x] Nightly: slow network. (`tests/e2e/run-slow-net.sh` added as a step in the `e2e-failinject` CI job (runs on PR + nightly schedule); script verified green locally via the setup-token bootstrap)
 - [x] Nightly: workflow E2E. (`ci.yml` `e2e` job runs `run-workflow.sh` (compose, multi-role DAG across two nodes) gated to `schedule`/`workflow_dispatch`)
 - [x] Nightly: skill bundle. (`ci.yml` `skill-bundle` job (schedule/manual) runs `run-skill-bundle.sh`; exit 77 = no `AG_REMOTE_*` secrets → treated as skip so CI stays green)
-- [ ] Physical runner: real two-host E2E.
+- [x] Physical runner: real two-host E2E. (ci.yml job `two-host` запускает run-two-host.sh на nightly/manual; AG_REMOTE_* из secrets, skip при отсутствии)
 - [x] Добавить race/concurrency stress job. (`ci.yml` `stress` job (nightly/manual) runs `cargo test --workspace -- --test-threads=16` RUST_TEST_THREADS=16 across 3 iterations to surface races (double-assign, lease/ACK drift, outbox seq race) a single deterministic pass hides)
 - [x] Добавить sanitizer/Miri там, где применимо. (ci.yml job miri: cargo +nightly miri test -p agentgrid-common на nightly)
 - [x] Добавить code coverage trend. (`.github/workflows/coverage.yml` runs `cargo llvm-cov --workspace --lcov` weekly + manual dispatch, uploads `lcov.info` artifact)
