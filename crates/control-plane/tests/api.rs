@@ -6809,3 +6809,65 @@ async fn approvals_keyset_pagination() {
         .collect();
     assert_eq!(ids.len(), 5, "approval pages must not overlap or skip");
 }
+
+/// Hardening P1 item 15: the artifact storage quota
+/// (`AGENTGRID_ARTIFACT_QUOTA_MB`) refuses uploads past the cap with 507.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn artifact_quota_refuses_uploads_over_cap() {
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB").ok();
+    std::env::set_var("AGENTGRID_ARTIFACT_QUOTA_MB", "0"); // 0 = unlimited (sanity)
+
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "n-quota", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+
+    let upload = |body: Vec<u8>| {
+        let app = app.clone();
+        let cred = cred.clone();
+        let aid = assign.attempt_id.clone();
+        let fence = assign.fencing_token.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/node/attempts/{aid}/artifacts/raw"))
+                    .header("authorization", format!("Bearer {cred}"))
+                    .header("x-agentgrid-fencing-token", fence)
+                    .header("x-artifact-name", "f.bin")
+                    .header("x-artifact-media-type", "application/octet-stream")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+
+    // Unlimited: upload succeeds.
+    assert_eq!(upload(b"small".to_vec()).await, StatusCode::OK);
+
+    // Tight quota: any further upload is refused with 507.
+    std::env::set_var("AGENTGRID_ARTIFACT_QUOTA_MB", "0");
+    // env is read per request; flip to 1 MB but used > 1 MB already? small is
+    // 5 bytes, so set quota to 1 MB and upload 2 MB — refused.
+    std::env::set_var("AGENTGRID_ARTIFACT_QUOTA_MB", "1");
+    let big = vec![0xAAu8; 2 * 1024 * 1024];
+    assert_eq!(
+        upload(big).await,
+        StatusCode::INSUFFICIENT_STORAGE,
+        "quota breach must be 507"
+    );
+
+    for (k, v) in [("AGENTGRID_ARTIFACT_QUOTA_MB", prev)] {
+        match v {
+            Some(p) => std::env::set_var(k, p),
+            None => std::env::remove_var(k),
+        }
+    }
+}

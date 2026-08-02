@@ -2527,6 +2527,18 @@ async fn upload_artifact(
     if req.content.len() > state.limits.artifact {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
+    // Hardening P1 item 15: artifact storage quota (see upload_artifact_raw).
+    if let Some(quota_mb) = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        if quota_mb > 0 {
+            let used = state.store.artifact_storage_bytes().await.unwrap_or(0);
+            if used + req.content.len() as u64 > quota_mb * 1024 * 1024 {
+                return StatusCode::INSUFFICIENT_STORAGE.into_response();
+            }
+        }
+    }
     match state
         .store
         .save_artifact_bytes(
@@ -2578,6 +2590,20 @@ async fn upload_artifact_raw(
     }
     if body.len() > state.limits.artifact {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    // Hardening P1 item 15: artifact storage quota — refuse uploads past
+    // `AGENTGRID_ARTIFACT_QUOTA_MB` (0 = unlimited) so the artifact volume
+    // cannot grow without bound.
+    if let Some(quota_mb) = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        if quota_mb > 0 {
+            let used = state.store.artifact_storage_bytes().await.unwrap_or(0);
+            if used + body.len() as u64 > quota_mb * 1024 * 1024 {
+                return StatusCode::INSUFFICIENT_STORAGE.into_response();
+            }
+        }
     }
     let name = match headers
         .get("x-artifact-name")

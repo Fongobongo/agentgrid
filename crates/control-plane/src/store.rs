@@ -2676,6 +2676,16 @@ impl Store {
         }
         s.f_bavail.saturating_mul(s.f_frsize)
     }
+
+    /// Hardening P1 item 15: total bytes currently stored as artifacts
+    /// (sum of `size_bytes` across metadata rows). Used by the artifact
+    /// storage quota to refuse uploads past `AGENTGRID_ARTIFACT_QUOTA_MB`.
+    pub async fn artifact_storage_bytes(&self) -> Result<u64> {
+        let row = sqlx::query("SELECT COALESCE(SUM(size_bytes), 0) AS total FROM artifacts")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get::<i64, _>("total").unwrap_or(0) as u64)
+    }
 }
 
 async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<usize> {

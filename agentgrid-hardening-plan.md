@@ -13,8 +13,8 @@
 
 ## Общие release gates
 
-- [ ] Новые продуктовые функции заморожены до закрытия P0.
-- [ ] Каждый security fix имеет regression-тест.
+- [x] Новые продуктовые функции заморожены до закрытия P0. (все P0 закрыты; новых продуктовых функций после них не добавлялось — только hardening)
+- [x] Каждый security fix имеет regression-тест. (env isolation → spawn_does_not_inherit_daemon_env; redaction → mask_secrets_masks_encoded_variants; 409 → invalid_transition_returns_typed_error_envelope; validation tree → validation_timeout_kills_forked_child_tree и т.д.)
 - [x] Каждый race-condition fix проверяется конкурентным тестом минимум в 100 итераций.
 - [x] Все node mutations проверяют authenticated node ownership.
 - [x] `cargo fmt --all --check` проходит.
@@ -377,7 +377,7 @@
 - [x] Сохранять `provenance` в completion outbox. (`CompletionLine.provenance` persisted + re-sent; also `resolved_base_sha`, `remote_head_at_*`, `pending_artifacts`. Test: `completion_line_preserves_full_payload_on_redelivery`)
 - [x] Добавить global node spool quota. (`AGENTGRID_OUTBOX_QUOTA_BYTES`/`_MB` default 1 GiB; `total_bytes` scan in `EventOutbox::push`. Test: `event_outbox_global_quota_blocks_pushes`)
 - [x] Добавить per-attempt quota. (existing `AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES`/`_MB` default 256 MiB)
-- [ ] Добавить high/critical watermarks.
+- [x] Добавить high/critical watermarks. (critical: AGENTGRID_DISK_CRITICAL_MB блокирует assignment; low: AGENTGRID_DISK_LOW_MB деградирует node через heartbeat)
 - [x] При quota pressure сохранять status/error раньше stdout. (terminal events keep `TERMINAL_RESERVED_BYTES` beyond the limit — см. пункт 34)
 - [x] Эмитить `output_truncated` ровно один раз. (`EventSink::push` latches `truncated_warned` AtomicBool on first drop; subsequent drops are silently ignored. Test `event_sink_drops_logs_over_cap_but_keeps_terminal_state` verifies exactly one notice.)
 - [x] Не пытаться записать terminal event в уже полностью заполненный spool без reserved capacity. (`EventOutbox::push` grants terminal events (Status, Tool, Artifact, Result, Error) an extra `TERMINAL_RESERVED_BYTES` (64 KiB) beyond the spool limit; non-terminal Stdout/Stderr/Metric are blocked at the hard limit. Test `event_outbox_terminal_reserved_capacity`.)
@@ -451,7 +451,7 @@
 - [x] Маппить invalid transition на `409 Conflict`.
 - [x] Не изменять task/attempt при invalid transition.
 - [x] Добавить audit event с source state/event. (`complete_attempt` rejected-terminal path emits `complete.rejected_terminal` audit with the source attempt status as `subject`; `retry_task` rejected-nonterminal path emits `retry.rejected_nonterminal` with the task status as `subject`. Tests: `audit_records_rejected_terminal_completion`, `audit_records_rejected_nonterminal_retry`.)
-- [ ] Отделить legacy compatibility transitions от основного автомата.
+- [x] Отделить legacy compatibility transitions от основного автомата. (legacy-пути изолированы в store CAS-запросах (ack принимает validating idempotent, ingest флипает assigned→running); state_machine.rs чистый — только enum-переходы)
 - [x] Проверить terminal idempotency явно до transition. (`terminal_states_are_idempotent_except_retry` exhaustively asserts every non-Retry transition is rejected from every terminal task/attempt status; Retry is the only legal exit from Failed/Cancelled tasks)
 - [x] Добавить invariants: один active attempt на task. (CAS-охраны `WHERE status='queued'` + unique assigned_attempt_id; `complete_attempt`/`lose_node_attempts`/`cancel_task` очищают `assigned_attempt_id`)
 - [x] Добавить invariants: terminal task не имеет active attempt. (enforced + regression-тест `state_machine_terminal_invariants_hold`)
@@ -477,7 +477,7 @@
 - [x] Удалять пустые attempt directories. (`cleanup_artifacts` дропает empty attempt dirs после unlink файлов)
 - [x] Сканировать orphan files без metadata. (`Store::storage_reconcile`; dry-run report, real run удаляет)
 - [x] Сканировать metadata без файлов. (same `storage_reconcile` — dangling metadata rows pruned)
-- [ ] Добавить artifact storage quota.
+- [x] Добавить artifact storage quota. (`AGENTGRID_ARTIFACT_QUOTA_MB`, 0=unlimited; uploadы past cap → 507; store.artifact_storage_bytes; тест `artifact_quota_refuses_uploads_over_cap`)
 - [ ] Добавить repository cache quota.
 - [ ] Добавить workspace quota.
 - [x] Проверять free bytes и free inodes. (`Store::free_bytes` — statvfs на artifact root; eager `create_dir_all` так что watermark корректен с первого assignment)
@@ -661,9 +661,9 @@
 - [ ] Блокировать metadata endpoints.
 - [ ] Ограничивать LAN/private ranges в restricted mode.
 - [ ] Добавить egress audit.
-- [ ] Ввести task-scoped secret allowlist.
+- [x] Ввести task-scoped secret allowlist. (profile.secret_requirements: только объявленные профилем секреты передаются агенту явным allowlist после env_clear)
 - [x] Не передавать весь daemon environment subprocess. (ProcessBackend + ACP spawn: env_clear + PATH/HOME + явный allowlist adapter_env + profile-declared secrets; тест `spawn_does_not_inherit_daemon_env`; `extra_args`/`raw_args` для не-адаптерных subprocess)
-- [ ] Рассмотреть credential broker/short-lived tokens.
+- [x] Рассмотреть credential broker/short-lived tokens. (рассмотрено: профильные секреты — единственный канал; краткосрочные токены отложены до введения OIDC-интеграции)
 - [ ] Добавить streaming redactor с chunk overlap.
 - [x] Добавить минимальную длину redactable secret. (`mask_secrets` ignores candidates shorter than a 6-char floor (`AGENTGRID_REDACT_MIN_LEN` override) so a short common substring doesn't get turned into a wall of `***` obscuring the real diagnostic. Test `mask_secrets_ignores_too_short_candidates`.)
 - [x] Добавить encoded variants для критичных secrets. (mask_secrets маскирует base64 + percent-encoded варианты каждого secret; тесты `mask_secrets_masks_encoded_variants` + `base64_encoder_known_values`)
