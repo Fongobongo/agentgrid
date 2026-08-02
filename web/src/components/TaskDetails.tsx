@@ -209,8 +209,11 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
               {patch === null && <p className="muted">No diff artifact.</p>}
               {patch && (
                 <>
-                  {/* Hardening P2 item 36: show the server-computed integrity hash. */}
+                  {/* Hardening P2 item 36: integrity hash + attachment download. */}
                   {patch.sha256 && <p className="muted mono">sha256: {patch.sha256.slice(0, 16)}…</p>}
+                  <a className="link" href={`/v1/tasks/${taskId}/artifacts/changes.patch`} download>
+                    Download
+                  </a>
                   <pre className="patch">{renderPatch(patch.text)}</pre>
                 </>
               )}
@@ -226,6 +229,9 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
                   {validationLog.sha256 && (
                     <p className="muted mono">sha256: {validationLog.sha256.slice(0, 16)}…</p>
                   )}
+                  <a className="link" href={`/v1/tasks/${taskId}/artifacts/validation.log`} download>
+                    Download
+                  </a>
                   <pre className="vlog">{validationLog.text}</pre>
                 </>
               )}

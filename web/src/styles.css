@@ -82,11 +82,14 @@ button {
 button:hover { filter: brightness(1.08); }
 button:disabled { opacity: 0.5; cursor: default; }
 button.danger { background: var(--bad); }
-button.link {
+button.link, a.link {
   background: none;
   color: var(--accent);
   text-decoration: underline;
   padding: 6px;
+  border: none;
+  cursor: pointer;
+  font: inherit;
 }
 
 /* ----- login ----- */

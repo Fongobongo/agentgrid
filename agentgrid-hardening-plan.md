@@ -811,7 +811,7 @@
 - [x] Отображать global event cursor корректно после retry. (ingest_id — см. §9)
 - [x] Разделять events по attempts. (TaskDetails attempt tabs по attempt_id; SSE/API с global cursor)
 - [x] Показывать artifact integrity hash. (GET artifact отдаёт `X-Artifact-Sha256`; web TaskDetails показывает sha256 для changes.patch и validation.log; тест `artifact_binary_raw_upload_round_trips` проверяет header)
-- [ ] Скачивать активные artifacts как attachment.
+- [x] Скачивать активные artifacts как attachment. (web TaskDetails: Download-ссылки на changes.patch / validation.log через /v1/tasks/{id}/artifacts/{name}; сервер отдаёт Content-Disposition attachment для активных типов)
 - [x] Добавить pagination для длинных списков. (серверные caps: tasks/events limit, keyset cursor; web: TaskDetails 5000-cap с окном 4000, Dashboard last-10 — клиентские ограничения для длинных списков)
 - [x] Добавить error states вместо пустых таблиц при API failure. (Dashboard/Nodes/Approvals/Skills/TaskDetails через ErrorBox; Workflows через .error banner — ошибки показаны, пустых таблиц при failure нет)
 - [ ] Добавить component/API tests.
