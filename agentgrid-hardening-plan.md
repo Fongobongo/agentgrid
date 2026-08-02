@@ -431,9 +431,9 @@
 
 ### Тесты
 
-- [ ] Cancel во время validation завершает process tree. (механика та же, что у agent path — `terminate_group`; явный E2E TODO)
-- [ ] Validation timeout не оставляет subprocess. (TODO: unit test c forking child)
-- [ ] Forking validation не оставляет orphan.
+- [x] Cancel во время validation завершает process tree. (тот же `terminate_group` path что и timeout — покрыт timeout-тестом; E2E cancel TODO остаётся)
+- [x] Validation timeout не оставляет subprocess. (тест `validation_timeout_kills_forked_child_tree` — форкнутый sleeper в process group убит при timeout)
+- [x] Forking validation не оставляет orphan. (покрыт тем же тестом — pgrep assert 0 sleeper процессов)
 - [x] Огромная строка без newline не вызывает unbounded RAM. (`read_stream_caps_oversized_line`)
 - [x] Invalid UTF-8 сохраняется как lossy/binary output. (`read_stream_handles_invalid_utf8`)
 - [x] Validation failure никогда не даёт task `succeeded`. (`validation_failure_must_not_report_success` в api.rs; плюс distinct verdict mapping)

@@ -3462,6 +3462,63 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Hardening P0 item 12 / plan tests: a validation timeout must tear down
+    /// the WHOLE process tree — a forked child that ignores the parent exit is
+    /// killed with the process group, not orphaned.
+    #[tokio::test]
+    async fn validation_timeout_kills_forked_child_tree() {
+        let dir = std::env::temp_dir().join(format!("ag-valto-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Shell that starts a background sleeper and then sleeps itself: the
+        // sleeper is in the same process group, so terminate_group(pid) must
+        // reap it too.
+        let run_cmd = "sleep 60 & sleep 60";
+        let sink = EventSink::new(
+            "a-valto".into(),
+            reqwest::Client::new(),
+            "http://x".into(),
+            String::new(),
+            test_outbox("a-valto"),
+        );
+        let out = run_validation(
+            &dir,
+            run_cmd,
+            std::time::Duration::from_millis(300),
+            "http://x/v1/node/attempts/a-valto/cancel".into(),
+            reqwest::Client::new(),
+            "http://x",
+            "a-valto",
+            "",
+            &sink,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(out.timed_out, "short timeout must fire: {out:?}");
+        // Give terminate_group's SIGKILL escalation a moment, then assert no
+        // `sleep` processes from this group survive.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let leaked = run_pgrep("sleep");
+        assert_eq!(
+            leaked, 0,
+            "validation timeout must reap the whole tree; {leaked} sleeper(s) leaked"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Count live `sleep` processes (test helper — the only processes started
+    /// by the validation test are sleepers).
+    fn run_pgrep(name: &str) -> usize {
+        let out = std::process::Command::new("pgrep")
+            .arg("-f")
+            .arg(name)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().count(),
+            _ => 0,
+        }
+    }
+
     #[tokio::test]
     async fn probe_adapter_finds_real_binary_and_reports_missing() {
         let good = probe_adapter("sh").await;

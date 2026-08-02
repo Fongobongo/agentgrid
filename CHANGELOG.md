@@ -127,6 +127,10 @@ All notable changes to this project are documented in this file.
 - **CLI attempts in logs:** `ag logs` prefixes every event with its attempt id
   (`[seq] (att-xxxxxxxx)`) so output from a retried attempt is distinguishable
   at a glance.
+- **Validation tree kill test:** `validation_timeout_kills_forked_child_tree`
+  proves a validation timeout reaps the WHOLE process group — a forked
+  background sleeper is killed with the shell, not orphaned (hardening P0
+  item 12).
 
 ### Security (hardening P0/P1/P2 — session hardening pass)
 
