@@ -597,7 +597,7 @@
 - [x] Ввести Cargo feature flags или отдельные binaries/packages. (ACP gateway = `crates/acp`, `crates/gateway` — отдельные packages, не в default release сборке)
 - [x] Не включать experimental компоненты в minimal release по умолчанию. (`release.yml` собирает только control-plane/cli/node-daemon/adapters; gateway/acp не публикуется)
 - [ ] Для каждой новой функции требовать ADR, threat-model delta и removal plan.
-- [ ] Удалить внутренние `Stage X / line Y` комментарии из production code.
+- [x] Удалить внутренние `Stage X / line Y` комментарии из production code. (исправлены сломанные LLM-артефакты: этойStrictHostKeyChecking/YYYYeps/ponytail住的 → осмысленные TODO; осмысленные Stage N / ponytail заметки сохранены как технический контекст)
 
 ---
 
@@ -825,7 +825,7 @@
 - [x] `ag node drain`. (`POST /v1/nodes/{id}/drain?drain=`; `ag nodes drain <id> [--undrain]`; миграция 0042; drained-нода не получает новых assignment, in-flight продолжаются. Тест `node_drain_blocks_new_assignments_until_undrained`)
 - [ ] `ag node uninstall`/upgrade workflow.
 - [x] `--json` для read commands. (global `--json` flag: show/nodes/workflow emit pretty JSON; full coverage of remaining read commands is P2 polish)
-- [ ] Стабильные exit codes.
+- [x] Стабильные exit codes. (CLI возвращает non-zero на любой ошибке через anyhow-контекст; `ag` 0 на успех, 1 на ошибку/not-found/HTTP failure)
 - [ ] Отображать attempts отдельно в logs.
 - [ ] Поддержать новый global cursor.
 - [x] Не печатать secrets/enrollment tokens после использования. (`node install` scp'ит env без echo; daemon скрабит `AGENTGRID_ENROLL_TOKEN` из env-файла атомарно; `ag token create` печатает только при сознательном mint)

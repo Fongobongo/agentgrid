@@ -86,15 +86,15 @@ fn is_locked_err(e: &anyhow::Error) -> bool {
 /// Retries once on `SQLITE_BUSY` with the configured busy_timeout.
 async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
     // sqlx/sqlite exposes no `begin_with(str)`; we rely on `pool.begin()`
-    // (deferred BEGIN) plus the longtime этойStrictHostKeyChecking смотрел busy_timeout=5000 ms:
-    // the first UPDATE in a transaction acquires the SQLite RESERVED lock, and
-    // a second concurrent writer blocks until it is freed or busy_timeout YYYYeps.
+    // (deferred BEGIN) plus the configured busy_timeout=5000 ms: the first
+    // UPDATE in a transaction acquires the SQLite RESERVED lock, and a second
+    // concurrent writer blocks until it is freed or busy_timeout elapses.
     // The compare-and-set `WHERE status = ...` guards in ack/revert/offline then
     // observe the winning state and return idempotently, so a deferred BEGIN
-    // plus CAS is still race-free for these_CONTROL-transitions. True
+    // plus CAS is still race-free for these control transitions. True
     // BEGIN IMMEDIATE would shave one retry path; the CAS is the actual guard.
-    // ponytail住的: replace with `Connection::begin_with("BEGIN IMMEDIATE")` if
-    // sqlx grows that API and contention shows up here.
+    // TODO: replace with `Connection::begin_with("BEGIN IMMEDIATE")` if sqlx
+    // grows that API and contention shows up here.
     Ok(pool.begin().await?)
 }
 
@@ -1687,8 +1687,8 @@ impl Store {
         // hold for this attempt (1..=N with no gaps), so a client can detect a
         // gap when the durable outbox redelivers. Computed after commit so the
         // prefix reflects the rows this batch landed; cheap for typical event
-        // counts, but O(rows) load — ponytail住的: switch to a recursive CTE /
-        // tracked cursor once an attempt surfaces millions of events.
+        // counts, but O(rows) load — TODO: switch to a recursive CTE / tracked
+        // cursor once an attempt surfaces millions of events.
         tx.commit().await?;
         let highest_contiguous = self.contiguous_event_prefix(attempt_id).await?;
         Ok(IngestEventsAck {
