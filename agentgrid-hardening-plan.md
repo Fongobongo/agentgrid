@@ -685,24 +685,24 @@
 - [x] Nightly: skill bundle. (`ci.yml` `skill-bundle` job (schedule/manual) runs `run-skill-bundle.sh`; exit 77 = no `AG_REMOTE_*` secrets → treated as skip so CI stays green)
 - [ ] Physical runner: real two-host E2E.
 - [x] Добавить race/concurrency stress job. (`ci.yml` `stress` job (nightly/manual) runs `cargo test --workspace -- --test-threads=16` RUST_TEST_THREADS=16 across 3 iterations to surface races (double-assign, lease/ACK drift, outbox seq race) a single deterministic pass hides)
-- [ ] Добавить sanitizer/Miri там, где применимо.
+- [x] Добавить sanitizer/Miri там, где применимо. (ci.yml job miri: cargo +nightly miri test -p agentgrid-common на nightly)
 - [x] Добавить code coverage trend. (`.github/workflows/coverage.yml` runs `cargo llvm-cov --workspace --lcov` weekly + manual dispatch, uploads `lcov.info` artifact)
 - [ ] Проверять migration from previous released DB snapshot.
 
 ## 29. Supply chain — P2
 
-- [ ] Закрепить GitHub Actions по commit SHA.
+- [x] Закрепить GitHub Actions по commit SHA. (все workflows: ci/coverage/release/supply-chain/codeql — actions pinned на 40-hex SHA; Dependabot bump к SHA)
 - [x] Настроить Renovate/Dependabot для обновления SHA. (`.github/dependabot.yml`: weekly github-actions + cargo ecosystems, opens labeled PRs; pairs with SHA-pinned actions so the bump is to a SHA, not a moving tag)
 - [x] `cargo audit`. (`.github/workflows/supply-chain.yml` → `cargo audit` на PR + nightly)
 - [x] `cargo deny`. (`deny.toml` policy + `cargo-deny` job in `supply-chain.yml`; verified `cargo deny check` green locally — advisories/licenses/bans/sources all ok)
 - [x] License allowlist. (`deny.toml [licenses] allow` MIT/Apache/BSD/ISC/Zlib/CC0/CDLA-Permissive-2.0/Unicode; rejects unlisted)
-- [ ] Secret scanning.
-- [ ] CodeQL.
-- [ ] SBOM CycloneDX/SPDX.
+- [x] Secret scanning. (gitleaks-action с full git history + trivy fs scan с secrets категорией)
+- [x] CodeQL. (новый codeql.yml: rust + javascript-typescript на PR/nightly, actions SHA-pinned)
+- [x] SBOM CycloneDX/SPDX. (anchore/sbom-action генерирует CycloneDX JSON, upload как artifact)
 - [ ] GitHub build provenance attestation.
 - [ ] Подписывать releases cosign/minisign.
 - [x] Публиковать SHA256 для каждого binary. (`release.yml` генерирует `SHA256SUMS` и загружает их вместе с артефактами)
-- [ ] Документировать reproducibility limitations.
+- [x] Документировать reproducibility limitations. (README "Reproducibility limitations" — non-deterministic inputs + что SHA256SUMS проверяют целостность, не пересборку)
 
 ## 30. Полноценный release workflow — P2
 

@@ -18,8 +18,8 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -29,8 +29,8 @@ jobs:
     # Hardening P2 item 29: enforce license + banned-crate + source policy on
     # top of the advisory check above.
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - name: install cargo-deny
         run: cargo install cargo-deny --locked
       - name: cargo deny check
@@ -43,11 +43,11 @@ jobs:
     # misconfig) with trivy — no image build needed. Catches leaked secrets /
     # policy-as-code issues that cargo-audit/deny (Rust-crate only) miss.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
       - name: trivy fs scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8
         with:
           scan-type: fs
           scan-ref: .
@@ -56,3 +56,35 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
+
+  secret-scan:
+    name: gitleaks secret scan
+    runs-on: ubuntu-latest
+    # Hardening P2 item 29: dedicated secret scanner with full git history
+    # (trivy's fs scan covers the working tree; gitleaks digs the log so a
+    # secret committed-and-removed still fails the gate).
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: gitleaks scan
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    # Hardening P2 item 29: generate a CycloneDX SBOM of the Rust workspace
+    # dependencies and upload it as a build artifact for audit / compliance.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: sbom.cyclonedx.json
+          upload-artifact: true

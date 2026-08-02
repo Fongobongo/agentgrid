@@ -32,9 +32,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             cross: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           targets: ${{ matrix.target }}
 
@@ -42,7 +42,7 @@ jobs:
         if: matrix.cross
         run: cargo install cross --locked
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
 
       - name: test before release (host target)
         # Hardening P2 item 30: never ship binaries from a tree that does not
@@ -84,7 +84,7 @@ jobs:
           cat SHA256SUMS
 
       - name: upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: agentgrid-${{ matrix.target }}
           path: |
@@ -109,8 +109,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: artifacts
       - name: flatten artifacts

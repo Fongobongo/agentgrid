@@ -19,11 +19,11 @@ jobs:
     name: fmt / clippy / test / build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: format check
         run: cargo fmt --all --check
       - name: clippy
@@ -40,8 +40,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "20"
           cache: npm
@@ -56,9 +56,9 @@ jobs:
     needs: [rust]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: build debug binaries
         run: cargo build --workspace
       - name: outbox durability (kill -9, CP outage, lost/retry)
@@ -79,7 +79,7 @@ jobs:
     needs: [rust, web]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: bring up stack and run a task
         run: bash tests/e2e/run.sh
         # Nightly-only (and manual): the workflow E2E brings up its own
@@ -98,7 +98,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: materialize skill bundle on local + remote and compare hashes
         env:
           AG_REMOTE_HOST: ${{ secrets.AG_REMOTE_HOST }}
@@ -122,13 +122,13 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           # Use a cheap shallow-ish fetch; conservative to not break cargo.
           submodules: false
       - name: install rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: build tests once
         run: cargo test --workspace --no-run --locked
       - name: run workspace tests x3 at high parallelism
@@ -138,3 +138,21 @@ jobs:
             RUST_TEST_THREADS=16 cargo test --workspace -- --test-threads=16
             echo "::endgroup::"
           done
+
+  miri:
+    name: Miri (UB check on pure-Rust crates)
+    runs-on: ubuntu-latest
+    # Hardening P2 item 28: Miri catches undefined behavior in the state
+    # machine and DTO layers (the unsafe-free core). Only `agentgrid-common`
+    # is run — the tokio/sqlx crates do not support Miri. Nightly + manual.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: install nightly + miri
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: nightly
+          components: miri
+      - name: miri test common
+        run: cargo +nightly miri test -p agentgrid-common

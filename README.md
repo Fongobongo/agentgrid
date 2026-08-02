@@ -117,6 +117,27 @@ aarch64 tier 2).
 Binaries: `agentgrid-control-plane`, `agentgrid-node-daemon`, `ag`,
 `adapter-{mock,claude,opencode}`.
 
+### Reproducibility limitations (hardening P2 item 29)
+
+Release builds are **not bit-reproducible** today. Known non-deterministic
+inputs:
+
+- **Build metadata**: Rust embeds the compiler version, crate hashes and
+  path-dependent metadata into binaries; `-C metadata`/`remap-path-prefix` are
+  not configured, so two builds on different machines yield different bytes.
+- **Embedded timestamps**: `CHANGELOG.md`/version strings and any `env!`-based
+  compile-time values may carry wall-clock data.
+- **SQLite bundled builds**: `libsqlite3-sys` compiles C from source; the C
+  compiler's version/optimizations leak into the final artifact.
+- **Web bundle**: `vite build` outputs are content-hashed but the surrounding
+  `index.html` embeds asset paths that depend on the build environment.
+
+What IS reproducible: the **SHA256SUMS** published with each GitHub Release are
+computed on the exact artifacts uploaded, so consumers can verify integrity of
+what they download (not that a rebuild matches). For bit-identical rebuilds a
+future pass would pin `rust-toolchain.toml`, add `remap-path-prefix`, and
+reproduce the web bundle in a pinned container image.
+
 ## Dev / ops notes
 
 - Only one control-plane instance per SQLite DB: a second launch is refused via
