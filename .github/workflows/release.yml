@@ -145,6 +145,17 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
           subject-path: 'release-assets/*'
+      - name: install cosign
+        # Hardening P2 item 29: keyless cosign signature over the per-target
+        # SHA256SUMS so consumers can verify artifact integrity independently.
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+      - name: sign checksums (keyless cosign)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          for f in release-assets/SHA256SUMS.*; do
+            cosign sign-blob --yes "$f" --output-signature "$f.sig"
+          done
       - name: create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

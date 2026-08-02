@@ -700,7 +700,7 @@
 - [x] CodeQL. (новый codeql.yml: rust + javascript-typescript на PR/nightly, actions SHA-pinned)
 - [x] SBOM CycloneDX/SPDX. (anchore/sbom-action генерирует CycloneDX JSON, upload как artifact)
 - [x] GitHub build provenance attestation. (release.yml: actions/attest-build-provenance на каждый артефакт, id-token+attestations permissions)
-- [ ] Подписывать releases cosign/minisign.
+- [x] Подписывать releases cosign/minisign. (keyless cosign sign-blob на каждый SHA256SUMS.* в release.yml, sigstore cosign-installer)
 - [x] Публиковать SHA256 для каждого binary. (`release.yml` генерирует `SHA256SUMS` и загружает их вместе с артефактами)
 - [x] Документировать reproducibility limitations. (README "Reproducibility limitations" — non-deterministic inputs + что SHA256SUMS проверяют целостность, не пересборку)
 
