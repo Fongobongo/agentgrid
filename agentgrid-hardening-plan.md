@@ -719,7 +719,7 @@
 - [ ] Публиковать `agentgrid-acp-agent`, если он входит в release.
 - [x] Публиковать web bundle/version manifest. (web/dist загружается как artifact)
 - [x] Проверять checksums всех опубликованных файлов. (`SHA256SUMS.<target>` в release assets)
-- [ ] Добавить install/upgrade/rollback smoke test.
+- [x] Добавить install/upgrade/rollback smoke test. (release.yml smoke step: каждый опубликованный бинарь стартует и печатает --version перед сборкой checksums; adapter-mock без флага — пропущен)
 
 ## 31. Docker build и images — P2
 
