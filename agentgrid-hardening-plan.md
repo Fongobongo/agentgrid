@@ -493,7 +493,7 @@
 ## 16. Декомпозиция control plane — P2
 
 - [ ] Создать `app.rs`/`router.rs`.
-- [ ] Вынести config и env validation в `config.rs`.
+- [x] Вынести config и env validation в `config.rs`. (новый `crates/control-plane/src/config.rs`: Limits, SetupToken, LoginRate, EventRate, env_usize — извлечены из lib.rs)
 - [ ] Вынести auth middleware/JWT/setup/login.
 - [ ] Вынести task routes.
 - [ ] Вынести node/attempt routes.
@@ -605,15 +605,15 @@
 
 ## 24. Настоящий Sandbox trait — P1/P2
 
-- [ ] Ввести trait `Sandbox`/`ExecutionBackend` с probe/spawn/terminate/collect.
-- [ ] Отделить agent adapter от execution backend.
-- [ ] Сделать capability report фактическим, а не декларативным.
-- [ ] Не заявлять resource limit enforced, если backend его не применил.
+- [x] Ввести trait `Sandbox`/`ExecutionBackend` с probe/spawn/terminate/collect. (ExecutionBackend trait в adapters/backend.rs: spawn + BackendProcess с pid/timeout/enforced_limits; terminate через process group)
+- [x] Отделить agent adapter от execution backend. (ExecutionBackend абстрагирует запуск; адаптеры — отдельные бинари; sandbox_prefix оборачивает spawn)
+- [x] Сделать capability report фактическим, а не декларативным. (heartbeat probe-ит бинари и шлёт готовность; enforced_limits честно отражает реальную изоляцию)
+- [x] Не заявлять resource limit enforced, если backend его не применил. (ProcessBackend всегда enforced_limits=false + тест `process_backend_does_not_enforce_limits`)
 - [ ] Добавить conformance suite для каждого backend.
 
 ## 25. Docker/Podman backend — P1
 
-- [ ] Не объединять `docker|podman` в один hardcoded `docker` binary.
+- [x] Не объединять `docker|podman` в один hardcoded `docker` binary. (sandbox.rs: `docker|podman` → SandboxKind::Docker, runtime бинарь из PATH; probe проверяет наличие)
 - [ ] Проверять runtime version и capability.
 - [ ] Pin image по digest.
 - [ ] Убедиться, что adapter и agent CLI реально существуют в image.

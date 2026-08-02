@@ -4,9 +4,11 @@
 //! is SQLite (see [`store`]). Stage 1 used an in-memory map — swapped for
 //! persistence in Stage 2.1.
 
+mod config;
 pub mod store;
 pub mod workflow;
 
+use crate::config::{env_usize, EventRate, Limits, LoginRate, SetupToken, SETUP_TOKEN_TTL};
 use crate::store::is_safe_opaque_id;
 use anyhow::Context;
 use std::sync::Arc;
@@ -122,116 +124,6 @@ pub struct AppState {
     /// introduced (a sequence > current contiguous-prefix+1). Out-of-order /
     /// skipped-sequence redelivery bumps this monotonically.
     pub event_gaps: std::sync::Arc<std::sync::atomic::AtomicU64>,
-}
-
-/// Request size ceilings (Stage 5.1). Overridable via env; defaults:
-/// prompt 64 KiB, event payload 1 MiB, artifact 50 MiB.
-struct Limits {
-    prompt: usize,
-    event: usize,
-    artifact: usize,
-    /// Hardening P1 (event ingestion): cap events per batch and the total
-    /// batch payload size, so a node cannot flood the control plane with one
-    /// giant request or O(events) inserts in a single transaction.
-    event_batch_count: usize,
-    event_batch_bytes: usize,
-}
-
-/// One-time bootstrap setup token (hardening P0). Printed to stdout once on
-/// first start; must be presented to `POST /v1/auth/setup` to create the
-/// first user; consumed on first use; expires after `SETUP_TOKEN_TTL`.
-struct SetupToken {
-    token: String,
-    issued_at: std::time::Instant,
-}
-
-const SETUP_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-
-impl SetupToken {
-    fn new() -> Self {
-        use rand::Rng;
-        // 32 hex chars from a random u128; sufficient for a short-lived,
-        // one-time bootstrap token printed to stdout.
-        let token = format!("{:032x}", rand::thread_rng().gen::<u128>());
-        Self {
-            token,
-            issued_at: std::time::Instant::now(),
-        }
-    }
-
-    /// True if the token has not expired.
-    fn is_live(&self) -> bool {
-        self.issued_at.elapsed() < SETUP_TOKEN_TTL
-    }
-}
-
-/// Sliding-window brute-force limiter for the login endpoint (Stage 2.5).
-/// Keyed globally per control-plane instance; a generic 429 (not a per-user
-/// signal) is returned when the budget is spent, so it cannot be used to
-/// enumerate which usernames exist.
-struct LoginRate {
-    window_start: i64,
-    count: u32,
-    max: u32,
-    window_secs: i64,
-}
-impl LoginRate {
-    fn new() -> Self {
-        Self {
-            window_start: 0,
-            count: 0,
-            max: 10,
-            window_secs: 60,
-        }
-    }
-    /// Record an attempt; returns false once the per-window budget is spent.
-    fn check_and_record(&mut self, now: i64) -> bool {
-        if now - self.window_start >= self.window_secs {
-            self.window_start = now;
-            self.count = 0;
-        }
-        self.count += 1;
-        self.count <= self.max
-    }
-}
-
-/// Hardening P1 item 14: per-node event-ingest rate limiter. Each node has its
-/// own fixed window counter, pruned lazily when next touched past the window.
-/// Defaults are tuned via `AGENTGRID_EVENT_RATE_MAX` (req / window) and
-/// `AGENTGRID_EVENT_RATE_WINDOW_SECS`.
-struct EventRate {
-    per_node: std::collections::HashMap<String, (i64, u32)>,
-    max: u32,
-    window_secs: i64,
-}
-
-impl EventRate {
-    fn new() -> Self {
-        Self {
-            per_node: std::collections::HashMap::new(),
-            max: env_usize("AGENTGRID_EVENT_RATE_MAX", 60) as u32,
-            window_secs: env_usize("AGENTGRID_EVENT_RATE_WINDOW_SECS", 10) as i64,
-        }
-    }
-
-    /// `true` if this request is under the per-node budget; the first request of
-    /// a new window resets the counter.
-    fn admit(&mut self, node_id: &str, now: i64) -> bool {
-        let entry = self.per_node.entry(node_id.to_string()).or_insert((now, 0));
-        if now - entry.0 >= self.window_secs {
-            entry.0 = now;
-            entry.1 = 0;
-        }
-        entry.1 += 1;
-        entry.1 <= self.max
-    }
-}
-
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
 }
 
 /// User identity established by [`require_user_auth`]; read by user handlers.
