@@ -2001,10 +2001,36 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state.clone());
 
+    // Create a real task so the approvals FK (migration 0043) accepts the row.
+    let task_req = CreateTaskRequest {
+        prompt: "approve me".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+    };
+    let created = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&task_req).unwrap(),
+            &test_token(&app).await,
+        ))
+        .await
+        .unwrap();
+    let task_id: String = serde_json::from_slice::<TaskView>(
+        &to_bytes(created.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap()
+    .id;
+
     let create = app
         .clone()
         .oneshot(post_json(
-            "/v1/tasks/t-1/approvals",
+            &format!("/v1/tasks/{task_id}/approvals"),
             serde_json::to_string(&serde_json::json!({
                 "attempt_id": "att-x",
                 "session_id": "sess-x",

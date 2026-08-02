@@ -112,6 +112,11 @@ All notable changes to this project are documented in this file.
   a diagnostic that printed an encoded secret cannot leak the raw value.
   Tests: `mask_secrets_masks_encoded_variants`,
   `base64_encoder_known_values`.
+- **DB integrity (migration 0043):** `node_repositories` gains FKs to
+  `nodes`/`repositories` (ON DELETE CASCADE) and `approvals` gains a FK to
+  `tasks` + a `status` CHECK (attempt_id intentionally left unconstrained —
+  approvals may precede a durable attempt row). Approval API tests updated to
+  create a real task first.
 
 ### Security (hardening P0/P1/P2 — session hardening pass)
 

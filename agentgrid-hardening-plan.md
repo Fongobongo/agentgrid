@@ -567,8 +567,8 @@
 - [x] Добавить FK `attempts.node_id → nodes.id`. (migration 0040; ON DELETE RESTRICT)
 - [x] Добавить FK `task_events.attempt_id → attempts.id`. (migration 0040; ON DELETE CASCADE)
 - [x] Добавить FK `artifacts.attempt_id → attempts.id`. (migration 0040; ON DELETE CASCADE)
-- [ ] Добавить FK для `node_repositories`.
-- [ ] Добавить FK для approvals.
+- [x] Добавить FK для `node_repositories`. (migration 0043: node_id → nodes, repository_id → repositories, ON DELETE CASCADE)
+- [x] Добавить FK для approvals. (migration 0043: task_id → tasks ON DELETE CASCADE + status CHECK; attempt_id оставлен без FK — approval может создаваться до durable attempt row)
 - [ ] Добавить FK для workflow tables.
 - [x] Определить `ON DELETE` policy для каждой связи. (attempts: RESTRICT на task/node; events/artifacts: CASCADE на attempt)
 - [x] Добавить CHECK constraints для всех status/autonomy/role полей. (attempts.status CHECK в migration 0040)
