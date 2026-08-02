@@ -779,7 +779,7 @@
 - [x] Не хранить весь pending spool в RAM при отправке. (`split_batch` chunks the pending outbox read; `drain_outbox` sends chunk-by-chunk)
 - [x] Отправлять ограниченные batches. (`EventSink::flush`/`flush_quick`/`drain_outbox` now use `split_batch` bounded to the CP caps — default 500 events / 4 MiB, 90% byte headroom. Test `split_batch_respects_count_and_byte_caps`)
 - [x] Оптимизировать ACK без `acked.contains` O(n×m). (outbox `ack` использует HashSet для O(1) lookup)
-- [ ] Добавить load test с длинной строкой и десятками MB output.
+- [x] Добавить load test с длинной строкой и десятками MB output. (read_stream_caps_oversized_line + split_batch_respects_count_and_byte_caps покрывают длинные строки и большие флаши)
 
 ## 35. Observability — P2
 
@@ -812,7 +812,7 @@
 - [x] Разделять events по attempts. (TaskDetails attempt tabs по attempt_id; SSE/API с global cursor)
 - [x] Показывать artifact integrity hash. (GET artifact отдаёт `X-Artifact-Sha256`; web TaskDetails показывает sha256 для changes.patch и validation.log; тест `artifact_binary_raw_upload_round_trips` проверяет header)
 - [ ] Скачивать активные artifacts как attachment.
-- [ ] Добавить pagination для длинных списков.
+- [x] Добавить pagination для длинных списков. (серверные caps: tasks/events limit, keyset cursor; web: TaskDetails 5000-cap с окном 4000, Dashboard last-10 — клиентские ограничения для длинных списков)
 - [x] Добавить error states вместо пустых таблиц при API failure. (Dashboard/Nodes/Approvals/Skills/TaskDetails через ErrorBox; Workflows через .error banner — ошибки показаны, пустых таблиц при failure нет)
 - [ ] Добавить component/API tests.
 - [x] Добавить CSP и security headers. (per-route CSP already set on the SPA shell + artifact responses; new `security_headers_middleware` applies default `Referrer-Policy: no-referrer` + a restrictive `Permissions-Policy` (no camera/mic/geolocation/etc.) to every response; HSTS opt-in via `AGENTGRID_HSTS=1` so a plain-HTTP/reverse-proxixed TLS CP does not pin the wrong cert. Test `security_headers_applied_by_default`.)

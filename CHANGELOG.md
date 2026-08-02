@@ -92,6 +92,15 @@ All notable changes to this project are documented in this file.
 - **Repository cache GC:** `prune_stale_workspaces` now runs
   `git gc --auto --quiet` on each bare mirror after `worktree prune`, so
   incremental pack growth is compacted without ever deleting an in-use mirror.
+- **Artifact integrity hash:** artifact downloads (user + node paths) return
+  `X-Artifact-Sha256` with the server-computed hash; the web TaskDetails page
+  shows the truncated hash for `changes.patch` and `validation.log`.
+- **CI/supply-chain hardening:** all workflow actions pinned to commit SHAs
+  (Dependabot bumps them); new jobs for CodeQL (Rust+JS), gitleaks secret
+  scan (full git history), CycloneDX SBOM, and Miri (`agentgrid-common`).
+  Dockerfiles use BuildKit cache mounts (cargo registry + target, web
+  node_modules) and pin base images by digest. Release pipeline smoke-tests
+  every published binary before computing SHA256SUMS.
 
 ### Security (hardening P0/P1/P2 — session hardening pass)
 
