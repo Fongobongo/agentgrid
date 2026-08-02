@@ -193,13 +193,29 @@ impl Store {
         }))
     }
 
-    pub async fn list_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
-        let rows = sqlx::query(
+    /// Hardening P2 item 20: list workflow runs with optional keyset cursor
+    /// (`after` = `(created_at, id)` — rows strictly after it) and a server
+    /// page cap. Stable `(created_at, id)` order.
+    pub async fn list_workflow_runs(
+        &self,
+        after: Option<(String, String)>,
+        limit: Option<u64>,
+    ) -> Result<Vec<WorkflowRun>> {
+        const MAX_RUNS: i64 = 1000;
+        let limit = limit.unwrap_or(100).min(MAX_RUNS as u64) as i64;
+        let mut sql = String::from(
             "SELECT id, template_id, status, context, repository, base_commit, created_at, finished_at \
-             FROM workflow_runs ORDER BY created_at ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+             FROM workflow_runs WHERE 1=1",
+        );
+        if after.is_some() {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+        }
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        let mut q = sqlx::query(&sql);
+        if let Some((created_at, id)) = &after {
+            q = q.bind(created_at).bind(created_at).bind(id);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows
             .iter()
             .map(|r| WorkflowRun {

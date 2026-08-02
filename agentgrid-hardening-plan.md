@@ -552,7 +552,7 @@
 
 - [x] Cursor pagination для tasks. (keyset cursor `after_created_at` + `after_id` на `(created_at, id)`; `limit` с серверным ceiling 1000; тест `list_tasks_keyset_pagination`)
 - [x] Cursor pagination для events. (global `ingest_id` + `after_ingest` + `limit` — см. §9)
-- [ ] Cursor pagination для workflow runs.
+- [x] Cursor pagination для workflow runs. (keyset cursor `after_created_at` + `after_id` + `limit` cap; тест `workflow_runs_keyset_pagination`)
 - [ ] Cursor pagination для conversations/messages.
 - [ ] Cursor pagination для approvals/audit.
 - [x] Server-side maximum limit. (`list_tasks` + `list_nodes` capped at 1000 rows server-side)

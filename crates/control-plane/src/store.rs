@@ -3138,7 +3138,7 @@ mod workflow_tests {
         assert!(roles.contains(&WorkflowRole::Worker));
         assert!(roles.contains(&WorkflowRole::Verifier));
 
-        let all = s.list_workflow_runs().await.unwrap();
+        let all = s.list_workflow_runs(None, None).await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(s.list_workflow_templates().await.unwrap().len(), 1);
     }

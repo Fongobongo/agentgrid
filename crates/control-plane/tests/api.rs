@@ -2309,7 +2309,12 @@ async fn workflow_schedule_fires_run_on_tick() {
     assert!(sched.enabled);
 
     // Initially: no runs.
-    assert!(state.store.list_workflow_runs().await.unwrap().is_empty());
+    assert!(state
+        .store
+        .list_workflow_runs(None, None)
+        .await
+        .unwrap()
+        .is_empty());
 
     // Tick with now = far future → due (last_run_at empty = due now).
     let created = state
@@ -2318,7 +2323,7 @@ async fn workflow_schedule_fires_run_on_tick() {
         .await
         .unwrap();
     assert_eq!(created.len(), 1, "schedule should fire once");
-    let runs = state.store.list_workflow_runs().await.unwrap();
+    let runs = state.store.list_workflow_runs(None, None).await.unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].id, created[0]);
 
@@ -6600,4 +6605,93 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
         got.is_some(),
         "undrained node must receive the queued assignment"
     );
+}
+
+/// Hardening P2 item 20: keyset cursor pagination for `GET /v1/workflow-runs`
+/// (`after_created_at` + `after_id`, stable `(created_at, id)` order, page cap).
+#[tokio::test]
+async fn workflow_runs_keyset_pagination() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    // Create a minimal template so runs can be started.
+    let body = serde_json::json!({
+        "name": "page-tpl",
+        "steps": [{ "id": "s1", "prompt": "do", "role": "worker" }],
+    })
+    .to_string();
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/workflows",
+            body,
+            Some(&test_token(&app).await),
+        ))
+        .await
+        .unwrap();
+    let tpl: WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    // Start 5 runs via the store (fast; no tick needed).
+    let mut runs = Vec::new();
+    for i in 0..5 {
+        let r = state
+            .store
+            .create_workflow_run(&tpl.id, None, Some(&format!("repo-{i}")), None)
+            .await
+            .unwrap();
+        runs.push(r);
+    }
+    runs.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+
+    let enc = |s: &str| s.replace('+', "%2B").replace(':', "%3A");
+    async fn page(app: &Router, qs: &str) -> Vec<WorkflowRun> {
+        let resp = app
+            .clone()
+            .oneshot(get_auth(
+                &format!("/v1/workflow-runs{qs}"),
+                &test_token(app).await,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    // Page 1: limit 2.
+    let p1 = page(&app, "?limit=2").await;
+    assert_eq!(p1.len(), 2);
+    assert_eq!(p1[0].id, runs[0].id);
+    assert_eq!(p1[1].id, runs[1].id);
+    // Page 2: after p1's last row.
+    let p2 = page(
+        &app,
+        &format!(
+            "?limit=2&after_created_at={}&after_id={}",
+            enc(&p1[1].created_at),
+            p1[1].id
+        ),
+    )
+    .await;
+    assert_eq!(p2.len(), 2);
+    assert_eq!(p2[0].id, runs[2].id);
+    assert_eq!(p2[1].id, runs[3].id);
+    // Page 3: remaining 1.
+    let p3 = page(
+        &app,
+        &format!(
+            "?limit=2&after_created_at={}&after_id={}",
+            enc(&p2[1].created_at),
+            p2[1].id
+        ),
+    )
+    .await;
+    assert_eq!(p3.len(), 1);
+    assert_eq!(p3[0].id, runs[4].id);
+
+    let ids: std::collections::HashSet<String> = p1
+        .iter()
+        .chain(p2.iter())
+        .chain(p3.iter())
+        .map(|r| r.id.clone())
+        .collect();
+    assert_eq!(ids.len(), 5, "workflow-run pages must not overlap or skip");
 }

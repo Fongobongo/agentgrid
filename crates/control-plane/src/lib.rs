@@ -1960,12 +1960,29 @@ async fn delete_workflow_schedule(
     }
 }
 
+/// Hardening P2 item 20: query for `GET /v1/workflow-runs` — keyset cursor
+/// (`after_created_at` + `after_id`) and a server page cap.
+#[derive(Debug, Default, serde::Deserialize)]
+struct WorkflowRunsQuery {
+    #[serde(default)]
+    after_created_at: Option<String>,
+    #[serde(default)]
+    after_id: Option<String>,
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
 async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
+    Query(q): Query<WorkflowRunsQuery>,
 ) -> Result<Json<Vec<WorkflowRun>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — surface
     // storage outage as 503 so the client does not read it as "no runs".
-    match state.store.list_workflow_runs().await {
+    let after = match (&q.after_created_at, &q.after_id) {
+        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
+        _ => None,
+    };
+    match state.store.list_workflow_runs(after, q.limit).await {
         Ok(r) => Ok(Json(r)),
         Err(e) => {
             tracing::error!("list_workflow_runs failed: {e}");
