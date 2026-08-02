@@ -101,6 +101,12 @@ All notable changes to this project are documented in this file.
   Dockerfiles use BuildKit cache mounts (cargo registry + target, web
   node_modules) and pin base images by digest. Release pipeline smoke-tests
   every published binary before computing SHA256SUMS.
+- **Agent env isolation (hardening P1 item 27):** the adapter subprocess no
+  longer inherits the node daemon's full environment. Both spawn paths
+  (`ProcessBackend` + ACP) start from a clean `PATH`/`HOME` plus the explicit
+  `AGENTGRID_ADAPTER_ENV` allowlist and profile-declared secrets; the daemon's
+  credentials/API keys/`AGENTGRID_SECRETS` never reach the agent. Test:
+  `spawn_does_not_inherit_daemon_env`.
 
 ### Security (hardening P0/P1/P2 — session hardening pass)
 

@@ -41,6 +41,8 @@ async fn start_stream_collect(f: &AdapterFixture) {
         bin: f.bin.clone(),
         sandbox_prefix_args: vec![],
         prompt: f.prompt.into(),
+        extra_args: vec![],
+        raw_args: false,
         workdir: std::env::temp_dir(),
         attempt_id: format!("attempt-conform-{}", f.name),
         timeout: Duration::from_secs(10),
@@ -77,6 +79,8 @@ async fn start_cancel(f: &AdapterFixture) {
         // mock `sleep:` blocks a single prompt turn — emulates a long agent
         // run that must be interruptible.
         prompt: "sleep:30".into(),
+        extra_args: vec![],
+        raw_args: false,
         workdir: std::env::temp_dir(),
         attempt_id: format!("attempt-cancel-{}", f.name),
         timeout: Duration::from_secs(30),

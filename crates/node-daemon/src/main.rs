@@ -1313,6 +1313,16 @@ async fn drive_acp_session(
     for k in sandbox::unsafe_env_guard(cfg.sandbox) {
         cmd.env_remove(k);
     }
+    // Hardening P1 item 27: do not inherit the daemon's full environment
+    // (node credentials / secrets); start from PATH + HOME + the explicit
+    // allowlist so the ACP child never sees daemon secrets.
+    cmd.env_clear();
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        cmd.env("HOME", home);
+    }
     for (k, v) in &cfg.adapter_env {
         cmd.env(k, v);
     }
@@ -1326,6 +1336,15 @@ async fn drive_acp_session(
         .or_else(|| agent_profile(&assignment.adapter));
     if let Some(text) = &profile_text {
         cmd.env("AGENTGRID_SYSTEM_PROMPT", text);
+    }
+    // Hardening P1 item 27: profile-declared secrets live in the daemon env but
+    // the child no longer inherits it — forward the ones the profile requires.
+    if let Some(p) = &cp_profile {
+        for req in &p.secret_requirements {
+            if let Some(v) = std::env::var_os(&req.env) {
+                cmd.env(&req.env, v);
+            }
+        }
     }
     // Stage 13 secret-ref sync: required secrets must be set in the node env
     // before the agent starts. A missing required secret is fail-closed —
@@ -1969,14 +1988,27 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     // unsandboxed environment unless the operator explicitly opted in.
     let env_remove = sandbox::unsafe_env_guard(cfg.sandbox);
     let validation_passed = loop {
+        // Hardening P1 item 27: forward profile-declared secrets explicitly —
+        // ProcessBackend env_clears the child, so daemon-env secrets must be
+        // allowlisted here.
+        let mut spawn_env = cfg.adapter_env.clone();
+        if let Some(p) = &cp_profile {
+            for req in &p.secret_requirements {
+                if let Some(v) = std::env::var_os(&req.env) {
+                    spawn_env.push((req.env.clone(), v.to_string_lossy().to_string()));
+                }
+            }
+        }
         let req = agentgrid_adapters::SpawnRequest {
             bin: sb_program.clone(),
             sandbox_prefix_args: sb_prefix.clone(),
             prompt: prompt.clone(),
+            extra_args: vec![],
+            raw_args: false,
             workdir: ws.path.clone(),
             attempt_id: assignment.attempt_id.clone(),
             timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
-            env: cfg.adapter_env.clone(),
+            env: spawn_env,
             env_remove: env_remove.clone(),
             limits: profile_limits(cp_profile.as_ref()),
         };
@@ -4317,7 +4349,13 @@ mod tests {
                 repository_root: std::env::temp_dir().join("ag-skill-repos"),
                 secrets: vec![],
                 sandbox: sandbox::SandboxKind::None,
-                adapter_env: vec![],
+                // Hardening P1 item 27: the child no longer inherits the
+                // daemon env — forward the fake agent's record path via the
+                // explicit allowlist instead of set_var in the parent.
+                adapter_env: vec![(
+                    "AG_FAKE_RECORD_PROMPT".to_string(),
+                    record.to_string_lossy().to_string(),
+                )],
                 outbox_root: std::env::temp_dir()
                     .join(format!("ag-skill-outbox-{}", uuid::Uuid::new_v4())),
                 artifact_spool_root: std::env::temp_dir()

@@ -20,6 +20,14 @@ pub struct SpawnRequest {
     /// Empty → no sandbox passthrough, matching prior behaviour.
     pub sandbox_prefix_args: Vec<String>,
     pub prompt: String,
+    /// Extra args after `--prompt <prompt>` (hardening P1 item 27: used by
+    /// tests to run `sh -c …`; production passes empty).
+    pub extra_args: Vec<String>,
+    /// Skip the automatic `--prompt <prompt>` argument (hardening P1 item 27:
+    /// lets the backend launch a raw command line, e.g. `sh -c …`, for
+    /// non-adapter subprocesses and tests). Production adapter runs keep
+    /// `false` (the adapter contract expects `--prompt`).
+    pub raw_args: bool,
     pub workdir: PathBuf,
     pub attempt_id: String,
     pub timeout: Duration,
@@ -130,8 +138,22 @@ impl ExecutionBackend for ProcessBackend {
         // the sandbox (e.g. Docker) when the node supplied prefix args; empty
         // → passthrough as before.
         cmd.args(&req.sandbox_prefix_args);
-        cmd.arg("--prompt").arg(&req.prompt);
+        if !req.raw_args {
+            cmd.arg("--prompt").arg(&req.prompt);
+        }
+        cmd.args(&req.extra_args);
         cmd.current_dir(&req.workdir);
+        // Hardening P1 item 27: do NOT inherit the daemon's full environment —
+        // it can carry node credentials / API keys / AGENTGRID_SECRETS that the
+        // adapter must never see. Start from a clean env: PATH + HOME (so
+        // exec/lookup works), the explicit allowlist, and the attempt id.
+        cmd.env_clear();
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", path);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
         cmd.env("AGENTGRID_ATTEMPT_ID", &req.attempt_id);
         for (k, v) in &req.env {
             cmd.env(k, v);
@@ -168,6 +190,8 @@ mod tests {
             bin: bin.into(),
             sandbox_prefix_args: vec![],
             prompt: "ignored".into(),
+            extra_args: vec![],
+            raw_args: false,
             workdir: std::env::temp_dir(),
             attempt_id: "t".into(),
             timeout: Duration::from_secs(5),
@@ -203,6 +227,43 @@ mod tests {
         let mut bp = ProcessBackend.spawn(req("true")).unwrap();
         assert!(!bp.enforced_limits);
         let _ = bp.child.wait().await;
+    }
+
+    /// Hardening P1 item 27: the child must NOT inherit the daemon's full
+    /// environment. A secret set in the parent env stays invisible to the
+    /// adapter unless explicitly allowlisted.
+    #[tokio::test]
+    async fn spawn_does_not_inherit_daemon_env() {
+        std::env::set_var("AGENTGRID_TEST_DAEMON_SECRET", "shh");
+        let mut r = req("sh");
+        r.raw_args = true;
+        r.extra_args = vec![
+            "-c".into(),
+            "printf '%s' \"$AGENTGRID_TEST_DAEMON_SECRET\"".into(),
+        ];
+        let mut bp = ProcessBackend.spawn(r).unwrap();
+        use tokio::io::AsyncReadExt;
+        let mut out = String::new();
+        bp.stdout.read_to_string(&mut out).await.unwrap();
+        bp.child.wait().await.unwrap();
+        std::env::remove_var("AGENTGRID_TEST_DAEMON_SECRET");
+        assert!(out.is_empty(), "daemon env leaked to child: {out:?}");
+
+        // An explicitly allowlisted var IS forwarded.
+        std::env::set_var("AGENTGRID_TEST_DAEMON_SECRET", "shh");
+        let mut r2 = req("sh");
+        r2.raw_args = true;
+        r2.extra_args = vec![
+            "-c".into(),
+            "printf '%s' \"$AGENTGRID_TEST_DAEMON_SECRET\"".into(),
+        ];
+        r2.env = vec![("AGENTGRID_TEST_DAEMON_SECRET".into(), "ok".into())];
+        let mut bp2 = ProcessBackend.spawn(r2).unwrap();
+        let mut out2 = String::new();
+        bp2.stdout.read_to_string(&mut out2).await.unwrap();
+        bp2.child.wait().await.unwrap();
+        std::env::remove_var("AGENTGRID_TEST_DAEMON_SECRET");
+        assert_eq!(out2, "ok", "allowlisted env forwarded");
     }
 
     #[test]
