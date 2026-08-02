@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   ApiError,
+  ArtifactDownload,
   cancelTask,
   getArtifact,
   getEligibility,
@@ -29,8 +30,8 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const [patch, setPatch] = useState<string | null | undefined>(undefined);
-  const [validationLog, setValidationLog] = useState<string | null | undefined>(undefined);
+  const [patch, setPatch] = useState<ArtifactDownload | null | undefined>(undefined);
+  const [validationLog, setValidationLog] = useState<ArtifactDownload | null | undefined>(undefined);
   const [busy, setBusy] = useState<string | null>(null);
 
   const logRef = useRef<HTMLDivElement>(null);
@@ -206,7 +207,13 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
             <>
               <h3>Diff (changes.patch)</h3>
               {patch === null && <p className="muted">No diff artifact.</p>}
-              {patch && <pre className="patch">{renderPatch(patch)}</pre>}
+              {patch && (
+                <>
+                  {/* Hardening P2 item 36: show the server-computed integrity hash. */}
+                  {patch.sha256 && <p className="muted mono">sha256: {patch.sha256.slice(0, 16)}…</p>}
+                  <pre className="patch">{renderPatch(patch.text)}</pre>
+                </>
+              )}
             </>
           )}
 
@@ -214,7 +221,14 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
             <>
               <h3>Validation log</h3>
               {validationLog === null && <p className="muted">No validation log.</p>}
-              {validationLog && <pre className="vlog">{validationLog}</pre>}
+              {validationLog && (
+                <>
+                  {validationLog.sha256 && (
+                    <p className="muted mono">sha256: {validationLog.sha256.slice(0, 16)}…</p>
+                  )}
+                  <pre className="vlog">{validationLog.text}</pre>
+                </>
+              )}
             </>
           )}
         </section>

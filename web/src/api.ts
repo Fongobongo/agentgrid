@@ -297,11 +297,19 @@ export function setSkillTrust(name: string, source: string, trusted: boolean) {
   return req('POST', `/v1/skills/${encodeURIComponent(name)}/${dec}?source=${encodeURIComponent(source)}`);
 }
 
-export async function getArtifact(taskId: string, name: string): Promise<string | null> {
+// Hardening P2 item 36: artifact download returns { text, sha256 } — the
+// server-computed integrity hash is exposed for display.
+export interface ArtifactDownload {
+  text: string;
+  sha256: string | null;
+}
+
+export async function getArtifact(taskId: string, name: string): Promise<ArtifactDownload | null> {
   const r = await req('GET', `/v1/tasks/${taskId}/artifacts/${name}`);
   if (r.status === 404) return null;
   if (!r.ok) throw new ApiError(r.status, `GET artifact -> ${r.status}`);
-  return r.text();
+  const text = await r.text();
+  return { text, sha256: r.headers.get('x-artifact-sha256') };
 }
 
 /// Stream a task's events over SSE with automatic reconnect + resume by

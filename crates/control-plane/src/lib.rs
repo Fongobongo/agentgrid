@@ -2416,9 +2416,13 @@ async fn get_artifact(
                 .read_artifact_meta(&task_id, &name)
                 .await
                 .ok()
-                .flatten()
-                .and_then(|m| m.media_type);
-            Ok(artifact_response(bytes, mt.as_deref(), &name))
+                .flatten();
+            Ok(artifact_response(
+                bytes,
+                mt.as_ref().and_then(|m| m.media_type.as_deref()),
+                &name,
+                mt.as_ref().and_then(|m| m.sha256.as_deref()),
+            ))
         }
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -2461,9 +2465,13 @@ async fn get_artifact_node(
                 .read_artifact_meta(&task_id, &name)
                 .await
                 .ok()
-                .flatten()
-                .and_then(|m| m.media_type);
-            Ok(artifact_response(bytes, mt.as_deref(), &name))
+                .flatten();
+            Ok(artifact_response(
+                bytes,
+                mt.as_ref().and_then(|m| m.media_type.as_deref()),
+                &name,
+                mt.as_ref().and_then(|m| m.sha256.as_deref()),
+            ))
         }
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -2606,7 +2614,12 @@ async fn upload_artifact_raw(
 /// and every artifact response adds `X-Content-Type-Options: nosniff` so a
 /// browser never sniffs a download as HTML/script. `name` is encoded as a
 /// safe RFC 6266 `filename` (ASCII-only, control chars stripped).
-fn artifact_response(bytes: Vec<u8>, media_type: Option<&str>, name: &str) -> Response {
+fn artifact_response(
+    bytes: Vec<u8>,
+    media_type: Option<&str>,
+    name: &str,
+    sha256: Option<&str>,
+) -> Response {
     const INLINE_SAFE: &[&str] = &[
         "application/octet-stream",
         "text/plain",
@@ -2678,6 +2691,14 @@ fn artifact_response(bytes: Vec<u8>, media_type: Option<&str>, name: &str) -> Re
         };
         if let Ok(v) = axum::http::HeaderValue::from_str(&cd) {
             resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    // Hardening P2 item 36: expose the server-computed content hash so
+    // clients (web UI) can show the artifact's integrity digest.
+    if let Some(sha) = sha256 {
+        if let Ok(v) = axum::http::HeaderValue::from_str(sha) {
+            resp.headers_mut()
+                .insert(header::HeaderName::from_static("x-artifact-sha256"), v);
         }
     }
     resp
@@ -3488,7 +3509,7 @@ mod artifact_response_tests {
 
     #[tokio::test]
     async fn html_served_as_attachment_octetstream_with_nosniff() {
-        let resp = artifact_response(b"<html></html>".to_vec(), Some("text/html"), "x.html");
+        let resp = artifact_response(b"<html></html>".to_vec(), Some("text/html"), "x.html", None);
         assert_eq!(
             hdr(&resp, "content-type").as_deref(),
             Some("application/octet-stream")
@@ -3505,7 +3526,7 @@ mod artifact_response_tests {
 
     #[tokio::test]
     async fn svg_served_as_attachment_octetstream_with_nosniff() {
-        let resp = artifact_response(b"<svg/>".to_vec(), Some("image/svg+xml"), "logo.svg");
+        let resp = artifact_response(b"<svg/>".to_vec(), Some("image/svg+xml"), "logo.svg", None);
         assert_eq!(
             hdr(&resp, "content-type").as_deref(),
             Some("application/octet-stream")
@@ -3520,7 +3541,7 @@ mod artifact_response_tests {
 
     #[tokio::test]
     async fn png_allowed_inline_no_attachment() {
-        let resp = artifact_response(b"\x89PNG".to_vec(), Some("image/png"), "blob.png");
+        let resp = artifact_response(b"\x89PNG".to_vec(), Some("image/png"), "blob.png", None);
         assert_eq!(hdr(&resp, "content-type").as_deref(), Some("image/png"));
         assert_eq!(
             hdr(&resp, "x-content-type-options").as_deref(),
@@ -3534,7 +3555,12 @@ mod artifact_response_tests {
 
     #[tokio::test]
     async fn unknown_type_forced_octetstream_attachment() {
-        let resp = artifact_response(b"x".to_vec(), Some("application/x-crazy"), "weird.dat");
+        let resp = artifact_response(
+            b"x".to_vec(),
+            Some("application/x-crazy"),
+            "weird.dat",
+            None,
+        );
         assert_eq!(
             hdr(&resp, "content-type").as_deref(),
             Some("application/octet-stream")
@@ -3551,7 +3577,7 @@ mod artifact_response_tests {
     #[tokio::test]
     async fn filename_control_and_separator_chars_stripped() {
         // name "../e<TAB>v<QUOTE>x" -> separators/control/quote stripped to "evx"
-        let resp = artifact_response(b"x".to_vec(), Some("text/html"), "../e\tv\"x");
+        let resp = artifact_response(b"x".to_vec(), Some("text/html"), "../e\tv\"x", None);
         let cd = hdr(&resp, "content-disposition").unwrap_or_default();
         assert!(
             cd.contains("filename=\"evx\"") || cd == "attachment",

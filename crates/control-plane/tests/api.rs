@@ -904,7 +904,7 @@ async fn artifact_binary_raw_upload_round_trips() {
                 .header("x-agentgrid-fencing-token", &assign.fencing_token)
                 .header("x-artifact-name", "blob.bin")
                 .header("x-artifact-media-type", "image/png")
-                .header("x-artifact-sha256", sha)
+                .header("x-artifact-sha256", sha.clone())
                 .body(Body::from(payload.clone()))
                 .unwrap(),
         )
@@ -924,6 +924,13 @@ async fn artifact_binary_raw_upload_round_trips() {
         resp.headers().get("content-type").unwrap(),
         "image/png",
         "stored media type must be served back"
+    );
+    // Hardening P2 item 36: the server-computed hash is exposed for integrity
+    // display in the UI.
+    assert_eq!(
+        resp.headers().get("x-artifact-sha256").unwrap(),
+        sha.as_str(),
+        "artifact integrity hash surfaced on download"
     );
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     assert_eq!(body.as_ref(), payload.as_slice(), "binary bytes round trip");

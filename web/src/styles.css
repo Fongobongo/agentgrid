@@ -58,6 +58,9 @@ h3 { margin: 18px 0 8px; }
 
 .muted { color: var(--muted); }
 
+/* Hardening P2 item 36: monospace integrity-hash line. */
+.mono { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: 0.85rem; word-break: break-all; }
+
 .error {
   background: rgba(248, 81, 73, 0.12);
   border: 1px solid var(--bad);

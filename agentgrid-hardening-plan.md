@@ -810,10 +810,10 @@
 - [x] Показывать unsafe wrapper warning. (Nodes.tsx `⚠ unsafe` badge; NodeView.unsafe_active)
 - [x] Отображать global event cursor корректно после retry. (ingest_id — см. §9)
 - [x] Разделять events по attempts. (TaskDetails attempt tabs по attempt_id; SSE/API с global cursor)
-- [ ] Показывать artifact integrity hash.
+- [x] Показывать artifact integrity hash. (GET artifact отдаёт `X-Artifact-Sha256`; web TaskDetails показывает sha256 для changes.patch и validation.log; тест `artifact_binary_raw_upload_round_trips` проверяет header)
 - [ ] Скачивать активные artifacts как attachment.
 - [ ] Добавить pagination для длинных списков.
-- [ ] Добавить error states вместо пустых таблиц при API failure.
+- [x] Добавить error states вместо пустых таблиц при API failure. (Dashboard/Nodes/Approvals/Skills/TaskDetails через ErrorBox; Workflows через .error banner — ошибки показаны, пустых таблиц при failure нет)
 - [ ] Добавить component/API tests.
 - [x] Добавить CSP и security headers. (per-route CSP already set on the SPA shell + artifact responses; new `security_headers_middleware` applies default `Referrer-Policy: no-referrer` + a restrictive `Permissions-Policy` (no camera/mic/geolocation/etc.) to every response; HSTS opt-in via `AGENTGRID_HSTS=1` so a plain-HTTP/reverse-proxixed TLS CP does not pin the wrong cert. Test `security_headers_applied_by_default`.)
 
