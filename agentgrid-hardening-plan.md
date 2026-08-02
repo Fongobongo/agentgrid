@@ -22,7 +22,7 @@
 - [x] `cargo test --workspace --all-targets` проходит.
 - [x] `npm ci && npm run build && npm run lint` проходит в `web/`.
 - [x] Основной E2E и failure-injection suite проходят перед тегом релиза. (process-based suite — `run-outbox.sh`, `run-cp-restart.sh`, `run-disk-full.sh`, `run-slow-net.sh` — all green locally after the setup-token bootstrap fix; `run.sh`/`run-workflow.sh` export a fixed `AGENTGRID_ADMIN_PASSWORD` so the compose path's `up.sh` bootstrap creates matching creds (`docker compose config` validated; live compose run not exercised locally due to disk)
-- [ ] Threat model и README соответствуют фактическому поведению.
+- [x] Threat model и README соответствуют фактическому поведению. (threat-model.md: секция "Hardening pass additions" покрывает env isolation, redaction variants, event cursor, drain, artifact hash, DB FKs; README обновлён ранее)
 
 ---
 

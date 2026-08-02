@@ -86,6 +86,31 @@ External ACP clients can drive the grid as an ACP agent (Stage 6) since 0.2.
   - Pin repository hosts with a known `~/.ssh/known_hosts` (no `StrictHostKeyChecking=no`); the node install path fails closed on an unknown host key by default.
   - A deploy key grants only repo clone/fetch; never place a key that can push unless a workflow explicitly requires upstream push (none does in 0.4.2).
 
+## Hardening pass additions (0.4.x)
+
+- **Daemon-env isolation:** the adapter subprocess no longer inherits the node
+  daemon's environment (`env_clear()` + `PATH`/`HOME` + the explicit
+  `AGENTGRID_ADAPTER_ENV` allowlist + profile-declared secrets). Node
+  credentials, API keys and `AGENTGRID_SECRETS` never reach the agent. (P1 27)
+- **Secret redaction variants:** `mask_secrets` masks base64- and
+  percent-encoded forms of each configured secret, so a diagnostic that
+  printed an encoded secret cannot leak the raw value. (P1 27)
+- **Global event cursor (SSE ordering):** events carry a monotonic `ingest_id`;
+  SSE `id:`/`Last-Event-ID` resume on the global cursor, so a client that
+  reconnects across attempts never reorders or duplicates events. (P0 9)
+- **Node drain:** a drained node stops receiving NEW assignments while its
+  in-flight attempts finish (heartbeat stays online) — a maintenance path that
+  cannot strand work. (P2 37)
+- **Artifact integrity:** artifact downloads return `X-Artifact-Sha256` (the
+  server-computed hash) so consumers can verify what they received. (P2 36)
+- **DB integrity:** FKs (attempts→tasks/nodes, task_events/artifacts→attempts,
+  node_repositories→nodes/repositories, approvals→tasks) + status CHECKs
+  backstop NEW writes; orphan rows from pre-FK databases are surfaced by
+  `count_orphan_rows`/`storage_gc`. (P1 21)
+- **Agent env allowlist for profiles:** profile-declared secrets are forwarded
+  to the child explicitly (not inherited), and `AGENTGRID_SYSTEM_PROMPT` is the
+  only other forwarded hint. (P1 27)
+
 ## Out of scope for 0.1.1
 
 - Strong per-adapter command interception (needs structured tool calls — ACP or
