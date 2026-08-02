@@ -699,7 +699,7 @@
 - [x] Secret scanning. (gitleaks-action с full git history + trivy fs scan с secrets категорией)
 - [x] CodeQL. (новый codeql.yml: rust + javascript-typescript на PR/nightly, actions SHA-pinned)
 - [x] SBOM CycloneDX/SPDX. (anchore/sbom-action генерирует CycloneDX JSON, upload как artifact)
-- [ ] GitHub build provenance attestation.
+- [x] GitHub build provenance attestation. (release.yml: actions/attest-build-provenance на каждый артефакт, id-token+attestations permissions)
 - [ ] Подписывать releases cosign/minisign.
 - [x] Публиковать SHA256 для каждого binary. (`release.yml` генерирует `SHA256SUMS` и загружает их вместе с артефактами)
 - [x] Документировать reproducibility limitations. (README "Reproducibility limitations" — non-deterministic inputs + что SHA256SUMS проверяют целостность, не пересборку)

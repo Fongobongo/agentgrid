@@ -121,6 +121,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -137,6 +139,12 @@ jobs:
           # Namespace SHA256SUMS per target to avoid collisions.
           find artifacts -name 'SHA256SUMS' -exec sh -c 'd=$(dirname {}); t=$(basename $d | sed "s/agentgrid-//"); cp {} release-assets/SHA256SUMS.$t' \;
           ls -la release-assets
+      - name: attest build provenance
+        # Hardening P2 item 29: GitHub provenance attestation for every release
+        # artifact — a verifiable record of who built what, from which commit.
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: 'release-assets/*'
       - name: create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
