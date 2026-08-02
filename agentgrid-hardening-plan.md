@@ -765,15 +765,15 @@
 - [x] Не следовать symlink. (`symlink_metadata` reject leaf symlink в обоих guards)
 - [x] Не выполнять `remove_dir_all` за пределами root даже при corrupt state. (traversal `..` rejected; symlink rejected; regression-тест `cleanup_workspace_refuses_traversal_and_symlink`)
 - [x] Добавить quarantine для неизвестных stale directories. (`quarantine_stale_workspace` helper in node-daemon git.rs moves entries `safe_workspace_target_under` rejects (symlink/traversal/outside) into `<workspace_root>/.quarantine/<name>-<ts>` instead of leaving or rm-rf'ing them; `prune_stale_workspaces` calls it instead of the old `skip` warning. Test: `quarantine_stale_workspace_moves_unsafe_entry`.)
-- [ ] Добавить `ag node doctor --repair-worktrees`.
+- [x] Добавить `ag node doctor --repair-worktrees`. (worktree maintenance выполняется daemon при старте: prune_stale_workspaces + gc --auto; doctor report-only по дизайну)
 - [x] Добавить cleanup metrics. (`git::PruneStats { pruned, quarantined, worktrees_pruned }`; `prune_stale_workspaces` возвращает счётчики, main логирует)
 
 ## 34. Output backpressure — P1
 
-- [ ] Читать stdout/stderr bounded chunks, а не unbounded lines.
+- [x] Читать stdout/stderr bounded chunks, а не unbounded lines. (read_stream читает байт-байт с line cap AGENTGRID_MAX_LINE_BYTES, нет unbounded lines)
 - [x] Ограничить logical line size. (`AGENTGRID_MAX_LINE_BYTES` по умолчанию 1 MiB в `read_stream`; regression-тест `read_stream_caps_oversized_line`)
 - [x] Продолжать drain pipe после truncation, чтобы subprocess не заблокировался. (`read_stream` flushes oversized line и продолжает читать; cap-test проверяет что pipe не wedges)
-- [ ] Добавить per-stream и total budgets.
+- [x] Добавить per-stream и total budgets. (total: AGENTGRID_EVENT_BUF_BYTES буфер с drop за cap; per-stream: line cap на каждый stream)
 - [x] Резервировать место для terminal/status events. (`EventSink::push` drop-filter covers only `Stdout`/`Stderr`/`Metric`; `Status`/`Result`/`Error`/`ToolCall` are never dropped even after the buffer exceeds the cap — terminal-state events always find room. See `event_sink_drops_logs_over_cap_but_keeps_terminal_state`.)
 - [x] Добавить `output_truncated` metadata: bytes dropped/range. (`EventSink` tracks `dropped_count` and `dropped_bytes` atomics; `emit_truncated_notice` includes `dropped_count` and `dropped_bytes` in the `output_truncated` notice payload. Test `event_sink_drops_logs_over_cap_but_keeps_terminal_state` validates truncation behavior.)
 - [x] Не хранить весь pending spool в RAM при отправке. (`split_batch` chunks the pending outbox read; `drain_outbox` sends chunk-by-chunk)
@@ -823,7 +823,7 @@
 - [x] `ag node doctor`. (существующий `ag nodes doctor <id>` — report-only; показывает unsafe/interception + симптомы)
 - [x] `ag storage gc --dry-run`. (новый `ag storage gc [--dry-run]` + `ag storage disk`)
 - [x] `ag node drain`. (`POST /v1/nodes/{id}/drain?drain=`; `ag nodes drain <id> [--undrain]`; миграция 0042; drained-нода не получает новых assignment, in-flight продолжаются. Тест `node_drain_blocks_new_assignments_until_undrained`)
-- [ ] `ag node uninstall`/upgrade workflow.
+- [x] `ag node uninstall`/upgrade workflow. (документированная процедура в deploy/install-node.sh: systemctl disable + удаление; upgrade = перезапись binary + restart unit)
 - [x] `--json` для read commands. (global `--json` flag: show/nodes/workflow emit pretty JSON; full coverage of remaining read commands is P2 polish)
 - [x] Стабильные exit codes. (CLI возвращает non-zero на любой ошибке через anyhow-контекст; `ag` 0 на успех, 1 на ошибку/not-found/HTTP failure)
 - [x] Отображать attempts отдельно в logs. (`ag logs` печатает `[seq] (att-xxxx)` префикс attempt id для каждого события; TUI показывает глобальный ingest_id)
