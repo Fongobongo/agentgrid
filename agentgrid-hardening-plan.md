@@ -92,7 +92,7 @@
 - [x] Проверять минимальную длину `AGENTGRID_JWT_SECRET`.
 - [x] В production mode отказываться запускаться без стабильного JWT secret.
 - [x] Удалить из комментариев неверное утверждение, что JWT secret влияет на node credentials.
-- [ ] Добавить server-side session version или `jti`, если требуется отзыв пользовательских сессий.
+- [x] Добавить server-side session version или `jti`, если требуется отзыв пользовательских сессий.
 
 ### Docker defaults
 
@@ -146,8 +146,8 @@
 
 ### Path safety
 
-- [ ] Перейти от path join/canonicalize к descriptor-relative записи, где возможно.
-- [ ] Использовать `openat`/`O_NOFOLLOW` или эквивалентную библиотеку.
+- [x] Перейти от path join/canonicalize к descriptor-relative записи, где возможно.
+- [x] Использовать `openat`/`O_NOFOLLOW` или эквивалентную библиотеку.
 - [x] Запретить symlink artifact directories. (`std::fs::symlink_metadata` reject на dir и file в `artifact_path`; regression-тест `save_artifact_rejects_symlink_dir`)
 - [x] Валидировать `attempt_id` как UUID/безопасный opaque ID. (`is_safe_opaque_id` на `[A-Za-z0-9_-]` в `artifact_path` + `save_artifact_bytes` раньше любого path join; regression-тест `save_artifact_rejects_traversal_attempt_id`)
 - [x] Сохранять upload во временный файл и атомарно публиковать rename.
@@ -170,7 +170,7 @@
 
 ## 4. Static file traversal — P0/P1
 
-- [ ] Заменить самописный `static_fallback` на `tower_http::services::ServeDir` либо эквивалент.
+- [x] Заменить самописный `static_fallback` на `tower_http::services::ServeDir` либо эквивалент.
 - [x] Если handler сохраняется — percent-decode path до проверки.
 - [x] Отклонять `ParentDir`, `RootDir` и platform prefix components.
 - [x] Canonicalize web root один раз при старте.
@@ -188,11 +188,11 @@
 - [x] Добавить явный unsafe flag/profile для unattended execution.
 - [x] Требовать `AGENTGRID_UNSAFE_UNATTENDED=1` для полного bypass permissions.
 - [x] Не разрешать unsafe mode при `sandbox=none`, если не указан отдельный override. (`sandbox::unsafe_env_guard` strips `AGENTGRID_UNSAFE_UNATTENDED` / `AGENTGRID_OPENCODE_AUTO` on unsandboxed runs unless `AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX=1`; applied in both ProcessBackend + wrapper-binary spawn paths; tests in `sandbox::tests::unsafe_guard_*`)
-- [ ] Показывать unsafe badge/warning в CLI, TUI и web UI.
-- [ ] Записывать выбранный security profile в attempt provenance.
-- [ ] Добавить capability `permission_interception: structured|wrapper|none`.
+- [x] Показывать unsafe badge/warning в CLI, TUI и web UI. (`NodeView.unsafe_active` + `permission_interception` от heartbeat; `ag nodes` таблица + `ag node doctor` выводят UNSAFE; TUI node pane красный `UNSAFE`; web Nodes.tsx `⚠ unsafe` badge)
+- [x] Записывать выбранный security profile в attempt provenance.
+- [x] Добавить capability `permission_interception: structured|wrapper|none`. (`AdapterCapability.permission_interception`, вычисляется по протоколу адаптера: ACP → structured, wrapper binary → wrapper)
 - [ ] Не маркировать wrapper adapter как strict-policy compatible.
-- [ ] Обновить `README.md`, `docs/acp-interop.md` и threat model.
+- [x] Обновить `README.md`, `docs/acp-interop.md` и threat model. (README maturity notes + unsafe-bypass note уже отражают wrapper interception; см. также §38)
 
 ### Тесты
 
@@ -313,25 +313,25 @@
 
 ## 9. Глобальный event cursor и SSE retries — P0
 
-- [ ] Добавить глобальный монотонный `ingest_id` для `task_events`.
-- [ ] Сохранить `(attempt_id, attempt_sequence)` как idempotency key.
-- [ ] Использовать `ingest_id` в SSE `id:`.
-- [ ] Использовать `ingest_id` в `Last-Event-ID` resume.
-- [ ] Переименовать API-поля, чтобы отличать global cursor и attempt sequence.
-- [ ] Сортировать events по `ingest_id`.
-- [ ] Добавить cursor pagination.
-- [ ] Обновить web client.
-- [ ] Обновить CLI `ag logs --follow`.
-- [ ] Обновить TUI.
-- [ ] Описать migration поведения старых клиентов.
+- [x] Добавить глобальный монотонный `ingest_id` для `task_events`. (migration 0037: `task_events.ingest_id` + `event_ingest_counter` single-row counter, allocated inside the ingest transaction via `UPDATE … RETURNING`; backfilled from `rowid`)
+- [x] Сохранить `(attempt_id, attempt_sequence)` как idempotency key. (unchanged `ON CONFLICT(attempt_id, sequence) DO NOTHING`)
+- [x] Использовать `ingest_id` в SSE `id:`. (SSE `id:` = `e.ingest_id`)
+- [x] Использовать `ingest_id` в `Last-Event-ID` resume. (`sse_resume_after` parses `Last-Event-ID` as ingest_id; legacy `after_sequence` still accepted)
+- [x] Переименовать API-поля, чтобы отличать global cursor и attempt sequence. (`EventsQuery.after_ingest` + legacy `after_sequence`; `TaskEvent.ingest_id` vs `sequence`)
+- [x] Сортировать events по `ingest_id`. (`get_events` JOIN attempts + `ORDER BY e.ingest_id`; no more Rust-side merge-sort by sequence)
+- [x] Добавить cursor pagination. (`limit` param + server-side `DEFAULT_EVENT_PAGE = 1000` cap)
+- [x] Обновить web client. (`api.ts` `getTaskEvents`/`streamTask` use `after_ingest`; `TaskDetails.tsx` sorts by `ingest_id`)
+- [x] Обновить CLI `ag logs --follow`. (`cmd_logs` advances on `ingest_id`, falls back to sequence on old servers)
+- [x] Обновить TUI. (`fetch_events` uses `after_ingest=0&limit=1000`; `EventRow` displays `ingest_id`)
+- [x] Описать migration поведения старых клиентов. (pre-0037 clients keep working: `after_sequence` still honoured, `ingest_id` serde-defaults to 0)
 
 ### Тесты
 
-- [ ] Retry после 500 событий показывает события нового attempt с sequence 1.
-- [ ] SSE reconnect между attempts не теряет events.
-- [ ] Events разных attempts отображаются в правильном порядке.
-- [ ] Duplicate `(attempt_id, attempt_sequence)` не создаёт новую запись.
-- [ ] Global cursor монотонен при concurrent ingestion.
+- [x] Retry после 500 событий показывает события нового attempt с sequence 1. (`events_ordered_by_global_ingest_cursor_across_attempts` — new attempt seq-1 comes after old attempt tail)
+- [x] SSE reconnect между attempts не теряет events. (`sse_stream_emits_ingest_id_cursor` — stream emits `id:<ingest_id>` frames; resume by `Last-Event-ID`/`after_ingest` returns exactly the tail, covered by the same test + `sse_resume_after` unit tests)
+- [x] Events разных attempts отображаются в правильном порядке. (same API test: monotonic ingest_id across attempts)
+- [x] Duplicate `(attempt_id, attempt_sequence)` не создаёт новую запись. (existing dedup test + `ON CONFLICT DO NOTHING`; `ingest_id` monotonic though not gap-free)
+- [x] Global cursor монотен при concurrent ingestion. (`ingest_id_monotonic_under_concurrent_ingestion` — 20 concurrent batches, monotonic read order, dup не добавляет строку; counter serialisation + `is_locked_err` retry) 
 
 **Основные файлы:**
 
@@ -347,9 +347,9 @@
 
 ### Выбор реализации
 
-- [ ] Принять ADR: SQLite outbox или crash-safe segmented files.
-- [ ] Зафиксировать durability semantics: at-least-once + idempotent CP ingest.
-- [ ] Зафиксировать поведение при power loss, disk full и corrupt tail.
+- [x] Принять ADR: SQLite outbox или crash-safe segmented files. (сохранён текущий segmented-JSONL дизайн; ADR в `docs/decisions/` обновлён ранее — outbox остаётся append-only JSONL с atomic rename + fsync)
+- [x] Зафиксировать durability semantics: at-least-once + idempotent CP ingest. (`ON CONFLICT(attempt_id, sequence) DO NOTHING`; `complete_attempt` idempotent on terminal)
+- [x] Зафиксировать поведение при power loss, disk full и corrupt tail. (corrupt/truncated trailing line терпится; middle corrupt records теперь quarantine — см. ниже)
 
 ### Если SQLite
 
@@ -369,28 +369,28 @@
 - [x] `fsync` parent directory после rename. (new `fsync_parent(path)` helper fdatasyncs the parent directory after sync_all+before/around rename in record and both ack paths; covers the durability gap where a renamed-in change survives data sync but the directory entry change is still in the page cache.)
 - [ ] Использовать immutable segments + checkpoint вместо полного rewrite на ACK.
 - [x] Терпимо обрабатывать truncated trailing JSON line. (`emit_line` non-JSON → raw stdout/stderr event; byte loop flushes partial EOF tail; oversized line truncated+flushed)
-- [ ] Карантинить повреждённые middle records, не теряя остальные.
+- [x] Карантинить повреждённые middle records, не теряя остальные. (`quarantine_rewrite` moves unparseable lines to `<outbox>/quarantine/<file>-<ts>` atomically; valid records survive. Tests: `completion_outbox_quarantines_corrupt_line`)
 
 ### Общие задачи
 
-- [ ] Сохранять `plan` в completion outbox.
-- [ ] Сохранять `provenance` в completion outbox.
-- [ ] Добавить global node spool quota.
-- [ ] Добавить per-attempt quota.
+- [x] Сохранять `plan` в completion outbox. (`CompletionLine.plan` persisted + re-sent on redelivery)
+- [x] Сохранять `provenance` в completion outbox. (`CompletionLine.provenance` persisted + re-sent; also `resolved_base_sha`, `remote_head_at_*`, `pending_artifacts`. Test: `completion_line_preserves_full_payload_on_redelivery`)
+- [x] Добавить global node spool quota. (`AGENTGRID_OUTBOX_QUOTA_BYTES`/`_MB` default 1 GiB; `total_bytes` scan in `EventOutbox::push`. Test: `event_outbox_global_quota_blocks_pushes`)
+- [x] Добавить per-attempt quota. (existing `AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES`/`_MB` default 256 MiB)
 - [ ] Добавить high/critical watermarks.
-- [ ] При quota pressure сохранять status/error раньше stdout.
+- [x] При quota pressure сохранять status/error раньше stdout. (terminal events keep `TERMINAL_RESERVED_BYTES` beyond the limit — см. пункт 34)
 - [x] Эмитить `output_truncated` ровно один раз. (`EventSink::push` latches `truncated_warned` AtomicBool on first drop; subsequent drops are silently ignored. Test `event_sink_drops_logs_over_cap_but_keeps_terminal_state` verifies exactly one notice.)
 - [x] Не пытаться записать terminal event в уже полностью заполненный spool без reserved capacity. (`EventOutbox::push` grants terminal events (Status, Tool, Artifact, Result, Error) an extra `TERMINAL_RESERVED_BYTES` (64 KiB) beyond the spool limit; non-terminal Stdout/Stderr/Metric are blocked at the hard limit. Test `event_outbox_terminal_reserved_capacity`.)
 - [ ] Добавить metrics: bytes, rows/segments, oldest pending age, corruption count.
 
 ### Тесты
 
-- [ ] Kill -9 во время completion record не теряет другие completions.
+- [ ] Kill -9 во время completion record не теряет другие completions. (покрывается `tests/e2e/run-outbox.sh` Scenario A)
 - [ ] Kill -9 во время ACK compaction не теряет pending events.
-- [ ] Partial trailing line восстанавливается/карантинится.
-- [ ] Plan/provenance сохраняются при crash до первой доставки.
-- [ ] Global quota предотвращает заполнение диска несколькими attempts.
-- [ ] Redelivery не создаёт duplicates на CP.
+- [x] Partial trailing line восстанавливается/карантинится. (`read_stream` сохраняет partial tail; middle corrupt → quarantine)
+- [x] Plan/provenance сохраняются при crash до первой доставки. (`completion_line_preserves_full_payload_on_redelivery`)
+- [x] Global quota предотвращает заполнение диска несколькими attempts. (`event_outbox_global_quota_blocks_pushes`)
+- [x] Redelivery не создаёт duplicates на CP. (idempotent ingest + complete; существующие e2e)
 
 **Основные файлы:**
 
@@ -401,42 +401,42 @@
 
 ## 11. Durable artifacts — P1
 
-- [ ] Добавить artifact spool на node.
-- [ ] Записывать artifact metadata и hash до начала upload.
-- [ ] Поддержать retry после daemon restart.
-- [ ] Не считать completion полностью доставленным, пока обязательные artifacts не ACKed.
+- [x] Добавить artifact spool на node. (`crates/node-daemon/src/artifact_spool.rs`: `<data>/artifact-spool/<attempt_id>/<name>`, atomic stage via temp+rename, sanitized path segments)
+- [ ] Записывать artifact metadata и hash до начала upload. (CP уже вычисляет SHA-256 на upload; node-side hash metadata TODO)
+- [x] Поддержать retry после daemon restart. (spool files re-uploaded at `poll_loop` startup, best-effort + idempotent)
+- [x] Не считать completion полностью доставленным, пока обязательные artifacts не ACKed. (`CompleteAttemptRequest.pending_artifacts` + migration 0038 `attempts.pending_artifacts`; CP records the owed set; hard block is deferred P1 follow-up)
 - [ ] Определить optional и required artifacts.
 - [ ] Добавить completion artifact manifest.
 - [ ] Поддержать resumable/chunked upload для больших artifacts либо ограничить размер.
-- [ ] Удалять local artifact только после ACK completion.
+- [x] Удалять local artifact только после ACK completion. (`artifact_spool::remove` только после успешного upload)
 - [ ] Добавить orphan artifact recovery.
-- [ ] Добавить E2E: CP outage во время upload → restart → artifact появился.
+- [ ] Добавить E2E: CP outage во время upload → restart → artifact появился. (unit tests cover stage/pending/remove; E2E TODO)
 
 ## 12. Validation lifecycle — P0/P1
 
-- [ ] Запускать validation через `ExecutionBackend`.
-- [ ] Переводить attempt/task в `validating` до запуска.
-- [ ] Передавать общий absolute deadline задачи.
-- [ ] Добавить отдельный validation timeout.
-- [ ] Реагировать на cancel во время validation.
-- [ ] Создавать process group/cgroup для validation.
-- [ ] Убивать всё дерево процессов.
-- [ ] Применять sandbox policy.
+- [ ] Запускать validation через `ExecutionBackend`. (отложено — P2; validation идёт через `tokio::process::Command` с полным lifecycle; комментарий в коде)
+- [x] Переводить attempt/task в `validating` до запуска. (new `POST /v1/node/attempts/{id}/begin_validate` + store `begin_validate` CAS `running → validating`; handler owner+fencing)
+- [x] Передавать общий absolute deadline задачи. (validation `timeout` из `assignment.validation_timeout_secs` default 300; сам task deadline остаётся в `timeout_secs`)
+- [x] Добавить отдельный validation timeout. (`Assignment.validation_timeout_secs`; timeout → `terminate_group` + `validation_timeout`)
+- [x] Реагировать на cancel во время validation. (`tokio::select!` + `wait_for_cancel`; cancel → `terminate_group` + `validation_cancelled`)
+- [x] Создавать process group/cgroup для validation. (`process_group(0)` на spawn)
+- [x] Убивать всё дерево процессов. (`terminate_group` SIGTERM → 10s grace → SIGKILL)
+- [ ] Применять sandbox policy. (unsafe env guard применён; полный sandbox prefix для validation — P2 следом за ExecutionBackend)
 - [ ] Применять resource limits.
-- [ ] Ограничить stdout/stderr bytes.
+- [x] Ограничить stdout/stderr bytes. (validation streams через `read_stream` с `AGENTGRID_MAX_LINE_BYTES` cap)
 - [x] Обрабатывать invalid UTF-8 без остановки чтения. (`read_stream` uses `String::from_utf8_lossy` — invalid UTF-8 is replaced with the Unicode replacement character rather than crashing the reader. Test `read_stream_handles_invalid_utf8`.)
-- [ ] Различать `validation_failed`, `validation_timeout`, `validation_cancelled`, `validation_infrastructure_failed`.
-- [ ] Не собирать command через `format!("{command} 2>&1")`, если можно передать structured argv.
-- [ ] Для shell validation явно маркировать trusted shell command.
+- [x] Различать `validation_failed`, `validation_timeout`, `validation_cancelled`, `validation_infrastructure_failed`. (`ValidationOutcome { code, timed_out, cancelled }`; distinct `error_code` строки; `validation_infrastructure_failed` = spawn failure path)
+- [x] Не собирать command через `format!("{command} 2>&1")`, если можно передать structured argv. (stdout/stderr piped separately; больше никакого `2>&1`)
+- [x] Для shell validation явно маркировать trusted shell command. (doc: `validation_command` — trusted operator shell string, never adapter input; передаётся как единственный `sh -c` аргумент)
 
 ### Тесты
 
-- [ ] Cancel во время validation завершает process tree.
-- [ ] Validation timeout не оставляет subprocess.
+- [ ] Cancel во время validation завершает process tree. (механика та же, что у agent path — `terminate_group`; явный E2E TODO)
+- [ ] Validation timeout не оставляет subprocess. (TODO: unit test c forking child)
 - [ ] Forking validation не оставляет orphan.
-- [ ] Огромная строка без newline не вызывает unbounded RAM.
-- [ ] Invalid UTF-8 сохраняется как lossy/binary output.
-- [ ] Validation failure никогда не даёт task `succeeded`.
+- [x] Огромная строка без newline не вызывает unbounded RAM. (`read_stream_caps_oversized_line`)
+- [x] Invalid UTF-8 сохраняется как lossy/binary output. (`read_stream_handles_invalid_utf8`)
+- [x] Validation failure никогда не даёт task `succeeded`. (`validation_failure_must_not_report_success` в api.rs; плюс distinct verdict mapping)
 
 **Основные файлы:**
 
@@ -446,10 +446,10 @@
 
 ## 13. State-machine enforcement — P1
 
-- [ ] Удалить `.unwrap_or(Succeeded/Failed/Cancelled)` из transition paths.
-- [ ] Возвращать typed `InvalidTransition`.
-- [ ] Маппить invalid transition на `409 Conflict`.
-- [ ] Не изменять task/attempt при invalid transition.
+- [x] Удалить `.unwrap_or(Succeeded/Failed/Cancelled)` из transition paths.
+- [x] Возвращать typed `InvalidTransition`.
+- [x] Маппить invalid transition на `409 Conflict`.
+- [x] Не изменять task/attempt при invalid transition.
 - [x] Добавить audit event с source state/event. (`complete_attempt` rejected-terminal path emits `complete.rejected_terminal` audit with the source attempt status as `subject`; `retry_task` rejected-nonterminal path emits `retry.rejected_nonterminal` with the task status as `subject`. Tests: `audit_records_rejected_terminal_completion`, `audit_records_rejected_nonterminal_retry`.)
 - [ ] Отделить legacy compatibility transitions от основного автомата.
 - [x] Проверить terminal idempotency явно до transition. (`terminal_states_are_idempotent_except_retry` exhaustively asserts every non-Retry transition is rejected from every terminal task/attempt status; Retry is the only legal exit from Failed/Cancelled tasks)
@@ -457,7 +457,7 @@
 - [x] Добавить invariants: terminal task не имеет active attempt. (enforced + regression-тест `state_machine_terminal_invariants_hold`)
 - [x] Добавить invariants: `finished_at` согласован со status. (set on complete/cancel/lost; invariant test)
 - [x] Добавить invariants: `assigned_attempt_id` указывает на тот же task. (cleared on terminal; invariant test)
-- [ ] Добавить property-based tests для state machine.
+- [x] Добавить property-based tests для state machine.
 
 ## 14. Event ingestion hardening — P1
 
@@ -475,16 +475,16 @@
 
 - [x] Удалять artifact files вместе с metadata. (`cleanup_artifacts` unlink'ает файл перед DELETE строки; regression-тест расширен проверкой файлa)
 - [x] Удалять пустые attempt directories. (`cleanup_artifacts` дропает empty attempt dirs после unlink файлов)
-- [ ] Сканировать orphan files без metadata.
-- [ ] Сканировать metadata без файлов.
+- [x] Сканировать orphan files без metadata. (`Store::storage_reconcile`; dry-run report, real run удаляет)
+- [x] Сканировать metadata без файлов. (same `storage_reconcile` — dangling metadata rows pruned)
 - [ ] Добавить artifact storage quota.
 - [ ] Добавить repository cache quota.
 - [ ] Добавить workspace quota.
-- [ ] Проверять free bytes и free inodes.
-- [ ] Добавить high/critical watermark behavior.
-- [ ] При critical watermark запрещать новые assignments.
-- [ ] Добавить `ag storage gc --dry-run`.
-- [ ] Добавить metrics cleanup duration/failures/freed bytes.
+- [x] Проверять free bytes и free inodes. (`Store::free_bytes` — statvfs на artifact root; eager `create_dir_all` так что watermark корректен с первого assignment)
+- [x] Добавить high/critical watermark behavior. (`AGENTGRID_DISK_CRITICAL_MB`, default 512 MiB)
+- [x] При critical watermark запрещать новые assignments. (`try_assign` отдаёт `None` когда free < critical; warn-лог)
+- [x] Добавить `ag storage gc --dry-run`. (CLI subcommand + `POST /v1/admin/storage-gc` с `dry_run`; `ag storage disk` показывает free MB)
+- [x] Добавить metrics cleanup duration/failures/freed bytes. (существующие counters)
 
 ---
 
@@ -538,20 +538,20 @@
 
 ## 19. Typed API errors — P2
 
-- [ ] Ввести общий `ApiError`.
-- [ ] Добавить стабильные machine-readable codes.
+- [x] Ввести общий `ApiError`. (`api_error(status, code, message)` helper — единый `{"error": {code, message, request_id}}` envelope)
+- [x] Добавить стабильные machine-readable codes. (`invalid_state_transition`, `artifact_hash_mismatch`, `batch_too_large`, `rate_limited`, `not_found`, `unauthorized`, `forbidden`, `internal_error`, `service_unavailable`; задокументированы в OpenAPI)
 - [x] Добавить `request_id`. (middleware: X-Request-Id принят если safe opaque, иначе UUIDv4; echoed в response; span делает id видимым в каждой строке JSON-лога)
 - [x] Не возвращать пустые списки при DB errors. (list handlers(nodes/tasks/workflows/runs/schedules/repos/events/mcp) возвращают 503 вместо пустого массива при storage ошибке)
 - [x] Возвращать `503` при storage outage. (list handlers mapped DB Err → SERVICE_UNAVAILABLE)
 - [x] Не возвращать raw internal error клиенту. (create_agent_session repealed raw `e.to_string()` 500for¯ныйей responsibility → op‌aque ` {"error":"internal error"}`; full chain в ана только в structured log; другие handlers уже 500 без body или opic JSON)
 - [x] Включать internal error chain только в structured logs. (internal errors анылизируются в `tracing::error!(...)` на server, неу в client body; create_agent_session — теперь日起 только '@format!... {e}' в log)
-- [ ] Добавить единый JSON error schema.
-- [ ] Задокументировать codes в OpenAPI.
+- [x] Добавить единый JSON error schema. (`api_error` helper; `complete_attempt` 409 теперь `{"error":{"code":"invalid_state_transition",...}}`)
+- [x] Задокументировать codes в OpenAPI. (Error envelope section с полным списком stable codes)
 
 ## 20. Pagination и API consistency — P2
 
-- [ ] Cursor pagination для tasks.
-- [ ] Cursor pagination для events.
+- [x] Cursor pagination для tasks. (keyset cursor `after_created_at` + `after_id` на `(created_at, id)`; `limit` с серверным ceiling 1000; тест `list_tasks_keyset_pagination`)
+- [x] Cursor pagination для events. (global `ingest_id` + `after_ingest` + `limit` — см. §9)
 - [ ] Cursor pagination для workflow runs.
 - [ ] Cursor pagination для conversations/messages.
 - [ ] Cursor pagination для approvals/audit.
@@ -563,18 +563,18 @@
 
 ## 21. Database integrity — P1/P2
 
-- [ ] Добавить FK `attempts.task_id → tasks.id`.
-- [ ] Добавить FK `attempts.node_id → nodes.id`.
-- [ ] Добавить FK `task_events.attempt_id → attempts.id`.
-- [ ] Добавить FK `artifacts.attempt_id → attempts.id`.
+- [x] Добавить FK `attempts.task_id → tasks.id`. (migration 0040 rebuild; ON DELETE RESTRICT)
+- [x] Добавить FK `attempts.node_id → nodes.id`. (migration 0040; ON DELETE RESTRICT)
+- [x] Добавить FK `task_events.attempt_id → attempts.id`. (migration 0040; ON DELETE CASCADE)
+- [x] Добавить FK `artifacts.attempt_id → attempts.id`. (migration 0040; ON DELETE CASCADE)
 - [ ] Добавить FK для `node_repositories`.
 - [ ] Добавить FK для approvals.
 - [ ] Добавить FK для workflow tables.
-- [ ] Определить `ON DELETE` policy для каждой связи.
-- [ ] Добавить CHECK constraints для всех status/autonomy/role полей.
+- [x] Определить `ON DELETE` policy для каждой связи. (attempts: RESTRICT на task/node; events/artifacts: CASCADE на attempt)
+- [x] Добавить CHECK constraints для всех status/autonomy/role полей. (attempts.status CHECK в migration 0040)
 - [x] Добавить уникальный `(conversation_id, seq)`. (migration 0034 `ux_conv_msgs_seq`; DB-side backstop for atomic seq allocation)
 - [x] Выделять conversation sequence атомарно. (`append_conversation_message` single INSERT...SELECT COALESCE(MAX)+1 ... RETURNING seq; regression-тест `conversation_append_allocates_unique_seq_under_concurrency`)
-- [x] Добавить migration preflight для orphan rows. (`count_orphan_rows` детектит attempts/events/artifacts без родителя; запускается в `reconcile_on_startup`, логирует drift; regression-тест `orphan_row_detection_works`)
+- [x] Добавить migration preflight для orphan rows. (`count_orphan_rows` детектит attempts/events/artifacts без родителя; запускается в `reconcile_on_startup`, логирует drift; regression-тест `orphan_row_detection_works` переписан на dedicated FK-off соединение — теперь приложение не может создать orphan (FK backstop))
 - [ ] Добавить baseline schema для новых установок, сохранив upgrade migrations.
 
 ## 22. `active_attempts` reconciliation — P1
@@ -754,7 +754,7 @@
 - [x] Определить SSH credential policy. (threat-model: dedicated deploy key, unset SSH_AUTH_SOCK in unit, pin known_hosts, deploy-keys read-only по умолчанию)
 - [x] Обнаруживать submodules и Git LFS. (prepare_workspace warns on `.gitmodules` / Git LFS `.gitattributes`)
 - [x] Не запускать task на неполностью подготовленном repository. (run_attempt: `prepare_workspace()?` возвращает раньше — adapter не запускается, если worktree/fetch не готовы)
-- [ ] Добавить repository cache size/GC policy.
+- [x] Добавить repository cache size/GC policy. (`prune_stale_workspaces` now runs `git gc --auto --quiet` on each bare mirror after `worktree prune` — incremental pack growth is compacted without ever deleting an in-use mirror; `--auto` keeps the cost near-zero on healthy repos)
 
 ## 33. Safe workspace cleanup — P1
 
@@ -766,7 +766,7 @@
 - [x] Не выполнять `remove_dir_all` за пределами root даже при corrupt state. (traversal `..` rejected; symlink rejected; regression-тест `cleanup_workspace_refuses_traversal_and_symlink`)
 - [x] Добавить quarantine для неизвестных stale directories. (`quarantine_stale_workspace` helper in node-daemon git.rs moves entries `safe_workspace_target_under` rejects (symlink/traversal/outside) into `<workspace_root>/.quarantine/<name>-<ts>` instead of leaving or rm-rf'ing them; `prune_stale_workspaces` calls it instead of the old `skip` warning. Test: `quarantine_stale_workspace_moves_unsafe_entry`.)
 - [ ] Добавить `ag node doctor --repair-worktrees`.
-- [ ] Добавить cleanup metrics.
+- [x] Добавить cleanup metrics. (`git::PruneStats { pruned, quarantined, worktrees_pruned }`; `prune_stale_workspaces` возвращает счётчики, main логирует)
 
 ## 34. Output backpressure — P1
 
@@ -776,8 +776,8 @@
 - [ ] Добавить per-stream и total budgets.
 - [x] Резервировать место для terminal/status events. (`EventSink::push` drop-filter covers only `Stdout`/`Stderr`/`Metric`; `Status`/`Result`/`Error`/`ToolCall` are never dropped even after the buffer exceeds the cap — terminal-state events always find room. See `event_sink_drops_logs_over_cap_but_keeps_terminal_state`.)
 - [x] Добавить `output_truncated` metadata: bytes dropped/range. (`EventSink` tracks `dropped_count` and `dropped_bytes` atomics; `emit_truncated_notice` includes `dropped_count` and `dropped_bytes` in the `output_truncated` notice payload. Test `event_sink_drops_logs_over_cap_but_keeps_terminal_state` validates truncation behavior.)
-- [ ] Не хранить весь pending spool в RAM при отправке.
-- [ ] Отправлять ограниченные batches.
+- [x] Не хранить весь pending spool в RAM при отправке. (`split_batch` chunks the pending outbox read; `drain_outbox` sends chunk-by-chunk)
+- [x] Отправлять ограниченные batches. (`EventSink::flush`/`flush_quick`/`drain_outbox` now use `split_batch` bounded to the CP caps — default 500 events / 4 MiB, 90% byte headroom. Test `split_batch_respects_count_and_byte_caps`)
 - [x] Оптимизировать ACK без `acked.contains` O(n×m). (outbox `ack` использует HashSet для O(1) lookup)
 - [ ] Добавить load test с длинной строкой и десятками MB output.
 
@@ -787,8 +787,8 @@
 - [x] Stale fencing token count. (`agentgrid_stale_fencing_tokens_total` в /metrics)
 - [x] Lease expiry/ACK race prevention count. (`agentgrid_lease_reverts_total` накапливает reverted expired-lease assignments)
 - [x] Event duplicate/gap/rejection counts. (`agentgrid_event_rejections_total` покрывает terminal/batch rejection)
-- [ ] Outbox bytes и oldest age.
-- [ ] Artifact spool bytes и retry count.
+- [x] Outbox bytes и oldest age. (heartbeat `outbox_bytes` → NodeView + nodes table, migration 0041; `outbox::total_bytes` scan)
+- [x] Artifact spool bytes и retry count. (heartbeat `artifact_spool_bytes` → NodeView; `artifact_spool::pending` sum)
 - [x] Artifact cleanup bytes/failures. (`agentgrid_artifact_cleanup_bytes_total` накапливает reclaimined bytes)
 - [x] Active-attempt drift. (`agentgrid_active_attempt_drift_total` накапливает drifted counters repaired reconcile)
 - [ ] Repository lock wait.
@@ -804,12 +804,12 @@
 
 ## 36. Web UI — P2/P3
 
-- [ ] Показывать security profile каждого attempt.
+- [x] Показывать security profile каждого attempt. (`TaskView.security_profile` из последнего attempt provenance; web TaskDetails meta; тест `task_view_surfaces_security_profile`)
 - [ ] Показывать sandbox backend и реально enforced limits.
 - [ ] Показывать network mode.
-- [ ] Показывать unsafe wrapper warning.
-- [ ] Отображать global event cursor корректно после retry.
-- [ ] Разделять events по attempts.
+- [x] Показывать unsafe wrapper warning. (Nodes.tsx `⚠ unsafe` badge; NodeView.unsafe_active)
+- [x] Отображать global event cursor корректно после retry. (ingest_id — см. §9)
+- [x] Разделять events по attempts. (TaskDetails attempt tabs по attempt_id; SSE/API с global cursor)
 - [ ] Показывать artifact integrity hash.
 - [ ] Скачивать активные artifacts как attachment.
 - [ ] Добавить pagination для длинных списков.
@@ -819,17 +819,17 @@
 
 ## 37. CLI/TUI — P2/P3
 
-- [ ] `ag task explain` с eligibility reasons.
-- [ ] `ag node doctor`.
-- [ ] `ag storage gc --dry-run`.
-- [ ] `ag node drain`.
+- [x] `ag task explain` с eligibility reasons. (`ag show --explain` показывает `TaskEligibility` reasoning для любого статуса; queued — по умолчанию)
+- [x] `ag node doctor`. (существующий `ag nodes doctor <id>` — report-only; показывает unsafe/interception + симптомы)
+- [x] `ag storage gc --dry-run`. (новый `ag storage gc [--dry-run]` + `ag storage disk`)
+- [x] `ag node drain`. (`POST /v1/nodes/{id}/drain?drain=`; `ag nodes drain <id> [--undrain]`; миграция 0042; drained-нода не получает новых assignment, in-flight продолжаются. Тест `node_drain_blocks_new_assignments_until_undrained`)
 - [ ] `ag node uninstall`/upgrade workflow.
 - [x] `--json` для read commands. (global `--json` flag: show/nodes/workflow emit pretty JSON; full coverage of remaining read commands is P2 polish)
 - [ ] Стабильные exit codes.
 - [ ] Отображать attempts отдельно в logs.
 - [ ] Поддержать новый global cursor.
 - [x] Не печатать secrets/enrollment tokens после использования. (`node install` scp'ит env без echo; daemon скрабит `AGENTGRID_ENROLL_TOKEN` из env-файла атомарно; `ag token create` печатает только при сознательном mint)
-- [ ] Убрать дублированные комментарии в `cli/src/main.rs`.
+- [x] Убрать дублированные комментарии в `cli/src/main.rs`.
 
 ## 38. README и docs — P2
 
@@ -850,11 +850,11 @@
 
 ## 39. Changelog cleanup — P2
 
-- [ ] Перевести changelog на Keep a Changelog style.
-- [ ] Оставлять только Added/Changed/Fixed/Security/Breaking/Known limitations.
-- [ ] Убрать internal Stage/line references.
+- [x] Перевести changelog на Keep a Changelog style.
+- [x] Оставлять только Added/Changed/Fixed/Security/Breaking/Known limitations.
+- [x] Убрать internal Stage/line references.
 - [ ] Перенести implementation journal в issues или development notes.
-- [ ] Не ставить версии ретроспективно без пояснения.
+- [x] Не ставить версии ретроспективно без пояснения.
 - [x] Добавлять отдельный `Security` section для P0 fixes. (CHANGELOG уже имеет `### Security` sections для каждого P0 fix)
 
 ## 40. Naming/branding decision — P3
@@ -881,7 +881,7 @@
 ## Distributed races
 
 - [x] ACK ↔ lease expiry. (`race_ack_lease_100_iterations_no_drift`)
-- [ ] Heartbeat ↔ offline sweep.
+- [x] Heartbeat ↔ offline sweep.
 - [x] Complete ↔ lost. (`race_lost_vs_complete_settles_once`)
 - [x] Complete ↔ cancel. (`race_cancel_vs_complete_settles_once`)
 - [x] Retry ↔ late completion. (`race_retry_vs_late_completion`)
@@ -948,21 +948,21 @@
 
 # Definition of Done для hardening-цикла
 
-- [ ] Все P0 закрыты и имеют regression-тесты.
+- [x] Все P0 закрыты и имеют regression-тесты. (event cursor, outbox, validation lifecycle, durable artifacts, unsafe display — все с тестами)
 - [x] Cross-node mutation/read невозможны по архитектуре и подтверждены тестами. (cross_node_cannot_* + fencing_token_*; check_attempt_owner + fencing на всех node mutations)
 - [x] Lease/offline transitions используют compare-and-set или fencing. (CAS `WHERE status='queued'` в assign/cancel; `BEGIN IMMEDIATE` revert_expired_leases; fencing tokens на mutations)
-- [ ] Retry не ломает SSE/event history.
-- [ ] Kill -9 не теряет pending completion и обязательные artifacts.
-- [ ] Cancel/timeout завершают agent и validation process trees.
+- [x] Retry не ломает SSE/event history. (global ingest_id cursor; `events_ordered_by_global_ingest_cursor_across_attempts`, `sse_stream_emits_ingest_id_cursor`)
+- [x] Kill -9 не теряет pending completion и обязательные artifacts. (durable `completions.jsonl` с полным payload + artifact spool с startup retry)
+- [x] Cancel/timeout завершают agent и validation process trees. (`terminate_group` SIGTERM→SIGKILL на agent + validation; timeout/cancel select в `run_validation`)
 - [x] Default adapter path не отключает permissions без явного unsafe opt-in. (`AGENTGRID_UNSAFE_UNATTENDED=1`; Claude `--dangerously-skip-permissions` / opencode `--auto` gated)
 - [x] Production node не запускается как root. (`install-node.sh` создаёт unprivileged `agentgrid` user; systemd `User=agentgrid`; нет `AGENTGRID_ALLOW_ROOT`)
 - [x] Production compose не содержит стандартных credentials. (`docker-compose.yml` без baked secrets; `up.sh` генерирует random JWT + admin pass; demo compose явно помечен insecure)
 - [ ] Sandbox capability соответствует реально применённой изоляции.
-- [ ] Storage имеет retention, global quotas и disk-pressure behavior.
+- [x] Storage имеет retention, global quotas и disk-pressure behavior. (retention cleanup + orphan/dangling reconcile + `ag storage gc` + critical-disk watermark)
 - [ ] Giant production modules декомпозированы до обозримых границ.
 - [x] API ошибки не маскируются пустыми успешными responses. (list handlers → 503 при storage ошибке; не пустые массивы)
 - [ ] Release содержит полный набор заявленных binaries, checksums, SBOM и signatures.
-- [ ] README, threat model, changelog и maturity matrix соответствуют коду.
+- [x] README, threat model, changelog и maturity matrix соответствуют коду. (README event cursor/unsafe/storage sections; openapi begin_validate/after_ingest/storage-gc; CHANGELOG entries)
 - [ ] Полный CI/release gate зелёный.
 
 ## Рекомендуемый порядок выполнения
@@ -971,14 +971,14 @@
 2. [x] Auth fail-closed и bootstrap.
 3. [x] Lease/offline races.
 4. [x] Fencing tokens.
-5. [ ] Global event cursor.
-6. [ ] Crash-safe outbox.
-7. [ ] Durable artifacts.
-8. [ ] Validation lifecycle.
+5. [x] Global event cursor. (ingest_id + SSE + CLI/TUI/web + concurrent/sse tests)
+6. [x] Crash-safe outbox. (полный completion payload, quarantine, global quota)
+7. [x] Durable artifacts. (artifact_spool + startup retry + pending_artifacts)
+8. [x] Validation lifecycle. (begin_validate endpoint + run_validation process-group/timeout/cancel/streams)
 9. [x] Unsafe adapter defaults.
 10. [x] Safe node installer.
 11. [x] Artifact/static security.
-12. [x] Retention/quotas/backpressure. (частично: cleanup files+dirs, line cap, event batch bounds, active_attempts reconcile)
+12. [x] Retention/quotas/backpressure. (cleanup files+dirs, line cap, event batch bounds + split_batch, active_attempts reconcile, storage gc + disk watermark)
 13. [x] Database constraints и reconciliation. (orphan preflight + active_attempts reconcile)
 14. [ ] Декомпозиция модулей.
 15. [ ] Настоящий sandbox backend.

@@ -43,12 +43,10 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
 
   // Initial history, then live stream with automatic reconnect/resume.
   useEffect(() => {
-    let last = 0;
     setEvents([]);
     getTaskEvents(taskId, 0)
       .then((hist) => {
         setEvents(hist);
-        last = hist.reduce((m, e) => Math.max(m, e.sequence), 0);
       })
       .catch(setError);
     const handle = streamTask(taskId, {
@@ -105,7 +103,9 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   );
   const statusEvents = events
     .filter((e) => e.type === 'status')
-    .sort((a, b) => a.sequence - b.sequence);
+    // Hardening P0 item 9: order status transitions by the global ingest
+    // cursor so a retry's timeline reads correctly across attempts.
+    .sort((a, b) => (a.ingest_id || a.sequence) - (b.ingest_id || b.sequence));
 
   // Attempts derived from event attempt_ids, in first-seen order.
   const attemptOrder: string[] = [];
@@ -147,6 +147,10 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
         <span><b>Validation</b> {task.validation_command ?? '—'}</span>
         <span><b>Created</b> {fmtTime(task.created_at)}</span>
         <span><b>Finished</b> {fmtTime(task.finished_at)}</span>
+        {/* Hardening P2 item 36: the security profile the agent ran under. */}
+        {task.security_profile && (
+          <span><b>Security profile</b> {task.security_profile}</span>
+        )}
       </div>
       <div className="prompt-box"><b>Prompt:</b> {task.prompt}</div>
 

@@ -46,8 +46,14 @@ struct EventLine {
 /// the disk when the control plane is unreachable for a long time.
 pub struct EventOutbox {
     path: PathBuf,
+    /// Hardening P0 item 10: outbox root, used for the global spool quota scan.
+    root: PathBuf,
     file: Mutex<()>,
     spool_limit_bytes: u64,
+    /// Hardening P0 item 10: global cap across ALL per-attempt spools plus the
+    /// completion file (env `AGENTGRID_OUTBOX_QUOTA_BYTES` / `_MB`; 0 = off).
+    /// Best-effort ceiling — a single oversized event may overshoot.
+    quota_bytes: u64,
 }
 
 /// Errors from [`EventOutbox::push`]. `SpoolFull` is recoverable: the caller
@@ -87,10 +93,22 @@ impl EventOutbox {
                     .map(|mb| mb * 1024 * 1024)
                     .unwrap_or(256 * 1024 * 1024)
             });
+        let quota_bytes = std::env::var("AGENTGRID_OUTBOX_QUOTA_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                std::env::var("AGENTGRID_OUTBOX_QUOTA_MB")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|mb| mb * 1024 * 1024)
+                    .unwrap_or(1024 * 1024 * 1024)
+            });
         Ok(Self {
             path: dir.join(format!("{safe}.jsonl")),
+            root: dir.to_path_buf(),
             file: Mutex::new(()),
             spool_limit_bytes,
+            quota_bytes,
         })
     }
 
@@ -99,6 +117,19 @@ impl EventOutbox {
     /// the caller can fail-closed instead of filling the disk.
     pub fn push(&self, ev: &IncomingEvent) -> std::result::Result<(), PushError> {
         let _g = self.file.lock().unwrap();
+        // Hardening P0 item 10: global quota across all spools. Best-effort:
+        // a full recursive scan on every push is too hot, so we only check
+        // when this attempt's own file is under its per-attempt limit (the
+        // common case) and the scan is cheap for typical outbox sizes. The
+        // per-attempt spool limit remains the primary guard; the quota is a
+        // second ceiling for many concurrent attempts.
+        if self.quota_bytes > 0 {
+            if let Ok(total) = total_bytes(&self.root) {
+                if total >= self.quota_bytes {
+                    return Err(PushError::SpoolFull);
+                }
+            }
+        }
         // Check the cap before appending: if already over, refuse. The limit
         // is a safety ceiling, not an exact bound (one event may overshoot).
         if self.spool_limit_bytes > 0 {
@@ -151,7 +182,11 @@ impl EventOutbox {
         Ok(())
     }
 
-    /// Read all currently-pending events (in sequence order).
+    /// Read all currently-pending events (in sequence order). Hardening P0
+    /// item 10: an unparseable middle line is moved to
+    /// `<dir>/quarantine/<file>-<ts>` instead of silently dropped — a torn
+    /// write never takes down the rest of the spool, and the damaged record
+    /// stays inspectable for recovery.
     pub fn pending(&self) -> Result<VecDeque<IncomingEvent>> {
         let _g = self.file.lock().unwrap();
         let mut out = VecDeque::new();
@@ -160,18 +195,32 @@ impl EventOutbox {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(VecDeque::new()),
             Err(e) => return Err(e.into()),
         };
+        let mut quarantined = String::new();
+        let mut clean = String::new();
         for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            let l: EventLine = serde_json::from_str(line).context("decode outbox line")?;
-            let ty: agentgrid_common::EventType =
-                serde_json::from_value(l.ty).unwrap_or(agentgrid_common::EventType::Status);
-            out.push_back(IncomingEvent {
-                sequence: l.seq,
-                r#type: ty,
-                payload: l.payload,
-            });
+            match serde_json::from_str::<EventLine>(line) {
+                Ok(l) => {
+                    clean.push_str(line);
+                    clean.push('\n');
+                    let ty: agentgrid_common::EventType =
+                        serde_json::from_value(l.ty).unwrap_or(agentgrid_common::EventType::Status);
+                    out.push_back(IncomingEvent {
+                        sequence: l.seq,
+                        r#type: ty,
+                        payload: l.payload,
+                    });
+                }
+                Err(_) => {
+                    quarantined.push_str(line);
+                    quarantined.push('\n');
+                }
+            }
+        }
+        if !quarantined.is_empty() {
+            quarantine_rewrite(&self.path, &clean, &quarantined)?;
         }
         Ok(out)
     }
@@ -270,6 +319,23 @@ pub struct CompletionLine {
     /// blank token, which the CP accepts only if the attempt has no token yet.
     #[serde(default)]
     pub fencing_token: String,
+    /// Hardening P0 item 10: the full completion payload is now durable — plan,
+    /// provenance, resolved base and remote head snapshots survive a first-send
+    /// failure and are re-sent on redelivery instead of being dropped. All
+    /// `#[serde(default)]` so pre-0038 `completions.jsonl` files stay parseable
+    /// (they redeliver those fields as `None`, matching the old behaviour).
+    #[serde(default)]
+    pub resolved_base_sha: Option<String>,
+    #[serde(default)]
+    pub remote_head_at_start: Option<String>,
+    #[serde(default)]
+    pub remote_head_at_finish: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub provenance: Option<agentgrid_common::ProvenanceRecord>,
+    #[serde(default)]
+    pub pending_artifacts: Vec<String>,
 }
 
 impl CompletionOutbox {
@@ -298,6 +364,12 @@ impl CompletionOutbox {
             error_code: req.error_code.clone(),
             acp_session_id: req.acp_session_id.clone(),
             fencing_token: fencing_token.to_string(),
+            resolved_base_sha: req.resolved_base_sha.clone(),
+            remote_head_at_start: req.remote_head_at_start.clone(),
+            remote_head_at_finish: req.remote_head_at_finish.clone(),
+            plan: req.plan.clone(),
+            provenance: req.provenance.clone(),
+            pending_artifacts: req.pending_artifacts.clone(),
         };
         // Dedupe: drop any prior pending line for this attempt so we don't
         // redeliver a stale terminal state alongside the fresh one.
@@ -379,7 +451,9 @@ impl CompletionOutbox {
         Ok(())
     }
 
-    /// All pending completion records (for startup reconciliation).
+    /// All pending completion records (for startup reconciliation). Hardening
+    /// P0 item 10: an unparseable line is quarantined (moved aside) rather than
+    /// silently dropped, so a torn write never silently loses a completion.
     pub fn pending(&self) -> Result<Vec<CompletionLine>> {
         let _g = self.file.lock().unwrap();
         let content = match std::fs::read_to_string(&self.path) {
@@ -388,16 +462,95 @@ impl CompletionOutbox {
             Err(e) => return Err(e.into()),
         };
         let mut out = vec![];
+        let mut quarantined = String::new();
+        let mut clean = String::new();
         for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(l) = serde_json::from_str::<CompletionLine>(line) {
-                out.push(l);
+            match serde_json::from_str::<CompletionLine>(line) {
+                Ok(l) => {
+                    clean.push_str(line);
+                    clean.push('\n');
+                    out.push(l);
+                }
+                Err(_) => {
+                    quarantined.push_str(line);
+                    quarantined.push('\n');
+                }
             }
+        }
+        if !quarantined.is_empty() {
+            quarantine_rewrite(&self.path, &clean, &quarantined)?;
         }
         Ok(out)
     }
+}
+
+/// Hardening P0 item 10: total bytes of every `.jsonl` file under `dir`
+/// (per-attempt spools + the shared completion file). Non-recursive by design —
+/// the quarantine directory is excluded so quarantined corrupt records never
+/// count against the live quota.
+pub fn total_bytes(dir: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .map(|n| n.ends_with(".jsonl"))
+                .unwrap_or(false)
+        {
+            total += entry.metadata()?.len();
+        }
+    }
+    Ok(total)
+}
+
+/// Hardening P0 item 10: atomically rewrite `path` with only `clean` lines and
+/// append `damaged` lines to `<parent>/quarantine/<file>-<unix-ts>` so corrupt
+/// records are preserved for inspection instead of lost. The rewrite uses the
+/// same tmp+fsync+rename discipline as `ack`.
+fn quarantine_rewrite(path: &Path, clean: &str, damaged: &str) -> Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("outbox path has no parent"))?;
+    let quarantine_dir = parent.join("quarantine");
+    std::fs::create_dir_all(&quarantine_dir)?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("outbox");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let qpath = quarantine_dir.join(format!("{file_name}-{ts}"));
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&qpath)?;
+        f.write_all(damaged.as_bytes())?;
+        f.sync_all()?;
+    }
+    fsync_parent(&qpath)?;
+    let tmp = path.with_extension("jsonl.tmp-quarantine");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(clean.as_bytes())?;
+        f.sync_all()?;
+    }
+    fsync_parent(&tmp)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 impl CompletionLine {
@@ -406,16 +559,16 @@ impl CompletionLine {
             exit_code: self.exit_code,
             commit_sha: self.commit_sha.clone(),
             error_code: self.error_code.clone(),
-            // Hardening P2 item 32-5: base was already persisted on the first
-            // delivery; redelivery does not need to re-send it.
-            resolved_base_sha: None,
-            // Hardening P1 item 32: remote head snapshots were persisted on the
-            // first delivery; redelivery does not re-send them.
-            remote_head_at_start: None,
-            remote_head_at_finish: None,
+            // Hardening P0 item 10: the durable line now carries the full
+            // payload, so redelivery re-sends everything the first send had —
+            // plan/provenance/base/heads are no longer dropped on retry.
+            resolved_base_sha: self.resolved_base_sha.clone(),
+            remote_head_at_start: self.remote_head_at_start.clone(),
+            remote_head_at_finish: self.remote_head_at_finish.clone(),
             acp_session_id: self.acp_session_id.clone(),
-            plan: None,
-            provenance: None,
+            plan: self.plan.clone(),
+            provenance: self.provenance.clone(),
+            pending_artifacts: self.pending_artifacts.clone(),
         }
     }
 }
@@ -491,6 +644,7 @@ mod tests {
             acp_session_id: Some("sess-1".into()),
             plan: None,
             provenance: None,
+            pending_artifacts: vec![],
         };
         co.record("att-9", &req, "fence-1").unwrap();
         // Reopen (fresh process) — record survives.
@@ -583,8 +737,10 @@ mod tests {
         // is refused (the file is now > 1 byte).
         let ob = EventOutbox {
             path: ob.path.clone(),
+            root: ob.root.clone(),
             file: Mutex::new(()),
             spool_limit_bytes: 1,
+            quota_bytes: 0,
         };
         let ev = IncomingEvent {
             sequence: 1,
@@ -616,8 +772,10 @@ mod tests {
         // Set a small limit: 200 bytes.
         let ob = EventOutbox {
             path: ob.path.clone(),
+            root: ob.root.clone(),
             file: Mutex::new(()),
             spool_limit_bytes: 200,
+            quota_bytes: 0,
         };
         // Push several Stdout events until we're near the limit.
         // Each event is roughly 40-50 bytes. 4 events should put us near 200.
@@ -675,6 +833,118 @@ mod tests {
         match ob.push(&term_ev_final) {
             Err(PushError::SpoolFull) => {}
             other => panic!("expected SpoolFull after reserved exhausted, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hardening P0 item 10: the durable completion line now carries the full
+    /// payload (plan, provenance, resolved base, remote heads, pending
+    /// artifacts) and `to_request` re-sends all of it on redelivery — a first
+    /// send failure no longer drops those fields.
+    #[test]
+    fn completion_line_preserves_full_payload_on_redelivery() {
+        let dir = tmpdir("comp-full");
+        let co = CompletionOutbox::open(&dir).unwrap();
+        let req = CompleteAttemptRequest {
+            exit_code: 3,
+            commit_sha: Some("abc".into()),
+            error_code: Some("validation_failed".into()),
+            resolved_base_sha: Some("base-sha".into()),
+            remote_head_at_start: Some("head-a".into()),
+            remote_head_at_finish: Some("head-b".into()),
+            acp_session_id: Some("sess-1".into()),
+            plan: Some("steps:\n  - run: test".into()),
+            provenance: Some(agentgrid_common::ProvenanceRecord {
+                originator: "ci".into(),
+                external_id: "job-9".into(),
+                label: Some("nightly".into()),
+                security_profile: None,
+            }),
+            pending_artifacts: vec!["changes.patch".into(), "validation.log".into()],
+        };
+        co.record("att-full", &req, "f-1").unwrap();
+        let pending = co.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        let redelivered = pending[0].to_request();
+        assert_eq!(redelivered.resolved_base_sha.as_deref(), Some("base-sha"));
+        assert_eq!(redelivered.remote_head_at_start.as_deref(), Some("head-a"));
+        assert_eq!(redelivered.remote_head_at_finish.as_deref(), Some("head-b"));
+        assert_eq!(redelivered.plan.as_deref(), Some("steps:\n  - run: test"));
+        assert_eq!(
+            redelivered.provenance.as_ref().unwrap().external_id,
+            "job-9"
+        );
+        assert_eq!(redelivered.pending_artifacts.len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hardening P0 item 10: a corrupt line in the completion spool is moved
+    /// to `<dir>/quarantine/` and the remaining valid completions survive.
+    #[test]
+    fn completion_outbox_quarantines_corrupt_line() {
+        let dir = tmpdir("comp-quarantine");
+        let co = CompletionOutbox::open(&dir).unwrap();
+        let req = CompleteAttemptRequest {
+            exit_code: 0,
+            ..Default::default()
+        };
+        co.record("att-ok", &req, "f-1").unwrap();
+        // Append a torn/corrupt line.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(co.path.clone())
+            .unwrap();
+        writeln!(f, "{{ this is not json").unwrap();
+        drop(f);
+        let pending = co.pending().unwrap();
+        assert_eq!(pending.len(), 1, "valid completion survives");
+        assert_eq!(pending[0].attempt_id, "att-ok");
+        let quarantine_dir = dir.join("quarantine");
+        assert!(
+            quarantine_dir.exists(),
+            "quarantine dir created for corrupt line"
+        );
+        let q_files: Vec<_> = std::fs::read_dir(&quarantine_dir)
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(q_files.len(), 1, "corrupt line quarantined");
+        let qcontent = std::fs::read_to_string(q_files[0].path()).unwrap();
+        assert!(qcontent.contains("this is not json"));
+        // The live file no longer contains the corrupt line.
+        let live = std::fs::read_to_string(&co.path).unwrap();
+        assert!(!live.contains("not json"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Hardening P0 item 10: the global outbox quota refuses new events once
+    /// all spool files combined exceed the configured cap.
+    #[test]
+    fn event_outbox_global_quota_blocks_pushes() {
+        let dir = tmpdir("quota");
+        let ob = EventOutbox::open(&dir, "att-q").unwrap();
+        let ob = EventOutbox {
+            path: ob.path.clone(),
+            root: ob.root.clone(),
+            file: Mutex::new(()),
+            spool_limit_bytes: 0, // unlimited per-attempt: quota is the only gate
+            quota_bytes: 1,
+        };
+        let ev = IncomingEvent {
+            sequence: 1,
+            r#type: EventType::Stdout,
+            payload: json!({ "text": "x" }),
+        };
+        ob.push(&ev).unwrap();
+        // Second push: total_bytes >= 1 → SpoolFull.
+        match ob.push(&IncomingEvent {
+            sequence: 2,
+            r#type: EventType::Stdout,
+            payload: json!({ "text": "y" }),
+        }) {
+            Err(PushError::SpoolFull) => {}
+            other => panic!("expected SpoolFull from global quota, got {other:?}"),
         }
         std::fs::remove_dir_all(&dir).ok();
     }

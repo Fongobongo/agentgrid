@@ -90,6 +90,12 @@ pub use state_machine::{
 };
 
 /// A single streamed event tied to an attempt, with a monotonic `sequence`.
+///
+/// Hardening P0 item 9: `ingest_id` is the global, monotonic cursor assigned by
+/// the control plane at ingest time (ordered across attempts), while
+/// `sequence` remains the per-attempt monotonic counter. SSE `id:` /
+/// `Last-Event-ID` and the `after_ingest` query use `ingest_id` so a client
+/// resuming after a retry never reorders events across attempts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskEvent {
     pub attempt_id: String,
@@ -97,6 +103,10 @@ pub struct TaskEvent {
     pub r#type: EventType,
     pub payload: serde_json::Value,
     pub created_at: String,
+    /// Global monotonic ingest cursor. `#[serde(default)]` keeps pre-0037
+    /// serialized events (and old clients) parseable.
+    #[serde(default)]
+    pub ingest_id: u64,
 }
 
 macro_rules! display_snake {
@@ -238,6 +248,17 @@ pub struct AdapterCapability {
     pub id: String,
     pub version: Option<String>,
     pub ready: bool,
+    /// How the adapter intercepts permission requests
+    /// (`"structured"` | `"wrapper"` | `"none"`). Wrapper adapters parse
+    /// stdout heuristically and cannot strictly enforce a policy; `"none"`
+    /// means the adapter never asks — it must be confined by sandbox or run
+    /// with the explicit unsafe bypass. Hardening P0 item 5.
+    #[serde(default = "default_permission_interception")]
+    pub permission_interception: String,
+}
+
+pub fn default_permission_interception() -> String {
+    "wrapper".to_string()
 }
 
 // ----- API DTOs -----
@@ -293,6 +314,11 @@ pub struct TaskView {
     /// prior ACP session. `None` => a fresh session.
     #[serde(default)]
     pub parent_acp_session_id: Option<String>,
+    /// Hardening P2 item 36: the security profile of the LATEST attempt
+    /// (from `attempts.provenance.security_profile`). Surfaced so operators can
+    /// see which policy the agent ran under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -308,6 +334,25 @@ pub struct NodeView {
     pub agent_version: String,
     pub load_avg: f64,
     pub free_disk_mb: u64,
+    /// Hardening P0 item 5: node is running an adapter with the unsafe
+    /// unattended bypass active (no sandbox). Surfaced so operators can see
+    /// which nodes run fully-unrestricted agents.
+    #[serde(default)]
+    pub unsafe_active: bool,
+    /// Hardening P0 item 5: best-available permission interception across the
+    /// node's adapters (`structured` | `wrapper` | `none`).
+    #[serde(default = "default_permission_interception")]
+    pub permission_interception: String,
+    /// Hardening P2 item 35: total bytes in the node's durable outbox.
+    #[serde(default)]
+    pub outbox_bytes: u64,
+    /// Hardening P2 item 35: total bytes staged in the node's artifact spool.
+    #[serde(default)]
+    pub artifact_spool_bytes: u64,
+    /// Hardening P2 item 37: node is drained — it keeps in-flight attempts but
+    /// receives no NEW assignments (maintenance mode).
+    #[serde(default)]
+    pub drained: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -350,6 +395,11 @@ pub struct Assignment {
     /// Optional validation command run after the agent succeeds (Stage 3.3).
     #[serde(default)]
     pub validation_command: Option<String>,
+    /// Hardening P0 item 12: per-attempt validation timeout in seconds
+    /// (default 300 when unset). The node kills the validation process tree on
+    /// timeout and reports `validation_timeout`.
+    #[serde(default)]
+    pub validation_timeout_secs: Option<u64>,
     /// Optional exact commit the node should check out (Stage 8 base_commit).
     #[serde(default)]
     pub base_commit: Option<String>,
@@ -490,6 +540,23 @@ pub struct HeartbeatRequest {
     /// hint, never blocks a task).
     #[serde(default)]
     pub discovered_skills: Vec<HeartbeatSkill>,
+    /// Hardening P0 item 5: this node is running an adapter with the unsafe
+    /// unattended bypass active (no sandbox). Absent on legacy nodes.
+    #[serde(default)]
+    pub unsafe_active: bool,
+    /// Hardening P0 item 5: best-available permission interception across the
+    /// node's adapters (`structured` | `wrapper` | `none`). Absent on legacy
+    /// nodes (defaults to `wrapper`).
+    #[serde(default = "default_permission_interception")]
+    pub permission_interception: String,
+    /// Hardening P2 item 35: total bytes currently buffered in the node's
+    /// durable outbox (pending event + completion spools). 0 on legacy nodes.
+    #[serde(default)]
+    pub outbox_bytes: u64,
+    /// Hardening P2 item 35: total bytes staged in the node's durable artifact
+    /// spool (artifacts not yet delivered to the CP). 0 on legacy nodes.
+    #[serde(default)]
+    pub artifact_spool_bytes: u64,
 }
 
 /// A skill name + source ("project" | "user" | "managed") advertised in a
@@ -582,6 +649,12 @@ pub struct CompleteAttemptRequest {
     /// can trace a run back to its external origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ProvenanceRecord>,
+    /// Hardening P1 item 11: artifact names this attempt staged locally but
+    /// could not deliver before completion (control plane was down). The node
+    /// retries them on the next startup; the CP records the list so operators
+    /// can see which artifacts are still owed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_artifacts: Vec<String>,
 }
 
 /// A provenance link between an attempt and the external system that
@@ -596,6 +669,9 @@ pub struct ProvenanceRecord {
     /// Optional human-readable label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Security profile used for this attempt (Stage 4.2 hardening).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -712,8 +788,15 @@ pub struct ArtifactUploadResponse {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventsQuery {
+    /// Legacy per-attempt cursor (pre-0037 clients). Prefer `after_ingest`.
     #[serde(default)]
     pub after_sequence: u64,
+    /// Hardening P0 item 9: resume after this global ingest cursor.
+    #[serde(default)]
+    pub after_ingest: Option<u64>,
+    /// Hardening P0 item 9: server-side page size cap (default 1000).
+    #[serde(default)]
+    pub limit: Option<u64>,
 }
 
 #[cfg(test)]
@@ -811,8 +894,14 @@ mod tests {
             r#type: EventType::Stdout,
             payload: serde_json::json!({"text": "hi"}),
             created_at: "2026-01-01T00:00:00Z".into(),
+            ingest_id: 42,
         };
         assert_eq!(round_trip(&ev), ev);
+
+        // Pre-0037 serialized event (no ingest_id) still parses to 0.
+        let old = r#"{"attempt_id":"a1","sequence":3,"type":"stdout","payload":{"text":"hi"},"created_at":"2026-01-01T00:00:00Z"}"#;
+        let parsed: TaskEvent = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.ingest_id, 0);
 
         let pr = PollResponse {
             assignment: Some(Assignment {
@@ -827,6 +916,7 @@ mod tests {
                 git_url: String::new(),
                 default_branch: String::new(),
                 validation_command: None,
+                validation_timeout_secs: None,
                 base_commit: None,
                 parent_acp_session_id: None,
                 provenance: None,
@@ -862,6 +952,10 @@ mod tests {
             capabilities: vec![],
             protocol_version: None,
             discovered_skills: vec![],
+            unsafe_active: false,
+            permission_interception: "wrapper".into(),
+            outbox_bytes: 0,
+            artifact_spool_bytes: 0,
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

@@ -12,3 +12,6 @@ serde_yaml = "0.9"
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1.4"

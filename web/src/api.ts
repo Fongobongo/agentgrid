@@ -25,6 +25,8 @@ export interface TaskView {
   finished_at: string | null;
   assigned_attempt_id: string | null;
   validation_command?: string | null;
+  // Hardening P2 item 36: security profile of the latest attempt.
+  security_profile?: string | null;
 }
 
 export interface NodeView {
@@ -39,6 +41,14 @@ export interface NodeView {
   agent_version: string;
   load_avg: number;
   free_disk_mb: number;
+  // Hardening P0 item 5: unsafe mode + permission interception.
+  unsafe_active?: boolean;
+  permission_interception?: string;
+  // Hardening P2 item 35: local storage pressure.
+  outbox_bytes?: number;
+  artifact_spool_bytes?: number;
+  // Hardening P2 item 37: maintenance drain — no NEW assignments.
+  drained?: boolean;
 }
 
 export interface RepositoryView {
@@ -91,6 +101,8 @@ export interface TaskEvent {
   type: string;
   payload: any;
   created_at: string;
+  // Hardening P0 item 9: global monotonic ingest cursor (0 on old servers).
+  ingest_id: number;
 }
 
 export class ApiError extends Error {
@@ -165,12 +177,19 @@ export function getEligibility(id: string) {
   return getJson<TaskEligibility>(`/v1/tasks/${id}/eligibility`);
 }
 
-export function getTaskEvents(taskId: string, after: number) {
-  return getJson<TaskEvent[]>(`/v1/tasks/${taskId}/events?after_sequence=${after}`);
+export function getTaskEvents(taskId: string, after?: number) {
+  // Hardening P0 item 9: resume on the global ingest cursor (0 = from start).
+  const q = after && after > 0 ? `?after_ingest=${after}` : '';
+  return getJson<TaskEvent[]>(`/v1/tasks/${taskId}/events${q}`);
 }
 
 export function revokeNode(id: string) {
   return req('DELETE', `/v1/nodes/${id}`);
+}
+
+// Hardening P2 item 37: drain (stop NEW assignments) / undrain a node.
+export function drainNode(id: string, drain: boolean) {
+  return req('POST', `/v1/nodes/${id}/drain?drain=${drain}`);
 }
 
 export interface WorkflowRun {
@@ -299,7 +318,7 @@ export function streamTask(
     onError?: (err: Error) => void;
   },
 ): StreamHandle {
-  let lastSeq = opts.after ?? 0;
+  let lastIngest = opts.after ?? 0;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let backoff = 500;
@@ -312,8 +331,10 @@ export function streamTask(
   const run = async () => {
     if (closed) return;
     try {
+      // Hardening P0 item 9: resume on the global ingest cursor so a retry
+      // never reorders or re-delivers events across attempts.
       const r = await fetch(
-        `/v1/tasks/${taskId}/events/stream?after_sequence=${lastSeq}`,
+        `/v1/tasks/${taskId}/events/stream?after_ingest=${lastIngest}`,
         { credentials: 'include' },
       );
       if (!r.ok || !r.body) throw new ApiError(r.status, `stream -> ${r.status}`);
@@ -334,7 +355,7 @@ export function streamTask(
             if (!data) continue;
             try {
               const e = JSON.parse(data) as TaskEvent;
-              if (e.sequence > lastSeq) lastSeq = e.sequence;
+              if (e.ingest_id > lastIngest) lastIngest = e.ingest_id;
               opts.onEvent(e);
             } catch {
               /* ignore malformed */
@@ -348,7 +369,7 @@ export function streamTask(
       if (!closed) schedule(run);
       return;
     }
-    // Stream closed by server: resume from lastSeq to stay live.
+    // Stream closed by server: resume from lastIngest to stay live.
     if (!closed) schedule(run);
   };
 

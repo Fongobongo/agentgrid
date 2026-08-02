@@ -100,7 +100,10 @@ their `permission_interception` capability is `wrapper`, **not** structured —
 the bypass flag is the only knob they apply, so an unsandboxed wrapper adapter in
 unsafe mode gives the agent full host access. Only structured-interception /
 container backends count as isolation; the worktree is **not** a security
-boundary.
+boundary. Nodes running with the bypass are visible at a glance: the heartbeat
+advertises `unsafe_active` + `permission_interception`, and `ag nodes` /
+`ag node doctor` / the TUI node pane / the web Nodes table show an `UNSAFE` /
+`⚠ unsafe` badge for them.
 
 ## Build from source
 
@@ -142,6 +145,31 @@ events; on reconnect the un-acked tail is replayed. Event batches are bounded
 events for a terminal attempt are rejected. A long-poll assignment never
 double-delivers a task to two pollers (`WHERE status='queued'` CAS).
 
+Since migration 0037 every event also carries a **global monotonic `ingest_id`**
+(allocated from a single-row counter at ingest), so the SSE `id:`/`Last-Event-ID`
+and the `after_ingest`/`limit` query params resume on a cursor that is ordered
+**across attempts** — a retried attempt's seq-1 events always render after the
+previous attempt's tail, never interleaved with it. Legacy `after_sequence`
+clients and pre-0037 servers keep working (the field serde-defaults to 0).
+`GET /v1/tasks` uses the same keyset idea: `after_created_at` + `after_id`
+page through tasks in stable `(created_at, id)` order, with a server-side
+`limit` cap.
+
+The completion path is crash-safe too: the node records the full
+`CompleteAttemptRequest` (exit code, commit, error code, resolved base, remote
+HEAD snapshots, plan, provenance, pending artifacts) into a durable
+`completions.jsonl` with atomic temp+rename+fsync, and replays it on startup if
+the CP never acked — nothing is dropped on redelivery. The outbox has a global
+spool quota (`AGENTGRID_OUTBOX_QUOTA_BYTES`/`_MB`, default 1 GiB) in addition to
+the per-attempt cap, and corrupt spool lines are moved to a `quarantine/`
+directory instead of being silently lost.
+
+Produced artifacts (`changes.patch`, `validation.log`, raw adapter output) are
+**staged into a durable local spool** (`AGENTGRID_DATA_DIR/artifact-spool/`)
+before upload, so a CP outage mid-upload cannot lose them: the staged copy
+survives the worktree cleanup and is retried on the next daemon startup. The
+completion reports which artifacts are still owed (`pending_artifacts`).
+
 ### Artifact retention, backup, upgrade & rollback
 
 - **Artifacts:** per-attempt under `AGENTGRID_ARTIFACT_ROOT/<attempt_id>/<name>`;
@@ -149,6 +177,15 @@ double-delivers a task to two pollers (`WHERE status='queued'` CAS).
   (client hash mismatch → 422). `cleanup_artifacts(<hours>)` drops the metadata
   row **and** the backing file, then removes now-empty attempt dirs. Upload size
   is capped (`AGENTGRID_MAX_ARTIFACT_MB`).
+- **Storage GC:** `ag storage gc` (or `POST /v1/admin/storage-gc`) reconciles
+  the artifact tree against the metadata table: orphan files (no row) are
+  unlinked and dangling metadata rows (no file) pruned. `--dry-run` reports
+  `orphan_files`/`orphan_bytes`/`metadata_without_file`/`free_mb` without
+  deleting. `ag storage disk` shows free space.
+- **Disk watermark:** the control plane refuses NEW task assignments when the
+  artifact volume drops below `AGENTGRID_DISK_CRITICAL_MB` (default 512 MiB), so
+  queued work cannot drive the disk to zero. Node heartbeats independently flag
+  `degraded` nodes below `AGENTGRID_DISK_LOW_MB`.
 - **Backup:** `VACUUM INTO '<path>'` on the SQLite DB; back up the DB file plus
   the `AGENTGRID_ARTIFACT_ROOT` tree.
 - **Upgrade:** forward-only migrations run on startup (`sqlx::migrate`); restart

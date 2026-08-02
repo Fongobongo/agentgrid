@@ -25,26 +25,30 @@ use agentgrid_common::{
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
-    http::{header, HeaderMap, Request, StatusCode, Uri},
+    http::{header, HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use futures_core::Stream;
+use http_body_util::BodyExt;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use store::Store;
 use tokio::sync::Notify;
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// JWT claims for user sessions (Stage 4.1).
+/// Includes `jti` (JWT ID) for session revocation (Stage 4.2).
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
     exp: usize,
+    jti: String,
 }
 
 /// Stage 2.5: the cookie name carrying the session JWT, set HttpOnly so the
@@ -372,11 +376,14 @@ impl AppState {
     }
 
     /// Issue a 12h JWT for `username` (Stage 4.1).
+    /// Includes `jti` for session revocation (Stage 4.2).
     fn issue_token(&self, username: &str) -> anyhow::Result<String> {
         let exp = (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp() as usize;
+        let jti = Uuid::new_v4().to_string();
         let claims = Claims {
             sub: username.to_string(),
             exp,
+            jti,
         };
         Ok(encode(
             &Header::default(),
@@ -385,15 +392,25 @@ impl AppState {
         )?)
     }
 
-    /// Validate a JWT and return the username, or None.
-    fn verify_token(&self, token: &str) -> Option<String> {
-        decode::<Claims>(
+    /// Validate a JWT and return the username, or None if revoked/invalid.
+    /// Checks revoked_sessions blocklist (Stage 4.2).
+    async fn verify_token(&self, token: &str) -> Option<String> {
+        let claims = decode::<Claims>(
             token,
             &DecodingKey::from_secret(&self.jwt_secret),
             &Validation::default(),
         )
-        .ok()
-        .map(|d| d.claims.sub)
+        .ok()?;
+        // Check if this jti has been revoked
+        if self
+            .store
+            .is_session_revoked(&claims.claims.jti)
+            .await
+            .ok()?
+        {
+            return None;
+        }
+        Some(claims.claims.sub)
     }
 
     /// Read the current one-time setup token (if live) for tests / operators
@@ -446,9 +463,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/profiles/{id}", post(create_profile_handler))
         .route("/v1/profiles/{id}/activate", post(activate_profile_handler))
         .route("/v1/admin/backup", post(admin_backup))
+        .route("/v1/admin/storage-gc", post(storage_gc_handler))
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/nodes/enrollment-token", post(create_enrollment_token))
         .route("/v1/nodes/{id}", delete(revoke_node))
+        .route("/v1/nodes/{id}/drain", post(drain_node_handler))
         .route(
             "/v1/repositories",
             post(create_repository).get(list_repositories),
@@ -460,6 +479,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/node/attempts/{id}/events", post(ingest_events))
         .route("/v1/node/attempts/{id}/complete", post(complete_attempt))
         .route("/v1/node/attempts/{id}/ack", post(ack_attempt_handler))
+        .route(
+            "/v1/node/attempts/{id}/begin_validate",
+            post(begin_validate_handler),
+        )
         .route(
             "/v1/node/attempts/{id}/session",
             post(create_agent_session_handler),
@@ -527,7 +550,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // JSON formatter attaches the current span to each event, so the id is
         // correlatable across the whole request without per-handler plumbing.
         .layer(middleware::from_fn(request_id_middleware))
-        .fallback(static_fallback)
+        .fallback(spa_fallback)
         .with_state(state)
 }
 
@@ -581,134 +604,108 @@ async fn request_id_middleware(headers: HeaderMap, mut req: Request<Body>, next:
     resp
 }
 
+/// Hardening P2 item 19: a single, machine-readable JSON error envelope used
+/// by handlers that already surface a typed status. `code` is a stable
+/// snake_case string clients can switch on; the human message is short and
+/// never includes internal error chains (those stay in structured logs).
+/// The `X-Request-Id` header (added by the middleware) stays the correlation
+/// key; it is also embedded in the body for clients that only read the body.
+pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
+    let req_id = uuid::Uuid::new_v4().to_string();
+    let body = serde_json::json!({
+        "error": {
+            "code": code,
+            "message": message.into(),
+            "request_id": req_id,
+        }
+    });
+    (status, Json(body)).into_response()
+}
+
 /// Request id available to handlers via extensions (for explicit logging /
 /// future audit). The span already carries it for every log line.
 #[derive(Clone, Debug)]
 pub struct RequestId(pub String);
 
 /// Serve the built web UI (Stage 4.3). Unknown non-API paths fall back to
-/// `index.html`; missing files under `/v1/` return 404.
-///
-/// Hardening P0 (static file traversal): unlike the former blind
-/// `root.join(rel)` + lexically-challenged `starts_with` check, the request
-/// path is rebuilt from a **component whitelist** — only `Normal` segments
-/// are joined; `ParentDir`, `RootDir`, and any OS prefix component are
-/// rejected. The web root is canonicalized once per request and the resolved
-/// file path is canonicalized before read; the canonical file path must
-/// remain under the canonical root, so symlinks/`..`/backslashes cannot
-/// escape. Axum percent-decodes the URI path before we see it.
-async fn static_fallback(State(state): State<Arc<AppState>>, uri: Uri) -> Response {
-    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-    // Hardening P0 item 4: the web root was canonicalized once at startup
-    // (see AppState::open). Reuse it directly; no per-request canonicalize.
-    let canon_root = match &state.web_root {
+/// SPA static file serving using tower-http's ServeDir.
+/// Serves files from the web root with proper security headers.
+/// Falls back to index.html for non-/v1/ routes (SPA routing).
+async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
+    let web_root = match &state.web_root {
         Some(r) => r.clone(),
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-
-    let rel = uri.path().trim_start_matches('/');
-    let fs_path = match join_within_root(&canon_root, rel) {
-        Some(p) => p,
-        None => return StatusCode::FORBIDDEN.into_response(),
-    };
-
-    if let Ok(bytes) = tokio::fs::read(&fs_path).await {
-        // Canonicalize the *existing* file and re-check containment; a symlink
-        // at fs_path pointing outside the root is blocked here.
-        if let Ok(canon_file) = fs_path.canonicalize() {
-            if !canon_file.starts_with(&canon_root) {
-                return StatusCode::FORBIDDEN.into_response();
+    let path = req.uri().path();
+    // Don't serve SPA fallback for /v1/ API routes - return 404
+    if path.starts_with("/v1/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Hardening P0: validate path components to prevent traversal.
+    // Only Normal segments allowed; ParentDir (..), RootDir (/), and
+    // any prefix components are rejected.
+    let rel = path.trim_start_matches('/');
+    // Inline is_safe_static_path check
+    let is_safe = {
+        use std::path::Component;
+        let mut safe = true;
+        for comp in std::path::Path::new(rel).components() {
+            match comp {
+                Component::Normal(_) => {}
+                Component::CurDir => {}
+                _ => {
+                    safe = false;
+                    break;
+                }
             }
         }
-        let ct = content_type(&fs_path);
-        let cache = cache_control_for(&fs_path);
-        (
-            [(CONTENT_TYPE, ct), (CACHE_CONTROL, cache.to_string())],
-            bytes,
-        )
-            .into_response()
-    } else if uri.path().starts_with("/v1/") {
-        StatusCode::NOT_FOUND.into_response()
-    } else {
-        let idx = canon_root.join("index.html");
-        match tokio::fs::read(&idx).await {
-            Ok(b) => (
+        safe
+    };
+    if !is_safe {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    // Hardening P0: reject symlinks that escape the web root.
+    // Check each path component for symlinks pointing outside root.
+    let fs_path = web_root.join(rel);
+    if let Ok(canon_file) = fs_path.canonicalize() {
+        if !canon_file.starts_with(web_root.canonicalize().unwrap_or_default()) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    // Serve index.html for root path explicitly
+    if rel.is_empty() {
+        let idx = web_root.join("index.html");
+        if let Ok(bytes) = tokio::fs::read(&idx).await {
+            return (
                 [
-                    (CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
-                    (CACHE_CONTROL, "no-cache".to_string()),
-                    // Hardening P0 item 3/36: a strict CSP for the SPA shell.
-                    // Only same-origin scripts/styles connect; no inline event
-                    // handlers, no plugins, no framing. Vite hashed bundles load
-                    // from /assets under same origin, so 'self' suffices.
-                    (
-                        header::HeaderName::from_static("content-security-policy"),
-                        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-                         img-src 'self' data:; connect-src 'self'; font-src 'self'; \
-                         object-src 'none'; base-uri 'self'; frame-ancestors 'none'; \
-                         form-action 'self'"
-                            .to_string(),
-                    ),
-                    (
-                        header::HeaderName::from_static("x-content-type-options"),
-                        "nosniff".to_string(),
-                    ),
-                    (
-                        header::HeaderName::from_static("x-frame-options"),
-                        "DENY".to_string(),
-                    ),
+                    (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (axum::http::header::CACHE_CONTROL, "no-cache"),
+                    (axum::http::header::HeaderName::from_static("content-security-policy"),
+                        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';                          img-src 'self' data:; connect-src 'self'; font-src 'self';                          object-src 'none'; base-uri 'self'; frame-ancestors 'none';                          form-action 'self'"),
+                    (axum::http::header::HeaderName::from_static("x-content-type-options"), "nosniff"),
+                    (axum::http::header::HeaderName::from_static("x-frame-options"), "DENY"),
                 ],
-                b,
-            )
-                .into_response(),
-            Err(_) => StatusCode::NOT_FOUND.into_response(),
+                bytes,
+            ).into_response();
         }
+        return StatusCode::NOT_FOUND.into_response();
     }
-}
-
-/// Hardening P0 (static file traversal): rebuild the target path from a
-/// path-component whitelist over `rel`. Only `Normal` segments are joined;
-/// `Component::ParentDir` (`..`), `Component::RootDir` (leading `/`), and any
-/// Windows prefix are rejected, so `../`, `..\`, absolute paths, and
-/// percent-encoded equivalents (already decoded by axum) cannot escape.
-fn join_within_root(root: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
-    use std::path::Component;
-    let mut p = root.to_path_buf();
-    for comp in std::path::Path::new(rel).components() {
-        match comp {
-            Component::Normal(s) => p.push(s),
-            Component::CurDir => {}
-            _ => return None,
+    let serve_dir = ServeDir::new(&web_root)
+        .not_found_service(ServeFile::new(web_root.join("index.html")))
+        .append_index_html_on_directories(false);
+    // Convert ServeDir response to axum Response<Body>
+    match tower::util::ServiceExt::oneshot(serve_dir, req).await {
+        Ok(res) => {
+            let (parts, body) = res.into_parts();
+            Response::from_parts(parts, Body::new(body.into_stream()))
         }
-    }
-    Some(p)
-}
-
-/// Cache-Control policy for a served static asset (hardening P0): Vite/hashed
-/// assets under an `assets/` directory are immutable and cacheable for a year;
-/// everything else (notably `index.html`) is `no-cache` so a redeployment is
-/// always re-checked for the newest shell.
-fn cache_control_for(p: &std::path::Path) -> &'static str {
-    if p.parent().map(|d| d.ends_with("assets")) == Some(true) {
-        "public, max-age=31536000, immutable"
-    } else {
-        "no-cache"
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
-fn content_type(path: &std::path::Path) -> String {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("ico") => "image/x-icon",
-        Some("png") => "image/png",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
-
+/// Check if a relative path is safe for static file serving.
+/// Only Normal path components are allowed; ParentDir (..), RootDir (/),
+/// and any prefix components are rejected.
 /// Node identity established by [`require_node_auth`]; read by node handlers.
 #[derive(Clone)]
 struct AuthedNode {
@@ -853,11 +850,15 @@ async fn require_user_auth(
                 }
             }
             Ok(_) => {
-                match auth_token_from_headers(req.headers()).and_then(|t| state.verify_token(&t)) {
-                    Some(u) => {
-                        req.extensions_mut().insert(AuthedUser { username: u });
+                if let Some(token) = auth_token_from_headers(req.headers()) {
+                    match state.verify_token(&token).await {
+                        Some(u) => {
+                            req.extensions_mut().insert(AuthedUser { username: u });
+                        }
+                        None => return Err(StatusCode::UNAUTHORIZED),
                     }
-                    None => return Err(StatusCode::UNAUTHORIZED),
+                } else {
+                    return Err(StatusCode::UNAUTHORIZED);
                 }
             }
             // Fail closed: a DB outage never opens the API.
@@ -968,7 +969,23 @@ async fn auth_login(
     Ok((headers, Json(LoginResponse { token })))
 }
 
-async fn auth_logout() -> (HeaderMap, StatusCode) {
+async fn auth_logout(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> (HeaderMap, StatusCode) {
+    // Clear the session cookie and revoke the JWT jti (Stage 4.2).
+    if let Some(token) = auth_token_from_headers(req.headers()) {
+        if let Ok(claims) = decode::<Claims>(
+            &token,
+            &DecodingKey::from_secret(&state.jwt_secret),
+            &Validation::default(),
+        ) {
+            let _ = state
+                .store
+                .revoke_session(&claims.claims.jti, &claims.claims.sub)
+                .await;
+        }
+    }
     // Clear the session cookie regardless of auth state (idempotent logout).
     let mut v = format!("{AUTH_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
     if std::env::var("AGENTGRID_COOKIE_SECURE").as_deref() == Ok("1") {
@@ -1082,6 +1099,56 @@ async fn admin_backup(
 #[derive(serde::Deserialize)]
 struct BackupRequest {
     path: String,
+}
+
+/// Hardening P1 item 15: `ag storage gc` — reconcile the artifact tree against
+/// the metadata table. `dry_run=true` only reports drift
+/// `{orphan_files, orphan_bytes, metadata_without_file, free_mb}`; `false`
+/// deletes orphan files and prunes dangling metadata rows.
+#[derive(serde::Deserialize)]
+struct StorageGcRequest {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn storage_gc_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<StorageGcRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.store.storage_reconcile(req.dry_run).await {
+        Ok((orphan_files, orphan_bytes, metadata_without_file)) => {
+            let free = state.store.free_bytes() / (1024 * 1024);
+            let _ = state
+                .store
+                .audit(
+                    "system",
+                    None,
+                    "storage.gc",
+                    None,
+                    Some(
+                        &serde_json::json!({
+                            "dry_run": req.dry_run,
+                            "orphan_files": orphan_files,
+                            "orphan_bytes": orphan_bytes,
+                            "metadata_without_file": metadata_without_file,
+                        })
+                        .to_string(),
+                    ),
+                )
+                .await;
+            Ok(Json(serde_json::json!({
+                "dry_run": req.dry_run,
+                "orphan_files": orphan_files,
+                "orphan_bytes": orphan_bytes,
+                "metadata_without_file": metadata_without_file,
+                "free_mb": free,
+            })))
+        }
+        Err(e) => {
+            tracing::error!("storage gc failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 /// its verdict. Fail-closed: a provider error yields `ask`, never `allow`.
 async fn evaluate_policy(
@@ -1578,6 +1645,35 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
             .artifact_cleanup_bytes
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
+    s.push_str("# HELP agentgrid_artifact_cleanup_runs_total Total artifact cleanup runs.");
+    s.push_str("\n# TYPE agentgrid_artifact_cleanup_runs_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_artifact_cleanup_runs_total {}\n",
+        state
+            .store
+            .artifact_cleanup_runs
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    s.push_str("# HELP agentgrid_artifact_cleanup_failures_total Total artifact cleanup failures.");
+    s.push_str("\n# TYPE agentgrid_artifact_cleanup_failures_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_artifact_cleanup_failures_total {}\n",
+        state
+            .store
+            .artifact_cleanup_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    s.push_str(
+        "# HELP agentgrid_artifact_cleanup_duration_seconds_total Total artifact cleanup duration in seconds.",
+    );
+    s.push_str("\n# TYPE agentgrid_artifact_cleanup_duration_seconds_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_artifact_cleanup_duration_seconds_total {}\n",
+        state
+            .store
+            .artifact_cleanup_duration_secs
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
 
     (
         StatusCode::OK,
@@ -1634,6 +1730,8 @@ async fn list_tasks(
             q.status.as_deref(),
             q.repository.as_deref(),
             q.node_id.as_deref(),
+            task_cursor(&q),
+            q.limit,
         )
         .await
     {
@@ -1645,8 +1743,10 @@ async fn list_tasks(
     }
 }
 
-/// Hardening P2 item 20: optional server-side filters for `GET /v1/tasks`.
-/// All are exact-match strings; absent = no filter. Combined with the row cap.
+/// Hardening P2 item 20: optional server-side filters + keyset cursor for
+/// `GET /v1/tasks`. `after_created_at` + `after_id` form a keyset cursor
+/// (rows strictly after `(created_at, id)`); `limit` caps the page (server
+/// ceiling 1000). Both cursor parts must be present together.
 #[derive(Debug, Default, serde::Deserialize)]
 struct TaskListQuery {
     #[serde(default)]
@@ -1655,6 +1755,22 @@ struct TaskListQuery {
     repository: Option<String>,
     #[serde(default)]
     node_id: Option<String>,
+    #[serde(default)]
+    after_created_at: Option<String>,
+    #[serde(default)]
+    after_id: Option<String>,
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
+/// Combine the optional keyset-cursor parts into the store's `Option<(String,
+/// String)>`. Only a complete pair is a cursor; a lone half is ignored so old
+/// clients (and garbage input) fall back to the first page.
+fn task_cursor(q: &TaskListQuery) -> Option<(String, String)> {
+    match (&q.after_created_at, &q.after_id) {
+        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
+        _ => None,
+    }
 }
 
 async fn show_task(
@@ -2018,6 +2134,48 @@ async fn revoke_node(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+/// Hardening P2 item 37: drain (or undrain) a node for maintenance. A drained
+/// node stops receiving NEW assignments while its in-flight attempts run to
+/// completion; the heartbeat keeps it online.
+async fn drain_node_handler(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
+    Path(id): Path<String>,
+    Query(q): Query<NodeDrainQuery>,
+) -> StatusCode {
+    let drained = q.drain.unwrap_or(true);
+    match state.store.set_node_drained(&id, drained).await {
+        Ok(true) => {
+            let _ = state
+                .store
+                .audit(
+                    "user",
+                    auth.as_ref().map(|e| e.0.username.as_str()),
+                    if drained {
+                        "node.drain"
+                    } else {
+                        "node.undrain"
+                    },
+                    Some(&id),
+                    None,
+                )
+                .await;
+            StatusCode::OK
+        }
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("set_node_drained failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NodeDrainQuery {
+    #[serde(default)]
+    drain: Option<bool>,
 }
 
 async fn create_repository(
@@ -2540,17 +2698,23 @@ fn is_safe_artifact_name(name: &str) -> bool {
     name.chars().all(|c| !c.is_control())
 }
 
-/// Resolve the SSE `after` cursor for a reconnect: `Last-Event-ID` header
-/// (browser default) seeds it, but an explicit query `after_sequence` wins.
-/// Either way the next poll starts after the last delivered sequence, so a
-/// reconnect reads no gaps and no duplicates.
-fn sse_resume_after(after_sequence: u64, last_event_id: Option<&axum::http::HeaderValue>) -> u64 {
+/// Resolve the SSE `after` cursor for a reconnect. `Last-Event-ID` header
+/// (browser default) carries the global `ingest_id` of the last delivered
+/// event (Hardening P0 item 9), and an explicit `after_ingest` query wins.
+/// Legacy `after_sequence` (per-attempt) is still accepted when neither is
+/// set, so pre-0037 clients keep working.
+fn sse_resume_after(
+    after_ingest: Option<u64>,
+    after_sequence: u64,
+    last_event_id: Option<&axum::http::HeaderValue>,
+) -> (Option<u64>, u64) {
     let last = last_event_id
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
     match last {
-        Some(last) => after_sequence.max(last),
-        None => after_sequence,
+        // `Last-Event-ID` is an ingest_id (the id: field on events since 0037).
+        Some(last) => (Some(last.max(after_ingest.unwrap_or(0))), after_sequence),
+        None => (after_ingest, after_sequence),
     }
 }
 
@@ -2565,24 +2729,36 @@ async fn events_stream(
     use axum::response::sse::{Event, Sse};
     use std::time::Duration;
     // SSE reconnect resume: `Last-Event-ID` header (browser default on
-    // reconnect) seeds `after`, but an explicit `after_sequence` query wins
-    // (lets a client force a different point). This gives no gaps/no dups:
-    // the next poll starts after the last delivered sequence.
-    let mut after = sse_resume_after(q.after_sequence, headers.get("Last-Event-ID"));
+    // reconnect) carries the global ingest_id of the last delivered event, but
+    // an explicit `after_ingest` query wins (lets a client force a different
+    // point). This gives no gaps/no dups across attempts: the next poll starts
+    // after the last delivered ingest_id.
+    let (mut after_ingest, after_sequence) = sse_resume_after(
+        q.after_ingest,
+        q.after_sequence,
+        headers.get("Last-Event-ID"),
+    );
     let stream = async_stream::stream! {
         loop {
-            match state.store.get_events(&task_id, after).await {
+            match state
+                .store
+                .get_events(&task_id, after_ingest, after_sequence, Some(500))
+                .await
+            {
                 Ok(events) if !events.is_empty() => {
                     for e in events {
-                        after = after.max(e.sequence);
+                        // Track both cursors: the global ingest_id drives
+                        // pagination; the legacy sequence stays accurate for
+                        // old clients that keep polling after_sequence.
+                        after_ingest = Some(after_ingest.unwrap_or(0).max(e.ingest_id));
                         if let Ok(data) = serde_json::to_string(&e) {
-                            // Set the SSE `id:` field to the sequence so a
-                            // browser will send `Last-Event-ID` on reconnect;
-                            // the `after_sequence` query is the explicit path.
+                            // SSE `id:` is the global ingest_id so a browser
+                            // sends `Last-Event-ID` as an ingest cursor on
+                            // reconnect (Hardening P0 item 9).
                             yield Ok(
                                 Event::default()
                                     .event("task-event")
-                                    .id(e.sequence.to_string())
+                                    .id(e.ingest_id.to_string())
                                     .data(data),
                             );
                         }
@@ -2606,8 +2782,13 @@ async fn get_events(
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<Vec<agentgrid_common::TaskEvent>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — surface
-    // storage outage as 503 so the client does not read it as "no events".
-    match state.store.get_events(&task_id, q.after_sequence).await {
+    // storage outage as 503 with a machine-readable code so the client does
+    // not read it as "no events".
+    match state
+        .store
+        .get_events(&task_id, q.after_ingest, q.after_sequence, q.limit)
+        .await
+    {
         Ok(e) => Ok(Json(e)),
         Err(e) => {
             tracing::error!("get_events failed: {e}");
@@ -2971,9 +3152,9 @@ async fn complete_attempt(
     Path(attempt_id): Path<String>,
     headers: HeaderMap,
     Json(req): Json<CompleteAttemptRequest>,
-) -> StatusCode {
+) -> Response {
     if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code;
+        return code.into_response();
     }
     if let Err(code) = check_fencing_token(
         &state,
@@ -2982,14 +3163,30 @@ async fn complete_attempt(
     )
     .await
     {
-        return code;
+        return code.into_response();
     }
     match state.store.complete_attempt(&attempt_id, &req).await {
-        Ok(true) => StatusCode::OK,
-        Ok(false) => StatusCode::NOT_FOUND,
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
+            // Hardening P1 item 13: map invalid state transition to 409 Conflict
+            // with a machine-readable code (hardening P2 item 19). The `?`
+            // operator wraps the raw `InvalidTransition` in anyhow (via its
+            // blanket From), NOT the StoreTransitionError marker — so check
+            // both shapes.
+            if e.downcast_ref::<crate::store::StoreTransitionError>()
+                .is_some()
+                || e.downcast_ref::<agentgrid_common::InvalidTransition>()
+                    .is_some()
+            {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    "invalid_state_transition",
+                    "attempt cannot transition from its current state",
+                );
+            }
             tracing::error!("complete_attempt failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }
@@ -3017,6 +3214,39 @@ async fn ack_attempt_handler(
         Ok(false) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("ack_attempt failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// Hardening P0 item 12: the node signals it has started the post-agent
+/// validation command; the CP moves the attempt (and task) `running →
+/// validating`. Ownership + fencing checked like every other node mutation.
+async fn begin_validate_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
+    Path(attempt_id): Path<String>,
+    headers: HeaderMap,
+) -> StatusCode {
+    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
+        return code;
+    }
+    if let Err(code) = check_fencing_token(
+        &state,
+        &attempt_id,
+        fencing_token_header(&headers).as_deref(),
+    )
+    .await
+    {
+        return code;
+    }
+    match state.store.begin_validate(&attempt_id).await {
+        Ok(true) => StatusCode::OK,
+        // Not `running` (already validating, terminal, or gone): idempotent
+        // no-op so a retried validation signal never 500s.
+        Ok(false) => StatusCode::OK,
+        Err(e) => {
+            tracing::error!("begin_validate failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -3199,30 +3429,47 @@ mod sse_tests {
 
     #[test]
     fn resume_uses_query_when_higher_than_header() {
-        // Explicit query wins over Last-Event-ID when query is newer.
-        assert_eq!(sse_resume_after(5, Some(&header("2"))), 5);
+        // Explicit after_ingest query wins over Last-Event-ID when newer.
+        assert_eq!(
+            sse_resume_after(Some(5), 0, Some(&header("2"))),
+            (Some(5), 0)
+        );
     }
 
     #[test]
     fn resume_uses_header_when_higher_than_query() {
-        // Last-Event-ID promotes a reconnect that started at 0 up to last seq.
-        assert_eq!(sse_resume_after(0, Some(&header("7"))), 7);
+        // Last-Event-ID promotes a reconnect that started at 0 up to last
+        // ingest_id (Hardening P0 item 9: the header carries the global cursor).
+        assert_eq!(sse_resume_after(None, 0, Some(&header("7"))), (Some(7), 0));
     }
 
     #[test]
     fn resume_takes_max_of_both() {
-        assert_eq!(sse_resume_after(3, Some(&header("3"))), 3);
+        assert_eq!(
+            sse_resume_after(Some(3), 0, Some(&header("3"))),
+            (Some(3), 0)
+        );
     }
 
     #[test]
     fn resume_without_header_is_query() {
-        assert_eq!(sse_resume_after(9, None), 9);
+        assert_eq!(sse_resume_after(Some(9), 0, None), (Some(9), 0));
     }
 
     #[test]
     fn resume_ignores_non_numeric_header() {
         // A garbage Last-Event-ID falls back to the query (no gaps, no dup).
-        assert_eq!(sse_resume_after(4, Some(&header("garbage"))), 4);
+        assert_eq!(
+            sse_resume_after(None, 0, Some(&header("garbage"))),
+            (None, 0)
+        );
+    }
+
+    #[test]
+    fn resume_legacy_sequence_without_ingest_cursor() {
+        // Pre-0037 client: no after_ingest, no Last-Event-ID — the per-attempt
+        // after_sequence is passed through unchanged.
+        assert_eq!(sse_resume_after(None, 42, None), (None, 42));
     }
 }
 

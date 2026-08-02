@@ -293,3 +293,277 @@ mod tests {
         // No attempt transition escapes the terminal set at all.
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Generate all TaskStatus values
+    fn arb_task_status() -> impl Strategy<Value = TaskStatus> {
+        prop_oneof![
+            Just(TaskStatus::Queued),
+            Just(TaskStatus::Assigned),
+            Just(TaskStatus::Running),
+            Just(TaskStatus::Validating),
+            Just(TaskStatus::Succeeded),
+            Just(TaskStatus::Failed),
+            Just(TaskStatus::Cancelled),
+        ]
+    }
+
+    // Generate all TaskTransition values
+    fn arb_task_transition() -> impl Strategy<Value = TaskTransition> {
+        prop_oneof![
+            Just(TaskTransition::Assign),
+            Just(TaskTransition::Start),
+            Just(TaskTransition::BeginValidate),
+            Just(TaskTransition::Succeed),
+            Just(TaskTransition::Fail),
+            Just(TaskTransition::Cancel),
+            Just(TaskTransition::Retry),
+            Just(TaskTransition::NodeLost),
+        ]
+    }
+
+    // Generate all AttemptStatus values
+    fn arb_attempt_status() -> impl Strategy<Value = AttemptStatus> {
+        prop_oneof![
+            Just(AttemptStatus::Assigned),
+            Just(AttemptStatus::Running),
+            Just(AttemptStatus::Validating),
+            Just(AttemptStatus::Succeeded),
+            Just(AttemptStatus::Failed),
+            Just(AttemptStatus::Cancelled),
+            Just(AttemptStatus::Lost),
+        ]
+    }
+
+    // Generate all AttemptTransition values
+    fn arb_attempt_transition() -> impl Strategy<Value = AttemptTransition> {
+        prop_oneof![
+            Just(AttemptTransition::Start),
+            Just(AttemptTransition::BeginValidate),
+            Just(AttemptTransition::Succeed),
+            Just(AttemptTransition::Fail),
+            Just(AttemptTransition::Cancel),
+            Just(AttemptTransition::NodeLost),
+        ]
+    }
+
+    // Property: Every valid transition from a non-terminal state leads to a valid state
+    proptest! {
+        #[test]
+        fn task_transitions_always_return_valid_state_or_err(
+            status in arb_task_status(),
+            transition in arb_task_transition(),
+        ) {
+            let result = next_task_status(status, transition);
+            match result {
+                Ok(new_status) => {
+                    // The new status must be a valid TaskStatus variant
+                    prop_assert!(matches!(
+                        new_status,
+                        TaskStatus::Queued
+                            | TaskStatus::Assigned
+                            | TaskStatus::Running
+                            | TaskStatus::Validating
+                            | TaskStatus::Succeeded
+                            | TaskStatus::Failed
+                            | TaskStatus::Cancelled
+                    ));
+                    // Transitioning from a terminal state (except Retry from Failed/Cancelled) must error
+                    if matches!(
+                        status,
+                        TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+                    ) && !(matches!(status, TaskStatus::Failed | TaskStatus::Cancelled)
+                        && matches!(transition, TaskTransition::Retry))
+                    {
+                        prop_assert!(result.is_err(), "terminal state {status:?} with non-retry transition {transition:?} must error");
+                    }
+                }
+                Err(_) => {
+                    // Error is valid for invalid transitions
+                }
+            }
+        }
+
+        #[test]
+        fn attempt_transitions_always_return_valid_state_or_err(
+            status in arb_attempt_status(),
+            transition in arb_attempt_transition(),
+        ) {
+            let result = next_attempt_status(status, transition);
+            match result {
+                Ok(new_status) => {
+                    prop_assert!(matches!(
+                        new_status,
+                        AttemptStatus::Assigned
+                            | AttemptStatus::Running
+                            | AttemptStatus::Validating
+                            | AttemptStatus::Succeeded
+                            | AttemptStatus::Failed
+                            | AttemptStatus::Cancelled
+                            | AttemptStatus::Lost
+                    ));
+                    // Attempt transitions from terminal states must always error
+                    if matches!(status, AttemptStatus::Succeeded | AttemptStatus::Failed | AttemptStatus::Cancelled | AttemptStatus::Lost) {
+                        prop_assert!(result.is_err(), "terminal attempt state {status:?} must not transition");
+                    }
+                }
+                Err(_) => {
+                    // Error is valid for invalid transitions
+                }
+            }
+        }
+
+        #[test]
+        fn task_transition_is_deterministic(
+            status in arb_task_status(),
+            transition in arb_task_transition(),
+        ) {
+            let r1 = next_task_status(status, transition);
+            let r2 = next_task_status(status, transition);
+            prop_assert_eq!(r1, r2);
+        }
+
+        #[test]
+        fn attempt_transition_is_deterministic(
+            status in arb_attempt_status(),
+            transition in arb_attempt_transition(),
+        ) {
+            let r1 = next_attempt_status(status, transition);
+            let r2 = next_attempt_status(status, transition);
+            prop_assert_eq!(r1, r2);
+        }
+
+        #[test]
+        fn task_terminal_states_have_no_outgoing_except_retry(
+            status in prop_oneof![
+                Just(TaskStatus::Succeeded),
+                Just(TaskStatus::Failed),
+                Just(TaskStatus::Cancelled),
+            ],
+            transition in arb_task_transition(),
+        ) {
+            let result = next_task_status(status, transition);
+            if matches!(status, TaskStatus::Failed | TaskStatus::Cancelled) && matches!(transition, TaskTransition::Retry) {
+                prop_assert_eq!(result.unwrap(), TaskStatus::Queued);
+            } else {
+                prop_assert!(result.is_err());
+            }
+        }
+
+        #[test]
+        fn attempt_terminal_states_have_no_outgoing(
+            status in prop_oneof![
+                Just(AttemptStatus::Succeeded),
+                Just(AttemptStatus::Failed),
+                Just(AttemptStatus::Cancelled),
+                Just(AttemptStatus::Lost),
+            ],
+            transition in arb_attempt_transition(),
+        ) {
+            let result = next_attempt_status(status, transition);
+            prop_assert!(result.is_err());
+        }
+
+        #[test]
+        fn task_queued_only_transitions_to_assigned_cancelled_or_failed(
+            transition in arb_task_transition(),
+        ) {
+            let result = next_task_status(TaskStatus::Queued, transition);
+            match transition {
+                TaskTransition::Assign => prop_assert_eq!(result.unwrap(), TaskStatus::Assigned),
+                TaskTransition::Cancel => prop_assert_eq!(result.unwrap(), TaskStatus::Cancelled),
+                TaskTransition::NodeLost => prop_assert_eq!(result.unwrap(), TaskStatus::Failed),
+                _ => prop_assert!(result.is_err()),
+            }
+        }
+
+        #[test]
+        fn task_assigned_transitions(
+            transition in arb_task_transition(),
+        ) {
+            let result = next_task_status(TaskStatus::Assigned, transition);
+            match transition {
+                TaskTransition::Start => prop_assert_eq!(result.unwrap(), TaskStatus::Running),
+                TaskTransition::Cancel => prop_assert_eq!(result.unwrap(), TaskStatus::Cancelled),
+                TaskTransition::Retry => prop_assert_eq!(result.unwrap(), TaskStatus::Queued),
+                TaskTransition::NodeLost => prop_assert_eq!(result.unwrap(), TaskStatus::Failed),
+                _ => prop_assert!(result.is_err()),
+            }
+        }
+
+        #[test]
+        fn task_running_transitions(
+            transition in arb_task_transition(),
+        ) {
+            let result = next_task_status(TaskStatus::Running, transition);
+            match transition {
+                TaskTransition::BeginValidate => prop_assert_eq!(result.unwrap(), TaskStatus::Validating),
+                TaskTransition::Succeed => prop_assert_eq!(result.unwrap(), TaskStatus::Succeeded),
+                TaskTransition::Fail => prop_assert_eq!(result.unwrap(), TaskStatus::Failed),
+                TaskTransition::Cancel => prop_assert_eq!(result.unwrap(), TaskStatus::Cancelled),
+                TaskTransition::NodeLost => prop_assert_eq!(result.unwrap(), TaskStatus::Failed),
+                _ => prop_assert!(result.is_err()),
+            }
+        }
+
+        #[test]
+        fn task_validating_transitions(
+            transition in arb_task_transition(),
+        ) {
+            let result = next_task_status(TaskStatus::Validating, transition);
+            match transition {
+                TaskTransition::Succeed => prop_assert_eq!(result.unwrap(), TaskStatus::Succeeded),
+                TaskTransition::Fail => prop_assert_eq!(result.unwrap(), TaskStatus::Failed),
+                TaskTransition::Cancel => prop_assert_eq!(result.unwrap(), TaskStatus::Cancelled),
+                TaskTransition::NodeLost => prop_assert_eq!(result.unwrap(), TaskStatus::Failed),
+                _ => prop_assert!(result.is_err()),
+            }
+        }
+
+        #[test]
+        fn attempt_assigned_transitions(
+            transition in arb_attempt_transition(),
+        ) {
+            let result = next_attempt_status(AttemptStatus::Assigned, transition);
+            match transition {
+                AttemptTransition::Start => prop_assert_eq!(result.unwrap(), AttemptStatus::Running),
+                AttemptTransition::Cancel => prop_assert_eq!(result.unwrap(), AttemptStatus::Cancelled),
+                AttemptTransition::NodeLost => prop_assert_eq!(result.unwrap(), AttemptStatus::Lost),
+                _ => prop_assert!(result.is_err()),
+            }
+        }
+
+        #[test]
+        fn attempt_running_transitions(
+            transition in arb_attempt_transition(),
+        ) {
+            let result = next_attempt_status(AttemptStatus::Running, transition);
+            match transition {
+                AttemptTransition::BeginValidate => prop_assert_eq!(result.unwrap(), AttemptStatus::Validating),
+                AttemptTransition::Succeed => prop_assert_eq!(result.unwrap(), AttemptStatus::Succeeded),
+                AttemptTransition::Fail => prop_assert_eq!(result.unwrap(), AttemptStatus::Failed),
+                AttemptTransition::Cancel => prop_assert_eq!(result.unwrap(), AttemptStatus::Cancelled),
+                AttemptTransition::NodeLost => prop_assert_eq!(result.unwrap(), AttemptStatus::Lost),
+                _ => prop_assert!(result.is_err()),
+            }
+        }
+
+        #[test]
+        fn attempt_validating_transitions(
+            transition in arb_attempt_transition(),
+        ) {
+            let result = next_attempt_status(AttemptStatus::Validating, transition);
+            match transition {
+                AttemptTransition::Succeed => prop_assert_eq!(result.unwrap(), AttemptStatus::Succeeded),
+                AttemptTransition::Fail => prop_assert_eq!(result.unwrap(), AttemptStatus::Failed),
+                AttemptTransition::Cancel => prop_assert_eq!(result.unwrap(), AttemptStatus::Cancelled),
+                AttemptTransition::NodeLost => prop_assert_eq!(result.unwrap(), AttemptStatus::Lost),
+                _ => prop_assert!(result.is_err()),
+            }
+        }
+    }
+}

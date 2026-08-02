@@ -65,6 +65,27 @@ enum AgCommand {
     Workflow(WorkflowArgs),
     /// Full-screen TUI dashboard (read-only monitoring).
     Tui(TuiArgs),
+    /// Storage maintenance (artifact GC, disk status).
+    Storage(StorageArgs),
+}
+
+#[derive(Args)]
+struct StorageArgs {
+    #[command(subcommand)]
+    command: StorageSub,
+}
+
+#[derive(Subcommand)]
+enum StorageSub {
+    /// Reconcile the artifact tree against metadata. `--dry-run` only reports
+    /// orphan files / dangling metadata without deleting anything.
+    Gc {
+        /// Report only; delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show free space on the control-plane artifact volume.
+    Disk,
 }
 
 #[derive(Args)]
@@ -162,6 +183,11 @@ fn paint(no_color: bool, code: &str, s: &str) -> String {
 #[derive(Args)]
 struct ShowArgs {
     task_id: String,
+    /// Hardening P2 item 37: show scheduler eligibility reasoning for the task
+    /// even when it is no longer queued (e.g. after assignment), mirroring
+    /// `ag task explain`.
+    #[arg(long)]
+    explain: bool,
 }
 
 #[derive(Args)]
@@ -353,6 +379,14 @@ enum NodeSub {
     /// is report-only — it does not mutate the node. Use `ag node install` /
     /// the node daemon for repair; this surfaces the symptoms there.
     Doctor { node_id: String },
+    /// Drain a node for maintenance: it keeps in-flight attempts but receives
+    /// no NEW assignments. `--undrain` re-enables assignments.
+    Drain {
+        node_id: String,
+        /// Re-enable assignments on this node.
+        #[arg(long)]
+        undrain: bool,
+    },
 }
 
 /// Transport used for the node -> control-plane runtime link.
@@ -555,7 +589,82 @@ async fn main() -> Result<()> {
         AgCommand::Server(a) => cmd_server_start(a),
         AgCommand::Workflow(a) => cmd_workflow(&client, &base, a, cli.json).await,
         AgCommand::Tui(a) => cmd_tui(&client, &base, a).await,
+        AgCommand::Storage(a) => cmd_storage(&client, &base, a, cli.json).await,
     }
+}
+
+/// Hardening P1 item 15: `ag storage gc [--dry-run]` and `ag storage disk`.
+async fn cmd_storage(
+    client: &reqwest::Client,
+    base: &str,
+    a: StorageArgs,
+    json: bool,
+) -> Result<()> {
+    match a.command {
+        StorageSub::Gc { dry_run } => {
+            let resp = client
+                .post(format!("{base}/v1/admin/storage-gc"))
+                .json(&serde_json::json!({ "dry_run": dry_run }))
+                .send()
+                .await
+                .context("storage gc request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("storage gc failed: HTTP {}", resp.status());
+            }
+            let out: serde_json::Value = resp.json().await.context("parse storage gc response")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                let orphans = out
+                    .get("orphan_files")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let bytes = out
+                    .get("orphan_bytes")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let dangling = out
+                    .get("metadata_without_file")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let free_mb = out.get("free_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+                if dry_run {
+                    println!(
+                        "dry-run: {orphans} orphan file(s), {bytes} bytes reclaimable, {dangling} dangling metadata row(s), {free_mb} MB free"
+                    );
+                } else {
+                    println!(
+                        "gc: removed {orphans} orphan file(s) ({bytes} bytes), pruned {dangling} dangling metadata row(s); {free_mb} MB free"
+                    );
+                }
+            }
+        }
+        StorageSub::Disk => {
+            // The gc endpoint reports free_mb even with dry_run — reuse it for
+            // a cheap disk-status probe without any mutation.
+            let resp = client
+                .post(format!("{base}/v1/admin/storage-gc"))
+                .json(&serde_json::json!({ "dry_run": true }))
+                .send()
+                .await
+                .context("storage disk request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("storage disk failed: HTTP {}", resp.status());
+            }
+            let out: serde_json::Value =
+                resp.json().await.context("parse storage disk response")?;
+            let free_mb = out.get("free_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "free_mb": free_mb }))?
+                );
+            } else {
+                println!("control plane artifact volume: {free_mb} MB free");
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_tui(client: &reqwest::Client, base: &str, a: TuiArgs) -> Result<()> {
@@ -610,7 +719,10 @@ async fn cmd_show(client: &reqwest::Client, base: &str, a: ShowArgs, json: bool)
             .unwrap_or_else(|| "-".into())
     );
     println!("created:   {}", task.created_at);
-    if task.status == TaskStatus::Queued {
+    // Hardening P2 item 37: eligibility reasoning — shown for queued tasks by
+    // default (explains why a task is stuck), and for ANY status with
+    // `--explain` (why the scheduler picked / rejected nodes).
+    if task.status == TaskStatus::Queued || a.explain {
         if let Ok(elig) = client
             .get(format!("{base}/v1/tasks/{}/eligibility", task.id))
             .send()
@@ -636,12 +748,20 @@ async fn cmd_show(client: &reqwest::Client, base: &str, a: ShowArgs, json: bool)
 
 async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<()> {
     let nc = a.no_color;
-    let mut after: u64 = 0;
+    let mut after_ingest: u64 = 0;
+    let mut has_ingest = false;
     let mut phase = Phase::Starting;
     loop {
         let resp = client
             .get(format!("{base}/v1/tasks/{}/events", a.task_id))
-            .query(&[("after_sequence", after)])
+            // Hardening P0 item 9: the global ingest_id cursor orders events
+            // across attempts (a retry no longer reorders old vs new attempts).
+            // `after_sequence` is kept alongside so an old server that ignores
+            // `after_ingest` still resumes per-attempt.
+            .query(&[
+                ("after_ingest", after_ingest),
+                ("after_sequence", after_ingest),
+            ])
             .send()
             .await
             .context("events request failed")?;
@@ -649,7 +769,15 @@ async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<(
             let events: Vec<serde_json::Value> = resp.json().await.context("parse events")?;
             for e in &events {
                 let seq = e.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0);
-                after = after.max(seq);
+                // Fall back to per-attempt sequence on old servers that never
+                // populate ingest_id.
+                let ingest = e.get("ingest_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                if ingest > 0 {
+                    after_ingest = after_ingest.max(ingest);
+                    has_ingest = true;
+                } else if !has_ingest {
+                    after_ingest = after_ingest.max(seq);
+                }
                 let ty = e.get("type").and_then(|v| v.as_str()).unwrap_or("?");
                 phase = phase_from_event(ty, e);
                 print_event(e, seq, ty, nc);
@@ -806,6 +934,39 @@ async fn cmd_nodes(client: &reqwest::Client, base: &str, json: bool, a: NodeArgs
         NodeSub::List => cmd_node_list(client, base, json).await,
         NodeSub::Install(i) => cmd_node_install(client, base, *i).await,
         NodeSub::Doctor { node_id } => cmd_node_doctor(client, base, &node_id).await,
+        NodeSub::Drain { node_id, undrain } => {
+            cmd_node_drain(client, base, &node_id, undrain).await
+        }
+    }
+}
+
+/// Hardening P2 item 37: drain a node (no NEW assignments; in-flight attempts
+/// finish) or undrain it.
+async fn cmd_node_drain(
+    client: &reqwest::Client,
+    base: &str,
+    node_id: &str,
+    undrain: bool,
+) -> Result<()> {
+    let resp = client
+        .post(format!(
+            "{base}/v1/nodes/{node_id}/drain?drain={}",
+            !undrain
+        ))
+        .send()
+        .await
+        .context("node drain request failed")?;
+    if resp.status().is_success() {
+        if undrain {
+            println!("node {node_id} undrained — new assignments enabled");
+        } else {
+            println!("node {node_id} drained — no new assignments; in-flight attempts finish");
+        }
+        Ok(())
+    } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("node {node_id} not found")
+    } else {
+        anyhow::bail!("node drain failed: HTTP {}", resp.status())
     }
 }
 
@@ -854,6 +1015,24 @@ async fn cmd_node_doctor(client: &reqwest::Client, base: &str, node_id: &str) ->
         })
         .unwrap_or_default();
     println!("  adapters    : {adapters}");
+    // Hardening P0 item 5: surface unsafe mode + permission interception so a
+    // doctor run flags fully-unrestricted nodes.
+    let unsafe_active = n
+        .get("unsafe_active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let intercept = n
+        .get("permission_interception")
+        .and_then(|v| v.as_str())
+        .unwrap_or("wrapper");
+    println!("  interception: {intercept}");
+    println!("  unsafe mode : {unsafe_active}");
+    if unsafe_active {
+        symptoms.push(
+            "node runs UNSAFE unattended mode (permissions bypassed, no sandbox) — restrict access"
+                .into(),
+        );
+    }
     if status == "offline" {
         symptoms.push("node is OFFLINE (heartbeat lost or just started)".into());
     }
@@ -1121,10 +1300,6 @@ fn validate_install_args(a: &NodeInstallArgs) -> Result<()> {
 /// key (direct), password via `sshpass` when present, else `expect` (universally
 /// available on Linux). `extra` are program-specific args (e.g. `-f -N -R ...`);
 /// `remote_cmd` (ssh only) is the final argument (the remote shell command).
-/// Run an ssh/scp invocation against the remote host, choosing the auth wrapper:
-/// key (direct), password via `sshpass` when present, else `expect` (universally
-/// available on Linux). `extra` are program-specific args (e.g. `-f -N -R ...`);
-/// `remote_cmd` (ssh only) is the final argument (the remote shell command).
 /// `detach` launches the command in its own session (setsid) so it survives the
 /// `ag nodes install` process — used for the persistent reverse tunnel.
 fn run_remote(
@@ -1277,8 +1452,8 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         return Ok(());
     }
     println!(
-        "{:<36} {:<10} {:<8} {:<6} {:<10}",
-        "ID", "STATUS", "ACTIVE", "MAX", "DISK"
+        "{:<36} {:<10} {:<8} {:<6} {:<10} {:<12} {:<14} {:<12}",
+        "ID", "STATUS", "ACTIVE", "MAX", "DISK", "INTERCEPT", "UNSAFE", "SPOOL"
     );
     for n in &nodes {
         let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("-");
@@ -1297,7 +1472,33 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         } else {
             format!("{:.0} GB", disk as f64 / 1024.0)
         };
-        println!("{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10}");
+        // Hardening P0 item 5: surface unsafe mode + interception so operators
+        // can see which nodes run fully-unrestricted agents at a glance.
+        let intercept = n
+            .get("permission_interception")
+            .and_then(|v| v.as_str())
+            .unwrap_or("wrapper");
+        let unsafe_active = n
+            .get("unsafe_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let unsafe_flag = if unsafe_active { "UNSAFE" } else { "no" };
+        // Hardening P2 item 35: local storage pressure (outbox + artifact
+        // spool) — a node whose spool grows is backing up and not draining.
+        let spool_bytes = n.get("outbox_bytes").and_then(|v| v.as_u64()).unwrap_or(0)
+            + n.get("artifact_spool_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+        let spool = if spool_bytes >= 1024 * 1024 {
+            format!("{:.1} MB", spool_bytes as f64 / (1024.0 * 1024.0))
+        } else if spool_bytes > 0 {
+            format!("{spool_bytes} B")
+        } else {
+            "-".to_string()
+        };
+        println!(
+            "{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10} {intercept:<12} {unsafe_flag:<14} {spool:<12}"
+        );
     }
     Ok(())
 }

@@ -640,11 +640,22 @@ pub fn cleanup_workspace(
 /// attempt on a just-restarted node isn't swept). For each repo under
 /// `repository_root`, also runs `git worktree prune` to drop gitlinks whose
 /// worktrees no longer exist. Best-effort.
+///
+/// Hardening P1 item 33/35: returns prune/ quarantine/worktree counts for
+/// cleanup observability (logged by the caller).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PruneStats {
+    pub pruned: u64,
+    pub quarantined: u64,
+    pub worktrees_pruned: u64,
+}
+
 pub fn prune_stale_workspaces(
     workspace_root: &std::path::Path,
     repository_root: &std::path::Path,
     retention: std::time::Duration,
-) {
+) -> PruneStats {
+    let mut stats = PruneStats::default();
     let cutoff = std::time::SystemTime::now() - retention;
     if let Ok(entries) = std::fs::read_dir(workspace_root) {
         for e in entries.flatten() {
@@ -663,8 +674,10 @@ pub fn prune_stale_workspaces(
                             // silently surviving / corrupting the cleanup.
                             if safe_workspace_target_under(&p, workspace_root) {
                                 let _ = std::fs::remove_dir_all(&p);
+                                stats.pruned += 1;
                             } else {
                                 quarantine_stale_workspace(&p, workspace_root);
+                                stats.quarantined += 1;
                             }
                         }
                     }
@@ -676,9 +689,18 @@ pub fn prune_stale_workspaces(
         for e in entries.flatten() {
             if e.path().join(".git").exists() {
                 let _ = git(&e.path(), &["worktree", "prune"]);
+                // Hardening P1 item 32: repository cache GC policy — run
+                // `git gc --auto` on each bare mirror so incremental pack
+                // growth is compacted without ever deleting the mirror
+                // (removing a mirror while an attempt uses it would break the
+                // worktree). `--auto` decides itself whether a gc is needed,
+                // so the cost stays near-zero on healthy repos.
+                let _ = git(&e.path(), &["gc", "--auto", "--quiet"]);
+                stats.worktrees_pruned += 1;
             }
         }
     }
+    stats
 }
 
 /// Hardening P1 item 32: capture the remote (upstream) HEAD of the bare-mirror
@@ -715,6 +737,7 @@ mod tests {
             git_url: git_url.into(),
             default_branch: default_branch.into(),
             validation_command: None,
+            validation_timeout_secs: None,
             base_commit: None,
             parent_acp_session_id: None,
             provenance: None,
@@ -1017,6 +1040,7 @@ mod tests {
                     git_url: url,
                     default_branch: "main".into(),
                     validation_command: None,
+                    validation_timeout_secs: None,
                     base_commit: None,
                     parent_acp_session_id: None,
                     provenance: None,

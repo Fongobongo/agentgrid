@@ -12,6 +12,27 @@ info:
     This document is a generated summary of the public surface; see
     `crates/control-plane/src/lib.rs` for the authoritative route table.
 
+    ## Error envelope (hardening P2 item 19)
+
+    Handlers that return structured errors use a single machine-readable body:
+
+    ```json
+    {
+      "error": {
+        "code": "invalid_state_transition",
+        "message": "attempt cannot transition from its current state",
+        "request_id": "<uuid>"
+      }
+    }
+    ```
+
+    Stable codes: `invalid_state_transition` (409), `artifact_hash_mismatch`
+    (422), `batch_too_large` (413), `rate_limited` (429), `not_found` (404),
+    `unauthorized` (401), `forbidden` (403), `internal_error` (500),
+    `service_unavailable` (503). Every response carries an `X-Request-Id`
+    header (echoed/used for log correlation); the body `request_id` matches a
+    freshly minted id for clients that only read the body.
+
 paths:
   /v1/auth/setup:
     post:
@@ -26,14 +47,50 @@ paths:
   /v1/admin/backup:
     post:
       summary: Snapshot the SQLite DB (VACUUM INTO) to a downloadable artifact
+  /v1/admin/storage-gc:
+    post:
+      summary: Reconcile the artifact tree against metadata (orphan GC)
+      description: |
+        Body `{ "dry_run": bool }`. Reports `orphan_files`, `orphan_bytes`,
+        `metadata_without_file` and `free_mb`. With `dry_run: false` orphan
+        files are unlinked and dangling metadata rows pruned. Audited as
+        `storage.gc`.
   /v1/tasks:
     get:
       summary: List tasks
+      description: |
+        Optional filters `status` / `repository` / `node_id` (exact match).
+        Keyset pagination: pass `after_created_at` + `after_id` (the last
+        row's values) to fetch the next page; `limit` caps the page (server
+        ceiling 1000). Order is stable `(created_at, id)`.
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: repository
+          in: query
+          schema: { type: string }
+        - name: node_id
+          in: query
+          schema: { type: string }
+        - name: after_created_at
+          in: query
+          schema: { type: string }
+        - name: after_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer }
     post:
       summary: Create a task
   /v1/tasks/{id}:
     get:
       summary: Fetch a task by id
+      description: |
+        Task view includes `security_profile` — the security profile of the
+        latest attempt (from `attempts.provenance.security_profile`), so
+        operators can see the policy the agent ran under.
     parameters:
       - name: id
         in: path
@@ -48,9 +105,31 @@ paths:
   /v1/tasks/{id}/events:
     get:
       summary: List task events (polling)
+      description: |
+        Ordered by the global `ingest_id` cursor (migration 0037) so events
+        from different attempts render in true time order after a retry.
+        `after_ingest` resumes after that global cursor; legacy `after_sequence`
+        (per-attempt) is still honoured. `limit` caps the page (default 1000).
+      parameters:
+        - name: after_ingest
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: after_sequence
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
   /v1/tasks/{id}/events/stream:
     get:
       summary: SSE event stream (Last-Event-ID resume supported)
+      description: |
+        The SSE `id:` field carries the global `ingest_id`; a reconnect sends it
+        back as `Last-Event-ID` and resumes exactly where it stopped, across
+        attempts.
   /v1/tasks/{id}/approvals:
     get:
       summary: List pending approvals for a task
@@ -63,9 +142,23 @@ paths:
   /v1/nodes:
     get:
       summary: List registered nodes
+      description: |
+        Each node carries `unsafe_active` (unsafe unattended bypass active) and
+        `permission_interception` (`structured` | `wrapper` | `none`) so
+        operators can spot fully-unrestricted nodes. Also `outbox_bytes` and
+        `artifact_spool_bytes` (hardening P2 item 35): local storage pressure —
+        a node whose spool grows is backing up and not draining.
   /v1/nodes/{id}:
     get:
       summary: Fetch a node by id
+  /v1/nodes/{id}/drain:
+    post:
+      summary: Drain / undrain a node for maintenance
+      description: |
+        `?drain=true` (default) stops NEW task assignments while in-flight
+        attempts finish and the heartbeat stays online; `?drain=false`
+        re-enables scheduling. Audited as `node.drain` / `node.undrain`.
+        (hardening P2 item 37)
   /v1/nodes/enrollment-token:
     post:
       summary: Mint a one-time node enrollment token (admin)
@@ -81,6 +174,13 @@ paths:
   /v1/node/attempts/{id}/ack:
     post:
       summary: Acknowledge an assignment started (node credentials)
+  /v1/node/attempts/{id}/begin_validate:
+    post:
+      summary: Signal the post-agent validation command has started (node credentials)
+      description: |
+        Moves the attempt (and task) `running → validating` (CAS). Idempotent:
+        a retried signal on an already-validating/terminal attempt returns 200
+        without error; a stale fencing token yields 409.
   /v1/node/attempts/{id}/events:
     post:
       summary: Ingest a batch of adapter events (node credentials)

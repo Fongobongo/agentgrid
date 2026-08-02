@@ -11,10 +11,10 @@ use agentgrid_common::{
     next_attempt_status, next_task_status, AgentProfile, AgentSession, ApprovalStatus,
     ApprovalView, ArtifactMeta, ArtifactUploadResponse, Assignment, AttemptStatus,
     AttemptTransition, CompleteAttemptRequest, CreateRepositoryRequest, CreateTaskRequest,
-    EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest, McpServer,
-    NodeEligibility, NodeStatus, NodeView, PollRequest, RepositoryView, SkillTrustView,
-    TaskEligibility, TaskEvent, TaskStatus, TaskTransition, TaskView, UploadArtifactRequest,
-    WorkflowBudget, WorkflowRole, WorkflowSchedule,
+    EnrollRequest, EnrollResponse, EventType, HeartbeatRequest, IngestEventsRequest,
+    InvalidTransition, McpServer, NodeEligibility, NodeStatus, NodeView, PollRequest,
+    RepositoryView, SkillTrustView, TaskEligibility, TaskEvent, TaskStatus, TaskTransition,
+    TaskView, UploadArtifactRequest, WorkflowBudget, WorkflowRole, WorkflowSchedule,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -33,6 +33,8 @@ const ASSIGNMENT_LEASE_SECS: i64 = 30;
 /// Window after assignment within which the node must ack (Stage 1.3). An
 /// unacked assignment is reverted (returned to the queue) once this passes.
 const ACK_DEADLINE_SECS: i64 = 30;
+/// Hardening P0 item 9: server-side page size cap for `GET /v1/tasks/{id}/events`.
+const DEFAULT_EVENT_PAGE: u64 = 1000;
 
 #[derive(Clone)]
 pub struct Store {
@@ -54,10 +56,26 @@ pub struct Store {
     pub(crate) active_attempt_drift: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Hardening P2 item 35: cumulative bytes reclaimed by artifact retention.
     pub(crate) artifact_cleanup_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Number of artifact cleanup runs.
+    pub(crate) artifact_cleanup_runs: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Number of artifact cleanup failures.
+    pub(crate) artifact_cleanup_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Total duration of artifact cleanup runs in seconds.
+    pub(crate) artifact_cleanup_duration_secs: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// True when an sqlx error is a SQLite lock-contention failure (`database is
+/// locked` / `database table is locked`), which is safe to retry with backoff.
+fn is_locked_err(e: &anyhow::Error) -> bool {
+    if let Some(sqlx::Error::Database(dberr)) = e.downcast_ref::<sqlx::Error>() {
+        let m = dberr.message().to_ascii_lowercase();
+        return m.contains("database is locked") || m.contains("database table is locked");
+    }
+    false
 }
 
 /// Begin a `BEGIN IMMEDIATE` write transaction. The default `pool.begin()` uses
@@ -223,6 +241,20 @@ impl From<sqlx::Error> for StoreArtifactError {
     }
 }
 
+/// Error from a state-machine transition in the store. Returned when an
+/// operation attempts an invalid status transition (e.g., completing an
+/// already-terminal attempt, retrying a non-terminal task). Mapped to 409
+/// Conflict by the HTTP layer.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid transition: {0}")]
+pub struct StoreTransitionError(pub InvalidTransition);
+
+impl From<InvalidTransition> for StoreTransitionError {
+    fn from(e: InvalidTransition) -> Self {
+        StoreTransitionError(e)
+    }
+}
+
 /// Argon2id hash of a password (Stage 4.1).
 fn hash_password(password: &str) -> Result<String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
@@ -305,6 +337,10 @@ impl Store {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("artifacts");
+        // Hardening P1 item 15: create the artifact root eagerly so the
+        // critical-disk watermark (statvfs on the root) is meaningful from the
+        // first assignment, even before any artifact is written.
+        let _ = std::fs::create_dir_all(&artifact_root);
         Ok(Self {
             pool,
             artifact_root,
@@ -315,6 +351,11 @@ impl Store {
             lease_reverts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             active_attempt_drift: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             artifact_cleanup_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            artifact_cleanup_runs: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            artifact_cleanup_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            artifact_cleanup_duration_secs: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                0,
+            )),
         })
     }
 
@@ -700,7 +741,9 @@ impl Store {
             "UPDATE nodes SET name = ?, \
                status = CASE WHEN status = 'revoked' THEN 'revoked' ELSE ? END, \
                agent_version = ?, max_concurrency = ?, adapters = ?, repositories = ?, \
-               active_attempts = ?, load_avg = ?, free_disk_mb = ?, last_heartbeat_at = ? \
+               active_attempts = ?, load_avg = ?, free_disk_mb = ?, last_heartbeat_at = ?, \
+               unsafe_active = ?, permission_interception = ?, \
+               outbox_bytes = ?, artifact_spool_bytes = ? \
              WHERE id = ?",
         )
         .bind(&req.name)
@@ -713,6 +756,10 @@ impl Store {
         .bind(req.load_avg)
         .bind(req.free_disk_mb as i64)
         .bind(&now)
+        .bind(req.unsafe_active as i64)
+        .bind(&req.permission_interception)
+        .bind(req.outbox_bytes as i64)
+        .bind(req.artifact_spool_bytes as i64)
         .bind(node_id)
         .execute(&self.pool)
         .await?
@@ -743,6 +790,58 @@ impl Store {
             lose_node_attempts(&mut t, node_id).await?;
             t.commit().await?;
         }
+        Ok(affected == 1)
+    }
+
+    /// Hardening P2 item 37: mark a node drained (stop NEW assignments) or
+    /// undrained. In-flight attempts are untouched; the heartbeat keeps the
+    /// node online so maintenance can drain gracefully.
+    pub async fn set_node_drained(&self, node_id: &str, drained: bool) -> Result<bool> {
+        let affected = sqlx::query("UPDATE nodes SET drained = ? WHERE id = ?")
+            .bind(drained as i64)
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if affected == 1 {
+            self.audit(
+                "user",
+                None,
+                if drained {
+                    "node.drain"
+                } else {
+                    "node.undrain"
+                },
+                Some(node_id),
+                None,
+            )
+            .await?;
+        }
+        Ok(affected == 1)
+    }
+
+    /// Check if a session (by jti) has been revoked.
+    pub async fn is_session_revoked(&self, jti: &str) -> Result<bool> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT jti FROM revoked_sessions WHERE jti = ?")
+                .bind(jti)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.is_some())
+    }
+
+    /// Revoke a user session by jti (JWT ID).
+    pub async fn revoke_session(&self, jti: &str, username: &str) -> Result<bool> {
+        let now = now_iso();
+        let affected = sqlx::query(
+            "INSERT OR IGNORE INTO revoked_sessions (jti, username, revoked_at) VALUES (?, ?, ?)",
+        )
+        .bind(jti)
+        .bind(username)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
         Ok(affected == 1)
     }
 
@@ -884,6 +983,7 @@ impl Store {
             requested_node_id: req.requested_node_id.clone(),
             base_commit: req.base_commit.clone(),
             parent_acp_session_id: req.parent_acp_session_id.clone(),
+            security_profile: None,
         })
     }
 
@@ -892,7 +992,8 @@ impl Store {
         // DB) cannot pull an unbounded row set in one request.
         const MAX_TASKS: i64 = 1000;
         let rows = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, \
+                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
              FROM tasks ORDER BY created_at ASC LIMIT ?",
         )
         .bind(MAX_TASKS)
@@ -905,20 +1006,32 @@ impl Store {
     /// (`status`, `repository`, `node_id`) plus the same row cap. Each filter
     /// is exact match; `None` means no predicate. Symbol/leftover lexic of
     /// `active_attempts` are not involved.
+    ///
+    /// Cursor pagination (hardening P2 item 20): `after` is a keyset cursor
+    /// `(created_at, id)` — rows strictly after it are returned (stable order
+    /// by `created_at, id` even when timestamps collide). `limit` caps the
+    /// page (server-enforced ceiling).
     pub async fn list_tasks_filtered(
         &self,
         status: Option<&str>,
         repository: Option<&str>,
         node_id: Option<&str>,
+        after: Option<(String, String)>,
+        limit: Option<u64>,
     ) -> Result<Vec<TaskView>> {
         const MAX_TASKS: i64 = 1000;
+        let limit = limit.unwrap_or(100).min(MAX_TASKS as u64) as i64;
         // Build the query with only the present filters as bound params. The
         // `node_id` filter joins the latest attempt's node via a correlated
         // subquery on `assigned_attempt_id`.
         let mut sql = String::from(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, \
+                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
              FROM tasks WHERE 1=1",
         );
+        if after.is_some() {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+        }
         if status.is_some() {
             sql.push_str(" AND status = ?");
         }
@@ -928,8 +1041,13 @@ impl Store {
         if node_id.is_some() {
             sql.push_str(" AND assigned_attempt_id IN (SELECT id FROM attempts WHERE node_id = ?)");
         }
-        sql.push_str(" ORDER BY created_at ASC LIMIT ?");
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
         let mut q = sqlx::query(&sql);
+        if let Some((created_at, id)) = &after {
+            // The keyset predicate has three placeholders: created_at > ?, and
+            // the tie-break (created_at = ? AND id > ?).
+            q = q.bind(created_at).bind(created_at).bind(id);
+        }
         if let Some(s) = status {
             q = q.bind(s);
         }
@@ -939,13 +1057,14 @@ impl Store {
         if let Some(n) = node_id {
             q = q.bind(n);
         }
-        let rows = q.bind(MAX_TASKS).fetch_all(&self.pool).await?;
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(row_to_task_view).collect())
     }
 
     pub async fn show_task(&self, id: &str) -> Result<Option<TaskView>> {
         let row = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, \
+                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
              FROM tasks WHERE id = ?",
         )
         .bind(id)
@@ -954,34 +1073,60 @@ impl Store {
         Ok(row.as_ref().map(row_to_task_view))
     }
 
-    pub async fn get_events(&self, task_id: &str, after: u64) -> Result<Vec<TaskEvent>> {
-        let attempt_rows = sqlx::query("SELECT id FROM attempts WHERE task_id = ?")
-            .bind(task_id)
-            .fetch_all(&self.pool)
-            .await?;
-        let mut events: Vec<TaskEvent> = Vec::new();
-        for a in attempt_rows {
-            let aid: String = a.try_get("id")?;
-            let rows = sqlx::query(
-                "SELECT attempt_id, sequence, type, payload, created_at FROM task_events \
-                 WHERE attempt_id = ? AND sequence > ? ORDER BY sequence ASC",
+    /// Hardening P0 item 9: read events for a task ordered by the global
+    /// `ingest_id` cursor. `after_ingest` resumes after that global cursor;
+    /// `limit` caps the page (server enforces a hard cap). The legacy
+    /// `after_sequence` cursor is honoured as a per-attempt filter so pre-0037
+    /// clients keep working; results still carry `ingest_id`.
+    pub async fn get_events(
+        &self,
+        task_id: &str,
+        after_ingest: Option<u64>,
+        after_sequence: u64,
+        limit: Option<u64>,
+    ) -> Result<Vec<TaskEvent>> {
+        let limit = limit.unwrap_or(DEFAULT_EVENT_PAGE).min(DEFAULT_EVENT_PAGE) as i64;
+        let rows = match after_ingest {
+            Some(after) => sqlx::query(
+                "SELECT e.attempt_id, e.sequence, e.type, e.payload, e.created_at, e.ingest_id \
+                     FROM task_events e \
+                     JOIN attempts a ON a.id = e.attempt_id \
+                     WHERE a.task_id = ? AND e.ingest_id > ? \
+                     ORDER BY e.ingest_id ASC LIMIT ?",
             )
-            .bind(&aid)
+            .bind(task_id)
             .bind(after as i64)
+            .bind(limit)
             .fetch_all(&self.pool)
-            .await?;
-            for r in rows {
-                let payload_text: String = r.try_get("payload")?;
-                events.push(TaskEvent {
-                    attempt_id: r.try_get("attempt_id")?,
-                    sequence: r.try_get::<i64, _>("sequence")? as u64,
-                    r#type: event_type_of(&r.try_get::<String, _>("type")?),
-                    payload: serde_json::from_str(&payload_text).unwrap_or(serde_json::Value::Null),
-                    created_at: r.try_get("created_at")?,
-                });
+            .await?,
+            None => {
+                // Legacy per-attempt cursor: filter each attempt's sequence.
+                sqlx::query(
+                    "SELECT e.attempt_id, e.sequence, e.type, e.payload, e.created_at, e.ingest_id \
+                     FROM task_events e \
+                     JOIN attempts a ON a.id = e.attempt_id \
+                     WHERE a.task_id = ? AND e.sequence > ? \
+                     ORDER BY e.ingest_id ASC LIMIT ?",
+                )
+                .bind(task_id)
+                .bind(after_sequence as i64)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
             }
+        };
+        let mut events = Vec::with_capacity(rows.len());
+        for r in rows {
+            let payload_text: String = r.try_get("payload")?;
+            events.push(TaskEvent {
+                attempt_id: r.try_get("attempt_id")?,
+                sequence: r.try_get::<i64, _>("sequence")? as u64,
+                r#type: event_type_of(&r.try_get::<String, _>("type")?),
+                payload: serde_json::from_str(&payload_text).unwrap_or(serde_json::Value::Null),
+                created_at: r.try_get("created_at")?,
+                ingest_id: r.try_get::<i64, _>("ingest_id")? as u64,
+            });
         }
-        events.sort_by_key(|e| e.sequence);
         Ok(events)
     }
 
@@ -1162,7 +1307,7 @@ impl Store {
         // pull an unbounded node row set.
         const MAX_NODES: i64 = 1000;
         let rows = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, drained \
              FROM nodes ORDER BY created_at ASC LIMIT ?",
         )
         .bind(MAX_NODES)
@@ -1201,6 +1346,40 @@ impl Store {
 
     /// Atomic, race-free assignment of one queued task to `node_id`.
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
+        // Hardening P1 item 15: critical-disk watermark — refuse NEW
+        // assignments when the artifact-root filesystem is nearly full, so the
+        // disk cannot be driven to zero by queued work. Node-side low-disk
+        // (heartbeat) already degrades the node; this is the control-plane's
+        // own ceiling. Env `AGENTGRID_DISK_CRITICAL_MB` (default 512 MiB).
+        {
+            let crit_mb = std::env::var("AGENTGRID_DISK_CRITICAL_MB")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(512);
+            let free = self.free_bytes() / (1024 * 1024);
+            if crit_mb > 0 && free < crit_mb {
+                tracing::warn!(
+                    node_id,
+                    free_mb = free,
+                    crit_mb,
+                    "critical disk watermark reached; refusing new assignments"
+                );
+                return Ok(None);
+            }
+        }
+        // Hardening P2 item 37: a drained node stops receiving NEW assignments
+        // (in-flight attempts keep running; heartbeat stays online).
+        {
+            let drained: i64 = sqlx::query_scalar("SELECT drained FROM nodes WHERE id = ?")
+                .bind(node_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .unwrap_or(0);
+            if drained != 0 {
+                tracing::info!(node_id, "node is drained; skipping assignment");
+                return Ok(None);
+            }
+        }
         let mut tx = self.pool.begin().await?;
         let cands = sqlx::query(
             "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at FROM tasks \
@@ -1239,7 +1418,7 @@ impl Store {
             };
 
             let node = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, drained \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
@@ -1320,6 +1499,7 @@ impl Store {
                 git_url,
                 default_branch,
                 validation_command: task_validation.or(validation_command),
+                validation_timeout_secs: None,
                 base_commit,
                 parent_acp_session_id,
                 provenance: None,
@@ -1410,6 +1590,31 @@ impl Store {
         attempt_id: &str,
         req: &IngestEventsRequest,
     ) -> Result<agentgrid_common::IngestEventsAck> {
+        // Hardening P0 item 9: the global `ingest_id` counter makes every
+        // ingest a write, so concurrent batches contend for the writer lock.
+        // SQLite's busy_timeout does not cover `SQLITE_BUSY_SNAPSHOT` (deferred
+        // BEGIN read-then-write), so retry the transaction body on "database is
+        // locked" with a short backoff — a node pushing many attempts
+        // concurrently must never see intermittent 500s. 12 attempts × up to
+        // 600ms covers the worst burst without stalling a normal ingest.
+        for attempt in 0..12u32 {
+            match self.ingest_events_inner(attempt_id, req).await {
+                Ok(ack) => return Ok(ack),
+                Err(e) if is_locked_err(&e) && attempt < 11 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10 + 50 * attempt as u64))
+                        .await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("retry loop always returns")
+    }
+
+    async fn ingest_events_inner(
+        &self,
+        attempt_id: &str,
+        req: &IngestEventsRequest,
+    ) -> Result<agentgrid_common::IngestEventsAck> {
         use agentgrid_common::IngestEventsAck;
         let mut tx = self.pool.begin().await?;
         let attempt = sqlx::query("SELECT task_id, status FROM attempts WHERE id = ?")
@@ -1450,9 +1655,21 @@ impl Store {
         for ev in &req.events {
             let payload = serde_json::to_string(&ev.payload)?;
             let id = Uuid::new_v4().to_string();
+            // Hardening P0 item 9: allocate the global ingest cursor from the
+            // single-row counter inside the same transaction, so every inserted
+            // event gets a strictly monotonic id ordered across attempts.
+            // Duplicate redeliveries consume a counter value but land nowhere
+            // (ON CONFLICT DO NOTHING) — the cursor stays monotonic, not
+            // necessarily gap-free, which is all the read path requires.
+            let ingest_id: i64 = sqlx::query_scalar(
+                "UPDATE event_ingest_counter SET next_val = next_val + 1 \
+                 WHERE id = 1 RETURNING next_val",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
             let r = sqlx::query(
-                "INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?) \
+                "INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at, ingest_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(attempt_id, sequence) DO NOTHING",
             )
             .bind(&id)
@@ -1461,6 +1678,7 @@ impl Store {
             .bind(event_type_str(ev.r#type))
             .bind(&payload)
             .bind(now_iso())
+            .bind(ingest_id)
             .execute(&mut *tx)
             .await?;
             accepted += r.rows_affected();
@@ -1581,37 +1799,39 @@ impl Store {
             TaskTransition::Fail
         };
 
-        let attempt_target: AttemptStatus = as_enum
-            .and_then(|s| next_attempt_status(s, at).ok())
-            .unwrap_or(if success {
-                AttemptStatus::Succeeded
-            } else {
-                AttemptStatus::Failed
-            });
+        // Hardening P1 item 13: use the state machine transitions without
+        // silent fallbacks. If the current state does not allow the requested
+        // transition, return an error (mapped to 409 Conflict by the handler).
+        let Some(current_attempt_status) = as_enum else {
+            let _ = tx.rollback().await;
+            return Err(StoreTransitionError(InvalidTransition {
+                from: "unknown",
+                transition: if success { "succeed" } else { "fail" },
+            })
+            .into());
+        };
+        let attempt_target: AttemptStatus = next_attempt_status(current_attempt_status, at)?;
 
         let task_row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
             .bind(&task_id)
             .fetch_one(&mut *tx)
             .await?;
         let task_status: String = task_row.try_get("status")?;
-        let ts_enum = from_snake::<TaskStatus>(&task_status);
-        let task_target: TaskStatus = ts_enum
-            .and_then(|s| next_task_status(s, tt).ok())
-            .unwrap_or(if success {
-                TaskStatus::Succeeded
-            } else {
-                TaskStatus::Failed
-            });
+        let Some(current_task_status) = from_snake::<TaskStatus>(&task_status) else {
+            let _ = tx.rollback().await;
+            return Err(StoreTransitionError(InvalidTransition {
+                from: "unknown",
+                transition: if success { "succeed" } else { "fail" },
+            })
+            .into());
+        };
+        let task_target: TaskStatus = next_task_status(current_task_status, tt)?;
 
         // If cancellation was requested, the attempt ends as cancelled
         // regardless of the adapter's exit code.
         let (attempt_target, task_target) = if cancel_requested != 0 {
-            let a = as_enum
-                .and_then(|s| next_attempt_status(s, AttemptTransition::Cancel).ok())
-                .unwrap_or(AttemptStatus::Cancelled);
-            let t = ts_enum
-                .and_then(|s| next_task_status(s, TaskTransition::Cancel).ok())
-                .unwrap_or(TaskStatus::Cancelled);
+            let a = next_attempt_status(current_attempt_status, AttemptTransition::Cancel)?;
+            let t = next_task_status(current_task_status, TaskTransition::Cancel)?;
             (a, t)
         } else {
             (attempt_target, task_target)
@@ -1685,6 +1905,17 @@ impl Store {
         if let Some(plan) = &req.plan {
             sqlx::query("UPDATE attempts SET plan = ? WHERE id = ?")
                 .bind(plan)
+                .bind(attempt_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        // Hardening P1 item 11: persist the set of artifacts the node could not
+        // deliver before completion so operators can see what is still owed and
+        // the node knows what to retry on the next startup.
+        if !req.pending_artifacts.is_empty() {
+            let pa = serde_json::to_string(&req.pending_artifacts)?;
+            sqlx::query("UPDATE attempts SET pending_artifacts = ? WHERE id = ?")
+                .bind(pa)
                 .bind(attempt_id)
                 .execute(&mut *tx)
                 .await?;
@@ -1831,6 +2062,34 @@ impl Store {
              WHERE assigned_attempt_id = ? AND status IN ('assigned','queued')",
         )
         .bind(&now)
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Hardening P0 item 12: mark the attempt (and its task) as `validating`
+    /// once the node starts running the post-agent validation command. CAS on
+    /// the attempt status so a concurrent lease-revert/cancel cannot double
+    /// transition; `false` when the attempt is not `running`.
+    pub async fn begin_validate(&self, attempt_id: &str) -> Result<bool> {
+        let mut tx = begin_immediate(&self.pool).await?;
+        let n = sqlx::query(
+            "UPDATE attempts SET status = 'validating' WHERE id = ? AND status = 'running'",
+        )
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if n != 1 {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        }
+        let _task = sqlx::query(
+            "UPDATE tasks SET status = 'validating' \
+             WHERE assigned_attempt_id = ? AND status = 'running'",
+        )
         .bind(attempt_id)
         .execute(&mut *tx)
         .await?;
@@ -2242,6 +2501,7 @@ impl Store {
     /// Delete artifact metadata older than `retention_hours` (default 168).
     /// Files on disk are left for an operator cleanup job (metadata only here).
     pub async fn cleanup_artifacts(&self, retention_hours: i64) -> Result<u64> {
+        let start = std::time::Instant::now();
         let cutoff = iso_plus_secs(-(retention_hours * 3600));
         // Hardening P1 item 15: delete the backing file alongside the metadata
         // row, so retention does not leave orphan files on disk. Collect the
@@ -2282,7 +2542,139 @@ impl Store {
             .bind(&cutoff)
             .execute(&self.pool)
             .await?;
+        let duration_secs = start.elapsed().as_secs();
+        self.artifact_cleanup_runs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.artifact_cleanup_duration_secs
+            .fetch_add(duration_secs, std::sync::atomic::Ordering::Relaxed);
         Ok(res.rows_affected())
+    }
+
+    /// Delete artifact metadata older than `retention_hours`, recording failures.
+    pub async fn cleanup_artifacts_recorded(&self, retention_hours: i64) -> Result<u64> {
+        match self.cleanup_artifacts(retention_hours).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                self.artifact_cleanup_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(e)
+            }
+        }
+    }
+
+    /// Hardening P1 item 15: scan the artifact root for drift between the
+    /// metadata table and the on-disk tree.
+    ///
+    /// - **Orphan files** — a file under `<artifact_root>/<attempt_id>/<name>`
+    ///   with no `artifacts` row. In `dry_run` mode they are reported only;
+    ///   otherwise they are unlinked (their metadata was already deleted by
+    ///   retention, so the bytes are unreachable garbage).
+    /// - **Metadata without files** — an `artifacts` row whose backing file is
+    ///   missing (crash between unlink and row delete, or external cleanup).
+    ///   These rows are pruned so the table never points at nothing.
+    ///
+    /// Returns `(orphan_files, orphan_bytes, metadata_without_file)`.
+    #[allow(clippy::type_complexity)]
+    pub async fn storage_reconcile(&self, dry_run: bool) -> Result<(u64, u64, u64)> {
+        // Load every live artifact path from metadata.
+        let rows = sqlx::query("SELECT attempt_id, name FROM artifacts")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut live: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for r in &rows {
+            let attempt_id: String = r.try_get("attempt_id")?;
+            let name: String = r.try_get("name")?;
+            live.insert((attempt_id, name));
+        }
+
+        // Walk the artifact root, never following symlinks.
+        let mut orphans = 0u64;
+        let mut orphan_bytes = 0u64;
+        let mut metadata_without_file = 0u64;
+
+        if let Ok(entries) = std::fs::read_dir(&self.artifact_root) {
+            for entry in entries.flatten() {
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                let attempt_id = entry.file_name().to_string_lossy().to_string();
+                if !ft.is_dir() {
+                    continue;
+                }
+                // Defensive: never touch a symlinked attempt dir.
+                let dir_path = entry.path();
+                if std::fs::symlink_metadata(&dir_path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                if let Ok(files) = std::fs::read_dir(&dir_path) {
+                    for f in files.flatten() {
+                        if !f.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                            continue;
+                        }
+                        let name = f.file_name().to_string_lossy().to_string();
+                        let key = (attempt_id.clone(), name.clone());
+                        if live.contains(&key) {
+                            // Metadata exists; check the file actually there.
+                            continue;
+                        }
+                        // Orphan file (no metadata row).
+                        orphans += 1;
+                        if let Ok(meta) = f.metadata() {
+                            orphan_bytes += meta.len();
+                        }
+                        if !dry_run {
+                            let _ = std::fs::remove_file(f.path());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Metadata rows whose backing file is missing.
+        for (attempt_id, name) in &live {
+            if let Ok(path) = self.artifact_path(attempt_id, name) {
+                if std::fs::symlink_metadata(&path).is_err() {
+                    metadata_without_file += 1;
+                    if !dry_run {
+                        sqlx::query("DELETE FROM artifacts WHERE attempt_id = ? AND name = ?")
+                            .bind(attempt_id)
+                            .bind(name)
+                            .execute(&self.pool)
+                            .await?;
+                    }
+                }
+            }
+        }
+
+        Ok((orphans, orphan_bytes, metadata_without_file))
+    }
+
+    /// Free bytes on the artifact volume (statvfs). Exposed for `ag storage`.
+    pub fn artifact_root(&self) -> &std::path::Path {
+        &self.artifact_root
+    }
+
+    /// Hardening P1 item 15: free bytes on the artifact root's filesystem
+    /// (statvfs). Used by the critical-disk watermark to stop new assignments.
+    pub fn free_bytes(&self) -> u64 {
+        let path = std::path::Path::new(&self.artifact_root);
+        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        let cpath = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        // SAFETY: cpath is a valid NUL-terminated path; the statvfs struct is
+        // zeroed and written by the kernel.
+        let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut s) };
+        if rc != 0 {
+            return 0;
+        }
+        s.f_bavail.saturating_mul(s.f_frsize)
     }
 }
 
@@ -2411,6 +2803,21 @@ async fn lose_node_attempts(
 }
 
 fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
+    // Hardening P2 item 36: extract the security profile from the latest
+    // attempt's provenance JSON (ProvenanceRecord.security_profile), if any.
+    let security_profile: Option<String> = r
+        .try_get::<Option<String>, _>("attempt_provenance")
+        .ok()
+        .flatten()
+        .and_then(|json| {
+            serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|v| {
+                    v.get("security_profile")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                })
+        });
     TaskView {
         id: r.try_get("id").unwrap_or_default(),
         repository: r.try_get("repository").unwrap_or_default(),
@@ -2426,6 +2833,7 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         requested_node_id: r.try_get("requested_node_id").unwrap_or_default(),
         base_commit: r.try_get("base_commit").unwrap_or_default(),
         parent_acp_session_id: r.try_get("parent_acp_session_id").unwrap_or_default(),
+        security_profile,
     }
 }
 
@@ -2472,6 +2880,11 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
         agent_version: r.try_get("agent_version").unwrap_or_default(),
         load_avg: r.try_get::<f64, _>("load_avg").unwrap_or(0.0),
         free_disk_mb: r.try_get::<i64, _>("free_disk_mb").unwrap_or(0) as u64,
+        unsafe_active: r.try_get::<i64, _>("unsafe_active").unwrap_or(0) != 0,
+        permission_interception: r.try_get("permission_interception").unwrap_or_default(),
+        outbox_bytes: r.try_get::<i64, _>("outbox_bytes").unwrap_or(0) as u64,
+        artifact_spool_bytes: r.try_get::<i64, _>("artifact_spool_bytes").unwrap_or(0) as u64,
+        drained: r.try_get::<i64, _>("drained").unwrap_or(0) != 0,
     }
 }
 
@@ -2624,6 +3037,49 @@ mod workflow_tests {
         Store::open(p.to_str().unwrap()).await.unwrap()
     }
 
+    /// Seed a real node + task + attempt so FK-backed tables (migration 0040)
+    /// accept the rows. Returns (node_id, task_id).
+    async fn seed_task_attempt(s: &Store, task_id: &str, att_id: &str) -> (String, String) {
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 2,
+                agent_version: "test".into(),
+                protocol_version: None,
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        sqlx::query(
+            "INSERT INTO tasks (id, repository, prompt, adapter, status, created_at, timeout_secs) \
+             VALUES (?, '', 'p', 'mock', 'queued', ?, 60)",
+        )
+        .bind(task_id)
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
+             VALUES (?, ?, 1, ?, 'succeeded', ?, ?, ?)",
+        )
+        .bind(att_id)
+        .bind(task_id)
+        .bind(&node_id)
+        .bind(now_iso())
+        .bind(now_iso())
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        (node_id, task_id.to_string())
+    }
+
     fn step(id: &str, deps: &[&str], role: WorkflowRole) -> WorkflowStep {
         WorkflowStep {
             id: id.into(),
@@ -2774,6 +3230,7 @@ mod workflow_tests {
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
         let a = s.try_assign(&node_id).await.unwrap().expect("assign");
+        s.ack_attempt(&a.attempt_id).await.unwrap();
         s.complete_attempt(
             &a.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -2786,6 +3243,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -2893,6 +3351,7 @@ mod workflow_tests {
         assert_eq!(created.len(), 1);
         // Assign + fail it; retryable step should respawn.
         let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a1.attempt_id).await.unwrap();
         s.complete_attempt(
             &a1.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -2905,6 +3364,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -2915,6 +3375,7 @@ mod workflow_tests {
         assert_eq!(steps_run[0].attempts, 1);
         // Assign + succeed the retry.
         let a2 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a2.attempt_id).await.unwrap();
         s.complete_attempt(
             &a2.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -2927,6 +3388,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -2960,6 +3422,7 @@ mod workflow_tests {
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
         let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a1.attempt_id).await.unwrap();
         s.complete_attempt(
             &a1.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -2972,6 +3435,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3029,6 +3493,7 @@ mod workflow_tests {
 
         // Complete worker 1 with a commit sha.
         let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a1.attempt_id).await.unwrap();
         s.complete_attempt(
             &a1.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -3041,6 +3506,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3048,6 +3514,7 @@ mod workflow_tests {
 
         // Complete worker 2 with a commit sha.
         let a2 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a2.attempt_id).await.unwrap();
         s.complete_attempt(
             &a2.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -3060,6 +3527,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3130,6 +3598,7 @@ mod workflow_tests {
         // Activate + complete the worker with a commit.
         let _ = s.tick_workflow_run(&run.id).await.unwrap();
         let a = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a.attempt_id).await.unwrap();
         s.complete_attempt(
             &a.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -3142,6 +3611,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3204,6 +3674,7 @@ mod workflow_tests {
         // attempt 1 -> fail
         s.tick_workflow_run(&run.id).await.unwrap();
         let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a1.attempt_id).await.unwrap();
         s.complete_attempt(
             &a1.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -3216,6 +3687,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3223,6 +3695,7 @@ mod workflow_tests {
         s.tick_workflow_run(&run.id).await.unwrap();
         // attempt 2 -> fail (exhausts max_attempts=2)
         let a2 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a2.attempt_id).await.unwrap();
         s.complete_attempt(
             &a2.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -3235,6 +3708,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3274,6 +3748,7 @@ mod workflow_tests {
             .unwrap();
         s.tick_workflow_run(&run2.id).await.unwrap();
         let b1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&b1.attempt_id).await.unwrap();
         s.complete_attempt(
             &b1.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -3286,6 +3761,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3375,6 +3851,7 @@ mod workflow_tests {
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
         let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a1.attempt_id).await.unwrap();
         s.complete_attempt(
             &a1.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -3387,6 +3864,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3425,6 +3903,7 @@ mod workflow_tests {
         let created = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(created.len(), 1);
         let a1 = s.try_assign("n1").await.unwrap().unwrap();
+        s.ack_attempt(&a1.attempt_id).await.unwrap();
         s.complete_attempt(
             &a1.attempt_id,
             &agentgrid_common::CompleteAttemptRequest {
@@ -3437,6 +3916,7 @@ mod workflow_tests {
                 acp_session_id: None,
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3545,6 +4025,8 @@ mod workflow_tests {
     #[tokio::test]
     async fn cleanup_old_artifacts() {
         let s = temp_store().await;
+        // FK-valid attempt (migration 0040) so the artifacts FK accepts rows.
+        let (_node_id, _task_id) = seed_task_attempt(&s, "task-att1", "att-1").await;
         // Hardening P1 item 15: plant the backing files so we can assert the
         // reaped row's file is unlinked while the kept row's file survives.
         let old_path = s.artifact_path("att-1", "old.txt").unwrap();
@@ -3763,6 +4245,7 @@ mod workflow_tests {
             s.last_conversation_acp_session(&conv.id).await.unwrap(),
             None
         );
+        s.ack_attempt(&a1.attempt_id).await.unwrap();
         s.complete_attempt(
             &a1.attempt_id,
             &CompleteAttemptRequest {
@@ -3775,6 +4258,7 @@ mod workflow_tests {
                 acp_session_id: Some("sess-1".into()),
                 provenance: None,
                 plan: None,
+                pending_artifacts: vec![],
             },
         )
         .await
@@ -3957,6 +4441,9 @@ mod workflow_tests {
     #[tokio::test]
     async fn artifact_save_rejects_traversal_names() {
         let s = temp_store().await;
+        // FK-valid attempt (migration 0040) so the rejected-name assertions
+        // test the NAME guard, not the FK.
+        let (_node_id, _task_id) = seed_task_attempt(&s, "task-trav", "att-trav").await;
         for bad in ["../x", "..", ".", "/etc/passwd", "a/b", "a\\b", "", "x\0y"] {
             let r = s
                 .save_artifact(
@@ -3989,29 +4476,9 @@ mod workflow_tests {
         // invalid names resolve to None (not found), not an error, so a 404 vs
         // 500 cannot leak whether an artifact exists.
         let s = temp_store().await;
-        // Seed a task + attempt so latest_attempt_id resolves.
-        let task_id = "task-art";
-        sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, status, created_at, timeout_secs) \
-             VALUES (?, '', 'p', 'mock', 'queued', ?, 60)",
-        )
-        .bind(task_id)
-        .bind(now_iso())
-        .execute(&s.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
-             VALUES (?, ?, 1, 'n', 'succeeded', ?, ?, ?)",
-        )
-        .bind("att-art")
-        .bind(task_id)
-        .bind(now_iso())
-        .bind(now_iso())
-        .bind(now_iso())
-        .execute(&s.pool)
-        .await
-        .unwrap();
+        // Seed a task + attempt (FK-valid, migration 0040) so latest_attempt_id
+        // resolves and the artifacts FK accepts the rows.
+        let (_node_id, task_id) = seed_task_attempt(&s, "task-art", "att-art").await;
         s.save_artifact(
             "att-art",
             &UploadArtifactRequest {
@@ -4023,14 +4490,14 @@ mod workflow_tests {
         .await
         .unwrap();
         assert_eq!(
-            s.read_artifact(task_id, "real.txt").await.unwrap(),
+            s.read_artifact(&task_id, "real.txt").await.unwrap(),
             Some("data".to_string()),
             "valid artifact reads back"
         );
         // No traversal name reaches the filesystem as an escape.
         for bad in ["../../../etc/passwd", "..", "/etc/passwd", "sub/dir/secret"] {
             assert_eq!(
-                s.read_artifact(task_id, bad).await.unwrap(),
+                s.read_artifact(&task_id, bad).await.unwrap(),
                 None,
                 "traversal read {bad:?} must be None"
             );
@@ -4043,28 +4510,7 @@ mod workflow_tests {
         // byte-for-byte through the binary-safe endpoint, with the stored media
         // type and caller-supplied hash read back unchanged.
         let s = temp_store().await;
-        let task_id = "task-bart";
-        sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, status, created_at, timeout_secs) \
-             VALUES (?, '', 'p', 'mock', 'queued', ?, 60)",
-        )
-        .bind(task_id)
-        .bind(now_iso())
-        .execute(&s.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
-             VALUES (?, ?, 1, 'n', 'succeeded', ?, ?, ?)",
-        )
-        .bind("att-bart")
-        .bind(task_id)
-        .bind(now_iso())
-        .bind(now_iso())
-        .bind(now_iso())
-        .execute(&s.pool)
-        .await
-        .unwrap();
+        let (_node_id, task_id) = seed_task_attempt(&s, "task-bart", "att-bart").await;
         // 0xFF 0xFE 0x00 invalid as UTF-8; would be mangled by read_to_string.
         let bytes: &[u8] = &[0xFFu8, 0xFEu8, 0x00u8, 0x01u8, 0x02u8];
         let sha = sha256_bytes_hex(bytes);
@@ -4072,12 +4518,12 @@ mod workflow_tests {
             .await
             .unwrap();
         assert_eq!(
-            s.read_artifact_bytes(task_id, "blob.bin").await.unwrap(),
+            s.read_artifact_bytes(&task_id, "blob.bin").await.unwrap(),
             Some(bytes.to_vec()),
             "binary bytes must round trip unchanged"
         );
         let meta = s
-            .read_artifact_meta(task_id, "blob.bin")
+            .read_artifact_meta(&task_id, "blob.bin")
             .await
             .unwrap()
             .expect("meta present");
@@ -4397,27 +4843,57 @@ mod workflow_tests {
     /// once a parent row is removed out-of-band (simulating corruption).
     #[tokio::test]
     async fn orphan_row_detection_works() {
+        use sqlx::Connection;
         let s = temp_store().await;
         // Healthy: no orphans.
         assert_eq!(s.count_orphan_rows().await.unwrap(), 0);
-        // Plant a task + attempt + event, then delete the task out-of-band,
-        // leaving the attempt (and transitively the event) orphaned.
+        // Simulate pre-FK corruption on a DEDICATED connection with foreign
+        // keys off: the app connection now enforces FKs (migration 0040), so
+        // orphan rows can no longer be created through it — they can only
+        // pre-exist from an old database. Plant the orphan exactly the way an
+        // old DB would look: task + attempt + event, then remove the task.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("ag-wf-orphan-{n}.db"));
+        let _ = std::fs::remove_file(&p);
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&p)
+            .create_if_missing(true)
+            .foreign_keys(false);
+        let mut conn = sqlx::SqliteConnection::connect_with(&opts.clone())
+            .await
+            .unwrap();
+        // Fresh file has no schema — run the migrations on it first.
+        sqlx::migrate!("./migrations").run(&mut conn).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut conn)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO tasks (id, repository, prompt, adapter, status, created_at) VALUES ('t-orphan','r','p','mock','queued','2024-01-01T00:00:00Z')")
-            .execute(&s.pool).await.unwrap();
+            .execute(&mut conn).await.unwrap();
         sqlx::query("INSERT INTO attempts (id, task_id, node_id, number, status, started_at) VALUES ('a-orphan','t-orphan','n-x',1,'running','2024-01-01T00:00:00Z')")
-            .execute(&s.pool).await.unwrap();
+            .execute(&mut conn).await.unwrap();
         sqlx::query("INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at) VALUES ('e-orphan','a-orphan',1,'log','{}','2024-01-01T00:00:00Z')")
-            .execute(&s.pool).await.unwrap();
+            .execute(&mut conn).await.unwrap();
+        drop(conn);
+        // Re-open through the app Store (FK on) and check the detector.
+        let s2 = Store::open(p.to_str().unwrap()).await.unwrap();
         assert_eq!(
-            s.count_orphan_rows().await.unwrap(),
+            s2.count_orphan_rows().await.unwrap(),
             0,
             "no orphans while parents exist"
         );
-        sqlx::query("DELETE FROM tasks WHERE id = 't-orphan'")
-            .execute(&s.pool)
+        // Remove the parent task out-of-band (again with FKs off).
+        let mut conn = sqlx::SqliteConnection::connect_with(&opts).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut conn)
             .await
             .unwrap();
-        let orphans = s.count_orphan_rows().await.unwrap();
+        sqlx::query("DELETE FROM tasks WHERE id = 't-orphan'")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        drop(conn);
+        let orphans = s2.count_orphan_rows().await.unwrap();
         assert!(orphans >= 1, "detected orphaned attempt: {orphans}");
     }
 
@@ -4456,6 +4932,7 @@ mod workflow_tests {
             .await
             .unwrap();
         let a = s.try_assign(&node_id).await.unwrap().unwrap();
+        s.ack_attempt(&a.attempt_id).await.unwrap();
         // First completion succeeds (running -> succeeded).
         assert!(s
             .complete_attempt(&a.attempt_id, &CompleteAttemptRequest::default())

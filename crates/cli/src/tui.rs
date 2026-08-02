@@ -93,6 +93,8 @@ struct NodeRow {
     name: String,
     online: bool,
     load: u32,
+    /// Hardening P0 item 5: node runs an adapter with the unsafe bypass.
+    unsafe_active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +130,15 @@ fn format_event(e: &serde_json::Value) -> EventRow {
         _ => (format!("{ty} {text}"), Color::Gray),
     };
     EventRow {
-        seq: e.get("sequence").and_then(|v| v.as_u64()).unwrap_or(0),
+        // Hardening P0 item 9: display the global ingest cursor so events from
+        // different attempts stay visually ordered after a retry. Falls back to
+        // the per-attempt sequence on old servers.
+        seq: e
+            .get("ingest_id")
+            .and_then(|v| v.as_u64())
+            .filter(|v| *v > 0)
+            .or_else(|| e.get("sequence").and_then(|v| v.as_u64()))
+            .unwrap_or(0),
         formatted,
         color,
     }
@@ -503,9 +513,17 @@ fn render_sidebar(f: &mut Frame, state: &mut AppState, area: Rect) {
                     "●".to_string(),
                     if n.online { Color::Green } else { Color::Red },
                 );
+                // Hardening P0 item 5: mark unsafe nodes in red so operators
+                // notice fully-unrestricted agents in the node pane.
+                let unsafe_span = if n.unsafe_active {
+                    colored_span(state, " UNSAFE".to_string(), Color::Red)
+                } else {
+                    Span::raw("")
+                };
                 ListItem::new(Line::from(vec![
                     dot,
                     Span::raw(format!(" {} (#{}) load={}", n.name, n.id, n.load)),
+                    unsafe_span,
                 ]))
             })
             .collect();
@@ -762,6 +780,10 @@ async fn fetch_nodes(state: &mut AppState, client: &Client, base: &str) -> anyho
                 .get("running_attempts")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
+            unsafe_active: n
+                .get("unsafe_active")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
         .collect();
     Ok(())
@@ -802,6 +824,9 @@ async fn fetch_events(
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let resp = client
         .get(format!("{base}/v1/tasks/{task_id}/events"))
+        // Hardening P0 item 9: global cursor + server-side page cap keep the
+        // TUI bounded even for long event histories.
+        .query(&[("after_ingest", 0u64), ("limit", 1000u64)])
         .send()
         .await?;
     resp.json().await.context("parse events")
@@ -842,13 +867,17 @@ mod tests {
 
     #[test]
     fn format_event_tool_and_file() {
-        let e = json!({ "sequence": 7i64, "type": "tool_call", "payload": { "tool": "bash", "input": "ls" } });
+        let e = json!({ "ingest_id": 7i64, "sequence": 1i64, "type": "tool_call", "payload": { "tool": "bash", "input": "ls" } });
         let r = format_event(&e);
+        // Hardening P0 item 9: the displayed cursor is the global ingest_id.
         assert_eq!(r.seq, 7);
         assert!(r.formatted.contains("tool bash ls"), "{}", r.formatted);
         assert_eq!(r.color, Color::Cyan);
-        let e2 = json!({ "sequence": 3i64, "type": "file_change", "payload": { "path": "src/x.rs", "op": "edit" } });
+        let e2 = json!({ "ingest_id": 8i64, "sequence": 3i64, "type": "file_change", "payload": { "path": "src/x.rs", "op": "edit" } });
         assert!(format_event(&e2).formatted.contains("file edit src/x.rs"));
+        // Legacy server without ingest_id falls back to sequence.
+        let e3 = json!({ "sequence": 5i64, "type": "stdout", "payload": { "text": "x" } });
+        assert_eq!(format_event(&e3).seq, 5);
     }
 
     #[test]

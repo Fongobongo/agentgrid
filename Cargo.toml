@@ -34,6 +34,7 @@ tower = { version = "0.5", features = ["util"] }
 sha2 = "0.10"
 async-stream = "0.3"
 futures-core = "0.3"
+futures-util = "0.3"
 argon2 = "0.5"
 password-hash = { version = "0.5", features = ["std"] }
 jsonwebtoken = "9"

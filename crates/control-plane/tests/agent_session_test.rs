@@ -182,6 +182,7 @@ async fn agent_session_opened_and_closed_on_complete() {
     assert_eq!(s.adapter, "mock");
     assert_eq!(s.status, "running");
     // Completing the attempt closes the session.
+    state.store.ack_attempt(&assign.attempt_id).await.unwrap();
     state
         .store
         .complete_attempt(

@@ -93,13 +93,26 @@ impl GatewayAgent {
         resp.json().await.map_err(http_err)
     }
 
-    async fn get_events(&self, task_id: &str, after: u64) -> Result<Vec<TaskEvent>, RpcError> {
+    async fn get_events(
+        &self,
+        task_id: &str,
+        after_ingest: Option<u64>,
+        after_sequence: u64,
+        limit: Option<u64>,
+    ) -> Result<Vec<TaskEvent>, RpcError> {
+        let mut query: Vec<(&str, String)> = vec![("after_sequence", after_sequence.to_string())];
+        if let Some(a) = after_ingest {
+            query.push(("after_ingest", a.to_string()));
+        }
+        if let Some(l) = limit {
+            query.push(("limit", l.to_string()));
+        }
         let resp = self
             .auth(
                 self.client
                     .get(format!("{}/v1/tasks/{}/events", self.server, task_id)),
             )
-            .query(&[("after_sequence", after)])
+            .query(&query)
             .send()
             .await
             .map_err(http_err)?;
@@ -255,12 +268,12 @@ impl AcpAgent for GatewayAgent {
         if let Some(m) = self.sessions.lock().unwrap().get_mut(&p.session_id) {
             m.task_id = Some(task_id.clone());
         }
-        let mut after: u64 = 0;
+        let mut after: Option<u64> = None;
         loop {
-            let events = self.get_events(&task_id, after).await?;
+            let events = self.get_events(&task_id, after, 0, None).await?;
             for e in &events {
                 notify_update(&ctx.sender, &p.session_id, e.payload.clone());
-                after = after.max(e.sequence);
+                after = Some(after.unwrap_or(0).max(e.ingest_id));
             }
 
             // Surface pending permission requests to the ACP client and relay

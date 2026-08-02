@@ -27,9 +27,10 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
+mod artifact_spool;
 mod git;
 mod outbox;
 mod sandbox;
@@ -60,6 +61,10 @@ struct Config {
     sandbox: sandbox::SandboxKind,
     /// Stage 2.1: durable event/completion outbox root (survives daemon kill).
     outbox_root: PathBuf,
+    /// Hardening P1 item 11: durable artifact spool root. Artifacts are staged
+    /// here before upload so a CP outage mid-upload cannot lose them; they are
+    /// retried on the next daemon startup.
+    artifact_spool_root: PathBuf,
     /// Stage 2.1: a single durable completion spool (idempotent redelivery).
     completion_outbox: Arc<outbox::CompletionOutbox>,
     /// Stage 9.1: command-policy autonomy level driving the local
@@ -177,6 +182,7 @@ fn config_from_env() -> Config {
         adapter_env: parse_env_pairs("AGENTGRID_ADAPTER_ENV"),
         sandbox: sandbox::SandboxKind::from_env(),
         outbox_root: PathBuf::from(&data_dir).join("outbox"),
+        artifact_spool_root: PathBuf::from(&data_dir).join("artifact-spool"),
         completion_outbox: Arc::new({
             let dir = PathBuf::from(&data_dir).join("outbox");
             outbox::CompletionOutbox::open(&dir).unwrap_or_else(|e| {
@@ -473,7 +479,45 @@ fn provenance_from_env() -> Option<agentgrid_common::ProvenanceRecord> {
         originator,
         external_id,
         label: std::env::var("AGENTGRID_PROVENANCE_LABEL").ok(),
+        security_profile: None,
     })
+}
+
+/// Hardening P0 item 5: is the node running an adapter with the unsafe
+/// unattended bypass? Unsafe mode is process-wide and env-driven, so the
+/// heartbeat advertises it for every beat. The sandbox guard strips the env
+/// on unsandboxed runs unless `AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX=1`, so this
+/// reads the actual post-guard state.
+fn node_unsafe_active(_cfg: &Config) -> bool {
+    agentgrid_adapters::unsafe_unattended_from_env()
+}
+
+/// Hardening P0 item 5: best-available permission interception across the
+/// node's adapters. ACP adapters get structured interception; wrapper binaries
+/// only get heuristic stdout interception ("wrapper"); a node with no adapters
+/// reports "none".
+fn node_permission_interception(cfg: &Config) -> String {
+    if cfg.adapters.is_empty() {
+        return "none".to_string();
+    }
+    if cfg
+        .adapters
+        .iter()
+        .all(|a| a.protocol == AdapterProtocol::Acp)
+    {
+        "structured".to_string()
+    } else {
+        "wrapper".to_string()
+    }
+}
+
+/// Hardening P0 item 5: per-adapter permission interception class used in the
+/// capability report.
+fn adapter_permission_interception(a: &AdapterSpec) -> String {
+    match a.protocol {
+        AdapterProtocol::Acp => "structured".to_string(),
+        AdapterProtocol::Wrapper => "wrapper".to_string(),
+    }
 }
 
 /// Stage 13: check an adapter's installed version against a profile's declared
@@ -926,6 +970,38 @@ impl EventSink {
         if batch.is_empty() {
             return;
         }
+        // Hardening P1 item 34: the CP caps a batch at 500 events / 4 MiB
+        // (AGENTGRID_MAX_EVENT_BATCH[_KB]). Chunk large buffers so a big flush
+        // is never rejected wholesale with 413 and the whole attempt's output
+        // is not held in RAM as one unbounded request.
+        for chunk in split_batch(batch) {
+            let (acked, chunk) = self.send_events(chunk, true).await;
+            if !acked {
+                // Transient failure: return the REMAINING chunk (and any that
+                // follow, which we haven't taken yet) to the buffer front so
+                // the flusher loop keeps retrying while the daemon lives.
+                let mut buf = self.buf.lock().await;
+                for e in chunk.into_iter().rev() {
+                    buf.push_front(e);
+                }
+                return;
+            }
+        }
+    }
+
+    /// POST one bounded event batch; `retry` decides whether transient/5xx
+    /// failures are retried with backoff (true for the flusher loop, false for
+    /// the quick post-adapter drain). Returns `(acked, batch)`: `acked` false
+    /// hands the caller the batch back so it can be pushed to the buffer front
+    /// for retry.
+    async fn send_events(
+        &self,
+        batch: Vec<IncomingEvent>,
+        retry: bool,
+    ) -> (bool, Vec<IncomingEvent>) {
+        if batch.is_empty() {
+            return (true, batch);
+        }
         let url = format!(
             "{}/v1/node/attempts/{}/events",
             self.server, self.attempt_id
@@ -937,37 +1013,31 @@ impl EventSink {
             .iter()
             .map(|e| e.payload.to_string().len() as u64)
             .sum();
-        let req = IngestEventsRequest { events: batch };
+        // Serialize by reference so `batch` stays owned by the caller for the
+        // push-back path on failure.
+        let req = IngestEventsRequest {
+            events: batch.clone(),
+        };
         let mut post = self.client.post(&url).json(&req);
         if !self.fence.is_empty() {
             post = post.header("x-agentgrid-fencing-token", &self.fence);
         }
-        // Stage 2.1: verify the HTTP status and retry transient/5xx failures.
-        // On a still-non-2xx response the batch is returned to the front of the
-        // buffer so the flusher loop keeps retrying while the daemon runs; the
-        // durable outbox still holds them for redelivery after a restart.
-        match send_with_retry(post, 10).await {
+        let max_attempts = if retry { 10 } else { 1 };
+        match send_with_retry(post, max_attempts).await {
             Ok(s) if s.is_success() => {
-                // CP acked: release the RAM budget and drop the lines from the
-                // durable outbox.
                 self.buf_bytes.fetch_sub(freed, Ordering::Relaxed);
                 if let Err(e) = self.outbox.ack(&seqs) {
                     tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
                 }
+                (true, batch)
             }
             Ok(s) => {
                 tracing::warn!(attempt_id = %self.attempt_id, "event flush got {s}; will retry");
-                let mut buf = self.buf.lock().await;
-                for e in req.events {
-                    buf.push_front(e);
-                }
+                (false, batch)
             }
             Err(e) => {
                 tracing::warn!(attempt_id = %self.attempt_id, "event flush error {e}; will retry");
-                let mut buf = self.buf.lock().await;
-                for e in req.events {
-                    buf.push_front(e);
-                }
+                (false, batch)
             }
         }
     }
@@ -993,29 +1063,18 @@ impl EventSink {
         if batch.is_empty() {
             return;
         }
-        let url = format!(
-            "{}/v1/node/attempts/{}/events",
-            self.server, self.attempt_id
-        );
-        let seqs: Vec<u64> = batch.iter().map(|e| e.sequence).collect();
-        let freed: u64 = batch
-            .iter()
-            .map(|e| e.payload.to_string().len() as u64)
-            .sum();
-        let req = IngestEventsRequest { events: batch };
-        match send_with_retry(self.client.post(&url).json(&req), 1).await {
-            Ok(s) if s.is_success() => {
-                self.buf_bytes.fetch_sub(freed, Ordering::Relaxed);
-                if let Err(e) = self.outbox.ack(&seqs) {
-                    tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
-                }
-            }
-            _ => {
-                // Push back; the durable outbox still holds these lines.
+        // Hardening P1 item 34: bounded chunks so a large post-adapter flush is
+        // not rejected by the CP batch cap and RAM stays bounded.
+        for chunk in split_batch(batch) {
+            let (acked, chunk) = self.send_events(chunk, false).await;
+            if !acked {
+                // Push back the failed chunk; the durable outbox still holds
+                // every line for restart redelivery.
                 let mut buf = self.buf.lock().await;
-                for e in req.events {
+                for e in chunk.into_iter().rev() {
                     buf.push_front(e);
                 }
+                return;
             }
         }
     }
@@ -1052,19 +1111,65 @@ impl EventSink {
             if pending.is_empty() {
                 return;
             }
-            let batch: Vec<IncomingEvent> = pending.into_iter().collect();
-            let seqs: Vec<u64> = batch.iter().map(|e| e.sequence).collect();
-            let req = IngestEventsRequest { events: batch };
-            match send_with_retry(self.client.post(&url).json(&req), 10).await {
-                Ok(s) if s.is_success() => {
-                    if let Err(e) = self.outbox.ack(&seqs) {
-                        tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
+            // Hardening P1 item 34: never hold the whole pending spool in RAM
+            // or POST it as one oversized batch — chunk at the CP batch cap and
+            // deliver chunk-by-chunk, acking each.
+            for chunk in split_batch(pending.into_iter().collect()) {
+                let seqs: Vec<u64> = chunk.iter().map(|e| e.sequence).collect();
+                let req = IngestEventsRequest { events: chunk };
+                match send_with_retry(self.client.post(&url).json(&req), 10).await {
+                    Ok(s) if s.is_success() => {
+                        if let Err(e) = self.outbox.ack(&seqs) {
+                            tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
+                        }
                     }
+                    _ => return,
                 }
-                _ => return,
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        attempt_id = %self.attempt_id,
+                        "drain_outbox timed out; events remain on disk"
+                    );
+                    return;
+                }
             }
         }
     }
+}
+
+/// Hardening P1 item 34: split an event buffer into bounded chunks matching the
+/// CP's ingest caps (`AGENTGRID_MAX_EVENT_BATCH` events / `_KB` bytes, default
+/// 500 / 4 MiB). Slightly conservative on the byte cap so a single oversized
+/// payload never trips the server's 413.
+fn split_batch(events: Vec<IncomingEvent>) -> Vec<Vec<IncomingEvent>> {
+    let max_events = std::env::var("AGENTGRID_MAX_EVENT_BATCH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(500);
+    let max_bytes = std::env::var("AGENTGRID_MAX_EVENT_BATCH_KB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|kb| kb * 1024)
+        .unwrap_or(4 * 1024 * 1024);
+    let max_bytes = (max_bytes as f64 * 0.9) as usize; // leave headroom
+    let mut chunks: Vec<Vec<IncomingEvent>> = Vec::new();
+    let mut cur: Vec<IncomingEvent> = Vec::new();
+    let mut cur_bytes = 0usize;
+    for e in events {
+        let sz = e.payload.to_string().len() + 64;
+        if (!cur.is_empty() && cur.len() >= max_events)
+            || (!cur.is_empty() && cur_bytes + sz > max_bytes)
+        {
+            chunks.push(std::mem::take(&mut cur));
+            cur_bytes = 0;
+        }
+        cur_bytes += sz;
+        cur.push(e);
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
 }
 
 async fn read_stream<R: AsyncRead + Unpin>(
@@ -1665,9 +1770,37 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         }
         if exit_code == 0 {
             if let Some(cmd) = &assignment.validation_command {
-                match run_validation(&workdir, cmd, &sink, &cfg.secrets).await {
-                    Ok(vcode) if vcode != 0 => {
-                        exit_code = vcode;
+                let vto = std::time::Duration::from_secs(
+                    assignment.validation_timeout_secs.unwrap_or(300),
+                );
+                let cancel_url = format!(
+                    "{}/v1/node/attempts/{}/cancel",
+                    cfg.server, assignment.attempt_id
+                );
+                match run_validation(
+                    &workdir,
+                    cmd,
+                    vto,
+                    cancel_url,
+                    client.clone(),
+                    &cfg.server,
+                    &assignment.attempt_id,
+                    &assignment.fencing_token,
+                    &sink,
+                    &cfg.secrets,
+                )
+                .await
+                {
+                    Ok(o) if o.timed_out => {
+                        exit_code = o.code.max(1);
+                        error_code = Some("validation_timeout".into());
+                    }
+                    Ok(o) if o.cancelled => {
+                        exit_code = o.code.max(1);
+                        error_code = Some("validation_cancelled".into());
+                    }
+                    Ok(o) if o.code != 0 => {
+                        exit_code = o.code;
                         error_code = Some("validation_failed".into());
                     }
                     Err(e) => {
@@ -1690,6 +1823,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             None,
             None,
             assignment.provenance.clone().or_else(provenance_from_env),
+            vec![],
             &cfg.completion_outbox,
             &assignment.fencing_token,
         )
@@ -1743,6 +1877,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
                 None,
                 None,
                 assignment.provenance.clone().or_else(provenance_from_env),
+                vec![],
                 &cfg.completion_outbox,
                 &assignment.fencing_token,
             )
@@ -1783,6 +1918,10 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     let mut prompt = assignment.prompt.clone();
     let mut last_code: i32;
     let mut last_kill_reason: Option<&'static str> = None;
+    // Hardening P0 item 12: distinct validation verdicts (timeout/cancel) are
+    // captured here so the post-loop error_code mapping preserves them instead
+    // of collapsing into `validation_failed`.
+    let mut validation_verdict: Option<&'static str> = None;
 
     // Ack once; the attempt is `running` for its whole (multi-round) lifetime.
     ack_attempt(
@@ -1923,6 +2062,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             acp_session_id: None,
             plan: None,
             provenance: assignment.provenance.clone().or_else(provenance_from_env),
+            pending_artifacts: vec![],
         };
         if let Err(e) = cfg.completion_outbox.record(
             &assignment.attempt_id,
@@ -1950,9 +2090,38 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         // Validate; if it passes we're done. If it fails and a retry is left,
         // feed the validation error back into the prompt and re-spawn.
         if let Some(cmd) = &assignment.validation_command {
-            let v = run_validation(&workdir, cmd, &sink, &cfg.secrets).await;
+            let vto =
+                std::time::Duration::from_secs(assignment.validation_timeout_secs.unwrap_or(300));
+            let cancel_url = format!(
+                "{}/v1/node/attempts/{}/cancel",
+                cfg.server, assignment.attempt_id
+            );
+            let v = run_validation(
+                &workdir,
+                cmd,
+                vto,
+                cancel_url,
+                client.clone(),
+                &cfg.server,
+                &assignment.attempt_id,
+                &assignment.fencing_token,
+                &sink,
+                &cfg.secrets,
+            )
+            .await;
             let fail = match &v {
-                Ok(vcode) => *vcode != 0,
+                Ok(o) => {
+                    // Timeout/cancel are terminal — no feedback retry loop.
+                    if o.timed_out {
+                        validation_verdict = Some("validation_timeout");
+                        break false;
+                    }
+                    if o.cancelled {
+                        validation_verdict = Some("validation_cancelled");
+                        break false;
+                    }
+                    o.code != 0
+                }
                 Err(e) => {
                     tracing::error!("validation failed to run: {e}");
                     true
@@ -2013,7 +2182,11 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
             .await??;
 
     let code = last_code;
-    let error_code: Option<String> = if sink.spool_full() {
+    let error_code: Option<String> = if let Some(v) = validation_verdict {
+        // Hardening P0 item 12: timeout/cancel are distinct from a plain
+        // validation failure and must not collapse into `validation_failed`.
+        Some(v.into())
+    } else if sink.spool_full() {
         Some("spool_full".into())
     } else if code == 0 {
         if validation_passed {
@@ -2026,7 +2199,9 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     };
 
     // Upload produced artifacts (changes.patch for git tasks; validation.log;
-    // raw adapter output as a format-change safety net, Stage 3.1).
+    // raw adapter output as a format-change safety net, Stage 3.1). Each is
+    // staged into the durable spool first (Hardening P1 item 11).
+    let spool_root = cfg.artifact_spool_root.clone();
     upload_if_exists(
         &client,
         &cfg.server,
@@ -2034,6 +2209,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         "changes.patch",
         &patch_path,
         &assignment.fencing_token,
+        &spool_root,
     )
     .await;
     upload_if_exists(
@@ -2043,6 +2219,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         "validation.log",
         &validation_log,
         &assignment.fencing_token,
+        &spool_root,
     )
     .await;
     upload_if_exists(
@@ -2052,6 +2229,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         "agent-raw-output.log",
         &raw_path,
         &assignment.fencing_token,
+        &spool_root,
     )
     .await;
 
@@ -2066,6 +2244,18 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     // (after the agent ran). Best-effort — None on any git failure or when
     // not a git task; audit data must never block the completion.
     let remote_head_at_finish = cleanup_repo.as_deref().and_then(git::remote_head_at);
+    // Hardening P1 item 11: report which artifacts are still owed (staged in
+    // the durable spool but not yet acked by the CP) so operators can see the
+    // outstanding set and the startup retry knows what to deliver.
+    let pending_artifacts: Vec<String> = artifact_spool::pending(&cfg.artifact_spool_root)
+        .ok()
+        .map(|p| {
+            p.iter()
+                .filter(|(aid, _, _)| aid == &assignment.attempt_id)
+                .map(|(_, name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     report_complete(
         &client,
         &cfg.server,
@@ -2078,6 +2268,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         remote_head_at_start,
         remote_head_at_finish,
         assignment.provenance.clone().or_else(provenance_from_env),
+        pending_artifacts,
         &cfg.completion_outbox,
         &assignment.fencing_token,
     )
@@ -2103,40 +2294,163 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
     Ok(())
 }
 
+/// Outcome of a validation run: the command's exit code plus whether it was
+/// cut short by the per-attempt timeout or a user cancellation (both kill the
+/// whole process tree). The caller maps these to distinct error codes
+/// (`validation_failed` / `validation_timeout` / `validation_cancelled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValidationOutcome {
+    code: i32,
+    timed_out: bool,
+    cancelled: bool,
+}
+
 /// Run the post-agent validation command in the worktree, streaming its output
-/// as events and writing `validation.log`. Returns the command exit code.
+/// as events and writing `validation.log`. The command is a trusted operator
+/// shell string (explicitly marked as such — it is NOT adapter input), run
+/// with a fresh process group, a bounded timeout, cancellation support and the
+/// same line-cap/lossy-UTF-8 streaming as the agent output (Hardening P0 item
+/// 12). Returns the outcome; the process tree is always terminated on
+/// timeout/cancel.
+#[allow(clippy::too_many_arguments)]
 async fn run_validation(
     workdir: &std::path::Path,
     command: &str,
-    sink: &EventSink,
+    timeout: std::time::Duration,
+    cancel_url: String,
+    client: reqwest::Client,
+    server: &str,
+    attempt_id: &str,
+    fence: &str,
+    sink: &Arc<EventSink>,
     secrets: &[String],
-) -> Result<i32> {
-    let mut child = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{command} 2>&1"))
-        .current_dir(workdir)
-        .stdout(std::process::Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take().unwrap();
-    let mut log = String::new();
-    let mut lines = BufReader::new(stdout).lines();
-    while let Some(line) = lines.next_line().await? {
-        let masked = mask_secrets(&line, secrets);
-        sink.push(EventType::Stdout, json!({ "text": masked }))
-            .await;
-        log.push_str(&masked);
-        log.push('\n');
+) -> Result<ValidationOutcome> {
+    sink.push(
+        EventType::Status,
+        json!({ "status": "validating", "phase": "validation" }),
+    )
+    .await;
+    // Best-effort: flip the CP attempt/task to `validating`. A failure here
+    // only means the status stays `running`; the outcome codes below still
+    // drive the terminal transition correctly.
+    if !fence.is_empty() {
+        let post = client
+            .post(format!(
+                "{server}/v1/node/attempts/{attempt_id}/begin_validate"
+            ))
+            .header("x-agentgrid-fencing-token", fence);
+        match send_with_retry(post, 2).await {
+            Ok(s) if s.is_success() => {}
+            Ok(s) => tracing::warn!(
+                attempt_id,
+                "begin_validate got {s}; validation proceeds with status=running"
+            ),
+            Err(e) => tracing::warn!(attempt_id, "begin_validate failed: {e}"),
+        }
     }
-    let status = child.wait().await?;
-    let code = status.code().unwrap_or(-1);
-    tokio::fs::write(workdir.join("validation.log"), &log).await?;
-    Ok(code)
+
+    // Hardening P0 item 12: structured argv — never `format!("{command} 2>&1")`.
+    // The shell string is an explicit operator-trusted command (repository
+    // validation_command), so `sh -c` is the documented contract; stdout and
+    // stderr are piped separately and merged by the same lossy/line-capped
+    // streaming the agent output uses.
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(workdir)
+        .process_group(0)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // The validation command inherits the daemon env by default (it needs
+    // PATH, repo state, etc.). The unsafe guard applies the same rule as the
+    // agent path: unsandboxed runs do NOT get the unsafe bypass env.
+    for k in crate::sandbox::unsafe_env_guard(cfg_sandbox_kind()) {
+        cmd.env_remove(k);
+    }
+    let mut child = cmd.spawn()?;
+    let pid = child.id().unwrap_or(0);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("validation stdout pipe unavailable for {attempt_id}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("validation stderr pipe unavailable for {attempt_id}"))?;
+    let raw = tokio::fs::File::create(workdir.join("validation.log"))
+        .await
+        .ok();
+    let raw = raw.map(|f| std::sync::Arc::new(tokio::sync::Mutex::new(f)));
+    let s1 = sink.clone();
+    let secrets_out = secrets.to_vec();
+    let r1 = tokio::spawn(read_stream(stdout, s1, "stdout", secrets_out, raw.clone()));
+    let s2 = sink.clone();
+    let secrets_err = secrets.to_vec();
+    let r2 = tokio::spawn(read_stream(stderr, s2, "stderr", secrets_err, raw.clone()));
+
+    enum VOutcome {
+        Exited(i32),
+        Timeout,
+        Cancel,
+    }
+    let verdict = tokio::select! {
+        status = child.wait() => VOutcome::Exited(status?.code().unwrap_or(-1)),
+        _ = tokio::time::sleep(timeout) => VOutcome::Timeout,
+        _ = wait_for_cancel(client.clone(), cancel_url) => VOutcome::Cancel,
+    };
+    let (code, timed_out, cancelled) = match verdict {
+        VOutcome::Exited(c) => (c, false, false),
+        VOutcome::Timeout => {
+            terminate_group(pid);
+            let status = child.wait().await;
+            (
+                status.ok().and_then(|s| s.code()).unwrap_or(-1),
+                true,
+                false,
+            )
+        }
+        VOutcome::Cancel => {
+            sink.push(
+                EventType::Status,
+                json!({ "status": "cancelled", "phase": "validation", "reason": "user_requested" }),
+            )
+            .await;
+            terminate_group(pid);
+            let status = child.wait().await;
+            (
+                status.ok().and_then(|s| s.code()).unwrap_or(-1),
+                false,
+                true,
+            )
+        }
+    };
+    let _ = r1.await;
+    let _ = r2.await;
+    // read_stream mirrors straight into validation.log via the raw file handle.
+    Ok(ValidationOutcome {
+        code,
+        timed_out,
+        cancelled,
+    })
+}
+
+/// Hardening P0 item 12: the sandbox kind the validation subprocess sees. This
+/// mirrors how the agent path picks `sandbox_prefix`; validation keeps it
+/// simpler (no container prefix) but still applies the unsafe env guard.
+fn cfg_sandbox_kind() -> crate::sandbox::SandboxKind {
+    crate::sandbox::SandboxKind::from_env()
 }
 
 /// Upload a local file as an artifact if it exists (idempotent per name).
 /// Stage 2.2 binary-safe path: the file bytes go up as the raw request body
 /// (not UTF-8 JSON), with the name and media type in headers, so binary diffs
 /// and non-text artifacts round-trip without corruption.
+///
+/// Hardening P1 item 11: the artifact is FIRST staged into the durable local
+/// spool (`<data>/artifact-spool/<attempt>/<name>`) so a control-plane outage
+/// during upload cannot lose it — the worktree is deleted after the attempt,
+/// but the staged copy survives and is retried on the next daemon startup.
+/// The spool copy is only removed after a successful upload.
 async fn upload_if_exists(
     client: &reqwest::Client,
     server: &str,
@@ -2144,24 +2458,44 @@ async fn upload_if_exists(
     name: &str,
     path: &std::path::Path,
     fence: &str,
+    spool_root: &std::path::Path,
 ) {
-    if let Ok(bytes) = tokio::fs::read(path).await {
-        let media = artifact_media_type(name);
-        // Stage 2.1: check the response status and retry transient failures;
-        // the upload is idempotent per (attempt_id, name) on the control plane.
-        let mut post = client
-            .post(format!(
-                "{server}/v1/node/attempts/{attempt_id}/artifacts/raw"
-            ))
-            .header("x-artifact-name", name)
-            .header("x-artifact-media-type", media);
-        if !fence.is_empty() {
-            post = post.header("x-agentgrid-fencing-token", fence);
+    // Stage into the durable spool first (idempotent; re-stages replace).
+    let staged = match artifact_spool::stage(spool_root, attempt_id, name, path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("artifact {name} stage failed for {attempt_id}: {e}");
+            return;
         }
-        match send_with_retry(post.body(bytes), 10).await {
-            Ok(s) if s.is_success() => {}
-            Ok(s) => tracing::warn!("artifact {name} upload got {s} for {attempt_id}"),
-            Err(e) => tracing::warn!("artifact {name} upload failed: {e}"),
+    };
+    // Upload from the spool copy so a mid-upload daemon kill leaves the staged
+    // file intact for the startup retry.
+    let bytes = match tokio::fs::read(&staged).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("artifact {name} spool read failed for {attempt_id}: {e}");
+            return;
+        }
+    };
+    let media = artifact_media_type(name);
+    let mut post = client
+        .post(format!(
+            "{server}/v1/node/attempts/{attempt_id}/artifacts/raw"
+        ))
+        .header("x-artifact-name", name)
+        .header("x-artifact-media-type", media);
+    if !fence.is_empty() {
+        post = post.header("x-agentgrid-fencing-token", fence);
+    }
+    match send_with_retry(post.body(bytes), 10).await {
+        Ok(s) if s.is_success() => {
+            let _ = artifact_spool::remove(spool_root, attempt_id, name);
+        }
+        Ok(s) => {
+            tracing::warn!("artifact {name} upload got {s} for {attempt_id} (staged for retry)")
+        }
+        Err(e) => {
+            tracing::warn!("artifact {name} upload failed: {e} (staged for retry)");
         }
     }
 }
@@ -2288,6 +2622,7 @@ async fn report_complete(
     remote_head_at_start: Option<String>,
     remote_head_at_finish: Option<String>,
     provenance: Option<agentgrid_common::ProvenanceRecord>,
+    pending_artifacts: Vec<String>,
     completion_outbox: &outbox::CompletionOutbox,
     fence: &str,
 ) {
@@ -2302,6 +2637,7 @@ async fn report_complete(
         acp_session_id,
         plan: None,
         provenance,
+        pending_artifacts,
     };
     // Stage 2.1: persist the completion durably so a daemon kill before the CP
     // acks it is redelivered on the next startup (complete_attempt is
@@ -2500,6 +2836,35 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
         }
     }
 
+    // Hardening P1 item 11: retry artifacts staged by a prior (killed) run
+    // whose upload never completed. Best-effort and idempotent on the CP
+    // (upload keyed by attempt_id+name); a failure here just leaves the file
+    // staged for the next restart.
+    let spool_root = cfg.artifact_spool_root.clone();
+    if let Ok(pending) = artifact_spool::pending(&spool_root) {
+        for (attempt_id, name, path) in &pending {
+            tracing::info!(
+                attempt_id,
+                artifact = %name,
+                "retrying staged artifact from previous run"
+            );
+            // The fencing token for the old attempt is no longer known (it
+            // lives in the assignment, not the spool); send without a token.
+            // The CP's N/N-1 policy accepts a blank token only for attempts
+            // with no token yet, so a stale attempt is safely rejected.
+            upload_if_exists(
+                &client,
+                &cfg.server,
+                attempt_id,
+                name,
+                path,
+                "",
+                &spool_root,
+            )
+            .await;
+        }
+    }
+
     // Heartbeat loop: publish status/load/capabilities periodically.
     let hb_sem = sem.clone();
     let hb_cfg = cfg.clone();
@@ -2552,6 +2917,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                         id: a.id.clone(),
                         version: probe.version,
                         ready: probe.found,
+                        permission_interception: adapter_permission_interception(a),
                     });
                 }
                 ok
@@ -2592,6 +2958,23 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                 capabilities,
                 protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
                 discovered_skills,
+                // Hardening P0 item 5: unsafe mode is process-wide (env-driven
+                // and gated by the sandbox guard), so advertise it once per beat.
+                unsafe_active: node_unsafe_active(&hb_cfg),
+                permission_interception: node_permission_interception(&hb_cfg),
+                // Hardening P2 item 35: report local storage pressure so the CP
+                // can surface nodes that are backing up (outbox / artifact
+                // spool not draining). Best-effort — a scan error reads as 0.
+                outbox_bytes: outbox::total_bytes(&hb_cfg.outbox_root).unwrap_or(0),
+                artifact_spool_bytes: artifact_spool::pending(&hb_cfg.artifact_spool_root)
+                    .map(|p| {
+                        p.iter()
+                            .filter_map(|(_, _, path)| {
+                                std::fs::metadata(path).ok().map(|m| m.len())
+                            })
+                            .sum()
+                    })
+                    .unwrap_or(0),
             };
             if let Err(e) = hb_client
                 .post(format!("{}/v1/node/heartbeat", hb_cfg.server))
@@ -2704,7 +3087,7 @@ async fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(24);
     if retention_h > 0 {
-        tokio::task::spawn_blocking({
+        let stats = tokio::task::spawn_blocking({
             let ws = cfg.workspace_root.clone();
             let repos = cfg.repository_root.clone();
             move || {
@@ -2717,6 +3100,16 @@ async fn main() -> Result<()> {
         })
         .await
         .ok();
+        // Hardening P1 item 33/35: cleanup observability — log the prune
+        // verdict so operators can see how much was reclaimed/quarantined.
+        if let Some(stats) = stats {
+            tracing::info!(
+                pruned = stats.pruned,
+                quarantined = stats.quarantined,
+                worktrees_pruned = stats.worktrees_pruned,
+                "stale workspace prune complete"
+            );
+        }
     }
     let cred = load_or_enroll(&cfg).await?;
     tracing::info!(
@@ -2933,10 +3326,22 @@ mod tests {
             String::new(),
             test_outbox("a1"),
         );
-        let code = run_validation(&dir, "echo hi; exit 2", &sink, &[])
-            .await
-            .unwrap();
-        assert_eq!(code, 2);
+        let out = run_validation(
+            &dir,
+            "echo hi; exit 2",
+            std::time::Duration::from_secs(30),
+            "http://x/v1/node/attempts/a1/cancel".into(),
+            reqwest::Client::new(),
+            "http://x",
+            "a1",
+            "",
+            &sink,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.code, 2);
+        assert!(!out.timed_out && !out.cancelled);
         let log = std::fs::read_to_string(dir.join("validation.log")).unwrap();
         assert!(log.contains("hi"));
         std::fs::remove_dir_all(&dir).ok();
@@ -2957,8 +3362,21 @@ mod tests {
         );
         let secrets = vec!["sk-LEAK-12345".to_string()];
         let cmd = "printf 'token=sk-LEAK-12345 line\n'; exit 0";
-        let code = run_validation(&dir, cmd, &sink, &secrets).await.unwrap();
-        assert_eq!(code, 0);
+        let out = run_validation(
+            &dir,
+            cmd,
+            std::time::Duration::from_secs(30),
+            "http://x/v1/node/attempts/a2/cancel".into(),
+            reqwest::Client::new(),
+            "http://x",
+            "a2",
+            "",
+            &sink,
+            &secrets,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.code, 0);
         let log = std::fs::read_to_string(dir.join("validation.log")).unwrap();
         assert!(
             !log.contains("sk-LEAK-12345"),
@@ -3522,6 +3940,8 @@ mod tests {
             adapter_env: vec![],
             outbox_root: std::env::temp_dir()
                 .join(format!("ag-acp-outbox-{}", uuid::Uuid::new_v4())),
+            artifact_spool_root: std::env::temp_dir()
+                .join(format!("ag-acp-spool-{}", uuid::Uuid::new_v4())),
             completion_outbox: Arc::new(
                 outbox::CompletionOutbox::open(
                     &std::env::temp_dir().join(format!("ag-acp-comp-{}", uuid::Uuid::new_v4())),
@@ -3549,6 +3969,7 @@ mod tests {
             git_url: String::new(),
             default_branch: String::new(),
             validation_command: None,
+            validation_timeout_secs: None,
             base_commit: None,
             parent_acp_session_id: None,
             provenance: None,
@@ -3630,6 +4051,8 @@ mod tests {
             adapter_env: vec![("AG_FAKE_HANG".into(), "1".into())],
             outbox_root: std::env::temp_dir()
                 .join(format!("ag-acp-outbox-hang-{}", uuid::Uuid::new_v4())),
+            artifact_spool_root: std::env::temp_dir()
+                .join(format!("ag-acp-spool-hang-{}", uuid::Uuid::new_v4())),
             completion_outbox: Arc::new(
                 outbox::CompletionOutbox::open(
                     &std::env::temp_dir()
@@ -3658,6 +4081,7 @@ mod tests {
             git_url: String::new(),
             default_branch: String::new(),
             validation_command: None,
+            validation_timeout_secs: None,
             base_commit: None,
             parent_acp_session_id: None,
             provenance: None,
@@ -3735,6 +4159,8 @@ mod tests {
             adapter_env: vec![("AG_FAKE_HANG".into(), "1".into())],
             outbox_root: std::env::temp_dir()
                 .join(format!("ag-acp-outbox-cancel-{}", uuid::Uuid::new_v4())),
+            artifact_spool_root: std::env::temp_dir()
+                .join(format!("ag-acp-spool-cancel-{}", uuid::Uuid::new_v4())),
             completion_outbox: Arc::new(
                 outbox::CompletionOutbox::open(
                     &std::env::temp_dir()
@@ -3764,6 +4190,7 @@ mod tests {
             git_url: String::new(),
             default_branch: String::new(),
             validation_command: None,
+            validation_timeout_secs: None,
             base_commit: None,
             parent_acp_session_id: None,
             provenance: None,
@@ -3893,6 +4320,8 @@ mod tests {
                 adapter_env: vec![],
                 outbox_root: std::env::temp_dir()
                     .join(format!("ag-skill-outbox-{}", uuid::Uuid::new_v4())),
+                artifact_spool_root: std::env::temp_dir()
+                    .join(format!("ag-skill-spool-{}", uuid::Uuid::new_v4())),
                 completion_outbox: Arc::new(
                     outbox::CompletionOutbox::open(
                         &std::env::temp_dir()
@@ -3925,6 +4354,7 @@ mod tests {
                 git_url: String::new(),
                 default_branch: String::new(),
                 validation_command: None,
+                validation_timeout_secs: None,
                 base_commit: None,
                 parent_acp_session_id: None,
                 provenance: None,
@@ -4042,5 +4472,46 @@ mod tests {
         assert!(n >= 1, "at least one valid event produced: {n}");
         // The invalid UTF-8 should not crash - it produces a lossy line.
         // Just verify no panic occurred.
+    }
+
+    /// Hardening P1 item 34: `split_batch` bounds chunk size to the CP ingest
+    /// caps (event count + bytes) so a huge flush is never one oversized POST.
+    #[test]
+    fn split_batch_respects_count_and_byte_caps() {
+        // Keep env out of the default (500/4MiB) — 500-event cap is enough.
+        std::env::remove_var("AGENTGRID_MAX_EVENT_BATCH");
+        std::env::remove_var("AGENTGRID_MAX_EVENT_BATCH_KB");
+        let events: Vec<IncomingEvent> = (0..1200u64)
+            .map(|i| IncomingEvent {
+                sequence: i,
+                r#type: EventType::Stdout,
+                payload: json!({ "text": format!("line-{i}") }),
+            })
+            .collect();
+        let chunks = split_batch(events);
+        assert!(chunks.len() >= 3, "1200 events must split into >=3 chunks");
+        for c in &chunks {
+            assert!(
+                c.len() <= 500,
+                "chunk size {} exceeds the CP event cap",
+                c.len()
+            );
+        }
+        // Byte cap: tiny env cap forces many small chunks.
+        std::env::set_var("AGENTGRID_MAX_EVENT_BATCH_KB", "1"); // ~1 KiB per chunk
+        let events: Vec<IncomingEvent> = (0..100u64)
+            .map(|i| IncomingEvent {
+                sequence: i,
+                r#type: EventType::Stdout,
+                payload: json!({ "text": "x".repeat(500) }),
+            })
+            .collect();
+        let chunks = split_batch(events);
+        assert!(
+            chunks.len() >= 5,
+            "byte cap must split payload-heavy events into multiple chunks, got {}",
+            chunks.len()
+        );
+        std::env::remove_var("AGENTGRID_MAX_EVENT_BATCH_KB");
     }
 }

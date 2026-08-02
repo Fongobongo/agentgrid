@@ -4,6 +4,95 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Bootstrap:** `AGENTGRID_BOOTSTRAP_USER` / `AGENTGRID_BOOTSTRAP_PASSWORD` env vars removed — the one-time setup token (printed to stdout) is now the only bootstrap path.
+- **Adapters:** `--dangerously-skip-permissions` (Claude) and `--auto` (OpenCode) are no longer enabled by default. Requires explicit `AGENTGRID_UNSAFE_UNATTENDED=1`.
+- **SSH:** `ag nodes install` now fails closed on unknown host keys (no more `StrictHostKeyChecking=no`). Use `--accept-new-host-key` or `--host-key-fingerprint` to opt in.
+- **API errors:** List endpoints (`/v1/tasks`, `/v1/nodes`, etc.) return `503 Service Unavailable` on DB error instead of an empty array.
+- **Docker:** Production `docker-compose.yml` no longer contains default credentials (`admin/changeme`, `dev-insecure-secret-change-me`). Use `docker-compose.demo.yml` for insecure local testing.
+- **Node:** Daemon refuses to run as root unless `AGENTGRID_ALLOW_ROOT=1` is explicitly set.
+
+### Security (hardening P0/P1 — global event cursor, validation lifecycle, durable outbox/artifacts)
+
+- **Global event cursor:** `task_events` gains a monotonic `ingest_id` (migration
+  0037, single-row `event_ingest_counter`). SSE `id:` / `Last-Event-ID`,
+  `GET /v1/tasks/{id}/events?after_ingest=&limit=`, the web client, CLI
+  `ag logs --follow` and the TUI all resume on the global cursor, so events
+  across retried attempts stay in true time order (a new attempt's seq-1 never
+  renders before an old attempt's tail). Legacy `after_sequence` clients keep
+  working.
+- **Validation lifecycle:** new `POST /v1/node/attempts/{id}/begin_validate`
+  moves attempt+task `running → validating` (CAS, ownership + fencing checked).
+  `run_validation` now runs with a process group, a bounded per-attempt timeout
+  (`validation_timeout_secs`, default 300), cancellation support and full
+  process-tree kill; stdout/stderr are piped separately (no more `2>&1`
+  shell-format) through the capped/lossy `read_stream` into `validation.log`.
+  Distinct outcomes: `validation_failed` / `validation_timeout` /
+  `validation_cancelled`.
+- **Crash-safe completion payload:** the durable `completions.jsonl` now carries
+  the full `CompleteAttemptRequest` (plan, provenance, resolved base, remote
+  HEAD snapshots, pending artifacts) and re-sends all of it on redelivery —
+  nothing is dropped if the first send fails.
+- **Outbox quarantine + global quota:** corrupt spool lines are moved to a
+  `quarantine/` directory instead of being silently dropped; a global outbox
+  quota (`AGENTGRID_OUTBOX_QUOTA_BYTES`/`_MB`, default 1 GiB) caps total spool
+  growth across attempts.
+- **Durable artifact spool:** produced artifacts are staged into
+  `<data>/artifact-spool/<attempt>/<name>` before upload (atomic), survive the
+  worktree cleanup, and are retried on the next daemon startup. Completions
+  report still-owed artifacts (`pending_artifacts`, migration 0038).
+- **Unsafe-node visibility:** the heartbeat advertises `unsafe_active` +
+  `permission_interception` (structured/wrapper/none); `ag nodes`, `ag node
+  doctor`, the TUI node pane and the web Nodes table display an `UNSAFE` /
+  `⚠ unsafe` badge (migration 0039).
+- **Storage GC:** new `ag storage gc [--dry-run]` / `ag storage disk` +
+  `POST /v1/admin/storage-gc` reconcile the artifact tree against metadata
+  (orphan files unlinked, dangling rows pruned; dry-run reports only). The
+  control plane now refuses NEW assignments when the artifact volume drops
+  below `AGENTGRID_DISK_CRITICAL_MB` (default 512 MiB) via statvfs.
+- **Bounded event flushes:** `EventSink::flush`/`flush_quick` and
+  `drain_outbox` split large event buffers into chunks at the CP batch cap
+  (`AGENTGRID_MAX_EVENT_BATCH`/`_KB`) instead of one oversized POST — a big
+  attempt's output can no longer be rejected wholesale with 413 and pending
+  spool is never held entirely in RAM.
+- **Cleanup observability:** `git::PruneStats` (pruned/quarantined/
+  worktrees-pruned) logged after stale-workspace pruning.
+- **Typed API errors:** new `api_error(status, code, message)` envelope
+  (`{"error": {code, message, request_id}}`) with stable machine-readable
+  codes documented in `docs/openapi.yaml`. Fixed a real bug: an invalid
+  attempt transition from `complete_attempt` returned 500 instead of 409 —
+  anyhow wraps the raw `InvalidTransition` (not the `StoreTransitionError`
+  marker), so the handler now downcasts both shapes. Test:
+  `invalid_transition_returns_typed_error_envelope`.
+- **Tasks pagination:** `GET /v1/tasks` supports keyset cursor pagination
+  (`after_created_at` + `after_id`, stable `(created_at, id)` order) and a
+  client `limit` (server ceiling 1000). Test:
+  `list_tasks_keyset_pagination`.
+- **DB integrity (migration 0040):** `attempts` gains FKs to `tasks`/`nodes`
+  (ON DELETE RESTRICT) + a `status` CHECK; `task_events` and `artifacts` gain
+  FKs to `attempts` (ON DELETE CASCADE). The control plane already enforced
+  these invariants in handlers; the DB now backstops NEW writes (orphan rows
+  from pre-0040 databases are surfaced by `count_orphan_rows`/`storage_gc`
+  and cannot be recreated through the app). Tests:
+  `foreign_keys_enforced_after_migration_0040`.
+- **Security profile in task view:** `TaskView.security_profile` surfaces the
+  latest attempt's policy (from `attempts.provenance.security_profile`); the
+  web TaskDetails page shows it. Test:
+  `task_view_surfaces_security_profile`.
+- **Node storage pressure (migration 0041):** the heartbeat now reports
+  `outbox_bytes` + `artifact_spool_bytes` (local event/completion outbox and
+  staged-artifact spool totals); `ag nodes` and the web Nodes table show a
+  combined `SPOOL` column so backing-up nodes are visible at a glance.
+- **Node drain (migration 0042):** `POST /v1/nodes/{id}/drain?drain=` +
+  `ag nodes drain <id> [--undrain]` (web Drain/Undrain button) stops NEW task
+  assignments on a node for maintenance while its in-flight attempts finish
+  and the heartbeat stays online. Test:
+  `node_drain_blocks_new_assignments_until_undrained`.
+- **Repository cache GC:** `prune_stale_workspaces` now runs
+  `git gc --auto --quiet` on each bare mirror after `worktree prune`, so
+  incremental pack growth is compacted without ever deleting an in-use mirror.
+
 ### Security (hardening P0/P1/P2 — session hardening pass)
 
 - **Artifacts/UI:** strict CSP (`default-src 'self'` for UI, `default-src
@@ -186,7 +275,7 @@ All notable changes to this project are documented in this file.
   cancel-poll/revoke all rejected; positive case for upstream artifact read
   by a workflow consumer node.
 
-### Added (tests — two-host E2E on physical hosts, Stage 8 / line 260)
+### Added (tests — two-host E2E on physical hosts)
 
 - `tests/e2e/run-two-host.sh`: process-based, no Docker, no second CI runner.
   Brings up the local control plane (listening on 0.0.0.0) + a local node,
@@ -195,12 +284,12 @@ All notable changes to this project are documented in this file.
   enrolls the remote node with a fresh single-use token, then defines a
   workflow pinning workers to the remote host and integrator+verifier to the
   local host. Asserts `succeeded` and that the projection shows steps ran on
-  both node ids (provenance). Closes the Stage 8 release gate "the same
+  both node ids (provenance). Closes the  "the same
   manifest works on one PC and on two hosts". Remote host creds come from
   `.env` (`AG_REMOTE_*`); the documented follow-up is wiring this into CI on
   a second runner.
 
-### Added (control-plane+node — per-profile MCP server subset, Stage 13 follow-up)
+### Added (control-plane+node — per-profile MCP server subset, )
 
 - `AgentProfile.mcp_server_ids` (and `AgentProfileCreate.mcp_server_ids`):
   an optional allow-list of MCP server ids the profile attaches to its
@@ -217,7 +306,7 @@ All notable changes to this project are documented in this file.
   `mcp_server_ids` round-trips; CP `agent_profile_revisions_immutable_and_roll_back`
   asserts the subset persists through create→activate→fetch.
 
-### Added (control-plane+node — distributed patch-bundle fallback, Stage 8 / line 257)
+### Added (control-plane+node — distributed patch-bundle fallback)
 
 - `Assignment.upstream_task_ids` (parallel to `upstream_commits`, same order):
   control-plane resolves each upstream worker's `(commit_sha, task_id)` pair
@@ -295,7 +384,7 @@ All notable changes to this project are documented in this file.
   lifecycle enum; a full-screen TUI (ratatui multi-task dashboard) is backlog,
   YAGNI until operator-side ssh friction proves it.
 
-### Added (node-daemon — per-agent native projection, Stage 11.3 / line 363)
+### Added (node-daemon — per-agent native projection, )
 
 - The agent profile is now also projected into each adapter's native convention
   file, not just `AGENTS.md`. `native_projection_files(adapter_id)` maps
@@ -304,7 +393,7 @@ All notable changes to this project are documented in this file.
   observed to ignore `AGENTS.md`.
 - Test: `native_projection_files_table`.
 
-### Fixed (node-daemon — sandbox the legacy wrapper-binary spawn, Stage 11.2 / line 358)
+### Fixed (node-daemon — sandbox the legacy wrapper-binary spawn, )
 
 - The legacy `ExecutionBackend` wrapper-binary spawn path (raw adapter subprocess)
   bypassed the sandbox that the ACP path applies via `sandbox_command`. New
@@ -315,7 +404,7 @@ All notable changes to this project are documented in this file.
   passthrough as before.
 - Tests: `none_prefix_passthrough`, `docker_prefix_wraps_program`.
 
-### Fixed (node-daemon — bounded ACP session_cancel on interrupt, Stage 5 / line 192)
+### Fixed (node-daemon — bounded ACP session_cancel on interrupt)
 
 - `drive_acp_session`'с `session_cancel` RPC on the cancel branch was unbounded: an
   ACP subprocess already tearing down (or ignoring `session/cancel`) could park
@@ -325,7 +414,7 @@ All notable changes to this project are documented in this file.
 - New test: `drive_acp_session_cancel_mid_prompt_turn` (dummy cancel-ready CP,
   fake-acp hang mode made interruptible via a stdin-reader thread).
 
-### Fixed (node-daemon — adapter crash mid-line, Stage 519)
+### Fixed (node-daemon — adapter crash mid-line, )
 
 - `read_stream` no longer silently drops an adapter's final partial output when
   the process is killed mid-line (no trailing newline on EOF). It previously
@@ -337,7 +426,7 @@ All notable changes to this project are documented in this file.
   `agentgrid_acp` crate (Content-Length framed); a mid-JSON-RPC-frame crash
   regression test there is a follow-up (needs a mock ACP peer).
 
-### Added (node-daemon — cluster executor capability probe, Stage 10 / line 333)
+### Added (node-daemon — cluster executor capability probe)
 
 - The node now actually probes the `zeroshot` cluster-executor adapter's
   capability at startup and on each heartbeat (the pure `cluster::probe_decision`
@@ -347,15 +436,15 @@ All notable changes to this project are documented in this file.
   via the pure `probe_decision` helper. Fail-closed: missing runtime / missing
   binary / version-prefix mismatch → `ready = false`, so the node never claims a
   `zeroshot` task it cannot run (capability honesty, same discipline as the
-  wrapper-adapter boundary in Stage 9.1).
+  wrapper-adapter boundary in ).
 - Tests: `cluster_probe_fail_closed_when_runtime_missing`,
   `cluster_probe_fail_closed_when_executor_missing`,
   `cluster_probe_fail_closed_on_version_mismatch`.
 
-### Added (control-plane — independent verifier workspace isolation, Stage 8 / line 240)
+### Added (control-plane — independent verifier workspace isolation)
 
 - The independent verifier step now starts from the worker's tree without
-  ever touching the worker's private transcripts. By the Stage 13 ADR
+  ever touching the worker's private transcripts. By the 
   (`HandoffPackage` references commits, not transcripts), `render_handoff_block`
   already injects only summary + commit SHA; the verifier's worktree is its
   own. The bridge to the tree was missing: `upstream_commits_for_task` now
@@ -366,7 +455,7 @@ All notable changes to this project are documented in this file.
   sees the worker's logs. Isolation holds by construction.
 - Test: `verifier_assignment_carries_upstream_worker_commit_for_isolation`.
 
-### Added (common + control-plane + node-daemon — integrator integration branch, Stage 8 / line 239)
+### Added (common + control-plane + node-daemon — integrator integration branch)
 
 - An integrator workflow step now lands its upstream workers' commits into
   its worktree as an integration branch before the agent runs, instead of
@@ -423,6 +512,18 @@ All notable changes to this project are documented in this file.
     "real enforcement on agent load" follow-up (marked "не сейчас"). Parent
     checkbox closed.
 
+### Known Limitations
+
+- Wrapper adapters (Claude Code, OpenCode) do not support structured permission interception — only the `AGENTGRID_UNSAFE_UNATTENDED=1` bypass knob is available. Running without a sandbox in unsafe mode grants full host access.
+- Workflow engine (schedules, plan expansion, DAG execution) is marked **experimental** and may change without notice.
+- ACP gateway and Telegram gateway are **experimental** — protocol support is incomplete.
+- Skills/profiles/MCP server registry are **experimental** — node-side enforcement of secret requirements and adapter version compatibility is partial.
+- No built-in cgroup/Docker sandbox is enforced by default; the node daemon reports `enforced_limits=false`.
+- Repository cache and workspace GC policies are not yet implemented — operator must manage disk manually.
+- Event SSE cursor is per-attempt sequence only; no global monotonic `ingest_id` for cross-attempt ordering.
+- Crash-safe outbox uses segmented JSONL files; no SQLite outbox option yet.
+- Durable artifact uploads (resumable/chunked, retry after restart) are not implemented.
+
 ### Release (release.yml — SHA256 checksums)
 
 - Release binaries now ship a per-target `SHA256SUMS` so consumers can audit
@@ -430,7 +531,7 @@ All notable changes to this project are documented in this file.
   the binaries. MSRV stays `rust-version = "1.85"` in Cargo.toml. SBOM and
   signing/attestation (cosign, attest-build-provenance) deferred.
 
-### Added (control-plane — background workflow ticker / restart recovery, Stage 13 / line 487)
+### Added (control-plane — background workflow ticker / restart recovery)
 
 - Workflow runs no longer strand after a control-plane restart or when a
   node finishes a step task out-of-band (no one calls
@@ -445,7 +546,7 @@ All notable changes to this project are documented in this file.
   runs without duplicating steps or tasks. Test:
   `restart_does_not_duplicate_in_flight_workflow_step_tasks`.
 
-### Added (common + control-plane + node-daemon — heartbeat skill auto-discovery, Stage 9.2)
+### Added (common + control-plane + node-daemon — heartbeat skill auto-discovery, )
 
 - The trust ledger now auto-fills from what nodes discover on disk, closing
   the "heartbeat-report discovered skills для автозаполнения таблицы"
@@ -463,7 +564,7 @@ All notable changes to this project are documented in this file.
 - Tests: `upsert_discovered_skills_defaults_untrusted_and_preserves_operator_decision`
   (store), `heartbeat_auto_fills_skill_trust_ledger` (api).
 
-### Added (tests/e2e — variable CP-outage failure injection, Stage 2)
+### Added (tests/e2e — variable CP-outage failure injection, )
 
 - `tests/e2e/run-outbox.sh` Scenario D: a tunable (`AG_E2E_OUTAGE_SECS`,
   default 10s) control-plane outage while the node stays alive and streams; on
@@ -473,7 +574,7 @@ All notable changes to this project are documented in this file.
 - New `stop_cp` helper stops the CP fast (SIGTERM → short grace → SIGKILL) so a
   long-poll / graceful-shutdown does not stretch the outage past the lease.
 
-### Added (control-plane + node-daemon — parallel ready steps / distinct worktrees, Stage 7.2)
+### Added (control-plane + node-daemon — parallel ready steps / distinct worktrees, )
 
 - Tests codify that two independent ready steps (same repository) activate in a
   single workflow tick, each getting its own distinct task_id — parallel
@@ -482,7 +583,7 @@ All notable changes to this project are documented in this file.
 - Node: `parallel_prep_same_repo_does_not_race` now also asserts four parallel
   attempt preparations produce four distinct worktree paths.
 
-### Added (control-plane — Loop Engineering bytes + circuit breaker, Stage 13)
+### Added (control-plane — Loop Engineering bytes + circuit breaker, )
 
 - The workflow tick and the projection budget snapshot now observe the
   `max_bytes` and `max_repeated_handoffs` ceilings (previously left at 0).
@@ -494,7 +595,7 @@ All notable changes to this project are documented in this file.
 - Tests: `budget_bytes_enforced_from_message_payload_size`,
   `circuit_breaker_trips_on_repeated_step_to_step_handoffs` (store).
 
-### Added (control-plane + node-daemon + common — binary-safe artifact API, Stage 2.2)
+### Added (control-plane + node-daemon + common — binary-safe artifact API, )
 
 - Artifacts round-trip as raw bytes instead of UTF-8 JSON text, so binary
   diffs / archives / images are not corrupted. New node→CP endpoint
@@ -514,7 +615,7 @@ All notable changes to this project are documented in this file.
   `artifact_binary_raw_upload_round_trips` (api); existing text/upload and
   traversal tests still pass.
 
-### Added (common + control-plane — handoff packages reference commits, Stage 13)
+### Added (common + control-plane — handoff packages reference commits, )
 
 - Handoff messages now carry compact *references*, never full transcripts. New
   `agentgrid_common::HandoffPackage { summary, commit_sha?, artifacts[] }`
@@ -528,7 +629,7 @@ All notable changes to this project are documented in this file.
 - Tests: `handoff_payload_references_commit_and_artifacts_not_transcripts`,
   `render_handoff_block_injects_typed_messages_and_passes_when_empty` (common).
 
-### Added (common + control-plane — typed AgentMessage mailbox, Stage 13)
+### Added (common + control-plane — typed AgentMessage mailbox, )
 
 - Orchestrator-mediated typed inter-step messages (no free-form P2P).
   - common: `AgentMessage { from_step_id, to_step_id, kind, payload }` with a
@@ -548,7 +649,7 @@ All notable changes to this project are documented in this file.
   `typed_mailbox_emits_output_and_renders_handoff_block_in_pending_step_prompt`
   (CP).
 
-### Added (common + control-plane — architect plan expansion, Stage 13)
+### Added (common + control-plane — architect plan expansion, )
 
 - An architect workflow step can declare `expandable: Option<bool>`; when its
   winning attempt completes with a `CompleteAttemptRequest.plan` (YAML or JSON
@@ -568,7 +669,7 @@ All notable changes to this project are documented in this file.
 - Tests: `parse_plan_steps_yaml_and_json_round_trip` (common),
   `architect_expandable_plan_pauses_planready_then_approve_expands_steps` (CP).
 
-### Added (control-plane — repair-budget escalation, Stage 13)
+### Added (control-plane — repair-budget escalation, )
 
 - A `retryable` workflow step that exhausts `max_attempts` now escalates to a
   human (`step Blocked` + run `Blocked`) instead of hard-failing the run. Only
@@ -576,7 +677,7 @@ All notable changes to this project are documented in this file.
   is unchanged. Integrates with `tick_workflow_run`'s transition path.
 - Test: `retryable_step_exhausting_repair_budget_escalates_blocked`.
 
-### Added (control-plane — budget snapshot in workflow projection, Stage 13)
+### Added (control-plane — budget snapshot in workflow projection, )
 
 - `WorkflowProjection.budget: Option<BudgetSnapshot>` exposes the run's
   Loop Engineering budget state (limits + observable usage + first breach) so
@@ -588,7 +689,7 @@ All notable changes to this project are documented in this file.
   breach highlighted) from the snapshot.
 - Test: `workflow_projection_surfaces_budget_snapshot_when_template_has_budget`.
 
-### Added (common — L4 schedule ratify gate, Stage 13)
+### Added (common — L4 schedule ratify gate, )
 
 - Pure `agentgrid_common::ratify_l4_schedule(template, autonomy)`: a
   fully-autonomous `l4` schedule is fail-closed unless the template declares a
@@ -602,7 +703,7 @@ All notable changes to this project are documented in this file.
 - Tests: `ratify_l4_schedule_requires_budget_and_passes_lower_autonomy`
   (common), `l4_schedule_ratify_gate_refuses_without_budget_accepts_with` (CP).
 
-### Added (control-plane — Loop Engineering budget enforcement, Stage 13)
+### Added (control-plane — Loop Engineering budget enforcement, )
 
 - `tick_workflow_run` now enforces a workflow template's budget. Each tick it
   fetches the template's `WorkflowBudget`, computes a coarse `BudgetUsage`
@@ -618,7 +719,7 @@ All notable changes to this project are documented in this file.
   `max_repeated_handoffs` circuit breaker need per-attempt adapter
   observation + handoff history.
 
-### Added (common — Loop Engineering budgets, Stage 13)
+### Added (common — Loop Engineering budgets, )
 
 - `WorkflowBudget` (max_messages / max_rounds / max_bytes / max_tokens /
   max_cost_cents / max_wall_seconds / max_repeated_handoffs, all optional)
@@ -638,12 +739,12 @@ All notable changes to this project are documented in this file.
   `Blocked` on a breach + a repeated-handoff counter) needs scheduler-side
   usage tracking and handoff history.
 
-### Added (common — MCP server registry, Stage 13)
+### Added (common — MCP server registry, )
 
 - `McpServer`/`McpServerCreate` in `agentgrid-common`: an operator-managed
   registry of MCP stdio servers a profile may attach to a session. Carries the
   spawn contract (id, command, args) + `env_requirements` (names only — values
-  resolved at spawn from the node env, the same Stage 13 secret-ref model) + an
+  resolved at spawn from the node env, the same  secret-ref model) + an
   `enabled` gate. Migration `0025_mcp_servers.sql`.
 - Control plane: `upsert/get/list/delete_mcp_server` + endpoints
   `POST/GET /v1/mcp-servers` and `DELETE /v1/mcp-servers/{id}`.
@@ -658,7 +759,7 @@ All notable changes to this project are documented in this file.
 - Follow-up: per-profile server subset + real stdio lifecycle/spawn + MCP
   capability discovery (`mcp/list_tools`) need ACP adapter-side work.
 
-### Added (common — provenance record, Stage 13)
+### Added (common — provenance record, )
 
 - `ProvenanceRecord {originator, external_id, optional label}` in
   `agentgrid-common`: a provenance link between an attempt and the external
@@ -674,10 +775,10 @@ All notable changes to this project are documented in this file.
 - Tests: `completion_propagates_provenance` (CP round-trip into attempts
   row), `provenance_from_env_builds_record` (node env build).
 
-### Added (control-plane — scheduled/recurring workflows, Stage 13)
+### Added (control-plane — scheduled/recurring workflows, )
 
 - A workflow template now has scheduled triggers that fire a new `WorkflowRun`
-  on a fixed interval (MVP). Stage 13 recurring workflows:
+  on a fixed interval (MVP).  recurring workflows:
   - `WorkflowSchedule`/`WorkflowScheduleCreate` in `agentgrid-common`, migration
     `0023_workflow_schedules.sql` (`workflow_schedules`: id, template_id,
     interval_seconds, autonomy, last_run_at, enabled).
@@ -698,7 +799,7 @@ All notable changes to this project are documented in this file.
 
 - An agent profile now carries **secret requirements** (names only, never
   values) and an optional **adapter version** target, completing the node-side
-  sync contract (Stage 13):
+  sync contract ():
   - `SecretRequirement { env, required }` — a profile declares which secret env
     names it needs; the node checks its own env at apply time. A **required**
     secret that's unset is fail-closed: the node refuses to run the agent
@@ -762,7 +863,7 @@ All notable changes to this project are documented in this file.
   (`node_offline_loses_attempt_then_retry_succeeds`,
   `complete_on_lost_attempt_is_idempotent`).
 
-### Added (node — apply profile autonomy + resource limits, Stage 13)
+### Added (node — apply profile autonomy + resource limits, )
 
 - The node now applies the active agent profile's autonomy and resource
   ceilings, not just the system prompt:
@@ -779,7 +880,7 @@ All notable changes to this project are documented in this file.
   `profile_limits_maps_positive_ceilings` (plus the existing
   `fetch_agent_profile_*`).
 
-### Added (node — profile fetch from CP + DAG validation, Stage 13 / ADR 0004)
+### Added (node — profile fetch from CP + DAG validation,  / ADR 0004)
 
 - Node now fetches the active agent profile revision from the control plane
   (`fetch_agent_profile` → `GET /v1/profiles/{id}`) and prefers it over the
@@ -801,7 +902,7 @@ All notable changes to this project are documented in this file.
   `SpawnRequest.limits`/`cfg.autonomy` (today only the system_prompt is read);
   secret-reference sync + capability/version check before activation.
 
-### Added (policy — external provider registration, Stage 9.1)
+### Added (policy — external provider registration, )
 
 - `ExternalPolicyProvider` in `agentgrid-common::policy`: shells out to a
   pinned executable (env `AGENTGRID_POLICY_BINARY` + `AGENTGRID_POLICY_VERSION`)
@@ -819,7 +920,7 @@ All notable changes to this project are documented in this file.
   `external_provider_fail_closed_on_garbage_stdout`,
   `external_provider_parses_json_verdict`.
 
-### Added (profiles — immutable revisions + rollback, Stage 13)
+### Added (profiles — immutable revisions + rollback, )
 
 - Agent profile desired-state ledger (migration `0021_agent_profiles`): a
   profile is a chain of **immutable revisions** (system prompt + autonomy +
@@ -837,7 +938,7 @@ All notable changes to this project are documented in this file.
   (carries requirements, never values), capability/version compatibility check
   before activation.
 
-### Added (backends — resource limits + error mapping, Stage 12)
+### Added (backends — resource limits + error mapping, )
 
 - `ExecutionBackend` contract extended (in `agentgrid-adapters::backend`):
   - `SpawnRequest.limits: ResourceLimits` — `memory_max` / `cpu_quota_percent` /
@@ -862,21 +963,21 @@ All notable changes to this project are documented in this file.
   OOM-kill E2E, the h5i/CubeSandbox spikes. The contract + error mapping +
   conformance hook are in place now.
 
-### Added (zeroshot — ownership ADR + capability probe contract, Stage 10)
+### Added (zeroshot — ownership ADR + capability probe contract, )
 
 - **ADR 0002: Zeroshot ownership** (`docs/decisions/0002-zeroshot-ownership.md`)
   fixes the lifecycle invariant: **1 Agentgrid attempt = 1 Zeroshot cluster**, 1:1.
   Cancel kills the whole cluster, a daemon kill reclaims orphans (kill only — no
   resume across a Zeroshot boundary), retry = newer cluster; results are exported
   as artifacts; `cluster_id` piggybacks on `session_id`; host credentials never
-  mount through (Stage 12 backend policy).
+  mount through ( backend policy).
 - New `agentgrid-common::cluster` contract: `ProbedExecutor` (capability probe:
   is the container runtime present, the executor binary present, its version
   pinned?) and a pure `probe_decision(runtime_present, executor_version,
   required_prefix, executor_present)` a node uses to decide whether it can serve
   a `zeroshot` task — fail-closed: a negative probe means the node does **not**
   claim it (same capability-honesty discipline as the wrapper-adapter boundary,
-  Stage 9.1). `ClusterStep`/`ClusterHandle` model the create/kill lifecycle;
+  ). `ClusterStep`/`ClusterHandle` model the create/kill lifecycle;
   the concrete Zeroshot adapter (shelling out to the Zeroshot CLI) is a later
   spike. Covered by `cluster::tests::probe_*`.
 - Follow-ups: real shell-out probe (`which docker`, `zeroshot --version`) in the
@@ -884,7 +985,7 @@ All notable changes to this project are documented in this file.
   Docker-mount security rereview, the verified profile, and the one-task E2E —
   all gated on the Zeroshot binary landing.
 
-### Added (context — CTX provider contract + prompt injection, Stage 11)
+### Added (context — CTX provider contract + prompt injection, )
 
 - New `ContextProvider` contract in `agentgrid-common` (`context` module):
   `ContextPack` carries the repo digest + metrics (`bytes_in`/`bytes_out`/
@@ -902,10 +1003,10 @@ All notable changes to this project are documented in this file.
   `context::tests::cache_key_is_deterministic`.
 - Follow-ups: the real CTX-binary probe + an on-disk repo-index cache (atomic
   publish, quota/eviction) so a repeated attempt on the same key skips
-  re-indexing — the Stage 11 exit criterion. The trait, key shape, injection
+  re-indexing — the  exit criterion. The trait, key shape, injection
   point, and metrics are ready; only the indexer impl is missing.
 
-### Added (node — skill discovery wired into the prompt, Stage 9.2)
+### Added (node — skill discovery wired into the prompt, )
 
 - The node daemon now discovers skills in the attempt worktree
   (`<worktree>/.agents/skills`) and the user home (`~/.agents/skills`) before
@@ -924,7 +1025,7 @@ All notable changes to this project are documented in this file.
   skills in the UI automatically) and hard load/execute enforcement against an
   agent that reads `SKILL.md` itself remain follow-ups.
 
-### Added (skills — trust ledger UI/CLI, Stage 9.2)
+### Added (skills — trust ledger UI/CLI, )
 
 - New control-plane skill-trust ledger (migration `0020_skill_trust`):
   `GET /v1/skills[?source=]`, `GET /v1/skills/{name}?source=`, and
@@ -943,7 +1044,7 @@ All notable changes to this project are documented in this file.
   Node-side skill discovery wiring (heartbeat report + enforcement on load) is a
   follow-up — the ledger, endpoints, and operator surfaces are complete now.
 
-### Added (node — command-policy integration into ACP permission flow, Stage 9.1)
+### Added (node — command-policy integration into ACP permission flow, )
 
 - The node daemon now short-circuits `session/request_permission` through the
   builtin `CommandPolicyProvider` **before** creating an operator approval. For
@@ -963,10 +1064,10 @@ All notable changes to this project are documented in this file.
   adapter (an arbitrary binary emitting JSON lines, without structured tool
   calls) cannot be fully intercepted by this layer — there is no
   `session/request_permission` to hook. For a strict/unattended profile, pair a
-  wrapper adapter with a sandbox/backend policy (Stage 12); the ACP native
+  wrapper adapter with a sandbox/backend policy (); the ACP native
   launcher is the forward path and is fully intercepted.
 
-### Added (approvals — operator UI + CLI reason, Stage 9.2)
+### Added (approvals — operator UI + CLI reason, )
 
 - Control plane `POST /v1/approvals/{id}/{allow|deny}` now accepts an optional
   `{ "reason": "…" }` JSON body; the reason is persisted on the approval and
@@ -975,7 +1076,7 @@ All notable changes to this project are documented in this file.
   deny = `denied by operator`). Covered by `approval_flow_allow_deny_and_expiry`
   (allow-with-reason round-trip assertion).
 - CLI `ag approvals allow/deny <id> --reason "…"` sends that body. `list`
-  was already present (Stage 5); unchanged.
+  was already present (); unchanged.
 - Web UI: new Approvals view at `#/approvals` (nav button). Lists approvals —
   default filter `pending`, an `?…` shows all statuses — with status / scope /
   permission / task / attempt / created / expires / reason columns, and
@@ -991,13 +1092,13 @@ All notable changes to this project are documented in this file.
 - node-daemon: `AG_FAKE_HANG` test mode in the fake ACP agent (writes a
   truncated JSON-RPC line then blocks) + test `drive_acp_session_hang_mid_frame_times_out`
   covering "kill ACP subprocess mid-JSON-frame → attempt failed, no hang"
-  (plan Этап 5, line 193).
+  .
 
 ## [0.1.1] — correctness & security hardening
 
-Stage 1–2 hardening of the 0.1.0 MVP: truthful statuses / outcome model, lost-node
-recovery, explicit ack, scheduler fairness (Stage 1); durable node outbox, secret
-+ artifact safety, git isolation, adapter registry, operational hardening (Stage 2).
+–2 hardening of the 0.1.0 MVP: truthful statuses / outcome model, lost-node
+recovery, explicit ack, scheduler fairness (); durable node outbox, secret
++ artifact safety, git isolation, adapter registry, operational hardening ().
 A full threat model is in `docs/decisions/threat-model.md`; an upgrade guide for
 0.1.0 → 0.1.1 is in `docs/upgrade-0.1.0-to-0.1.1.md`. This release tracks the
 exit criteria of Этапы 1–2 of `agentgrid-development-plan.md` (Gate A).
@@ -1036,29 +1137,29 @@ Not yet closed (carried forward): binary-safe streaming artifact API +
 "descriptor-relative (`openat`/`O_NOFOLLOW`) writes; SQLite outbox, outbox size
 limits / `output_truncated` backpressure, artifacts-in-spool; E2E `network
 disconnect` / `kill -9 daemon`; legacy-schema FK migration; bare-mirror shared
-clone / cross-process repo lock." — **binary-safe artifact API closed post-0.1.1** (see `[Unreleased]` / Stage 2.2 above).
+clone / cross-process repo lock." — **binary-safe artifact API closed post-0.1.1** (see `[Unreleased]` /  above).
 
-## [0.2.0] — tagged retrospectively (Stage 6 boundary)
+## [0.2.0] — tagged retrospectively ( boundary)
 
-ACP interoperability (Stages 3–6), tracked post-hoc at the last Stage 6 commit.
+ACP interoperability (Stages 3–6), tracked post-hoc at the last  commit.
 Subsequent workflow work shipped as 0.3.0; this tag freezes the 0.2 feature
 surface.
 
-- **Stage 3** — versioned `AgentEventEnvelope { version, kind, payload,
+- **** — versioned `AgentEventEnvelope { version, kind, payload,
   raw_ref }` over `TaskEvent`; extended kinds (`plan`, `tool_call`, `tool_result`,
   `file_change`, `permission_request`, `usage`, `handoff`); `ExecutionBackend`
   trait (native process + worktree first); `AgentSession` table + DTO;
   cancellation normalized (`EventKind::Cancel` + node emits on cancel).
-- **Stage 4** — `SKILL.md` parser (YAML frontmatter), strict validation +
+- **** — `SKILL.md` parser (YAML frontmatter), strict validation +
   lenient diagnostics, discovery paths + scope precedence, progressive
   disclosure, trust gate (project skills not active without explicit trust),
   bundle manifest + hash verification + materialization, `RevisionStore`.
-- **Stage 5** — ACP southbound (`agentgrid-acp`): JSON-RPC 2.0 codec + stdio,
+- **** — ACP southbound (`agentgrid-acp`): JSON-RPC 2.0 codec + stdio,
   `initialize` / `session/new` / `session/prompt` / `session/cancel`,
   `session/update` → `AgentEventEnvelope` mapping, durable approval flow
   (state machine, `approvals` table, `/v1/approvals`, `ag approvals`,
   auto-expiry, fail-closed), ACP adapter in registry.
-- **Stage 6** — ACP northbound gateway (`agentgrid acp-agent` over stdio);
+- **** — ACP northbound gateway (`agentgrid acp-agent` over stdio);
   ACP session ↔ Agentgrid task/workflow mapping, streaming events →
   `session/update`, approval passthrough, `session/cancel`, `_agentgrid.dev`
   extensions; honest `ask`/`worker` modes only (`architect`/`verifier`/
@@ -1067,16 +1168,16 @@ surface.
 Follow-up left open against the 0.2 plan: ProcessAdapter wrapper wrapping,
   conformance suite fixtures, legacy-schema no-break migration audit, live
   ACP-agent E2E, absolute-path / MCP stdio passthrough wiring, Skill E2E
-  round trips — see `agentgrid-development-plan.md` unchecked Stage 3–5 items.
+  round trips — see `agentgrid-development-plan.md` unchecked –5 items.
 
 
 ## [0.3.0] — 2026-07-17
 
-Stage 8 distributed multi-agent workflows. See the `Added (Stage 8 …)` entries
+ distributed multi-agent workflows. See the `Added ( …)` entries
 under `[Unreleased]` below for the full list: per-step node placement, shared
 `base_commit` (control plane + node-side checkout), lost-step retry policy,
 integrator conflict policy (`Blocked`), ACP plan projection, and the two-node
-E2E harness (`tests/e2e/run-workflow.sh`). Tag `v0.3.0` marks the Stage 8 code
+E2E harness (`tests/e2e/run-workflow.sh`). Tag `v0.3.0` marks the  code
 complete; the two-container E2E run is the release validation gate.
 
 ## [Unreleased]
@@ -1084,10 +1185,10 @@ complete; the two-container E2E run is the release validation gate.
 ### Added (control-plane — TLS termination, Step 2)
 - control-plane serves HTTPS when `AGENTGRID_TLS_CERT` + `AGENTGRID_TLS_KEY` (PEM) are set: a `TlsListener` (axum 0.8 `Listener` trait over `tokio-rustls`) wraps the TCP listener; rustls with the `ring` provider, no system OpenSSL. Plaintext is retained for loopback / `--tls-cert` unset. `ag server start --tls-cert/--tls-key` forwards the paths as env. Nodes are already rustls-HTTPS clients (reqwest `rustls-tls`), so a node just needs `AGENTGRID_SERVER=https://cp`; no VPN is required for a star topology. `ag nodes install --server https://cp ...` skips the SSH reverse tunnel and points the node directly at the TLS control plane (SSH used only to `scp` the binary + start it). Covered by `tls_tests::load_tls_acceptor_missing_file_errors`. Reverse-proxy docs / mTLS remain follow-ups.
 
-### Added (gateway — chat front-end, Stage 9.3)
+### Added (gateway — chat front-end, )
 - New crate `crates/gateway` (`agentgrid-gateway`): a chat bridge that lets an operator drive the grid from a phone. A `ChatProvider` trait with one implementation — Telegram, via raw `reqwest` calls to the Bot API `getUpdates`/`sendMessage` long-polling (no chat-client crate). Commands proxy to the control-plane HTTP API: `/nodes`, `/tasks`, `/run <repo> <adapter> <prompt...>`, `/show <id>`, `/logs <id>`, `/cancel <id>`, `/help`. Auth is an allowlist of numeric chat ids (`AGENTGRID_GATEWAY_ADMINS`); chats off the list are ignored. The control-plane URL + a user JWT come from `AGENTGRID_SERVER` / `AGENTGRID_GATEWAY_TOKEN`. Discord and WhatsApp sit behind the same trait but are **not implemented yet** — WhatsApp especially has no easy open bot API (the Business API is gated/heavy); both are honestly deferred rather than stubbed. Covered by `tests::fmt_*` (the pure formatting/dispatch helpers); live bot wiring needs a real Telegram token.
 
-### Added (node — durable outbox hardening + E2E, Stage 2.1)
+### Added (node — durable outbox hardening + E2E, )
 
 - Fixed the startup completion-redelivery path: it was using an unauthenticated
   client, so `/v1/node/attempts/{id}/complete` returned 401 and the redelivery
@@ -1128,7 +1229,7 @@ complete; the two-container E2E run is the release validation gate.
   IMMEDIATE` writes such as `retry_task` under load — observed as a 500 on
   retry in the E2E. Less frequent checkpoints eliminate the contention.
 
-### Added (node — worktree/branch cleanup, Stage 2.3)
+### Added (node — worktree/branch cleanup, )
 
 - Every terminal attempt now reclaims its per-attempt worktree dir and branch:
   `git worktree remove --force` plus `git branch -D` for git tasks, a plain
@@ -1143,7 +1244,7 @@ complete; the two-container E2E run is the release validation gate.
   cases. Covered by `cleanup_workspace_removes_worktree_and_branch`,
   `cleanup_workspace_plain_dir_no_git`, `prune_stale_workspaces_removes_old_keeps_fresh`.
 
-### Changed (node — bare-mirror shared clone, Stage 2.3)
+### Changed (node — bare-mirror shared clone, )
 
 - The per-repository shared clone is now a `git clone --mirror` (bare): it has
   no working tree and no HEAD to mutate. Prior runs did `git checkout -B db
@@ -1157,61 +1258,61 @@ complete; the two-container E2E run is the release validation gate.
   `parallel_prep_same_repo_does_not_race`), which now run against a bare
   mirror clone.
 
-### Added (node — event backpressure + `output_truncated`, Stage 2.1)
+### Added (node — event backpressure + `output_truncated`, )
 
 - `EventSink` now caps its RAM buffer per attempt at `AGENTGRID_EVENT_BUF_BYTES` (default 4 MiB). Once over the cap, ordinary log/usage events (`stdout`/`stderr`/`metric`) are dropped and exactly one `output_truncated` status notice is emitted; terminal-state events (`status`/`result`/`error`) and `tool` calls are never dropped, so logs can't starve terminal state. The budget is released as the flusher drains. Covered by `event_sink_drops_logs_over_cap_but_keeps_terminal_state`.
 
-### Added (cp ops metrics — checkpoint duration + SQLITE_BUSY, Stage 2.5)
+### Added (cp ops metrics — checkpoint duration + SQLITE_BUSY, )
 
 - `/metrics` now exposes `agentgrid_sqlite_checkpoint_ms` (last `wal_checkpoint(TRUNCATE)` duration) and `agentgrid_sqlite_busy_total` (cumulative SQLITE_BUSY/locked-class failures observed during checkpoints). `wal_checkpoint` now times itself and counts busy/locked errors distinctly so they surface in metrics rather than only logs.
 
-### Added (node — durable event/completion outbox, Stage 2.1)
+### Added (node — durable event/completion outbox, )
 
 - The node daemon now persists streamed events and attempt completions to a durable JSONL outbox (`<data_dir>/outbox/<attempt_id>.jsonl` for events, `completions.jsonl` for terminal reports) before any send attempt, and removes a record only after the control plane acks it (HTTP 2xx). So a daemon crash or `kill` no longer drops the in-flight tail of events, nor a completion that was recorded but not yet acked. On startup the daemon redelivers any pending completion records (idempotent — `complete_attempt` is a no-op on already-terminal attempts); pending event records are re-queued when their attempt next runs (CP ingest is idempotent on `(attempt_id, sequence)`). Redelivery respects sequence order. Covered by `event_outbox_persists_and_acks`, `event_outbox_keeps_unacked_after_partial_ack`, `completion_outbox_record_and_ack`. Note: JSONL (not SQLite), no RAM/spool size limits or `output_truncated` backpressure yet, and no artifacts in the spool (artifacts already retry with per-name idempotency); those remain follow-ups.
 
-### Changed (security — web session cookie, Stage 2.5)
+### Changed (security — web session cookie, )
 
 - The web UI no longer stores the JWT in `localStorage` (XSS-readable); instead `/v1/auth/login` and `/v1/auth/setup` set an `HttpOnly` + `SameSite=Strict` session cookie (the browser JS cannot read it). The web client sends `credentials: include` on all requests (including the SSE event stream) and calls a new `POST /v1/auth/logout` to clear it. The `Authorization: Bearer` header is still accepted (CLI, gateway, node stay unaffected), and the login/setup JSON body still returns the token for non-browser clients. `Secure` is added only when `AGENTGRID_COOKIE_SECURE=1` so local plaintext dev keeps working (enable it behind TLS/reverse-proxy in prod). `SameSite=Strict` is the CSRF guard (a cross-site request carries no cookie, so it can't forge a state-changing call). Covered by `login_sets_cookie_and_cookie_auths`.
 
-### Fixed (git — per-repo lock serializes shared-clone mutations, Stage 2.3)
+### Fixed (git — per-repo lock serializes shared-clone mutations, )
 
 - `prepare_workspace` now holds an in-process per-repository `Mutex` across the shared-clone mutating steps (`fetch` / `checkout -B` / `worktree add`), so two concurrent attempts of the same repo cannot race the clone state (a `checkout -B` from one attempt moving the shared branch mid-`worktree add` of another). Each attempt still gets its own worktree, so agent work stays concurrent. Covered by `parallel_prep_same_repo_does_not_race` (4 concurrent prepares, all succeed). Note: in-process lock only (single node); a cross-process file lock remains a follow-up.
 
-### Fixed (security — artifact-name traversal, Stage 2.2)
+### Fixed (security — artifact-name traversal, )
 
 - `GET /v1/tasks/{id}/artifacts/{name}` used to resolve `name` directly, so a `../../etc/passwd` request could read outside the artifact root. The handler now runs the same `is_safe_artifact_name` gate as the upload path (404, not 403, so a denial cannot disclose whether an artifact exists), and `Store::artifact_path` adds defense-in-depth: it canonicalizes the attempt dir and checks the resolved path stays under the artifact root, and rejects any name that is not a single safe segment. Covered by `artifact_save_rejects_traversal_names`, `artifact_read_traversal_returns_none` (store) and `artifact_get_rejects_traversal_name` (api). Note: this is a canonicalize + single-segment guard, not a descriptor-relative (`openat`/`O_NOFOLLOW`) API; that hardening remains a follow-up.
 
-### Fixed (security — agent logs excluded from commit/diff, Stage 2.2)
+### Fixed (security — agent logs excluded from commit/diff, )
 
 - Node-side logs the daemon writes inside the agent worktree (`agent-raw-output.log`, `validation.log`) and its own `changes.patch` used to leak into the committed diff / `changes.patch` via `git add -A`, so raw agent output (which may contain secrets) could end up in a commit or the reviewable patch. `prepare_workspace` now scopes a per-worktree `.git/info/exclude` (resolved via `git rev-parse --git-path`, so linked worktrees get their own gitdir-scoped file rather than the shared clone's) listing those names. Covered by `raw_and_validation_logs_excluded_from_commit_and_patch`.
 
-### Added (web — workflow run viewer with DAG, Stage 11.6)
+### Added (web — workflow run viewer with DAG, )
 
 - A Workflows page lists runs (`GET /v1/workflow-runs`) and a run detail renders the step DAG: steps are layered by dependency depth (roots left, leaves right), each card shows role, status, verdict, assigned node, attempt count, and error code; the detail auto-polls and offers Cancel on non-terminal runs. Backed by the existing `GET /v1/workflow-runs/{id}/projection`. A span-waterfall timeline is a follow-up; this is a layered DAG view.
 
-### Added (ACP session resume, Stage 11.5)
+### Added (ACP session resume, )
 
 - ACP `session/new` is now issued with `parent_session_id` when a follow-up task in a conversation should resume the prior agent session, so the agent does not re-process the transcript from scratch. The node reports the `session_id` it received back to the control plane via `CompleteAttemptRequest.acp_session_id`; the control plane persists it on the attempt (`attempts.acp_session_id`, migration `0019`) and, on the next conversation turn, looks up the last finished attempt's session as the resume parent (`Store::last_conversation_acp_session`) and threads it onto the task as `Assignment.parent_acp_session_id`. Resume is an optimization (correctness already holds: conversations compose the full history into the prompt). Covered by `acp_session_resume_links_conversation_turns`.
 
-### Added (feedback-loop CI→agent, Stage 11.4)
+### Added (feedback-loop CI→agent, )
 
 - **Wrapper path**: the spawn→select→finalize→validate flow is wrapped in a retry loop. When `validation_command` is configured and the agent exits 0 but validation fails, the node re-spawns the agent with the validation error appended to the prompt (same worktree, fixes accumulate, single commit at the end), up to `AGENTGRID_FEEDBACK_RETRIES` rounds (default 0 = off, backward compatible). A `feedback` event is emitted each round so the loop is visible in the event stream.
 - **ACP path bugfix**: the ACP path used to skip `finalize_workspace` and `run_validation` entirely, silently leaving `validation_command` unenforced for ACP agents. Now both run after `drive_acp_session`, before `report_complete`.
 
-### Added (agent-profile SSOT, Stage 11.3)
+### Added (agent-profile SSOT, )
 
 - An optional system prompt per adapter, projected into the worktree before the agent runs. `AGENTGRID_AGENT_PROFILE_<ID>` is either a path to a `.md` file (read) or inline text; the node writes it to `<worktree>/AGENTS.md` (the cross-agent convention that Claude Code, opencode, pi, etc. read) and forwards it as the `AGENTGRID_SYSTEM_PROMPT` env hint. Per-agent native projection (`CLAUDE.md`, `.kiro/`) is a follow-up mapping table.
 
-### Added (Sandbox trait, Stage 11.2)
+### Added (Sandbox trait, )
 
 - Agent isolation: a `Sandbox` wraps the spawned agent command so an agent can run inside a container instead of sharing the node's full environment. `NoSandbox` (default, runs directly in the worktree) and `DockerSandbox` (`docker run --rm -i -v <workdir>:/ag -w /ag <image> --`). Configured via `AGENTGRID_SANDBOX` (`none` | `docker`) and `AGENTGRID_SANDBOX_IMAGE`. The ACP path (native ACP launcher + wrapper binary) routes through `sandbox_command`; the legacy `ExecutionBackend` wrapper path is left unsandboxed with a noted TODO.
 
-### Added (native ACP launcher + durable startup-reconcile, Stage 11.0/11.1)
+### Added (native ACP launcher + durable startup-reconcile, /11.1)
 
 - **Native ACP launcher**: a node can run any native-ACP coding agent (Claude Code, Codex, Gemini CLI, OpenCode, Kiro, …) directly over stdio by setting `AGENTGRID_ACP_LAUNCH_<ID>` (e.g. `AGENTGRID_ACP_LAUNCH_CLAUDE="claude --acp"`). The ACP path spawns that command instead of the `adapter-<id>` wrapper binary, so adding a new agent is one env var — no per-agent crate/parser. The per-CLI wrapper binaries (`adapter-claude`, `adapter-opencode`) remain as legacy fallback for agents that don't speak ACP.
 - **Durable startup-reconcile**: on boot the control plane immediately runs a maintenance tick (revert expired leases, mark silent nodes offline) instead of waiting for the first background tick, and audits the reconcile with the in-flight attempt count. In-flight `running` attempts on live nodes are left alone (the node may still complete them); node-death is caught by the existing `node_lost` path. Backed by `Store::reconcile_on_startup`.
 
-### Added (conversations — stateful multi-turn chat routed to an agent, Stage 9.5)
+### Added (conversations — stateful multi-turn chat routed to an agent, )
 - New `conversations` + `conversation_messages` tables (migration `0018`). A conversation is a stateful multi-turn chat routed through the control plane to a coding agent on some node. Each user message creates a task whose **prompt is the composed conversation history** (a `user:`/`assistant:` transcript), so any node that picks the task up sees the full shared context — conversations can hop nodes, and parallel conversations are isolated by id.
 - Endpoints: `POST /v1/conversations` (adapter, optional repository), `GET /v1/conversations/{id}`, `POST /v1/conversations/{id}/messages` (content → creates the task carrying the composed prompt, returns task id), `GET /v1/conversations/{id}/messages`.
 - `adapter-mock` now emits a `result.text` (echoes the last non-empty prompt line) so the chat loop has a readable answer without an LLM; real adapters (`claude`/`opencode`) emit their own.
@@ -1219,7 +1320,7 @@ complete; the two-container E2E run is the release validation gate.
 ### Added (gateway — conversations + chat loop)
 - The Telegram gateway now holds the current conversation id per chat and routes **plain text** (no slash) as a conversation message: it appends to the conversation, polls the task events until terminal, and replies with the agent's `result` text (best-effort: result payload, else last log/error line). `/new <adapter> [repository]` starts a conversation; plain text with no conversation bound nudges the operator to create one (and mentions `AGENTGRID_GATEWAY_CHAT_ADAPTER`, default `mock`).
 
-### Added (node-daemon — disk-space alerting, Stage 2.5)
+### Added (node-daemon — disk-space alerting, )
 - A node now marks itself `Degraded` and emits a `tracing::warn!` when free disk on its workspace falls below `AGENTGRID_DISK_LOW_MB` (default 1024 MB). The value was already reported in heartbeats and stored by the control plane; this surfaces a low-disk host as `degraded` in `ag nodes list` (and adds a `DISK` column showing free space / a `!` marker under 1 GB) so the scheduler/operator is warned before a full host silently fails worktree checkouts.
 
 ### Fixed (CLI — remote node bootstrap, multi-host link test)
@@ -1233,49 +1334,49 @@ complete; the two-container E2E run is the release validation gate.
 ### Added (CLI — remote node bootstrap)
 - CLI `ag nodes install --host user@host[:port] [--ssh-key ...] [--transport ssh-tunnel]` provisions a remote host as a node: mints a one-time enrollment token, `scp`s the node binary, opens a persistent reverse SSH tunnel (`remote localhost:<remote_port>` → control plane `:<local_port>`), writes a `chmod 600` env file, and starts the node in the background. The node then long-polls the control plane through the tunnel — so two hosts link automatically, working behind NAT with SSH providing encryption. `--transport wireguard` is reserved (planned; SSH used only for one-time bootstrap). Key-based auth preferred; `--password` wraps `sshpass` (SSHPASS env, never argv). User-supplied fields (`name`/`repositories`/`adapters`/`data-dir`) are validated against a safe charset (trust boundary). Covered by `node_install_tests` (parse_host, env-file format, validation).
 
-### Added (Stage 9 — approval scope, audit, tests)
+### Added ( — approval scope, audit, tests)
 - control-plane (9): approvals gain a `scope` column (migration 0017) — `tool_call | session | step | command | duration` — so operators see what they are approving. `create_approval` threads it through; `ApprovalView` and the list/get SELECTs expose it. Covered by `approval_scope_round_trips` (api).
 - control-plane (9): `POST /v1/policy/evaluate` now emits a fail-closed audit event (`policy.evaluate`) for every decision, so dangerous commands are never silent. `Store::list_audit` added for the trail. Covered by `policy_evaluate_audits_decision` (api).
 - skills (9): `untrusted_project_skill_not_materialized` asserts a repo-supplied (malicious, `curl | sh`) skill is skipped by `materialize` unless an operator has explicitly trusted it. Control-plane (9): `approval_payload_has_no_secrets` asserts the approval payload never serializes secret-like fields. Destructive-command denial is covered by the policy unit tests.
 
-### Added (Stage 9 — autonomy levels + approval timeout)
+### Added ( — autonomy levels + approval timeout)
 - common (9): autonomy levels `L0`–`L4` (`AutonomyLevel`, default `L2`) modulate the builtin policy. `BuiltinPolicyProvider::decide_for(level, class)` maps risk class → decision per level (L0 fully supervised → everything `ask`; L2 allows local read/edit/exec, asks network/git/install, denies destructive; L3 also allows network/git; L4 allows everything including destructive). `evaluate_with(level, command, cwd)` applies a level. Covered by `policy::tests::l0_*` / `l2_*` / `l3_*` / `l4_*`.
 - control-plane (9): `POST /v1/policy/evaluate` accepts an optional `autonomy` level (`l0`–`l4`, default `l2`) and applies it. Covered by `policy_endpoint_honors_autonomy_level` (api).
 - control-plane (9): an unanswered approval that times out now blocks the workflow step (and run) it is linked to, instead of leaving the run hanging. `approvals.step_run_id` (migration 0016) links an approval to a `workflow_steps` instance; `tick_approval_expiry` flips a past-due linked approval to `expired` and calls `block_step_and_run`, which sets the step and run to `Blocked` (idempotent, non-terminal only). Covered by `approval_timeout_blocks_linked_step` (store).
 
-### Added (Stage 9 — command-policy foundation)
+### Added ( — command-policy foundation)
 - common (9): command-policy foundation. `CommandPolicyProvider` trait with `evaluate(command, cwd) -> PolicyVerdict { decision, risk_class, reason, matched_rules }`; `RiskClass` (read / edit-workspace / execute-local / network-write / git-remote / package-install / destructive) and `PolicyDecision` (allow / ask / deny / rewrite). `BuiltinPolicyProvider` is a heuristic classifier mapping risk class → decision (destructive→deny, network/git/install→ask, read/edit/exec→allow). Fail-closed: an unavailable provider or an unparseable command yields `ask`, never `allow` (`PolicyVerdict::fail_closed`). Covered by `policy::tests::*` (8 unit tests).
 - control-plane (9): `POST /v1/policy/evaluate` exposes the builtin provider (`{command, cwd} -> verdict`); fail-closed on provider error. Covered by `policy_endpoint_classifies_commands` (api).
 
-### Added (Stage 8 — distributed workflows: node-side base_commit, conflict policy, ACP projection)
+### Added ( — distributed workflows: node-side base_commit, conflict policy, ACP projection)
 - node-daemon (8): honor a step's `base_commit` on the node. `prepare_workspace` checks the worktree out at the exact pinned commit (best-effort fetch, token-validated) so all attempts of one run start from the same commit; `finalize_workspace` diffs relative to `base_commit`. Covered by `base_commit_pins_worktree_to_commit`.
 - control-plane (8): integrator conflict policy. A non-retryable (or retry-exhausted) integrator step transitions the step **and** the run to `Blocked` (awaiting human/repair) instead of `Failed` — an integrator never silently overwrites and never fails the whole run. `Blocked` added to `WorkflowRunStatus`/`WorkflowStepStatus`. Covered by `integrator_failure_blocks_run_not_failed` and `worker_failure_still_fails_run`.
 - control-plane (8): ACP plan projection. `GET /v1/workflow-runs/{id}/projection` returns each step's role, status, placement, spawned task, assigned node, and latest verdict; the ACP gateway exposes it via the `_agentgrid/workflow/projection` extension. Covered by `workflow_run_projection_exposes_roles_nodes_verdicts` (store), `workflow_projection_endpoint_exposes_roles_and_verdicts` (api), and `gateway_exposes_workflow_projection` (acp).
-- e2e: `tests/e2e/run-workflow.sh` brings up control-plane + two node containers and runs a workflow that pins workers to node A and integrator/verifier to node B, asserting `succeeded` and printing step provenance — the Stage 8 two-container release gate.
+- e2e: `tests/e2e/run-workflow.sh` brings up control-plane + two node containers and runs a workflow that pins workers to node A and integrator/verifier to node B, asserting `succeeded` and printing step provenance — the  two-container release gate.
 
-### Added (Stage 8 — distributed workflows: base_commit + lost-step recovery)
+### Added ( — distributed workflows: base_commit + lost-step recovery)
 - control-plane (8): shared `base_commit` for a run's parallel workers. `WorkflowRun`/`CreateWorkflowRunRequest` gain `base_commit` (migration 0015); it is stored, threaded into every step's spawned task (`CreateTaskRequest`/`TaskView`/`Assignment` all gain `base_commit`), so all workers of one run start from the same commit. Per-step `base_commit` overrides the run-level value. `tasks.base_commit` added. Covered by `workflow_run_carries_base_commit`.
 - control-plane (8): per-step retry policy (lost-step recovery). `WorkflowStep`/`WorkflowStepRun` gain `retryable` + `max_attempts` + `attempts` (migration 0015). A failed/`node_lost` step is retried up to `max_attempts` only when `retryable` is set; side-effectful steps default to no auto-retry (step → `failed`). `tick_workflow_run` bumps the attempt counter and respawns the task on retry. Covered by `retryable_step_retries_then_succeeds`.
 
-### Added (Stage 8 — distributed workflows: placement)
+### Added ( — distributed workflows: placement)
 - control-plane (8): per-step node placement. `WorkflowStep`/`WorkflowStepRun` gain `requested_node_id`; it is stored in `workflow_steps` (migration 0014) and carried into the Agentgrid task spawned for that step, so the scheduler's `try_assign` pins the task to the requested node (NULL = any eligible node). Honored end-to-end: template → run → task. `TaskView` now exposes `requested_node_id` for UI/CLI visibility. Covered by a store-level regression test (`step_requested_node_id_pins_task`) and the golden workflow integration test.
 
-### Fixed (Stage 8 — distributed workflows: placement)
+### Fixed ( — distributed workflows: placement)
 - control-plane: bind `workflow_steps.requested_node_id` as `Option<&str>` (via `as_deref()`) instead of `&Option<String>`, and normalize empty-string to `None` on read. Binding `&Option<String>::None` into an `ALTER TABLE … ADD COLUMN` text column stored the empty string `""` rather than NULL, which poisoned the spawned task's `requested_node_id` and broke the `try_assign` `requested_node_id IS NULL` filter (unpinned steps could never be assigned).
-### Fixed (Stage 1 — 0.1.1 correctness)
+### Fixed ( — 0.1.1 correctness)
 - control-plane (1.1): decide task success from the adapter **outcome** (`error_code`), not raw `exit_code==0`. A validation failure that exits 0 is now `failed`/`validation_failed`, never silently `succeeded`. Adapter timeout reports a distinct `error_code="timeout"`.
 - control-plane (1.2): a node that goes `offline` (heartbeat lapse) or is `revoked` atomically loses its in-flight `assigned`/`running`/`validating` attempts (→ `lost`) and fails the owning task with `error_code="node_lost"`, freeing capacity. Late completions on a lost attempt are treated as idempotent no-ops.
 - control-plane (1.4): scheduler no longer blocks on an incompatible head-of-line task — it scans queued tasks (oldest-first) and assigns the first the node can run, instead of touching only the single oldest.
 - control-plane (1.3): explicit assignment acknowledgement. An attempt gains an `ack_deadline` (30s); the node daemon calls `POST /v1/node/attempts/{id}/ack` on spawn. An unacked assignment is reverted and the task re-queued by `tick_maintenance`; an acked (running) attempt is never reverted. Legacy `metric "attempt started"` events still act as an ack (N-1 node compatibility).
 
-### Fixed (Stage 2 — 0.1.1 durable delivery & security)
+### Fixed ( — 0.1.1 durable delivery & security)
 - node-daemon (2.2): stop leaking secrets. The non-JSON stdout/stderr fallback now sends the **masked** line, not the raw `line` (the raw disk mirror was already masked). `mask_secrets` is unit-tested.
 - node-daemon (2.1): verify the HTTP status on every node→CP call (event flush, completion, artifact upload) instead of only checking transport errors; a 5xx/429 now triggers retry with exponential backoff. A failed event batch is returned to the buffer for the flusher loop to retry while the daemon runs; completion retries until delivered (then gives up, letting the CP lease revert the attempt). Retryable-status logic is unit-tested.
 - control-plane (2.5): run `PRAGMA quick_check` on startup and refuse to serve a corrupt database; warn loudly when `AGENTGRID_JWT_SECRET` is unset (a random-per-start secret invalidates previously issued node tokens after a restart).
 - node-daemon (2.3): drop `sh -c` from git operations and `probe_adapter`; every git arg is passed via `Command::arg`, and `repository`/`task_id`/`default_branch`/`git_url` are validated (no shell metacharacters, no `..`, no absolute paths). Adversarial tests assert injection attempts are rejected.
 - node-daemon (2.4): run strictly the adapter the control plane assigned (`adapter-<id>` binary on PATH); an unknown or missing adapter fails the attempt with `error_code="infrastructure_failed"` instead of silently falling back. Heartbeat probes every configured adapter and reports `degraded` if any binary is missing. The single `AGENTGRID_ADAPTER` env var is removed in favor of the `AGENTGRID_ADAPTERS` registry.
 
-### Added (Stage 2.5 — ops hardening)
+### Added ( — ops hardening)
 - control-plane (2.5): `POST /v1/admin/backup` runs `VACUUM INTO` to a server-side path (path validated against `..`/shell metacharacters; `VACUUM INTO` refuses to overwrite). Store methods `backup_to` + `wal_checkpoint` back it. Covered by `backup_endpoint_writes_file` (api) and `backup_round_trips` (store, re-opens the copy).
 - control-plane (2.5): periodic `PRAGMA wal_checkpoint(TRUNCATE)` in the maintenance loop plus a checkpoint on graceful shutdown (Ctrl-C / SIGTERM), so the database file does not grow without bound and a restart replays nothing stale. Covered by `wal_checkpoint` use in `tick_maintenance`.
 - control-plane (2.5): `POST /v1/auth/login` is brute-force limited by a per-instance sliding window (10 attempts / 60s) returning a generic `429` (no per-user signal, so it cannot be used for user enumeration). Covered by `login_rate_limit_returns_429` (api).
@@ -1285,75 +1386,75 @@ complete; the two-container E2E run is the release validation gate.
 - control-plane (1.2, shipped): node `offline`/`revoked` atomically loses its in-flight attempts (→ `lost`) and frees `active_attempts` capacity; a late completion on a lost attempt is an idempotent no-op (`complete_on_lost_attempt_is_idempotent`). A task whose attempt is lost is failed with `error_code="node_lost"`. Marks plan items 36/37/38/40 done.
 - control-plane (2.5): node protocol versioning. `EnrollRequest`/`HeartbeatRequest`/`PollRequest` carry an optional `protocol_version`; a major mismatch marks the node `degraded` (incompatible_protocol) instead of scheduling it. The node daemon advertises `NODE_PROTOCOL_VERSION` on every enroll/heartbeat/poll. Covered by `node_protocol_mismatch_marks_degraded` (api).
 
-### Added (Stage 8 — workflow operations)
+### Added ( — workflow operations)
 - control-plane (8): `POST /v1/workflow-runs/{id}/cancel` cancels the whole run and every non-terminal step, and cancels any spawned task (`cancel_workflow_run`). CLI `ag workflow cancel <id>` added. Covered by `cancel_workflow_run_cancels_steps_and_tasks` (store) and `cancel_workflow_run_handler_cancels` (api). Pause/resume remain a follow-up.
 - control-plane (8): `POST /v1/workflows` accepts YAML bodies (content-type `application/yaml`) via `WorkflowTemplate::from_yaml`; the JSON contract is unchanged. Covered by `yaml_round_trips_to_template` (common) and `create_workflow_accepts_yaml` (api).
 
-### Added (Stage 3.1 — versioned event envelope)
+### Added ( — versioned event envelope)
 - common: `AgentEventEnvelope { version, kind, payload, raw_ref }` layered over the stored `TaskEvent`, plus an `EventKind` vocabulary (`plan`/`tool_call`/`tool_result`/`file_change`/`permission_request`/`usage`/`handoff`/...). Unknown kinds are preserved as `EventKind::Other` and never fatal; serde round-trip tested.
 - node-daemon: `read_stream` decodes the new envelope (and still the legacy `{type,payload}` NDJSON); unknown kinds become raw logs, so a future adapter cannot break the pipeline. Legacy `TaskEvent`/`EventType` storage contract is unchanged.
 
-### Added (Stage 3.2 — agent sessions)
+### Added ( — agent sessions)
 - common: `CreateAgentSessionRequest { adapter }` and `AgentSession { id, attempt_id, adapter, started_at, ended_at, status, error_code }`.
 - control-plane: `agent_sessions` table (migration 0010, FK to `attempts`). Node opens a session per attempt via `POST /v1/node/attempts/{id}/session` (auth required); the row starts `running` and is closed (`done`/`failed`) when the attempt completes. `get_agent_session` supports reporting/tests.
 - node-daemon: after acknowledging an assignment it calls `POST .../session` once, so each agent execution is attributable to its attempt.
 - Store: `finish_agent_session` runs inside `complete_attempt`'s transaction (previously a separate pooled connection, which deadlocked against the open write transaction and surfaced as `database is locked`).
 
-### Added (Stage 3.2 — execution backend contract)
+### Added ( — execution backend contract)
 - adapters: `ExecutionBackend` trait + `ProcessBackend` (native subprocess-in-worktree). `node-daemon` now spawns attempts through `ProcessBackend::spawn`, isolating the execution contract from orchestration so future backends (container/ACP) drop in without touching the daemon.
 - common: `AdapterCapability { id, version, ready }`; `HeartbeatRequest.capabilities` advertises per-adapter version + readiness each beat (degraded node already reports missing binaries).
 - adapters: conformance smoke drives the mock adapter through `ExecutionBackend` (start → stream → collect) and asserts event output.
 - common: `EventKind::Cancel`; the node daemon emits a normalized cancel event into the stream when cancellation is triggered. The atomic `cancel_task` UPDATE already makes cancel race-free (`cancel_requested` is only set on non-terminal attempts, and `complete_attempt` honors it), so the outcome is deterministic.
 
-### Added (Stage 4.1 — Agent Skills format & discovery)
+### Added ( — Agent Skills format & discovery)
 - skills (new crate `agentgrid-skills`): minimal YAML-frontmatter parser for `SKILL.md` (`name`, `description`, `license`, `compatibility`, `allowed-tools`, `metadata`) with strict + lenient modes. `discover()` scans `<project>/.agents/skills`, `~/.agents/skills`, and managed roots in precedence order (project > user > managed), resolving collisions deterministically with diagnostics. `Skill::catalog_entry()` exposes only name + description (progressive disclosure); the body is materialised on activation. Fixtures cover minimal, malformed-yaml, collision, and untrusted-script.
 
-### Added (Stage 4.2 — skill trust & bundles)
+### Added ( — skill trust & bundles)
 - skills: `TrustStore` (project skills untrusted by default — malicious-repo protection; user/managed trusted), `SkillBundle` manifest (filesystem/git sources, commit/hash pin, lock file) with `verify_locks`, `materialize()` (copies original `SKILL.md` verbatim, skips untrusted project skills, verifies lock hashes), and `RevisionStore` (immutable revisions under `<root>/revisions/<id>` with a transactional `active` symlink + `rollback`). All covered by unit + fixture tests; agent/remote integration + E2E materialization remain as follow-ups.
 
-### Added (Stage 5.1 — ACP southbound client)
+### Added ( — ACP southbound client)
 - acp (new crate `agentgrid-acp`): JSON-RPC 2.0 codec (request/response/notification, newline framing) + `AcpClient` over any byte transport (stdio in prod, in-memory pipe in tests) with id-matched responses and a notification channel. `initialize` tolerates unknown optional capabilities; `session/new|prompt|cancel` convenience methods; `session/update` → `AgentEventEnvelope` mapping (plan/tool_call/diff/usage/log/permission/...). `next_approval` state machine (`pending → allowed|denied|expired|cancelled`, fail-closed) built before any ACP integration. Covered by codec round-trip + a fake-agent lifecycle test (init → session/new → prompt streaming updates → result).
 
-### Added (Stage 5.3 — ACP node integration)
+### Added ( — ACP node integration)
 - node-daemon: ACP adapter registry type. `AdapterSpec { id, protocol }` with `AdapterProtocol::{Wrapper,Acp}`; `AGENTGRID_ADAPTERS=mock,claude,opencode:acp` selects the protocol per entry (default `Wrapper`, fully backward compatible). Heartbeat/poll/enroll advertise adapter ids as before.
 - node-daemon: `drive_acp_session` drives an ACP agent over stdio via `AcpClient` — `initialize` → `session/new` → `session/prompt`, forwarding every `session/update` into the event sink (mapped to `AgentEventEnvelope`), and handling `session/cancel`/`timeout` internally. The wrapper path is unchanged.
 - node-daemon + control-plane: `session/request_permission` creates a durable approval (`POST /v1/tasks/{id}/approvals`) and the daemon polls `GET /v1/approvals/{id}` until an operator answers, then replies `allow`/`deny` (fail-closed). Control plane adds the create + get-by-id endpoints.
 - node-daemon: test-only ACP agent (`src/bin/adapter-fake-acp.rs`) exercises the full spawn/update/result pipeline; a unit test asserts the session succeeds and ≥2 `session/update` events stream into the sink. Control-plane API test covers approval create → pending → allow → allowed and unknown-id 404.
 - acp: conformance tests cover the full `session/update` vocabulary mapping (`plan`/`tool_call`/`tool_result`/`diff`→`file_change`/`progress`/`permission_request`/`usage`/`log`, unknown→`Other`) and `session/cancel` acknowledgement, alongside the existing init→new→prompt lifecycle test.
 
-### Added (Stage 6 — ACP northbound gateway)
+### Added ( — ACP northbound gateway)
 - acp: `GatewayAgent` speaks the ACP *agent* role so Agentgrid can be driven by an external ACP client. `session/new` mints a session id; `session/prompt` creates an Agentgrid task (prompt known only at the gateway), streams the task's `session/update` events back to the client until the task terminates, and `session/cancel` cancels the underlying task.
 - acp: `AcpServer` (generic over the byte transport) drives the agent lifecycle — it decodes inbound JSON-RPC, dispatches each request on its own task (so an in-flight `session/prompt` can keep receiving the client's responses), and routes client responses back to agent→client requests via a shared pending map.
 - acp: `AcpCtx::request` lets the agent issue agent→client requests (e.g. `session/request_permission`) and await the response; the server's read loop routes the client's answer back. The `AcpAgent` trait now returns `Send` futures (RPITIT).
-- acp: approval requests flow end-to-end — the gateway polls `GET /v1/approvals?status=pending`, surfaces a pending approval for its task to the ACP client as `session/request_permission`, relays the client's `allow`/`deny` decision back to the control plane (`POST /v1/approvals/{id}/allow|deny`), and asks each approval exactly once. This closes the Stage 6 e2e acceptance criterion (node → control plane → ACP client → back).
+- acp: approval requests flow end-to-end — the gateway polls `GET /v1/approvals?status=pending`, surfaces a pending approval for its task to the ACP client as `session/request_permission`, relays the client's `allow`/`deny` decision back to the control plane (`POST /v1/approvals/{id}/allow|deny`), and asks each approval exactly once. This closes the  e2e acceptance criterion (node → control plane → ACP client → back).
 - acp: `agentgrid-acp-agent` binary runs the gateway over stdio (`AGENTGRID_SERVER`, optional `AGENTGRID_TOKEN`); any ACP-compatible client can now create tasks on the control plane and watch plan/progress/diff/permission events.
 - acp: integration smoke test spins up an in-process fake control plane (axum) and drives the gateway from a real ACP client over a pipe — asserts `session/update` streaming, permission round-trip, and a `succeeded` terminal result.
 - acp: `_`-prefixed extension methods let an external ACP client read Agentgrid state through the gateway. `AcpServer` routes any `method` starting with `_` to `AcpAgent::handle_extension`; `GatewayAgent` implements `_agentgrid/nodes` (`GET /v1/nodes`) and `_agentgrid/task_eligibility` (`GET /v1/tasks/{id}/eligibility`). Unknown extension methods return a clean RPC error (no hang). Covered by a new integration test.
 - docs: `docs/acp-interop.md` records ACP client interoperability (Poracode/Lightcode) — the standard agent role works unmodified; lists non-standard gaps (`_agentgrid/*` extensions, no `session/load`/`resume` passthrough, client `session/update` not forwarded).
 
-### Added (Stage 7.1 — workflow data model + DAG validation)
+### Added ( — workflow data model + DAG validation)
 - common: `workflow` module — `WorkflowStep` (id/prompt/depends_on/role/adapter), `WorkflowTemplate`, `WorkflowRun`, `WorkflowStepRun`, and the role/run/step status enums. `WorkflowRole` = `architect`/`worker`/`verifier` (v1 creates one role-run per step for its declared role).
 - control-plane: `validate_workflow_dag` (pure) — non-empty, unique ids, existing dependencies, no cycles (Kahn). `DagError` enumerates every failure; 7 unit tests cover valid chains/diamonds and all four error kinds.
 - control-plane: migration `0012_workflows.sql` (tables `workflow_templates`, `workflow_runs`, `workflow_steps`, `role_runs`). `Store` gains `create_workflow_template` (validates before insert), `get/list_workflow_template(s)`, `create_workflow_run` (instantiates steps + one role-run each, transactional), `get/list_workflow_run(s)`, `get_workflow_run_steps`. Storage round-trip covered by an integration test on a temp SQLite file.
 
-### Added (Stage 7.2 — workflow API + CLI)
+### Added ( — workflow API + CLI)
 - control-plane: HTTP surface for workflows (user-authenticated, same middleware as `/v1/tasks`). `POST /v1/workflows` (define template, validates DAG), `GET /v1/workflows` (list), `GET /v1/workflows/{id}` (show), `POST /v1/workflows/{id}/runs` (start run), `GET /v1/workflow-runs` (list), `GET /v1/workflow-runs/{id}` (run + step instances). Invalid DAG → `400`; unknown id → `404`.
 - common: `CreateWorkflowRequest`, `CreateWorkflowRunRequest`, `WorkflowRunWithSteps` DTOs.
 - cli: `ag workflow create|list|show|run`. `create` reads steps from a JSON file; `run` starts a run of a template. Covered by two `tests/api.rs` integration tests (happy path + invalid-DAG rejection).
 
-### Added (Stage 7.3 — DAG execution scheduler + roles)
+### Added ( — DAG execution scheduler + roles)
 - common: `WorkflowRole` expanded to `architect`/`worker`/`reviewer`/`integrator`/`verifier` (v1 still creates one role-run per step for its declared role).
 - control-plane: migration `0013_workflows_repository.sql` adds `workflow_runs.repository` so step tasks schedule against enrolled nodes.
 - control-plane: `Store::tick_workflow_run` — durable, idempotent scheduler. Marks a `pending` run `running`; activates `pending` steps whose dependencies are all `succeeded` by creating one Agentgrid task per step (tagged with the step's role); advances `running` steps whose task terminated; computes run status (succeeded when all leaves done, failed on any step failure). `create_workflow_run` now takes a `repository`.
 - control-plane: `POST /v1/workflow-runs/{id}/tick` drives the scheduler (wakes the assignment notifier) and returns the run + step instances.
 - tests: `tests/api.rs` golden workflow — `architect → 2 parallel workers → integrator → verifier` runs locally to a `succeeded` run on mock adapters (deterministic, exercises the full durable scheduler).
 
-### Added (Stage 5.2 — durable approval flow)
+### Added ( — durable approval flow)
 - control-plane: `approvals` table (migration 0011) + store (`create_approval`, `answer_approval` honoring the state machine, `get_approval`, `list_approvals`, `tick_approval_expiry`). API: `GET /v1/approvals`, `POST /v1/approvals/{id}/allow|deny` (user-auth, fail-closed). CLI: `ag approvals list|allow|deny`. The approval state machine moved into `agentgrid-common` so the control plane and the ACP client share one definition. Covered by an API test (create → list pending → allow → list allowed; terminal re-answer is a no-op).
 
 ## [0.1.0] - 2026-07-17
 
-### Added (Stage 5.3 — CI / release / ops)
+### Added ( — CI / release / ops)
 - GitHub Actions `ci.yml`: `rust` (fmt/clippy/test/build), `web` (build/lint), and `e2e` job that brings up the compose stack (control plane + two mock nodes) and asserts a task reaches `succeeded`.
 - `tests/e2e/run.sh`: self-contained E2E harness (builds images if missing, brings up via `up.sh`, submits a task, tears down).
 - `release.yml`: builds static `x86_64`/`aarch64` musl and `x86_64` gnu binaries via `cargo-zigbuild`, with a 60 MiB binary-size guardrail and uploaded artifacts.
@@ -1366,7 +1467,7 @@ complete; the two-container E2E run is the release validation gate.
 - node-daemon: warn when an adapter exits 0 but produces no stdout/stderr events, so a silent agent that yields an empty "succeeded" task is visible.
 - Node image (`Dockerfile.node-daemon`): optional `OPENCODE_VERSION` build arg bakes the opencode CLI into the image for a self-contained opencode node; default empty preserves the operator-provided contract (AGENTS.md: no required runtime deps).
 
-### Added (Stage 3.2 — OpenCode adapter)
+### Added ( — OpenCode adapter)
 - `adapter-opencode` wrapper binary: drives `opencode run --format json` headless and translates its `text`/`tool_use`/`error` events into the agentgrid contract (`log`/`tool_call`/`tool`/`error`); unknown event types are ignored (raw stdout is preserved as an artifact). Optional env `AGENTGRID_OPENCODE_BIN`/`AGENTGRID_OPENCODE_MODEL`/`AGENTGRID_OPENCODE_AUTO`. The underlying `opencode` CLI is provided by the operator (like `claude`); the wrapper is bundled into the node image.
 
 ### Added
@@ -1377,12 +1478,12 @@ complete; the two-container E2E run is the release validation gate.
 - Mock adapter (`crates/adapters`): deterministic `sleep:`/`write:`/`fail:`/`spam:` commands emitting JSON-line events; no LLM required.
 - Minimal CLI (`crates/cli`): `task run`, `task logs --follow`, `task show`, `node list`.
 - Integration test exercising the full task lifecycle and event idempotency.
-- ADR recording Stage 0.1 scope decisions (`docs/decisions/0001-mvp-scope.md`).
+- ADR recording  scope decisions (`docs/decisions/0001-mvp-scope.md`).
 
 ### Scope note
 This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git worktrees, real adapters and web UI follow in later stages.
 
-### Added (Stage 2.1 / 2.2 — persistence + state machine)
+### Added ( / 2.2 — persistence + state machine)
 - SQLite storage layer (`crates/control-plane/src/store.rs`) with bundled `libsqlite3-sys`, WAL,
   `synchronous=NORMAL`, `busy_timeout=5000`, 4-connection pool, and `sqlx` migrations.
 - Atomic assignment via a short write transaction with `UPDATE ... WHERE status='queued'` +
@@ -1397,12 +1498,12 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - End-to-end on one machine: `task run` → mock adapter writes file → `succeeded`, logs stream.
 - Control-plane restart on the same SQLite file preserves queued tasks (WAL).
 
-### Added (Stage 5.2 — metrics)
+### Added ( — metrics)
 - `GET /metrics` exposes Prometheus-text counts: `agentgrid_nodes{status}`,
   `agentgrid_tasks{status}`, `agentgrid_attempts_total`.
 - Test: metrics endpoint returns counts.
 
-### Added (Stage 3.3 / 3.4 — validation command + secret masking)
+### Added ( / 3.4 — validation command + secret masking)
 - After the agent succeeds, the node runs `Assignment.validation_command` in the
   worktree (diff already committed first, so it survives a failure); non-zero exit
   reports `error_code=validation_failed`, distinct from `agent_failed`. Validation
@@ -1412,12 +1513,12 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - `CompleteAttemptRequest.error_code` recorded on the attempt.
 - Node-daemon tests: secret masking + validation exit code/log.
 
-### Added (Stage 2.6 — events streaming, SSE)
+### Added ( — events streaming, SSE)
 - `GET /v1/tasks/{id}/events/stream` Server-Sent-Events endpoint: streams existing and
   new attempt events (polls every 250ms, 15s keep-alive ping) for the web UI.
-- Idempotent event ingest and batching were already in place (Stage 2.1/2.2).
+- Idempotent event ingest and batching were already in place (/2.2).
 
-### Added (Stage 2.8 — artifacts)
+### Added ( — artifacts)
 - `POST /v1/node/attempts/{id}/artifacts` (node auth) stores a text artifact on the
   control-plane filesystem under `artifact_root/<attempt_id>/<name>` and records
   metadata (idempotent per name).
@@ -1426,7 +1527,7 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - Schema migration `0005`: `artifacts` table.
 - Test: artifact upload (node auth) + read by task id.
 
-### Added (Stage 2.5 — repositories + git worktrees)
+### Added ( — repositories + git worktrees)
 - `POST /v1/repositories` / `GET /v1/repositories`: register a repo (name, git_url,
   default_branch, optional validation_command) and list them.
 - Assignment now carries `git_url`, `default_branch` and `validation_command`
@@ -1441,14 +1542,14 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - Schema migration `0004`: `repositories`, `node_repositories`.
 - Tests: repo create/list; node-daemon git worktree clone/commit/patch (real git).
 
-### Added (Stage 4.2 — full CLI)
+### Added ( — full CLI)
 - `ag server` starts the control plane by exec'ing the sibling `agentgrid-control-plane` binary (sets `AGENTGRID_LISTEN`/`AGENTGRID_DB`; optional one-time `--bootstrap-user`/`--bootstrap-password`).
 - `task run` gains `--validate` (validation command) and `--timeout` (seconds); `--adapter`/`--node` already present.
 - `node list` and `task show` gain a global `--json` flag for machine-readable output.
 - `token create`, `repo add`, `task logs --follow`, `task cancel`/`retry`, `login` already present; `node list` renders an aligned table.
-- Deferred: `node install` (systemd unit + enroll) — lands with packaging in Stage 5.3.
+- Deferred: `node install` (systemd unit + enroll) — lands with packaging in .
 
-### Added (Stage 5.2 — observability)
+### Added ( — observability)
 - `GET /metrics` expanded (Prometheus text): task duration histogram, terminal outcome
   counters (`agentgrid_tasks_total`), per-node `free_disk_mb`/`load_avg` gauges from heartbeat,
   and SQLite main/WAL file size gauges.
@@ -1457,7 +1558,7 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - Deferred (instrumentation needed): scheduler/heartbeat latency, event-buffer size,
   `SQLITE_BUSY`/checkpoint/write-lock metrics.
 
-### Added (Stage 5.1 — security)
+### Added ( — security)
 - Request size limits (trust-boundary input validation), overridable via env, returning 413:
   `AGENTGRID_MAX_PROMPT_KB` (64), `AGENTGRID_MAX_EVENT_KB` (1024), `AGENTGRID_MAX_ARTIFACT_MB` (50).
   A global `DefaultBodyLimit` caps request bodies at the artifact ceiling; the prompt and
@@ -1467,9 +1568,9 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
   plus existing node enroll/revoke. `AuthedUser` is attached by the user-auth middleware
   so handlers can record the acting username.
 - Enrollment token (one-time, TTL ≤ 10 min, hash-only) and per-node unique credential with
-  immediate revoke already landed in Stage 2.3; marked verified here.
+  immediate revoke already landed in ; marked verified here.
 
-### Added (Stage 4.3 — web UI)
+### Added ( — web UI)
 - React + TypeScript single-page UI (Vite) served as static files by the control plane
   (`web/dist`, overridable via `AGENTGRID_WEB_ROOT`); `index.html` fallback for client routing.
 - Auth gate with login and first-admin setup; JWT stored in `localStorage` and sent as Bearer.
@@ -1488,26 +1589,26 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - `npm ci && npm run build && npm run lint` passes; built UI smoke-tested against the
   running control plane (static serving + auth + SSE).
 
-### Added (Stage 4.1 — user authentication)
+### Added ( — user authentication)
 - Local users: `users` table (argon2id password hash). First user created via `POST /v1/auth/setup` (only while no users exist) or via `AGENTGRID_BOOTSTRAP_USER`/`AGENTGRID_BOOTSTRAP_PASSWORD` env at startup.
 - `POST /v1/auth/login` exchanges username+password for a 12h HS256 JWT. Secret from `AGENTGRID_JWT_SECRET` (random per start if unset).
 - `require_user_auth` middleware protects all `/v1/*` user endpoints (tasks, repositories, enrollment-token, nodes management). Open only during the bootstrap window (no users yet); node endpoints keep their own credential auth.
 - CLI `ag login` stores the JWT at `~/.config/agentgrid/credentials` (0600) and attaches it as `Bearer` to all user requests.
 - Integration test: setup→login→protected endpoint 401 without token / 201 with token; wrong password 401; second setup rejected.
 
-### Added (Stage 3.2 — Claude Code adapter)
+### Added ( — Claude Code adapter)
 - `adapter-claude` wrapper binary (ADR #12): launches `claude -p --output-format stream-json --verbose --dangerously-skip-permissions` and translates its output into the agentgrid event contract (`log`/`tool_call`/`tool`/`result`); unrecognized lines/blocks fall back to raw `log`.
 - Exit code is claude's; a `result` with `is_error:true` forces a non-zero exit so the daemon records `agent_failed`. API key supplied via env (`ANTHROPIC_API_KEY`) forwarded by the daemon through `AGENTGRID_ADAPTER_ENV`.
-- Verified end-to-end with a fake `claude` shim (translate + exit-code paths). Unit tests cover the `translate` mapping. Real-key run left as a manual `#[ignore]`-style check (Stage 3.5 exit criteria).
+- Verified end-to-end with a fake `claude` shim (translate + exit-code paths). Unit tests cover the `translate` mapping. Real-key run left as a manual `#[ignore]`-style check ( exit criteria).
 
-### Added (Stage 3.1 — adapter contract finalized + capability discovery)
+### Added ( — adapter contract finalized + capability discovery)
 - Adapter contract documented (subprocess model: `prepare`=worktree, `start`=`--prompt`, `stream`=NDJSON stdout, `cancel`=SIGTERM process group, `collect`=artifacts). Unknown stdout lines fall back to raw `log` so a future CLI format change cannot break the pipeline.
-- Capability discovery (Stage 3.1): the daemon probes the adapter binary in `PATH` at startup and on every heartbeat; a missing binary makes the node report `degraded` so the scheduler excludes it. Detected version is logged.
+- Capability discovery (): the daemon probes the adapter binary in `PATH` at startup and on every heartbeat; a missing binary makes the node report `degraded` so the scheduler excludes it. Detected version is logged.
 - Adapter config: `AGENTGRID_ADAPTER_ENV` forwards `KEY=VALUE` pairs (e.g. API keys) to the adapter subprocess.
 - Raw adapter output is mirrored to `agent-raw-output.log` in the worktree and uploaded as an artifact on completion (format-change safety net, spec risk #1).
 - Integration tests: `probe_adapter` (found/missing) and `read_stream` raw-log mirroring.
 
-### Added (Stage 2.4 — scheduler filters + `no_eligible_nodes` visibility)
+### Added ( — scheduler filters + `no_eligible_nodes` visibility)
 - Scheduler filter centralised in `node_ineligibility` (shared by assignment and
   visibility): only `online` nodes, with the task's adapter, the task's
   repository (or wildcard `*`), and spare capacity (`active_attempts <
@@ -1521,7 +1622,7 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - Integration tests: empty pool, missing adapter, missing repository, at
   capacity, and requested-node scoping.
 
-### Added (Stage 2.3 — node lifecycle: enrollment, heartbeat, revoke)
+### Added ( — node lifecycle: enrollment, heartbeat, revoke)
 - Enrollment tokens: `POST /v1/nodes/enrollment-token` issues a one-time token
   (TTL 10 min; only its SHA-256 hash is stored).
 - `POST /v1/node/enroll` exchanges a token for a permanent node credential
@@ -1541,7 +1642,7 @@ This is the Stage-1 vertical prototype. Persistence (SQLite WAL), auth, Git work
 - Schema migration `0003`: `enrollment_tokens`, `audit_events`, node `load_avg`/`free_disk_mb`.
 - Integration tests: enroll+auth flow; revoked node gets 401 on heartbeat and poll.
 
-### Added (Stage 2.7 — cancellation + timeout)
+### Added ( — cancellation + timeout)
 - `cancel_task`: `queued` → `cancelled` immediately; `assigned|running|validating` → sets
   `cancel_requested` on the attempt and reports `cancelled` once the node confirms completion.
 - `retry_task`: `failed|cancelled` → `queued` (new attempt created on next assign).

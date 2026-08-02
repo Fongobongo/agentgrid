@@ -66,6 +66,10 @@ async fn migrations_serve_legacy_happy_path() {
         protocol_version: None,
         capabilities: vec![],
         discovered_skills: vec![],
+        unsafe_active: false,
+        permission_interception: "wrapper".into(),
+        outbox_bytes: 0,
+        artifact_spool_bytes: 0,
     };
     assert!(s.heartbeat(&node_id, &hb).await.unwrap());
 
@@ -134,8 +138,84 @@ async fn migrations_serve_legacy_happy_path() {
 
     // 8. Event continuity: both ingested events are retrievable in sequence
     // (proves the events table + sequence column survived migrations).
-    let evs = s.get_events(&task.id, 0).await.unwrap();
+    let evs = s.get_events(&task.id, None, 0, None).await.unwrap();
     assert_eq!(evs.len(), 2, "both events must be retrievable");
     assert_eq!(evs[0].sequence, 1);
     assert_eq!(evs[1].sequence, 2);
+    assert!(
+        evs[0].ingest_id > 0,
+        "ingest_id backfilled by migration 0037"
+    );
+    assert!(evs[1].ingest_id > evs[0].ingest_id);
+}
+
+/// Hardening P1 item 21: migration 0040 rebuilds attempts/task_events/artifacts
+/// with FK constraints. A direct INSERT of an attempt whose node_id does not
+/// exist must now be rejected by the database (backstop for the handler-level
+/// ownership checks).
+#[tokio::test]
+async fn foreign_keys_enforced_after_migration_0040() {
+    let s = temp_store().await;
+    // Node + task first so the FK targets exist.
+    let (token, _tok_id) = s.create_enrollment_token().await.unwrap();
+    let enroll = EnrollRequest {
+        token,
+        name: "n".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        agent_version: "test".into(),
+        protocol_version: None,
+    };
+    let resp = s.enroll_node(&enroll).await.unwrap().expect("enroll");
+    let node_id = resp.node_id;
+    let task = s
+        .create_task(&CreateTaskRequest {
+            prompt: "x".into(),
+            repository: "*".into(),
+            adapter: "mock".into(),
+            requested_node_id: None,
+            timeout_secs: Some(60),
+            validation_command: None,
+            base_commit: None,
+            parent_acp_session_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Valid attempt (task_id + node_id exist) inserts fine.
+    sqlx::query(
+        "INSERT INTO attempts (id, task_id, number, node_id, status, started_at) \
+         VALUES ('att-valid', ?, 1, ?, 'assigned', '2026-01-01T00:00:00Z')",
+    )
+    .bind(&task.id)
+    .bind(&node_id)
+    .execute(&s.pool)
+    .await
+    .unwrap();
+
+    // Orphan attempt (task exists, node does NOT) must be rejected by FK.
+    let res = sqlx::query(
+        "INSERT INTO attempts (id, task_id, number, node_id, status, started_at) \
+         VALUES ('att-orphan', ?, 2, 'no-such-node', 'assigned', '2026-01-01T00:00:00Z')",
+    )
+    .bind(&task.id)
+    .execute(&s.pool)
+    .await;
+    assert!(
+        res.is_err(),
+        "attempt with a missing node_id must violate the FK"
+    );
+
+    // Orphan task event (attempt does not exist) must also be rejected.
+    let res = sqlx::query(
+        "INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at, ingest_id) \
+         VALUES ('ev-orphan', 'no-such-attempt', 1, 'stdout', '{}', '2026-01-01T00:00:00Z', 1)",
+    )
+    .execute(&s.pool)
+    .await;
+    assert!(
+        res.is_err(),
+        "task event with a missing attempt_id must violate the FK"
+    );
 }

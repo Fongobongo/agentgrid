@@ -31,6 +31,7 @@ password-hash.workspace = true
 jsonwebtoken.workspace = true
 rand.workspace = true
 agentgrid-common.workspace = true
+thiserror.workspace = true
 
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
@@ -41,6 +42,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 
+# Static file serving (tower-http ServeDir)
+tower-http = { version = "0.6", features = ["fs", "compression-br"] }
+tower.workspace = true
+http-body-util = "0.1"
+
 [dev-dependencies]
 tower.workspace = true
 serde_json.workspace = true
+futures-util.workspace = true
