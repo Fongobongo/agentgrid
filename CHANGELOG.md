@@ -124,6 +124,9 @@ All notable changes to this project are documented in this file.
 - **Approvals pagination:** `GET /v1/approvals` supports the same keyset
   cursor + page cap alongside the `status` filter. Test:
   `approvals_keyset_pagination`.
+- **CLI attempts in logs:** `ag logs` prefixes every event with its attempt id
+  (`[seq] (att-xxxxxxxx)`) so output from a retried attempt is distinguishable
+  at a glance.
 
 ### Security (hardening P0/P1/P2 — session hardening pass)
 

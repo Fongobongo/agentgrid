@@ -826,7 +826,7 @@
 - [ ] `ag node uninstall`/upgrade workflow.
 - [x] `--json` для read commands. (global `--json` flag: show/nodes/workflow emit pretty JSON; full coverage of remaining read commands is P2 polish)
 - [x] Стабильные exit codes. (CLI возвращает non-zero на любой ошибке через anyhow-контекст; `ag` 0 на успех, 1 на ошибку/not-found/HTTP failure)
-- [ ] Отображать attempts отдельно в logs.
+- [x] Отображать attempts отдельно в logs. (`ag logs` печатает `[seq] (att-xxxx)` префикс attempt id для каждого события; TUI показывает глобальный ingest_id)
 - [ ] Поддержать новый global cursor.
 - [x] Не печатать secrets/enrollment tokens после использования. (`node install` scp'ит env без echo; daemon скрабит `AGENTGRID_ENROLL_TOKEN` из env-файла атомарно; `ag token create` печатает только при сознательном mint)
 - [x] Убрать дублированные комментарии в `cli/src/main.rs`.

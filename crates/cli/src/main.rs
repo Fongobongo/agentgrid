@@ -780,7 +780,7 @@ async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<(
                 }
                 let ty = e.get("type").and_then(|v| v.as_str()).unwrap_or("?");
                 phase = phase_from_event(ty, e);
-                print_event(e, seq, ty, nc);
+                print_event(e, seq, ty, nc, e.get("attempt_id").and_then(|v| v.as_str()));
             }
         }
         // Stage TUI-idea: overlay a `blocked` phase when a durable approval is
@@ -858,7 +858,7 @@ fn phase_from_event(ty: &str, e: &serde_json::Value) -> Phase {
     }
 }
 
-fn print_event(e: &serde_json::Value, seq: u64, ty: &str, nc: bool) {
+fn print_event(e: &serde_json::Value, seq: u64, ty: &str, nc: bool, attempt_id: Option<&str>) {
     let payload = e.get("payload").cloned().unwrap_or(serde_json::Value::Null);
     let text = payload.get("text").and_then(|t| t.as_str()).unwrap_or("");
     let line = match ty {
@@ -896,7 +896,13 @@ fn print_event(e: &serde_json::Value, seq: u64, ty: &str, nc: bool) {
         "status" => format!("{} {}", paint(nc, C_YELLOW, "status"), text),
         _ => format!("{} {}", paint(nc, C_GRAY, ty), text),
     };
-    println!("{} {}", paint(nc, C_GRAY, &format!("[{seq}]")), line);
+    // Hardening P2 item 37: prefix each event with its attempt id (shortened)
+    // so logs from a retried attempt are distinguishable at a glance.
+    let seq_tag = match attempt_id {
+        Some(aid) => format!("[{}] (att-{})", seq, &aid[..aid.len().min(8)]),
+        None => format!("[{seq}]"),
+    };
+    println!("{} {}", paint(nc, C_GRAY, &seq_tag), line);
 }
 
 async fn has_pending_approval(client: &reqwest::Client, base: &str, task_id: &str) -> bool {
