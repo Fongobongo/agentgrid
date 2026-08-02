@@ -2934,9 +2934,16 @@ async fn cancel_task_handler(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ApprovalListQuery {
+    #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    after_created_at: Option<String>,
+    #[serde(default)]
+    after_id: Option<String>,
+    #[serde(default)]
+    limit: Option<u64>,
 }
 
 async fn list_approvals_handler(
@@ -2946,9 +2953,14 @@ async fn list_approvals_handler(
     let status = q
         .status
         .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok());
+    // Hardening P2 item 20: keyset cursor — only a complete pair is a cursor.
+    let after = match (&q.after_created_at, &q.after_id) {
+        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
+        _ => None,
+    };
     state
         .store
-        .list_approvals(status)
+        .list_approvals(status, after, q.limit)
         .await
         .map(Json)
         .map_err(|e| {

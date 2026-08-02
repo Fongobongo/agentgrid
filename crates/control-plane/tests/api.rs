@@ -6695,3 +6695,117 @@ async fn workflow_runs_keyset_pagination() {
         .collect();
     assert_eq!(ids.len(), 5, "workflow-run pages must not overlap or skip");
 }
+
+/// Hardening P2 item 20: keyset cursor pagination for `GET /v1/approvals`
+/// (`after_created_at` + `after_id`, stable `(created_at, id)` order).
+#[tokio::test]
+async fn approvals_keyset_pagination() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Create a real task, then 5 approvals through the API.
+    let task_req = CreateTaskRequest {
+        prompt: "page approvals".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+    };
+    let created = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&task_req).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let task_id: String = serde_json::from_slice::<TaskView>(
+        &to_bytes(created.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap()
+    .id;
+
+    let mut approvals = Vec::new();
+    for i in 0..5 {
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/v1/tasks/{task_id}/approvals"),
+                serde_json::to_string(&serde_json::json!({
+                    "attempt_id": "att-x",
+                    "permission": { "tool": "Bash", "input": format!("cmd-{i}") }
+                }))
+                .unwrap(),
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let id: String = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Fetch the full view so we have created_at for the keyset cursor.
+        let view_resp = app
+            .clone()
+            .oneshot(get_auth(&format!("/v1/approvals/{id}"), &token))
+            .await
+            .unwrap();
+        let v: ApprovalView =
+            serde_json::from_slice(&to_bytes(view_resp.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        approvals.push(v);
+    }
+    approvals.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+
+    let enc = |s: &str| s.replace('+', "%2B").replace(':', "%3A");
+    async fn page(app: &Router, token: &str, qs: &str) -> Vec<ApprovalView> {
+        let resp = app
+            .clone()
+            .oneshot(get_auth(&format!("/v1/approvals{qs}"), token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    let p1 = page(&app, &token, "?limit=2").await;
+    assert_eq!(p1.len(), 2);
+    let p2 = page(
+        &app,
+        &token,
+        &format!(
+            "?limit=2&after_created_at={}&after_id={}",
+            enc(&p1[1].created_at),
+            p1[1].id
+        ),
+    )
+    .await;
+    assert_eq!(p2.len(), 2);
+    let p3 = page(
+        &app,
+        &token,
+        &format!(
+            "?limit=2&after_created_at={}&after_id={}",
+            enc(&p2[1].created_at),
+            p2[1].id
+        ),
+    )
+    .await;
+    assert_eq!(p3.len(), 1);
+    let ids: std::collections::HashSet<String> = p1
+        .iter()
+        .chain(p2.iter())
+        .chain(p3.iter())
+        .map(|a| a.id.clone())
+        .collect();
+    assert_eq!(ids.len(), 5, "approval pages must not overlap or skip");
+}

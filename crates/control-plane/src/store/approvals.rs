@@ -98,33 +98,37 @@ impl Store {
     }
 
     /// List approvals, optionally filtered by status.
+    /// Hardening P2 item 20: list approvals with optional status filter, a
+    /// keyset cursor (`after` = `(created_at, id)`) and a server page cap.
     pub async fn list_approvals(
         &self,
         status: Option<ApprovalStatus>,
+        after: Option<(String, String)>,
+        limit: Option<u64>,
     ) -> Result<Vec<ApprovalView>> {
-        let rows = match status {
-            Some(s) => {
-                let v =
-                    serde_json::to_value(s).map(|v| v.as_str().unwrap_or("pending").to_string())?;
-                sqlx::query(
-                    "SELECT id, task_id, attempt_id, session_id, permission, status, reason, \
-                        created_at, expires_at, decided_at, scope \
-                 FROM approvals WHERE status = ? ORDER BY created_at ASC",
-                )
-                .bind(v)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    "SELECT id, task_id, attempt_id, session_id, permission, status, reason, \
-                        created_at, expires_at, decided_at, scope \
-                 FROM approvals ORDER BY created_at ASC",
-                )
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
+        const MAX_APPROVALS: i64 = 1000;
+        let limit = limit.unwrap_or(100).min(MAX_APPROVALS as u64) as i64;
+        let mut sql = String::from(
+            "SELECT id, task_id, attempt_id, session_id, permission, status, reason, \
+                created_at, expires_at, decided_at, scope \
+             FROM approvals WHERE 1=1",
+        );
+        if status.is_some() {
+            sql.push_str(" AND status = ?");
+        }
+        if after.is_some() {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+        }
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        let mut q = sqlx::query(&sql);
+        if let Some(s) = &status {
+            let v = serde_json::to_value(s).map(|v| v.as_str().unwrap_or("pending").to_string())?;
+            q = q.bind(v);
+        }
+        if let Some((created_at, id)) = &after {
+            q = q.bind(created_at).bind(created_at).bind(id);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(approval_from_row).collect())
     }
 

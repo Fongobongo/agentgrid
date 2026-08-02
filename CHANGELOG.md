@@ -121,6 +121,9 @@ All notable changes to this project are documented in this file.
   pagination (`after_created_at` + `after_id`, stable `(created_at, id)`
   order) and a server page cap. Test:
   `workflow_runs_keyset_pagination`.
+- **Approvals pagination:** `GET /v1/approvals` supports the same keyset
+  cursor + page cap alongside the `status` filter. Test:
+  `approvals_keyset_pagination`.
 
 ### Security (hardening P0/P1/P2 — session hardening pass)
 

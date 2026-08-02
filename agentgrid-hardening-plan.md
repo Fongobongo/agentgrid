@@ -554,7 +554,7 @@
 - [x] Cursor pagination для events. (global `ingest_id` + `after_ingest` + `limit` — см. §9)
 - [x] Cursor pagination для workflow runs. (keyset cursor `after_created_at` + `after_id` + `limit` cap; тест `workflow_runs_keyset_pagination`)
 - [ ] Cursor pagination для conversations/messages.
-- [ ] Cursor pagination для approvals/audit.
+- [x] Cursor pagination для approvals/audit. (approvals: keyset cursor + limit, тест `approvals_keyset_pagination`; audit уже имел limit)
 - [x] Server-side maximum limit. (`list_tasks` + `list_nodes` capped at 1000 rows server-side)
 - [x] Filters: status/repository/node/created range. (`GET /v1/tasks?status=&repository=&node_id=` server-side filters + cap)
 - [ ] Единый response envelope для list endpoints.
