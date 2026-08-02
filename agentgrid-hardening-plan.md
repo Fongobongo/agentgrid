@@ -402,7 +402,7 @@
 ## 11. Durable artifacts — P1
 
 - [x] Добавить artifact spool на node. (`crates/node-daemon/src/artifact_spool.rs`: `<data>/artifact-spool/<attempt_id>/<name>`, atomic stage via temp+rename, sanitized path segments)
-- [ ] Записывать artifact metadata и hash до начала upload. (CP уже вычисляет SHA-256 на upload; node-side hash metadata TODO)
+- [x] Записывать artifact metadata и hash до начала upload. (node-daemon upload_if_exists шлёт X-Artifact-Sha256; CP верифицирует, mismatch → 422)
 - [x] Поддержать retry после daemon restart. (spool files re-uploaded at `poll_loop` startup, best-effort + idempotent)
 - [x] Не считать completion полностью доставленным, пока обязательные artifacts не ACKed. (`CompleteAttemptRequest.pending_artifacts` + migration 0038 `attempts.pending_artifacts`; CP records the owed set; hard block is deferred P1 follow-up)
 - [ ] Определить optional и required artifacts.

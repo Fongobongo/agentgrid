@@ -2510,12 +2510,16 @@ async fn upload_if_exists(
         }
     };
     let media = artifact_media_type(name);
+    // Hardening P1 item 11: send the server-computed hash so the CP can verify
+    // the artifact arrived intact (client hash mismatch → 422).
+    let sha = sha256_hex_bytes(&bytes);
     let mut post = client
         .post(format!(
             "{server}/v1/node/attempts/{attempt_id}/artifacts/raw"
         ))
         .header("x-artifact-name", name)
-        .header("x-artifact-media-type", media);
+        .header("x-artifact-media-type", media)
+        .header("x-artifact-sha256", sha.as_str());
     if !fence.is_empty() {
         post = post.header("x-agentgrid-fencing-token", fence);
     }
@@ -2540,6 +2544,16 @@ fn artifact_media_type(name: &str) -> &'static str {
         "validation.log" | "agent-raw-output.log" => "text/plain",
         _ => "application/octet-stream",
     }
+}
+
+/// Hex SHA-256 of a byte slice (hardening P1 item 11: artifact upload
+/// verification header).
+fn sha256_hex_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let out = h.finalize();
+    out.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Poll the control plane until cancellation is requested for this attempt.
