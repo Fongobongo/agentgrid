@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use agentgrid_common::Assignment;
@@ -24,6 +25,16 @@ use anyhow::{Context, Result};
 /// clone). Each attempt
 /// still gets its own worktree, so agent work runs concurrently.
 static REPO_LOCKS: OnceLock<Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// Hardening P2 item 35: cumulative milliseconds spent waiting on the
+/// per-repo lock (in-process mutex + cross-process flock). Reported via the
+/// heartbeat so the control plane can surface repository contention.
+static REPO_LOCK_WAIT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Cumulative repository-lock wait in milliseconds (see [`REPO_LOCK_WAIT_MS`]).
+pub fn repo_lock_wait_ms() -> u64 {
+    REPO_LOCK_WAIT_MS.load(Ordering::Relaxed)
+}
 
 fn repo_lock(repo: &str) -> std::sync::Arc<Mutex<()>> {
     let map = REPO_LOCKS.get_or_init(Mutex::default);
@@ -247,10 +258,12 @@ pub fn prepare_workspace(
     // Stage 2.3: serialize shared bare-mirror mutations (fetch / worktree
     // add) per repository across concurrent attempts.
     let _repo_arc = repo_lock(repo);
+    // Hardening P2 item 35: account block time waiting on the per-repo lock
+    // so an operator can alert on repository contention.
+    let lock_started = std::time::Instant::now();
     let _repo_guard = _repo_arc.lock().unwrap();
-    // Hardening P1 item 32: cross-process flock with a timeout so a second
-    // node-daemon process (or a restarted daemon) cannot race the mirror.
     let _flock = RepoFlock::acquire(repository_root, repo, std::time::Duration::from_secs(60))?;
+    REPO_LOCK_WAIT_MS.fetch_add(lock_started.elapsed().as_millis() as u64, Ordering::Relaxed);
 
     // Stage 2.3 (bare mirror): keep a single bare `--mirror` clone per repo so
     // the shared clone has no working tree and no HEAD to mutate — attempts no

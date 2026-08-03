@@ -509,6 +509,94 @@ pub fn total_bytes(dir: &Path) -> std::io::Result<u64> {
     Ok(total)
 }
 
+/// Hardening P0 item 10: total pending event rows across all per-attempt spools.
+/// Excludes the shared completions.jsonl file and quarantine directory.
+pub fn pending_rows(dir: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_file() {
+            let name = entry.file_name();
+            let name_str = name.to_str().unwrap_or("");
+            if name_str.ends_with(".jsonl") && name_str != "completions.jsonl" {
+                let content = std::fs::read_to_string(entry.path())?;
+                total += content.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Hardening P0 item 10: age in milliseconds of the oldest unacked event
+/// across all per-attempt spools. Returns 0 if no pending events.
+pub fn oldest_pending_age_ms(dir: &Path) -> std::io::Result<u64> {
+    let mut oldest_ms: Option<u64> = None;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0) as u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_file() {
+            let name = entry.file_name();
+            let name_str = name.to_str().unwrap_or("");
+            if name_str.ends_with(".jsonl") && name_str != "completions.jsonl" {
+                let content = std::fs::read_to_string(entry.path())?;
+                for line in content.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if let Ok(ev) = serde_json::from_str::<EventLine>(line) {
+                        if let Some(created_at) =
+                            ev.payload.get("created_at").and_then(|v| v.as_str())
+                        {
+                            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(created_at) {
+                                let event_ms = dt.timestamp_millis().max(0) as u64;
+                                if event_ms <= now {
+                                    let age = now.saturating_sub(event_ms);
+                                    oldest_ms = Some(oldest_ms.map_or(age, |o| o.max(age)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(oldest_ms.unwrap_or(0))
+}
+
+/// Hardening P0 item 10: total quarantined corrupt records in the outbox
+/// quarantine directory.
+pub fn corruption_count(dir: &Path) -> std::io::Result<u64> {
+    let quarantine_dir = dir.join("quarantine");
+    if !quarantine_dir.exists() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(quarantine_dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_file() {
+            let content = std::fs::read_to_string(entry.path())?;
+            total += content.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+        }
+    }
+    Ok(total)
+}
+
+/// Hardening P0 item 10: pending completion records in completions.jsonl.
+pub fn completion_rows(dir: &Path) -> std::io::Result<u64> {
+    let path = dir.join("completions.jsonl");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let content = std::fs::read_to_string(path)?;
+    Ok(content.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+}
+
 /// Hardening P0 item 10: atomically rewrite `path` with only `clean` lines and
 /// append `damaged` lines to `<parent>/quarantine/<file>-<unix-ts>` so corrupt
 /// records are preserved for inspection instead of lost. The rewrite uses the

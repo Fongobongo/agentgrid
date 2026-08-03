@@ -8,11 +8,17 @@ mod config;
 pub mod store;
 pub mod workflow;
 
+// OpenTelemetry metrics (optional feature)
+pub mod otel;
+
 use crate::config::{env_usize, EventRate, Limits, LoginRate, SetupToken, SETUP_TOKEN_TTL};
 use crate::store::is_safe_opaque_id;
 use anyhow::Context;
 use std::sync::Arc;
 use std::time::Instant;
+
+#[cfg(feature = "opentelemetry")]
+use crate::otel::init_otel;
 
 use agentgrid_common::{
     AppendMessageRequest, ApprovalEvent, ApprovalView, CancelState, CompleteAttemptRequest,
@@ -251,7 +257,7 @@ impl AppState {
     /// exercise the bootstrap/setup flow). A one-time setup token is minted
     /// and printed to stdout (same as a fresh install).
     pub async fn open_temp_fresh() -> anyhow::Result<Arc<Self>> {
-        let p = std::env::temp_dir().join(format!("ag-test-{}.db", Uuid::new_v4()));
+        let p = std::path::Path::new("/var/tmp").join(format!("ag-test-{}.db", Uuid::new_v4()));
         Self::open(p.to_str().unwrap()).await
     }
 
@@ -259,7 +265,7 @@ impl AppState {
     /// `test`/`test` user so the closed bootstrap window does not block
     /// test task creation; tests then login to obtain a JWT.
     pub async fn open_temp() -> anyhow::Result<Arc<Self>> {
-        let p = std::env::temp_dir().join(format!("ag-test-{}.db", Uuid::new_v4()));
+        let p = std::path::Path::new("/var/tmp").join(format!("ag-test-{}.db", Uuid::new_v4()));
         let state = Self::open(p.to_str().unwrap()).await?;
         if state.store.user_count().await? == 0 {
             state.store.create_user("test", "test").await?;
@@ -1567,6 +1573,125 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
 
+    // Hardening P2 item 35: validation duration histogram + outcomes.
+    s.push_str(
+        "# HELP agentgrid_validation_duration_ms Validation duration (validating-state window).\n",
+    );
+    s.push_str("# TYPE agentgrid_validation_duration_ms histogram\n");
+    s.push_str(&format!(
+        "agentgrid_validation_duration_ms_sum {}\n",
+        state
+            .store
+            .validation_duration_sum
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    s.push_str(&format!(
+        "agentgrid_validation_duration_ms_count {}\n",
+        state
+            .store
+            .validation_duration_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    s.push_str("# HELP agentgrid_validation_outcomes_total Validation outcomes.\n");
+    s.push_str("# TYPE agentgrid_validation_outcomes_total counter\n");
+    for (k, v) in state.store.validation_outcomes.lock().unwrap().iter() {
+        s.push_str(&format!(
+            "agentgrid_validation_outcomes_total{{outcome=\"{k}\"}} {v}\n"
+        ));
+    }
+    s.push_str(
+        "# HELP agentgrid_attempts_by_security_profile_total Attempts by security profile.\n",
+    );
+    s.push_str("# TYPE agentgrid_attempts_by_security_profile_total counter\n");
+    for (k, v) in state.store.security_profile_attempts.lock().unwrap().iter() {
+        s.push_str(&format!(
+            "agentgrid_attempts_by_security_profile_total{{profile=\"{k}\"}} {v}\n"
+        ));
+    }
+
+    // Hardening P2 items 10/35: per-node storage & lock gauges from heartbeat.
+    s.push_str("# HELP agentgrid_node_outbox_bytes Bytes buffered in the node's durable outbox.\n");
+    s.push_str("# TYPE agentgrid_node_outbox_bytes gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_outbox_bytes{{node=\"{}\"}} {}\n",
+            n.name, n.outbox_bytes
+        ));
+    }
+    s.push_str("# HELP agentgrid_node_outbox_rows Pending outbox rows on the node.\n");
+    s.push_str("# TYPE agentgrid_node_outbox_rows gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_outbox_rows{{node=\"{}\"}} {}\n",
+            n.name, n.outbox_rows
+        ));
+    }
+    s.push_str("# HELP agentgrid_node_outbox_oldest_pending_age_ms Age of the oldest unacked outbox event.\n");
+    s.push_str("# TYPE agentgrid_node_outbox_oldest_pending_age_ms gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_outbox_oldest_pending_age_ms{{node=\"{}\"}} {}\n",
+            n.name, n.outbox_oldest_pending_age_ms
+        ));
+    }
+    s.push_str("# HELP agentgrid_node_outbox_corruption_total Quarantined corrupt outbox records on the node.\n");
+    s.push_str("# TYPE agentgrid_node_outbox_corruption_total gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_outbox_corruption_total{{node=\"{}\"}} {}\n",
+            n.name, n.outbox_corruption_count
+        ));
+    }
+    s.push_str(
+        "# HELP agentgrid_node_outbox_completion_rows Pending completion records on the node.\n",
+    );
+    s.push_str("# TYPE agentgrid_node_outbox_completion_rows gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_outbox_completion_rows{{node=\"{}\"}} {}\n",
+            n.name, n.outbox_completion_rows
+        ));
+    }
+    s.push_str(
+        "# HELP agentgrid_node_artifact_spool_bytes Bytes staged in the node's artifact spool.\n",
+    );
+    s.push_str("# TYPE agentgrid_node_artifact_spool_bytes gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_artifact_spool_bytes{{node=\"{}\"}} {}\n",
+            n.name, n.artifact_spool_bytes
+        ));
+    }
+    s.push_str(
+        "# HELP agentgrid_node_repo_lock_wait_ms Cumulative repository-lock wait on the node.\n",
+    );
+    s.push_str("# TYPE agentgrid_node_repo_lock_wait_ms gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_repo_lock_wait_ms{{node=\"{}\"}} {}\n",
+            n.name, n.repo_lock_wait_ms
+        ));
+        s.push_str("# HELP agentgrid_node_sandbox_backend Sandbox backend kind per node.\n");
+        s.push_str("# TYPE agentgrid_node_sandbox_backend gauge\n");
+        for n in &nodes {
+            s.push_str(&format!(
+                "agentgrid_node_sandbox_backend{{node=\"{}\",backend=\"{}\"}} 1\n",
+                n.name, n.sandbox_backend
+            ));
+        }
+        s.push_str(
+            "# HELP agentgrid_node_enforced_limits Whether sandbox enforces resource limits.\n",
+        );
+        s.push_str("# TYPE agentgrid_node_enforced_limits gauge\n");
+        for n in &nodes {
+            s.push_str(&format!(
+                "agentgrid_node_enforced_limits{{node=\"{}\"}} {}\n",
+                n.name,
+                if n.enforced_limits { 1 } else { 0 }
+            ));
+        }
+    }
+
     (
         StatusCode::OK,
         (
@@ -1685,16 +1810,14 @@ async fn task_eligibility_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<TaskEligibility>, StatusCode> {
-    state
-        .store
-        .task_eligibility(&id)
-        .await
-        .map_err(|e| {
-            tracing::error!("task_eligibility failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+    match state.store.task_eligibility(&id).await {
+        Ok(Some(elig)) => Ok(Json(elig)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("task_eligibility failed: {e:?}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 // ----- workflows (Stage 7.2) -----
@@ -2248,7 +2371,7 @@ async fn append_conversation_message(
         .ok_or(StatusCode::NOT_FOUND)?;
     let history = state
         .store
-        .list_conversation_messages(&id)
+        .list_conversation_messages(&id, 0, 1000)
         .await
         .map_err(|e| {
             tracing::error!("list_conversation_messages failed: {e}");
@@ -2296,10 +2419,19 @@ async fn append_conversation_message(
 async fn list_conversation_messages(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<agentgrid_common::ConversationMessage>>, StatusCode> {
+    let after_seq = params
+        .get("after_seq")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
     state
         .store
-        .list_conversation_messages(&id)
+        .list_conversation_messages(&id, after_seq, limit)
         .await
         .map(Json)
         .map_err(|e| {

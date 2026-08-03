@@ -42,10 +42,20 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 
+# OpenTelemetry (optional feature)
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", optional = true }
+opentelemetry-prometheus = { version = "0.27", optional = true }
+prometheus = { version = "0.13", optional = true }
+
 # Static file serving (tower-http ServeDir)
 tower-http = { version = "0.6", features = ["fs", "compression-br"] }
 tower.workspace = true
 http-body-util = "0.1"
+
+[features]
+default = []
+opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:prometheus"]
 
 [dev-dependencies]
 tower.workspace = true

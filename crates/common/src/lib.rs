@@ -261,6 +261,10 @@ pub fn default_permission_interception() -> String {
     "wrapper".to_string()
 }
 
+fn default_sandbox_backend() -> String {
+    "none".to_string()
+}
+
 // ----- API DTOs -----
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -349,6 +353,33 @@ pub struct NodeView {
     /// Hardening P2 item 35: total bytes staged in the node's artifact spool.
     #[serde(default)]
     pub artifact_spool_bytes: u64,
+    /// Hardening P0 item 10: total pending event rows across all per-attempt
+    /// spools.
+    #[serde(default)]
+    pub outbox_rows: u64,
+    /// Hardening P0 item 10: age in milliseconds of the oldest unacked event
+    /// across all per-attempt spools.
+    #[serde(default)]
+    pub outbox_oldest_pending_age_ms: u64,
+    /// Hardening P0 item 10: total quarantined corrupt records in the outbox
+    /// quarantine directory.
+    #[serde(default)]
+    pub outbox_corruption_count: u64,
+    /// Hardening P0 item 10: pending completion records in completions.jsonl.
+    #[serde(default)]
+    pub outbox_completion_rows: u64,
+    /// Hardening P2 item 35: cumulative repository-lock wait in milliseconds
+    /// measured on the node (cross-process flock contention, surfaced via
+    /// /metrics as a per-node gauge). 0 on legacy nodes.
+    #[serde(default)]
+    pub repo_lock_wait_ms: u64,
+    /// Hardening P2 item 35: sandbox backend kind ("none" | "docker").
+    #[serde(default = "default_sandbox_backend")]
+    pub sandbox_backend: String,
+    /// Hardening P2 item 35: whether the sandbox backend enforces resource
+    /// limits (memory, CPU, pids).
+    #[serde(default)]
+    pub enforced_limits: bool,
     /// Hardening P2 item 37: node is drained — it keeps in-flight attempts but
     /// receives no NEW assignments (maintenance mode).
     #[serde(default)]
@@ -557,6 +588,35 @@ pub struct HeartbeatRequest {
     /// spool (artifacts not yet delivered to the CP). 0 on legacy nodes.
     #[serde(default)]
     pub artifact_spool_bytes: u64,
+    /// Hardening P0 item 10: total pending event rows across all per-attempt
+    /// spools. 0 on legacy nodes.
+    #[serde(default)]
+    pub outbox_rows: u64,
+    /// Hardening P0 item 10: age in milliseconds of the oldest unacked event
+    /// across all per-attempt spools. 0 on legacy nodes or when empty.
+    #[serde(default)]
+    pub outbox_oldest_pending_age_ms: u64,
+    /// Hardening P0 item 10: total quarantined corrupt records in the outbox
+    /// quarantine directory. 0 on legacy nodes.
+    #[serde(default)]
+    pub outbox_corruption_count: u64,
+    /// Hardening P0 item 10: pending completion records in completions.jsonl.
+    /// 0 on legacy nodes.
+    #[serde(default)]
+    pub outbox_completion_rows: u64,
+    /// Hardening P2 item 35: cumulative repository-lock wait in milliseconds
+    /// measured on the node. 0 on legacy nodes.
+    #[serde(default)]
+    pub repo_lock_wait_ms: u64,
+    /// Hardening P2 item 35: sandbox backend kind ("none" | "docker").
+    /// Absent on legacy nodes (defaults to "none").
+    #[serde(default = "default_sandbox_backend")]
+    pub sandbox_backend: String,
+    /// Hardening P2 item 35: whether the sandbox backend enforces resource
+    /// limits (memory, CPU, pids). Always false for "none"; true for
+    /// "docker" only when limits are actually configured. 0 on legacy nodes.
+    #[serde(default)]
+    pub enforced_limits: bool,
 }
 
 /// A skill name + source ("project" | "user" | "managed") advertised in a
@@ -956,6 +1016,13 @@ mod tests {
             permission_interception: "wrapper".into(),
             outbox_bytes: 0,
             artifact_spool_bytes: 0,
+            outbox_rows: 0,
+            outbox_oldest_pending_age_ms: 0,
+            outbox_corruption_count: 0,
+            outbox_completion_rows: 0,
+            repo_lock_wait_ms: 0,
+            sandbox_backend: "none".into(),
+            enforced_limits: false,
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

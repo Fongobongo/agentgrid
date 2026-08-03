@@ -41,6 +41,12 @@ fn acquire_instance_lock(_db_path: &str) -> anyhow::Result<Option<std::fs::File>
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // OpenTelemetry metrics (optional feature)
+    #[cfg(feature = "opentelemetry")]
+    {
+        agentgrid_control_plane::otel::init_otel()?;
+    }
+
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(

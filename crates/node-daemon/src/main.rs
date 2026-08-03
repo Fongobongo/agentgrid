@@ -34,6 +34,9 @@ mod artifact_spool;
 mod git;
 mod outbox;
 mod sandbox;
+mod secret_redactor;
+
+use secret_redactor::StreamingRedactor;
 
 #[derive(Clone)]
 struct Config {
@@ -65,6 +68,9 @@ struct Config {
     /// here before upload so a CP outage mid-upload cannot lose them; they are
     /// retried on the next daemon startup.
     artifact_spool_root: PathBuf,
+    /// Hardening P1 item 11: maximum artifact size in bytes. Artifacts larger
+    /// than this are rejected at staging time. Default 100 MiB.
+    max_artifact_size: u64,
     /// Stage 2.1: a single durable completion spool (idempotent redelivery).
     completion_outbox: Arc<outbox::CompletionOutbox>,
     /// Stage 9.1: command-policy autonomy level driving the local
@@ -183,6 +189,11 @@ fn config_from_env() -> Config {
         sandbox: sandbox::SandboxKind::from_env(),
         outbox_root: PathBuf::from(&data_dir).join("outbox"),
         artifact_spool_root: PathBuf::from(&data_dir).join("artifact-spool"),
+        max_artifact_size: std::env::var("AGENTGRID_MAX_ARTIFACT_SIZE_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(100 * 1024 * 1024),
         completion_outbox: Arc::new({
             let dir = PathBuf::from(&data_dir).join("outbox");
             outbox::CompletionOutbox::open(&dir).unwrap_or_else(|e| {
@@ -1184,69 +1195,70 @@ async fn read_stream<R: AsyncRead + Unpin>(
     // lines()` swallows a partial tail on EOF; here we flush any remainder as a
     // final raw/stderr line so a crashed adapter's last half-event is preserved
     // (best-effort) rather than lost.
-    let mut buf = tokio::io::BufReader::new(reader);
-    let mut acc = Vec::new();
-    let mut byte = [0u8; 1];
+    //
     // Hardening P1 item 34: bound a single logical line so an adapter that
-    // never emits a newline cannot grow `acc` without limit. Past the cap we
-    // flush the accumulated bytes as a (truncated) line and keep draining so
+    // never emits a newline cannot grow the buffer without limit. Past the cap
+    // we flush the accumulated bytes as a (truncated) line and keep draining so
     // the subprocess pipe never blocks. Default 1 MiB per line.
+    //
+    // Hardening P1 item 27: streaming redactor with chunk overlap masks secrets
+    // split across chunk/line boundaries.
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut chunk = vec![0u8; 4096];
+    let min_len = std::env::var("AGENTGRID_REDACT_MIN_LEN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(6);
     let line_cap: usize = std::env::var("AGENTGRID_MAX_LINE_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1024 * 1024);
+    let mut redactor = StreamingRedactor::new(secrets, min_len, line_cap);
+
     loop {
-        byte[0] = 0;
-        match buf.read(&mut byte).await {
+        let n = match reader.read(&mut chunk).await {
             Ok(0) => break,
-            Ok(_) => {
-                acc.push(byte[0]);
-                if byte[0] == b'\n' {
-                    emit_line(&acc, &sink, stream, &secrets, &raw).await;
-                    acc.clear();
-                } else if acc.len() >= line_cap {
-                    // Flush the oversized line and keep draining the pipe.
-                    emit_line(&acc, &sink, stream, &secrets, &raw).await;
-                    acc.clear();
-                }
-            }
+            Ok(n) => n,
             Err(_) => break,
+        };
+        for line in redactor.feed(&chunk[..n]) {
+            emit_line_masked(&line, &sink, stream, &raw).await;
         }
     }
-    if !acc.is_empty() {
-        emit_line(&acc, &sink, stream, &secrets, &raw).await;
+
+    // Flush any remaining partial line
+    if let Some(line) = redactor.finish() {
+        emit_line_masked(&line, &sink, stream, &raw).await;
     }
 }
 
-async fn emit_line(
+/// Emit a line that has already been masked by the streaming redactor.
+async fn emit_line_masked(
     line: &[u8],
     sink: &Arc<EventSink>,
     stream: &str,
-    secrets: &[String],
     raw: &Option<Arc<Mutex<tokio::fs::File>>>,
 ) {
-    // strip the trailing newline if present (single line only here)
-    let trimmed: &[u8] = if line.last() == Some(&b'\n') {
-        &line[..line.len() - 1]
-    } else {
-        line
-    };
-    let s = String::from_utf8_lossy(trimmed).to_string();
-    let masked = mask_secrets(&s, secrets);
     if let Some(f) = raw {
         let mut g = f.lock().await;
-        let _ = g.write_all(masked.as_bytes()).await;
-        let _ = g.write_all(b"\n").await;
+        let _ = g.write_all(line).await;
+        let _ = g
+            .write_all(
+                b"
+",
+            )
+            .await;
     }
     // Stage 3.1: accept the versioned envelope first; fall back to the
     // legacy `{type, payload}` adapter event; anything else is a raw log.
     // Unknown kinds are preserved (never fatal).
-    if let Ok(env) = serde_json::from_str::<AgentEventEnvelope>(&masked) {
+    let s = String::from_utf8_lossy(line).to_string();
+    if let Ok(env) = serde_json::from_str::<AgentEventEnvelope>(&s) {
         sink.push(env.kind.to_event_type(), env.payload).await;
         sink.note_adapter_event();
         return;
     }
-    match serde_json::from_str::<AdapterEvent>(&masked) {
+    match serde_json::from_str::<AdapterEvent>(&s) {
         Ok(ae) => {
             sink.push(to_event_type(&ae.r#type), ae.payload).await;
             sink.note_adapter_event();
@@ -1257,7 +1269,7 @@ async fn emit_line(
             } else {
                 EventType::Stdout
             };
-            sink.push(ty, json!({ "text": masked })).await;
+            sink.push(ty, json!({ "text": s })).await;
             sink.note_adapter_event();
         }
     }
@@ -2242,6 +2254,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &patch_path,
         &assignment.fencing_token,
         &spool_root,
+        cfg.max_artifact_size,
     )
     .await;
     upload_if_exists(
@@ -2252,6 +2265,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &validation_log,
         &assignment.fencing_token,
         &spool_root,
+        cfg.max_artifact_size,
     )
     .await;
     upload_if_exists(
@@ -2262,6 +2276,7 @@ async fn run_attempt(cfg: Config, client: reqwest::Client, assignment: Assignmen
         &raw_path,
         &assignment.fencing_token,
         &spool_root,
+        cfg.max_artifact_size,
     )
     .await;
 
@@ -2483,6 +2498,7 @@ fn cfg_sandbox_kind() -> crate::sandbox::SandboxKind {
 /// during upload cannot lose it — the worktree is deleted after the attempt,
 /// but the staged copy survives and is retried on the next daemon startup.
 /// The spool copy is only removed after a successful upload.
+#[allow(clippy::too_many_arguments)]
 async fn upload_if_exists(
     client: &reqwest::Client,
     server: &str,
@@ -2491,6 +2507,7 @@ async fn upload_if_exists(
     path: &std::path::Path,
     fence: &str,
     spool_root: &std::path::Path,
+    max_artifact_size: u64,
 ) {
     // Stage into the durable spool first (idempotent; re-stages replace).
     let staged = match artifact_spool::stage(spool_root, attempt_id, name, path) {
@@ -2500,6 +2517,23 @@ async fn upload_if_exists(
             return;
         }
     };
+    // Check artifact size before upload (Hardening P1 item 11: limit size).
+    let metadata = match tokio::fs::metadata(&staged).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("artifact {name} metadata failed for {attempt_id}: {e}");
+            return;
+        }
+    };
+    if metadata.len() > max_artifact_size {
+        tracing::warn!(
+            "artifact {name} for {attempt_id} exceeds max size ({} > {} bytes); skipping",
+            metadata.len(),
+            max_artifact_size
+        );
+        let _ = artifact_spool::remove(spool_root, attempt_id, name);
+        return;
+    }
     // Upload from the spool copy so a mid-upload daemon kill leaves the staged
     // file intact for the startup retry.
     let bytes = match tokio::fs::read(&staged).await {
@@ -2554,70 +2588,6 @@ fn sha256_hex_bytes(bytes: &[u8]) -> String {
     h.update(bytes);
     let out = h.finalize();
     out.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Poll the control plane until cancellation is requested for this attempt.
-/// Replace any known secret substring with `***` (Stage 3.4).
-fn mask_secrets(line: &str, secrets: &[String]) -> String {
-    let mut s = line.to_string();
-    // Hardening P1 item 27: ignore secret candidates shorter than a minimum
-    // length (default 6, override via AGENTGRID_REDACT_MIN_LEN) so a single
-    // shared common short substring doesn't get turned into a wall of `***`
-    // and obscure the real diagnostic. Empty is always skipped.
-    let min_len = std::env::var("AGENTGRID_REDACT_MIN_LEN")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(6);
-    // Hardening P1 item 27: also mask encoded variants of each secret so a
-    // diagnostic that printed a base64 or percent-encoded form does not leak
-    // the raw secret.
-    for sec in secrets {
-        if sec.len() >= min_len {
-            s = s.replace(sec, "***");
-            s = s.replace(&base64_encode(sec.as_bytes()), "***");
-            s = s.replace(&url_encode(sec), "***");
-        }
-    }
-    s
-}
-
-/// Minimal base64 encoder (no external dep) for secret-variant masking.
-fn base64_encode(bytes: &[u8]) -> String {
-    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).map(|&b| b as u32).unwrap_or(0);
-        let b2 = chunk.get(2).map(|&b| b as u32).unwrap_or(0);
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TBL[(n >> 18) as usize & 63] as char);
-        out.push(TBL[(n >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            out.push(TBL[(n >> 6) as usize & 63] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(TBL[n as usize & 63] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-/// Minimal percent-encoder (non-alphanumeric → %XX) for secret-variant masking.
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push_str(&format!("{b:02X}"));
-        }
-    }
-    out
 }
 
 /// Whether an HTTP status from the control plane is worth retrying from the
@@ -2926,6 +2896,22 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
         }
     }
 
+    // Hardening P1 item 11: recover orphaned artifact spool entries from
+    // abandoned attempts (cancelled, expired, or otherwise never completed).
+    // Default max age 24 hours; override via AGENTGRID_ARTIFACT_ORPHAN_MAX_AGE_HOURS.
+    let orphan_max_age_hours = std::env::var("AGENTGRID_ARTIFACT_ORPHAN_MAX_AGE_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(24);
+    if let Ok(removed) = artifact_spool::recover_orphans(
+        &cfg.artifact_spool_root,
+        Duration::from_secs(orphan_max_age_hours * 3600),
+    ) {
+        if removed > 0 {
+            tracing::info!(removed, "cleaned up orphaned artifact spool entries");
+        }
+    }
+
     // Hardening P1 item 11: retry artifacts staged by a prior (killed) run
     // whose upload never completed. Best-effort and idempotent on the CP
     // (upload keyed by attempt_id+name); a failure here just leaves the file
@@ -2950,6 +2936,7 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                 path,
                 "",
                 &spool_root,
+                cfg.max_artifact_size,
             )
             .await;
         }
@@ -3065,6 +3052,22 @@ async fn poll_loop(cfg: Config, cred: SavedCredential) -> Result<()> {
                             .sum()
                     })
                     .unwrap_or(0),
+                // Hardening P0 item 10: detailed outbox metrics.
+                outbox_rows: outbox::pending_rows(&hb_cfg.outbox_root).unwrap_or(0),
+                outbox_oldest_pending_age_ms: outbox::oldest_pending_age_ms(&hb_cfg.outbox_root)
+                    .unwrap_or(0),
+                outbox_corruption_count: outbox::corruption_count(&hb_cfg.outbox_root).unwrap_or(0),
+                outbox_completion_rows: outbox::completion_rows(&hb_cfg.outbox_root).unwrap_or(0),
+                // Hardening P2 item 35: cumulative repository-lock wait.
+                repo_lock_wait_ms: git::repo_lock_wait_ms(),
+                // Hardening P2 item 35: sandbox backend and enforced limits.
+                sandbox_backend: match hb_cfg.sandbox {
+                    sandbox::SandboxKind::None => "none".to_string(),
+                    sandbox::SandboxKind::Docker => "docker".to_string(),
+                },
+                // ProcessBackend does not enforce resource limits; Docker backend
+                // currently doesn't configure --memory/--cpus/--pids-limit either.
+                enforced_limits: false,
             };
             if let Err(e) = hb_client
                 .post(format!("{}/v1/node/heartbeat", hb_cfg.server))
@@ -3392,19 +3395,6 @@ mod tests {
         std::env::remove_var("AGENTGRID_EVENT_BUF_BYTES");
     }
 
-    #[test]
-    fn mask_secrets_replaces_known() {
-        assert_eq!(
-            mask_secrets("token=abc123", &["abc123".to_string()]),
-            "token=***"
-        );
-        assert_eq!(mask_secrets("noop", &["abc123".to_string()]), "noop");
-        assert_eq!(
-            mask_secrets("a secret b", &["secret".to_string()]),
-            "a *** b"
-        );
-    }
-
     #[tokio::test]
     async fn validation_command_reports_exit_and_log() {
         let dir = std::env::temp_dir().join(format!("ag-val-{}", uuid::Uuid::new_v4()));
@@ -3643,67 +3633,6 @@ mod tests {
             "partial tail (no trailing newline) must be preserved, got: {got}"
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn mask_secrets_replaces_known_substring() {
-        assert_eq!(
-            mask_secrets("token=sk-12345 and more", &["sk-12345".to_string()]),
-            "token=*** and more"
-        );
-        // No secrets configured -> unchanged.
-        assert_eq!(mask_secrets("nothing", &[]), "nothing");
-    }
-
-    /// Hardening P1 item 27: a short secret candidate (below the default 6
-    /// char floor) is NOT redacted — turning a common 3-char substring into a
-    /// wall of `***` obscures real diagnostics. A normal-length secret is.
-    #[test]
-    fn mask_secrets_ignores_too_short_candidates() {
-        std::env::remove_var("AGENTGRID_REDACT_MIN_LEN");
-        // "abc" is below the 6-char floor -> left untouched.
-        assert_eq!(
-            mask_secrets("xabc yabc zabctx", &["abc".to_string()]),
-            "xabc yabc zabctx",
-            "sub-min-length secret candidate is not redacted"
-        );
-        // A cfg-secret of exactly 6 chars redacts (floor is exclusive below).
-        assert_eq!(
-            mask_secrets("tok=abcdef", &["abcdef".to_string()]),
-            "tok=***"
-        );
-    }
-
-    /// Hardening P1 item 27: base64 and percent-encoded variants of a secret
-    /// are masked too, so a diagnostic that printed an encoded form does not
-    /// leak the raw value.
-    #[test]
-    fn mask_secrets_masks_encoded_variants() {
-        std::env::remove_var("AGENTGRID_REDACT_MIN_LEN");
-        let sec = "sk-SUPER-SECRET-42";
-        let b64 = base64_encode(sec.as_bytes());
-        let url = url_encode(sec);
-        // Sanity: base64 form is well-formed; percent form encodes `-` as-is
-        // (it is an unreserved char) and would percent-encode non-alnum only.
-        assert_eq!(b64, "c2stU1VQRVItU0VDUkVULTQy");
-        // Raw, base64, and percent-encoded forms all become ***.
-        assert_eq!(mask_secrets(sec, &[sec.to_string()]), "***");
-        assert_eq!(
-            mask_secrets(&format!("auth={b64}"), &[sec.to_string()]),
-            "auth=***"
-        );
-        assert_eq!(
-            mask_secrets(&format!("q={url}"), &[sec.to_string()]),
-            "q=***"
-        );
-    }
-
-    #[test]
-    fn base64_encoder_known_values() {
-        assert_eq!(base64_encode(b"a"), "YQ==");
-        assert_eq!(base64_encode(b"ab"), "YWI=");
-        assert_eq!(base64_encode(b"abc"), "YWJj");
-        assert_eq!(base64_encode(b"hello world!"), "aGVsbG8gd29ybGQh");
     }
 
     #[test]
@@ -4129,6 +4058,7 @@ mod tests {
             ),
             autonomy: AutonomyLevel::default(),
             adapter_versions: Default::default(),
+            max_artifact_size: 100 * 1024 * 1024,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-{}-{}",
@@ -4241,6 +4171,7 @@ mod tests {
             ),
             autonomy: AutonomyLevel::default(),
             adapter_versions: Default::default(),
+            max_artifact_size: 100 * 1024 * 1024,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-hang-{}-{}",
@@ -4349,6 +4280,7 @@ mod tests {
             ),
             autonomy: AutonomyLevel::default(),
             adapter_versions: Default::default(),
+            max_artifact_size: 100 * 1024 * 1024,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-cancel-{}-{}",
@@ -4516,6 +4448,7 @@ mod tests {
                 ),
                 autonomy: AutonomyLevel::default(),
                 adapter_versions: Default::default(),
+                max_artifact_size: 100 * 1024 * 1024,
             };
 
             let ws = tmp.join("ws");

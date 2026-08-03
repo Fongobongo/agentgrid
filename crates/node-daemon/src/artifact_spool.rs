@@ -8,6 +8,7 @@
 //! safe path segments so nothing can escape the spool root.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
@@ -92,9 +93,72 @@ pub fn remove(root: &Path, attempt_id: &str, name: &str) -> Result<()> {
     }
 }
 
+/// Remove an entire attempt directory (all artifacts for that attempt).
+fn remove_attempt_dir(root: &Path, attempt_id: &str) -> Result<()> {
+    let aid = safe_segment(attempt_id);
+    if aid.is_empty() || aid == "." || aid == ".." || aid.starts_with('.') {
+        anyhow::bail!("unsafe attempt_id segment");
+    }
+    let attempt_dir = root.join(aid);
+    match std::fs::remove_dir_all(&attempt_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Recover orphaned artifact spool entries.
+///
+/// Removes attempt directories that have not been modified for longer than
+/// `max_age`. This cleans up artifacts from attempts that were cancelled,
+/// failed, or otherwise abandoned and will never be uploaded.
+/// Returns the number of attempt directories removed.
+pub fn recover_orphans(root: &Path, max_age: Duration) -> Result<usize> {
+    let now = SystemTime::now();
+    let mut removed = 0;
+
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+
+    for attempt in entries {
+        let attempt = attempt?;
+        if !attempt.file_type()?.is_dir() {
+            continue;
+        }
+        let aid = attempt.file_name().to_string_lossy().to_string();
+
+        // Check the directory's modified time
+        let metadata = match attempt.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let modified = match metadata.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if now.duration_since(modified).unwrap_or(Duration::ZERO) > max_age {
+            tracing::info!(
+                attempt_id = %aid,
+                age_hours = now.duration_since(modified).unwrap_or_default().as_secs() / 3600,
+                "removing orphaned artifact spool entry"
+            );
+            if remove_attempt_dir(root, &aid).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("ag-artspool-{tag}-{}", uuid::Uuid::new_v4()));
@@ -161,5 +225,45 @@ mod tests {
         assert!(names.contains(&("a1", "two.txt")));
         assert!(names.contains(&("a2", "one.txt")));
         assert!(!names.contains(&("a1", "one.txt")));
+    }
+
+    #[test]
+    fn recover_orphans_removes_old_entries() {
+        let root = tmpdir("orphans");
+        let src = root.join("s.txt");
+        std::fs::write(&src, b"x").unwrap();
+
+        // Create old attempt directory
+        stage(&root, "old-attempt", "file.txt", &src).unwrap();
+
+        // Sleep > 1 second to ensure mtime difference (filesystem resolution)
+        sleep(Duration::from_secs(2));
+
+        // Create new attempt directory (more recent)
+        stage(&root, "new-attempt", "file.txt", &src).unwrap();
+
+        // Recover with 1 second max_age - only old-attempt should be removed
+        let removed = recover_orphans(&root, Duration::from_secs(1)).unwrap();
+        assert_eq!(removed, 1);
+
+        let pend = pending(&root).unwrap();
+        assert_eq!(pend.len(), 1);
+        assert_eq!(pend[0].0, "new-attempt");
+    }
+
+    #[test]
+    fn recover_orphans_respects_max_age() {
+        let root = tmpdir("orphans-age");
+        let src = root.join("s.txt");
+        std::fs::write(&src, b"x").unwrap();
+
+        stage(&root, "attempt-1", "file.txt", &src).unwrap();
+
+        // Max age 1 hour - should NOT remove
+        let removed = recover_orphans(&root, Duration::from_secs(3600)).unwrap();
+        assert_eq!(removed, 0);
+
+        let pend = pending(&root).unwrap();
+        assert_eq!(pend.len(), 1);
     }
 }

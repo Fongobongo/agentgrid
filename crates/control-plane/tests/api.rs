@@ -258,8 +258,17 @@ async fn task_eligibility(app: &Router, task_id: &str) -> TaskEligibility {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    if status != StatusCode::OK {
+        eprintln!(
+            "ERROR: task_eligibility status={} body={}",
+            status,
+            String::from_utf8_lossy(&body)
+        );
+    }
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_slice(&body).unwrap()
 }
 
 async fn cancel_state(app: &Router, attempt_id: &str, cred: &str) -> CancelState {
@@ -698,6 +707,13 @@ async fn revoked_node_gets_401() {
         permission_interception: "wrapper".into(),
         outbox_bytes: 0,
         artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
     };
     let resp = app
         .clone()
@@ -1699,6 +1715,13 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 permission_interception: "wrapper".into(),
                 outbox_bytes: 0,
                 artifact_spool_bytes: 0,
+                outbox_rows: 0,
+                outbox_oldest_pending_age_ms: 0,
+                outbox_corruption_count: 0,
+                outbox_completion_rows: 0,
+                repo_lock_wait_ms: 0,
+                sandbox_backend: "none".into(),
+                enforced_limits: false,
             },
         )
         .await
@@ -1743,6 +1766,13 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         permission_interception: "wrapper".into(),
         outbox_bytes: 0,
         artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
     };
     let resp = app
         .clone()
@@ -3310,7 +3340,8 @@ async fn artifact_name_validation_rejects_nul_backslash_percent() {
 async fn backup_endpoint_writes_file() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
-    let path = std::env::temp_dir().join(format!("ag-admin-backup-{}.db", std::process::id()));
+    let path =
+        std::path::Path::new("/var/tmp").join(format!("ag-admin-backup-{}.db", std::process::id()));
     if path.exists() {
         let _ = std::fs::remove_file(&path);
     }
@@ -3746,6 +3777,13 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         permission_interception: "wrapper".into(),
         outbox_bytes: 0,
         artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
     };
     let resp = app
         .clone()
@@ -4599,7 +4637,7 @@ async fn static_fallback_rejects_traversal_and_caches_safe() {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let root = std::env::temp_dir().join(format!(
+    let root = std::path::Path::new("/var/tmp").join(format!(
         "ag-web-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -6164,6 +6202,13 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         // Hardening P2 item 35: report local storage pressure.
         outbox_bytes: 42,
         artifact_spool_bytes: 1337,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
     };
     let resp = app
         .clone()
@@ -6201,7 +6246,7 @@ async fn storage_gc_removes_orphans_and_dangling_metadata() {
     use agentgrid_control_plane::AppState;
     // Use a DEDICATED temp dir so the artifact root is isolated from the
     // shared `ag-test-*.db` artifact root that other tests reuse.
-    let dir = std::env::temp_dir().join(format!("ag-gc-{}", uuid::Uuid::new_v4()));
+    let dir = std::path::Path::new("/var/tmp").join(format!("ag-gc-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("test.db");
     let state = AppState::open(db.to_str().unwrap()).await.unwrap();

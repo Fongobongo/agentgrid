@@ -24,7 +24,7 @@ async fn temp_store() -> Store {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let p = std::env::temp_dir().join(format!("ag-mig-{nanos}.db"));
+    let p = std::path::Path::new("/var/tmp").join(format!("ag-mig-{nanos}.db"));
     let _ = std::fs::remove_file(&p);
     let _ = std::fs::remove_file(format!("{}-wal", p.display()));
     let _ = std::fs::remove_file(format!("{}-shm", p.display()));
@@ -70,6 +70,13 @@ async fn migrations_serve_legacy_happy_path() {
         permission_interception: "wrapper".into(),
         outbox_bytes: 0,
         artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
     };
     assert!(s.heartbeat(&node_id, &hb).await.unwrap());
 

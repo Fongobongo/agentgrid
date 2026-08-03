@@ -23,4 +23,5 @@ agentgrid-common.workspace = true
 agentgrid-adapters.workspace = true
 agentgrid-acp.workspace = true
 agentgrid-skills.workspace = true
+chrono.workspace = true
 libc = "0.2"

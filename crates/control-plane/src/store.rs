@@ -62,6 +62,16 @@ pub struct Store {
     pub(crate) artifact_cleanup_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Total duration of artifact cleanup runs in seconds.
     pub(crate) artifact_cleanup_duration_secs: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Hardening P2 item 35: validation duration histogram (CP-computed from
+    /// the `validating`-state window) and outcome distribution.
+    pub(crate) validation_duration_sum: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) validation_duration_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) validation_outcomes:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// Hardening P2 item 35: security-profile distribution across attempts
+    /// (from provenance).
+    pub(crate) security_profile_attempts:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
 }
 
 fn now_iso() -> String {
@@ -355,6 +365,14 @@ impl Store {
             artifact_cleanup_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             artifact_cleanup_duration_secs: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
                 0,
+            )),
+            validation_duration_sum: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            validation_duration_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            validation_outcomes: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            security_profile_attempts: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
             )),
         })
     }
@@ -743,7 +761,8 @@ impl Store {
                agent_version = ?, max_concurrency = ?, adapters = ?, repositories = ?, \
                active_attempts = ?, load_avg = ?, free_disk_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
-               outbox_bytes = ?, artifact_spool_bytes = ? \
+               outbox_bytes = ?, artifact_spool_bytes = ?, \
+               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ? \
              WHERE id = ?",
         )
         .bind(&req.name)
@@ -760,6 +779,13 @@ impl Store {
         .bind(&req.permission_interception)
         .bind(req.outbox_bytes as i64)
         .bind(req.artifact_spool_bytes as i64)
+        .bind(req.outbox_rows as i64)
+        .bind(req.outbox_oldest_pending_age_ms as i64)
+        .bind(req.outbox_corruption_count as i64)
+        .bind(req.outbox_completion_rows as i64)
+        .bind(req.repo_lock_wait_ms as i64)
+        .bind(&req.sandbox_backend)
+        .bind(req.enforced_limits as i64)
         .bind(node_id)
         .execute(&self.pool)
         .await?
@@ -1262,12 +1288,17 @@ impl Store {
     pub async fn list_conversation_messages(
         &self,
         conversation_id: &str,
+        after_seq: i64,
+        limit: i64,
     ) -> Result<Vec<agentgrid_common::ConversationMessage>> {
+        let limit = limit.clamp(1, 1000);
         let rows = sqlx::query(
             "SELECT seq, role, content, task_id, created_at FROM conversation_messages \
-             WHERE conversation_id = ? ORDER BY seq ASC",
+             WHERE conversation_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
         )
         .bind(conversation_id)
+        .bind(after_seq)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1307,7 +1338,7 @@ impl Store {
         // pull an unbounded node row set.
         const MAX_NODES: i64 = 1000;
         let rows = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, drained \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained \
              FROM nodes ORDER BY created_at ASC LIMIT ?",
         )
         .bind(MAX_NODES)
@@ -1322,8 +1353,8 @@ impl Store {
         let adapters = serde_json::to_string(&req.adapters)?;
         let repositories = serde_json::to_string(&req.repositories)?;
         sqlx::query(
-            "INSERT INTO nodes (id, name, status, max_concurrency, adapters, repositories, active_attempts, last_heartbeat_at, created_at) \
-             VALUES (?, ?, 'online', ?, ?, ?, 0, ?, ?) \
+            "INSERT INTO nodes (id, name, status, max_concurrency, adapters, repositories, active_attempts, last_heartbeat_at, created_at, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows) \
+             VALUES (?, ?, 'online', ?, ?, ?, 0, ?, ?, 0, 0, 0, 0) \
              ON CONFLICT(id) DO UPDATE SET \
                 name = excluded.name, \
                 max_concurrency = excluded.max_concurrency, \
@@ -1418,7 +1449,7 @@ impl Store {
             };
 
             let node = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, drained \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, drained \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
@@ -1429,7 +1460,8 @@ impl Store {
                 return Ok(None);
             };
             let nv = row_to_node_view(&node);
-            if !node_ineligibility(&nv, &repository, &adapter).is_empty() {
+            let inelig = node_ineligibility(&nv, &repository, &adapter);
+            if !inelig.is_empty() {
                 continue;
             }
 
@@ -1728,7 +1760,7 @@ impl Store {
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let attempt = sqlx::query(
-            "SELECT task_id, node_id, status, cancel_requested FROM attempts WHERE id = ?",
+            "SELECT task_id, node_id, status, cancel_requested, validated_at FROM attempts WHERE id = ?",
         )
         .bind(attempt_id)
         .fetch_optional(&mut *tx)
@@ -1741,6 +1773,7 @@ impl Store {
         let node_id: String = attempt.try_get("node_id")?;
         let attempt_status: String = attempt.try_get("status")?;
         let cancel_requested: i64 = attempt.try_get("cancel_requested")?;
+        let validated_at: Option<String> = attempt.try_get("validated_at")?;
         let as_enum = from_snake::<AttemptStatus>(&attempt_status);
 
         // Terminal/lost attempts cannot be completed again. A node that comes
@@ -1845,6 +1878,48 @@ impl Store {
             .bind(attempt_id)
             .execute(&mut *tx)
             .await?;
+        // Hardening P2 item 35: validation metrics. Only record when the attempt
+        // actually went through the `validating` state (begin_validate set
+        // `validated_at`); a `running`-only completion carries no validation.
+        if current_attempt_status == AttemptStatus::Validating {
+            if let Some(vat) = validated_at.as_deref() {
+                if let (Ok(vdt), Ok(fdt)) = (
+                    chrono::DateTime::parse_from_rfc3339(vat),
+                    chrono::DateTime::parse_from_rfc3339(&now),
+                ) {
+                    let ms = (fdt - vdt).num_milliseconds().max(0) as u64;
+                    self.validation_duration_sum
+                        .fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+                    self.validation_duration_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let outcome = if success {
+                "succeeded".to_string()
+            } else if let Some(ec) = &req.error_code {
+                ec.clone()
+            } else {
+                "failed".to_string()
+            };
+            *self
+                .validation_outcomes
+                .lock()
+                .unwrap()
+                .entry(outcome)
+                .or_insert(0) += 1;
+        }
+        if let Some(sp) = req
+            .provenance
+            .as_ref()
+            .and_then(|p| p.security_profile.as_deref())
+        {
+            *self
+                .security_profile_attempts
+                .lock()
+                .unwrap()
+                .entry(sp.to_string())
+                .or_insert(0) += 1;
+        }
         if let Some(sha) = &req.commit_sha {
             sqlx::query("UPDATE attempts SET commit_sha = ? WHERE id = ?")
                 .bind(sha)
@@ -2076,8 +2151,9 @@ impl Store {
     pub async fn begin_validate(&self, attempt_id: &str) -> Result<bool> {
         let mut tx = begin_immediate(&self.pool).await?;
         let n = sqlx::query(
-            "UPDATE attempts SET status = 'validating' WHERE id = ? AND status = 'running'",
+            "UPDATE attempts SET status = 'validating', validated_at = ? WHERE id = ? AND status = 'running'",
         )
+        .bind(now_iso())
         .bind(attempt_id)
         .execute(&mut *tx)
         .await?
@@ -2894,6 +2970,17 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
         permission_interception: r.try_get("permission_interception").unwrap_or_default(),
         outbox_bytes: r.try_get::<i64, _>("outbox_bytes").unwrap_or(0) as u64,
         artifact_spool_bytes: r.try_get::<i64, _>("artifact_spool_bytes").unwrap_or(0) as u64,
+        outbox_rows: r.try_get::<i64, _>("outbox_rows").unwrap_or(0) as u64,
+        outbox_oldest_pending_age_ms: r
+            .try_get::<i64, _>("outbox_oldest_pending_age_ms")
+            .unwrap_or(0) as u64,
+        outbox_corruption_count: r.try_get::<i64, _>("outbox_corruption_count").unwrap_or(0) as u64,
+        outbox_completion_rows: r.try_get::<i64, _>("outbox_completion_rows").unwrap_or(0) as u64,
+        repo_lock_wait_ms: r.try_get::<i64, _>("repo_lock_wait_ms").unwrap_or(0) as u64,
+        sandbox_backend: r
+            .try_get::<String, _>("sandbox_backend")
+            .unwrap_or_else(|_| "none".to_string()),
+        enforced_limits: r.try_get::<i64, _>("enforced_limits").unwrap_or(0) != 0,
         drained: r.try_get::<i64, _>("drained").unwrap_or(0) != 0,
     }
 }
@@ -3037,14 +3124,20 @@ mod workflow_tests {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     async fn temp_store() -> Store {
+        // Disable critical disk watermark for tests (temp fs often has < 512 MB free).
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("ag-wf-{nanos}-{n}.db"));
+        // std::env::temp_dir() returns /tmp which doesn't exist on this system.
+        // Use /var/tmp which is the actual temp directory.
+        let temp_dir = std::path::Path::new("/var/tmp");
+        let p = temp_dir.join(format!("ag-wf-{nanos}-{n}.db"));
         let _ = std::fs::remove_file(&p);
-        Store::open(p.to_str().unwrap()).await.unwrap()
+        let path_str = p.to_str().unwrap();
+        Store::open(path_str).await.unwrap()
     }
 
     /// Seed a real node + task + attempt so FK-backed tables (migration 0040)
@@ -4020,7 +4113,7 @@ mod workflow_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let backup = std::env::temp_dir().join(format!("ag-backup-{stamp}.db"));
+        let backup = std::path::Path::new("/var/tmp").join(format!("ag-backup-{stamp}.db"));
         if backup.exists() {
             let _ = std::fs::remove_file(&backup);
         }
@@ -4338,9 +4431,54 @@ mod workflow_tests {
         let expected: Vec<i64> = (1..=N as i64).collect();
         assert_eq!(seqs, expected, "sequences must be unique and gap-free");
         // And the persisted rows agree with the returned seqs.
-        let msgs = s.list_conversation_messages(&conv.id).await.unwrap();
+        let msgs = s
+            .list_conversation_messages(&conv.id, 0, 1000)
+            .await
+            .unwrap();
         let persisted: Vec<i64> = msgs.iter().map(|m| m.seq).collect();
         assert_eq!(persisted, expected);
+    }
+
+    #[tokio::test]
+    async fn conversation_messages_pagination_works() {
+        // Hardening P2 item 20: cursor pagination for conversation messages.
+        let s = temp_store().await;
+        let conv = s.create_conversation("mock", "").await.unwrap();
+        for i in 1..=10 {
+            s.append_conversation_message(&conv.id, "user", &format!("msg{i}"), None)
+                .await
+                .unwrap();
+        }
+        // First page: after_seq=0, limit=3
+        let page1 = s.list_conversation_messages(&conv.id, 0, 3).await.unwrap();
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page1[0].seq, 1);
+        assert_eq!(page1[2].seq, 3);
+        // Second page: after_seq=3, limit=3
+        let page2 = s.list_conversation_messages(&conv.id, 3, 3).await.unwrap();
+        assert_eq!(page2.len(), 3);
+        assert_eq!(page2[0].seq, 4);
+        assert_eq!(page2[2].seq, 6);
+        // Third page: after_seq=6, limit=3
+        let page3 = s.list_conversation_messages(&conv.id, 6, 3).await.unwrap();
+        assert_eq!(page3.len(), 3);
+        assert_eq!(page3[0].seq, 7);
+        assert_eq!(page3[2].seq, 9);
+        // Fourth page: after_seq=9, limit=3 (only 1 remaining)
+        let page4 = s.list_conversation_messages(&conv.id, 9, 3).await.unwrap();
+        assert_eq!(page4.len(), 1);
+        assert_eq!(page4[0].seq, 10);
+        // After end: after_seq=10, limit=3
+        let page5 = s.list_conversation_messages(&conv.id, 10, 3).await.unwrap();
+        assert_eq!(page5.len(), 0);
+        // Limit clamping: limit=0 -> 1, limit=2000 -> 1000
+        let clamped = s.list_conversation_messages(&conv.id, 0, 0).await.unwrap();
+        assert_eq!(clamped.len(), 1);
+        let clamped2 = s
+            .list_conversation_messages(&conv.id, 0, 2000)
+            .await
+            .unwrap();
+        assert_eq!(clamped2.len(), 10);
     }
 
     #[tokio::test]
@@ -4833,7 +4971,7 @@ mod workflow_tests {
         let real_id = "550e8400-e29b-41d4-a716-446655440000";
         let attempt_dir = s.artifact_root.join(real_id);
         tokio::fs::create_dir_all(&s.artifact_root).await.unwrap();
-        let outside = std::env::temp_dir().join("ag-symlink-outside");
+        let outside = std::path::Path::new("/var/tmp").join("ag-symlink-outside");
         tokio::fs::create_dir_all(&outside).await.unwrap();
         // Clean any symlink/dir left by a prior run so the test is repeatable.
         let _ = tokio::fs::remove_file(&attempt_dir).await;
@@ -4863,7 +5001,7 @@ mod workflow_tests {
         // pre-exist from an old database. Plant the orphan exactly the way an
         // old DB would look: task + attempt + event, then remove the task.
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!("ag-wf-orphan-{n}.db"));
+        let p = std::path::Path::new("/var/tmp").join(format!("ag-wf-orphan-{n}.db"));
         let _ = std::fs::remove_file(&p);
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&p)
