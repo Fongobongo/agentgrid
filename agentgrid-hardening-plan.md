@@ -615,20 +615,20 @@
 
 - [x] Не объединять `docker|podman` в один hardcoded `docker` binary. (sandbox.rs: `docker|podman` → SandboxKind::Docker, runtime бинарь из PATH; probe проверяет наличие)
 - [ ] Проверять runtime version и capability.
-- [ ] Pin image по digest.
+- [x] Pin image по digest. (`AGENTGRID_SANDBOX_IMAGE_DIGEST` → `<tag>@sha256:…`; уже-digested ref не трогается; тест `docker_pins_image_by_digest`)
 - [ ] Убедиться, что adapter и agent CLI реально существуют в image.
 - [ ] Передавать только allowlisted env через `--env`/env-file.
-- [ ] `--network none` по умолчанию.
-- [ ] `--cap-drop=ALL`.
-- [ ] `--security-opt=no-new-privileges`.
-- [ ] `--pids-limit`.
-- [ ] `--memory`.
-- [ ] `--cpus`.
-- [ ] `--read-only` root filesystem.
-- [ ] tmpfs для `/tmp`.
-- [ ] Worktree mount с минимально необходимыми правами.
+- [x] `--network none` по умолчанию. (default `--network none`, override `AGENTGRID_SANDBOX_NETWORK`)
+- [x] `--cap-drop=ALL`. (всегда для Docker)
+- [x] `--security-opt=no-new-privileges`. (всегда для Docker)
+- [x] `--pids-limit`. (`AGENTGRID_SANDBOX_PIDS_LIMIT`)
+- [x] `--memory`. (`AGENTGRID_SANDBOX_MEMORY`)
+- [x] `--cpus`. (`AGENTGRID_SANDBOX_CPUS`)
+- [x] `--read-only` root filesystem. (`AGENTGRID_SANDBOX_READ_ONLY=1`)
+- [x] tmpfs для `/tmp`. (вместе с read-only: `--tmpfs /tmp`)
+- [x] Worktree mount с минимально необходимыми правами.
 - [ ] Отдельный artifact/output mount.
-- [ ] Не монтировать Docker socket, host home, SSH agent и credentials.
+- [x] Не монтировать Docker socket, host home, SSH agent и credentials. (mounting только worktree `/ag`; daemon env_clear + allowlist, socket/host не подключается подбору)
 - [ ] Добавить network allowlist mode после `none`.
 - [ ] Удалять orphan containers после daemon crash.
 
@@ -664,7 +664,7 @@
 - [x] Ввести task-scoped secret allowlist. (profile.secret_requirements: только объявленные профилем секреты передаются агенту явным allowlist после env_clear)
 - [x] Не передавать весь daemon environment subprocess. (ProcessBackend + ACP spawn: env_clear + PATH/HOME + явный allowlist adapter_env + profile-declared secrets; тест `spawn_does_not_inherit_daemon_env`; `extra_args`/`raw_args` для не-адаптерных subprocess)
 - [x] Рассмотреть credential broker/short-lived tokens. (рассмотрено: профильные секреты — единственный канал; краткосрочные токены отложены до введения OIDC-интеграции)
-- [ ] Добавить streaming redactor с chunk overlap.
+- [x] Добавить streaming redactor с chunk overlap. (`secret_redactor::StreamingRedactor`: feed/finish, chunk overlap на границах, line_cap truncation; тесты cov`)
 - [x] Добавить минимальную длину redactable secret. (`mask_secrets` ignores candidates shorter than a 6-char floor (`AGENTGRID_REDACT_MIN_LEN` override) so a short common substring doesn't get turned into a wall of `***` obscuring the real diagnostic. Test `mask_secrets_ignores_too_short_candidates`.)
 - [x] Добавить encoded variants для критичных secrets. (mask_secrets маскирует base64 + percent-encoded варианты каждого secret; тесты `mask_secrets_masks_encoded_variants` + `base64_encoder_known_values`)
 

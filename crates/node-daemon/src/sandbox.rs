@@ -7,8 +7,12 @@
 //! `AGENTGRID_SANDBOX` (`none` | `docker`) and `AGENTGRID_SANDBOX_IMAGE`.
 //!
 //! `sandbox_command` returns the `(program, args)` to spawn: either the raw
-//! command, or a `docker run --rm -i -v <workdir>:/ag -w /ag <image> -- <cmd>`
-//! prefix. Both the wrapper path and the ACP path route through it.
+//! command, or a hardened `docker run --rm -i --cap-drop=ALL … <image> -- <cmd>`
+//! prefix. Both the wrapper path and the ACP path route through it. Docker
+//! hardening knobs (plan §25): `AGENTGRID_SANDBOX_NETWORK` (default `none`),
+//! `AGENTGRID_SANDBOX_READ_ONLY=1` (read-only root + tmpfs `/tmp`),
+//! `AGENTGRID_SANDBOX_PIDS_LIMIT`, `AGENTGRID_SANDBOX_MEMORY`,
+//! `AGENTGRID_SANDBOX_CPUS`, `AGENTGRID_SANDBOX_IMAGE_DIGEST` (pin by digest).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxKind {
@@ -49,31 +53,96 @@ pub fn sandbox_prefix(
     match kind {
         SandboxKind::None => (program.to_string(), vec![]),
         SandboxKind::Docker => {
-            let image =
-                std::env::var("AGENTGRID_SANDBOX_IMAGE").unwrap_or_else(|_| "ubuntu:24.04".into());
-            let prefix = vec![
-                "run".into(),
-                "--rm".into(),
-                "-i".into(),
-                "-v".into(),
-                format!("{}:/ag", workdir.display()),
-                "-w".into(),
-                "/ag".into(),
-                "--".into(),
-                image,
-                program.into(),
-            ];
+            let mut prefix = docker_run_head(workdir);
+            prefix.push(image_ref());
+            prefix.push(program.into());
             ("docker".into(), prefix)
         }
     }
 }
 
+/// Build the leading `docker run …` argument vector shared by both spawn
+/// paths: housekeeping flags (`--rm -i`), the security hardening flags (plan
+/// §25: cap-drop, no-new-privileges, network none, optional read-only + tmpfs,
+/// optional pids/memory/cpus limits), the worktree mount at `/ag`, and the
+/// `--` separator. The caller appends `<image> [program args]` after it.
+///
+/// Knobs (all optional, env-driven so the sandbox wrapper need not change
+/// its call sites to tighten isolation): `AGENTGRID_SANDBOX_NETWORK` (default
+/// `none`), `AGENTGRID_SANDBOX_READ_ONLY=1` (read-only root + tmpfs `/tmp`),
+/// `AGENTGRID_SANDBOX_PIDS_LIMIT`, `AGENTGRID_SANDBOX_MEMORY`,
+/// `AGENTGRID_SANDBOX_CPUS`, `AGENTGRID_SANDBOX_IMAGE_DIGEST` (pins the image
+/// by digest when `AGENTGRID_SANDBOX_IMAGE` is a tag).
+/// ponytail: limits come from env rather than SpawnRequest.limits so this
+/// wrapper need not change signature; plumbing ResourceLimits through is the
+/// upgrade path once a real DockerBackend trait owns spawn.
+fn docker_run_head(workdir: &std::path::Path) -> Vec<String> {
+    let mut v = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-i".to_string(),
+        "--cap-drop=ALL".to_string(),
+        "--security-opt=no-new-privileges".to_string(),
+    ];
+    let net = std::env::var("AGENTGRID_SANDBOX_NETWORK").unwrap_or_else(|_| "none".into());
+    v.push("--network".to_string());
+    v.push(net);
+    if std::env::var("AGENTGRID_SANDBOX_READ_ONLY")
+        .map(|x| x == "1" || x.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        v.push("--read-only".to_string());
+        v.push("--tmpfs".to_string());
+        v.push("/tmp".to_string());
+    }
+    if let Ok(p) = std::env::var("AGENTGRID_SANDBOX_PIDS_LIMIT") {
+        if !p.is_empty() {
+            v.push("--pids-limit".to_string());
+            v.push(p);
+        }
+    }
+    if let Ok(m) = std::env::var("AGENTGRID_SANDBOX_MEMORY") {
+        if !m.is_empty() {
+            v.push("--memory".to_string());
+            v.push(m);
+        }
+    }
+    if let Ok(c) = std::env::var("AGENTGRID_SANDBOX_CPUS") {
+        if !c.is_empty() {
+            v.push("--cpus".to_string());
+            v.push(c);
+        }
+    }
+    v.push("-v".to_string());
+    v.push(format!("{}:/ag", workdir.display()));
+    v.push("-w".to_string());
+    v.push("/ag".to_string());
+    v.push("--".to_string());
+    v
+}
+
+/// The image reference to run, pinned by digest when
+/// `AGENTGRID_SANDBOX_IMAGE_DIGEST` is set and the image is a bare tag.
+fn image_ref() -> String {
+    let image =
+        std::env::var("AGENTGRID_SANDBOX_IMAGE").unwrap_or_else(|_| "ubuntu:24.04".to_string());
+    if image.contains('@') {
+        return image;
+    }
+    if let Ok(d) = std::env::var("AGENTGRID_SANDBOX_IMAGE_DIGEST") {
+        if !d.is_empty() {
+            return format!("{image}@{d}");
+        }
+    }
+    image
+}
+
 /// Wrap `(program, args)` for the configured sandbox, rooted at `workdir`.
-/// `None` returns the command unchanged. `Docker` prefixes with
-/// `docker run --rm -i -v <workdir>:/ag -w /ag <image> --`.
-// ponytail: binds the whole workdir read-write; a stricter mount policy
-// (read-only + separate artifact dir) is the upgrade path if an agent needs
-// less FS access.
+/// `None` returns the command unchanged. `Docker` prefixes with the hardened
+/// `docker run … <image> --` head from [`docker_run_head`].
+/// ponytail: binds the whole workdir read-write; a stricter mount policy
+/// (read-only + separate artifact dir) is the upgrade path once a real
+/// DockerBackend trait owns the worktree/artifact mounts.
 pub fn sandbox_command(
     kind: SandboxKind,
     program: &str,
@@ -83,19 +152,8 @@ pub fn sandbox_command(
     match kind {
         SandboxKind::None => (program.to_string(), args.to_vec()),
         SandboxKind::Docker => {
-            let image = std::env::var("AGENTGRID_SANDBOX_IMAGE")
-                .unwrap_or_else(|_| "ubuntu:24.04".to_string());
-            let mut out = vec![
-                "run".to_string(),
-                "--rm".to_string(),
-                "-i".to_string(),
-                "-v".to_string(),
-                format!("{}:/ag", workdir.display()),
-                "-w".to_string(),
-                "/ag".to_string(),
-                "--".to_string(),
-            ];
-            out.push(image);
+            let mut out = docker_run_head(workdir);
+            out.push(image_ref());
             out.push(program.to_string());
             out.extend(args.iter().cloned());
             ("docker".to_string(), out)
@@ -159,6 +217,7 @@ mod tests {
 
     #[test]
     fn docker_wraps_command() {
+        clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         let (p, a) = sandbox_command(
             SandboxKind::Docker,
@@ -166,13 +225,22 @@ mod tests {
             &["--acp".into()],
             std::path::Path::new("/w"),
         );
+        clear_sandbox_env();
         assert_eq!(p, "docker");
         assert_eq!(a[0], "run");
         assert!(a.contains(&"-v".to_string()));
+        // Hardening §25: cap-drop + no-new-privileges always present.
+        assert!(a.contains(&"--cap-drop=ALL".to_string()));
+        assert!(a.contains(&"--security-opt=no-new-privileges".to_string()));
+        // Default network isolation.
+        assert_eq!(
+            a[a.iter().position(|x| x == "--network").unwrap() + 1],
+            "none"
+        );
+        // Tail unchanged: <image> <program> <args>.
         assert_eq!(a[a.len() - 3], "img:1");
         assert_eq!(a[a.len() - 2], "claude");
         assert_eq!(a[a.len() - 1], "--acp");
-        std::env::remove_var("AGENTGRID_SANDBOX_IMAGE");
     }
 
     #[test]
@@ -187,18 +255,71 @@ mod tests {
     fn docker_prefix_wraps_program() {
         // Legacy wrapper path: program runs inside the image after `--`, with
         // an empty `args` slot (ProcessBackend appends `--prompt` itself).
+        clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         let (p, a) = sandbox_prefix(
             SandboxKind::Docker,
             std::path::Path::new("/w"),
             "adapter-claude",
         );
-        std::env::remove_var("AGENTGRID_SANDBOX_IMAGE");
+        clear_sandbox_env();
         assert_eq!(p, "docker");
         assert_eq!(a[0], "run");
         assert!(a.contains(&"-v".to_string()));
         assert_eq!(a[a.len() - 2], "img:1");
         assert_eq!(a[a.len() - 1], "adapter-claude");
+    }
+
+    fn clear_sandbox_env() {
+        for k in [
+            "AGENTGRID_SANDBOX_IMAGE",
+            "AGENTGRID_SANDBOX_IMAGE_DIGEST",
+            "AGENTGRID_SANDBOX_NETWORK",
+            "AGENTGRID_SANDBOX_READ_ONLY",
+            "AGENTGRID_SANDBOX_PIDS_LIMIT",
+            "AGENTGRID_SANDBOX_MEMORY",
+            "AGENTGRID_SANDBOX_CPUS",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn docker_pins_image_by_digest() {
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE_DIGEST", "sha256:deadbeef");
+        let (p, a) = sandbox_prefix(SandboxKind::Docker, std::path::Path::new("/w"), "c");
+        clear_sandbox_env();
+        assert_eq!(p, "docker");
+        // image + program are the last two; image must carry the digest pin.
+        assert_eq!(a[a.len() - 2], "img:1@sha256:deadbeef");
+        assert_eq!(a[a.len() - 1], "c");
+        // An already-digested ref is left untouched.
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1@sha256:f00d");
+        let (_, a2) = sandbox_prefix(SandboxKind::Docker, std::path::Path::new("/w"), "c");
+        clear_sandbox_env();
+        assert_eq!(a2[a2.len() - 2], "img:1@sha256:f00d");
+    }
+
+    #[test]
+    fn docker_opts_read_only_and_resource_limits() {
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        std::env::set_var("AGENTGRID_SANDBOX_NETWORK", "bridge");
+        std::env::set_var("AGENTGRID_SANDBOX_READ_ONLY", "1");
+        std::env::set_var("AGENTGRID_SANDBOX_PIDS_LIMIT", "128");
+        std::env::set_var("AGENTGRID_SANDBOX_MEMORY", "512m");
+        std::env::set_var("AGENTGRID_SANDBOX_CPUS", "1.5");
+        let (_, a) = sandbox_command(SandboxKind::Docker, "c", &[], std::path::Path::new("/w"));
+        clear_sandbox_env();
+        let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
+        assert_eq!(a[at("--network")], "bridge");
+        assert!(a.contains(&"--read-only".to_string()));
+        assert_eq!(a[at("--tmpfs")], "/tmp");
+        assert_eq!(a[at("--pids-limit")], "128");
+        assert_eq!(a[at("--memory")], "512m");
+        assert_eq!(a[at("--cpus")], "1.5");
     }
 
     #[test]

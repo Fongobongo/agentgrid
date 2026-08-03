@@ -132,6 +132,20 @@ All notable changes to this project are documented in this file.
   background sleeper is killed with the shell, not orphaned (hardening P0
   item 12).
 
+### Security (hardening P1 §25 — Docker sandbox hardening)
+
+- **Docker run hardening:** `AGENTGRID_SANDBOX=docker` now wraps the agent in a
+  locked-down container instead of a bare `docker run`. The sandbox command
+  always adds `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and
+  `--network none` (override via `AGENTGRID_SANDBOX_NETWORK`); pins the image
+  by digest when `AGENTGRID_SANDBOX_IMAGE_DIGEST` is set; and can opt into a
+  read-only root + tmpfs `/tmp` (`AGENTGRID_SANDBOX_READ_ONLY=1`) and resource
+  ceilings (`AGENTGRID_SANDBOX_PIDS_LIMIT`, `_MEMORY`, `_CPUS`). Only the
+  worktree is mounted (`/ag`) — the Docker socket, host home and SSH/agent
+  credentials are never attached. Tests assert cap-drop / no-new-privileges /
+  network-none / read-only+tmpfs / pids-memory-cpus flags and the digest pin are
+  emitted. `AGENTGRID_SANDBOX_IMAGE` has no default credentials change.
+
 ### Security (hardening P0/P1/P2 — session hardening pass)
 
 - **Artifacts/UI:** strict CSP (`default-src 'self'` for UI, `default-src
