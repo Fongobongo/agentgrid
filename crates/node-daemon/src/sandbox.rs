@@ -134,7 +134,7 @@ fn docker_run_head(workdir: &std::path::Path, network_mode: Option<&str>) -> Vec
 
 /// The image reference to run, pinned by digest when
 /// `AGENTGRID_SANDBOX_IMAGE_DIGEST` is set and the image is a bare tag.
-fn image_ref() -> String {
+pub(crate) fn image_ref() -> String {
     let image =
         std::env::var("AGENTGRID_SANDBOX_IMAGE").unwrap_or_else(|_| "ubuntu:24.04".to_string());
     if image.contains('@') {
@@ -229,6 +229,30 @@ pub async fn probe_runtime_version() -> anyhow::Result<Option<String>> {
     }
     let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok(if v.is_empty() { None } else { Some(v) })
+}
+
+/// Plan §25: verify the adapter binary actually exists inside the sandbox
+/// image (the host-side `probe_adapter` proves nothing about the container).
+/// Runs `docker run --rm --entrypoint sh <image> -c 'command -v <bin>'` —
+/// returns true when the adapter is found. `Err`/false on a missing runtime
+/// or image — the caller logs and continues (node reports degraded, scheduler
+/// excludes it).
+pub async fn probe_adapter_in_sandbox(bin: &str) -> anyhow::Result<bool> {
+    let runtime = std::env::var("AGENTGRID_SANDBOX_RUNTIME")
+        .unwrap_or_else(|_| "docker".to_string());
+    let out = tokio::process::Command::new(&runtime)
+        .args([
+            "run",
+            "--rm",
+            "--entrypoint",
+            "sh",
+            &image_ref(),
+            "-c",
+            &format!("command -v {bin}"),
+        ])
+        .output()
+        .await?;
+    Ok(out.status.success())
 }
 
 /// Per-daemon identity stamped as `--label agentgrid.node=<id>` on every

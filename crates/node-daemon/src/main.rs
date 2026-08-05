@@ -479,6 +479,26 @@ async fn main() -> Result<()> {
                 a.id
             );
         }
+        // Plan §25: smoke-test the adapter inside the sandbox image too — the
+        // host probe proves nothing about what the container ships. Report
+        // degraded (not fatal) when the image lacks the adapter.
+        if matches!(cfg.sandbox, sandbox::SandboxKind::Docker) && a.id != "zeroshot" {
+            let bin = format!("adapter-{}", a.id.replace('_', "-"));
+            match sandbox::probe_adapter_in_sandbox(&bin).await {
+                Ok(true) => tracing::info!(adapter = %a.id, "adapter present in sandbox image"),
+                Ok(false) => {
+                    cfg.adapter_versions.insert(a.id.clone(), None);
+                    tracing::warn!(
+                        adapter = %a.id, bin = %bin,
+                        "adapter missing in sandbox image; node will report degraded"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    adapter = %a.id, error = %e,
+                    "sandbox smoke test failed (runtime/image issue)"
+                ),
+            }
+        }
     }
     tokio::fs::create_dir_all(&cfg.workspace_root).await?;
     // Plan §25: verify the container runtime (version + daemon reachable)

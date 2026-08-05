@@ -634,7 +634,7 @@
 
 ### Тесты
 
-- [ ] Sandbox smoke test запускает adapter.
+- [x] Sandbox smoke test запускает adapter. (sandbox.rs: `probe_adapter_in_sandbox` — `docker run --rm --entrypoint sh <image> -c "command -v <bin>"`; main.rs проверяет каждый adapter внутри image при AGENTGRID_SANDBOX=docker, degraded при отсутствии)
 - [x] API key попадает в container только при allowlist. (profile.secret_requirements declares needed env; node forwards only declared secrets to adapter/container)
 - [x] Agent не видит host home. (Docker sandbox: isolated container fs; worktree mounted at /ag; no host home bind)
 - [x] Agent не видит sibling worktrees. (each attempt gets fresh worktree; isolated directory; no cross-worktree access)
