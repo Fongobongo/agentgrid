@@ -8,10 +8,10 @@ use agentgrid_common::{
     ApprovalStatus, ApprovalView, Assignment, CancelState, CompleteAttemptRequest,
     CreateRepositoryRequest, CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest,
     EnrollRequest, EnrollResponse, EnrollTokenResponse, EventType, HeartbeatRequest, IncomingEvent,
-    IngestEventsRequest, LoginResponse, NodeStatus, NodeView, PollRequest, PollResponse,
-    RepositoryView, SkillTrustView, TaskEligibility, TaskStatus, TaskView, UploadArtifactRequest,
-    WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowRunWithSteps, WorkflowStep,
-    WorkflowStepStatus, WorkflowTemplate,
+    IngestEventsRequest, ListResponse, LoginResponse, NodeStatus, NodeView, PollRequest,
+    PollResponse, RepositoryView, SkillTrustView, TaskEligibility, TaskStatus, TaskView,
+    UploadArtifactRequest, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowRunWithSteps,
+    WorkflowStep, WorkflowStepStatus, WorkflowTemplate,
 };
 use agentgrid_control_plane::{build_router, AppState};
 use axum::body::{to_bytes, Body};
@@ -151,6 +151,7 @@ async fn enroll(
         max_concurrency: 2,
         agent_version: "test".into(),
         protocol_version: None,
+        permission_interception: "wrapper".into(),
     };
     let resp = app
         .clone()
@@ -185,6 +186,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -442,6 +445,8 @@ async fn validation_failure_must_not_report_success() {
         validation_command: Some("false".into()),
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let resp = app
         .clone()
@@ -555,6 +560,8 @@ async fn cancel_queued_marks_cancelled() {
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let resp = app
         .clone()
@@ -714,6 +721,9 @@ async fn revoked_node_gets_401() {
         repo_lock_wait_ms: 0,
         sandbox_backend: "none".into(),
         enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
     };
     let resp = app
         .clone()
@@ -799,10 +809,10 @@ async fn repository_create_and_list() {
         .oneshot(get_auth("/v1/repositories", &test_token(&app).await))
         .await
         .unwrap();
-    let repos: Vec<RepositoryView> =
+    let repos: ListResponse<RepositoryView> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(repos.len(), 1);
-    assert_eq!(repos[0].name, "demo");
+    assert_eq!(repos.items.len(), 1);
+    assert_eq!(repos.items[0].name, "demo");
 }
 
 #[tokio::test]
@@ -994,6 +1004,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
             })
             .unwrap(),
             None,
@@ -1059,6 +1071,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
             })
             .unwrap(),
             None,
@@ -1085,6 +1099,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
             })
             .unwrap(),
             Some(&token),
@@ -1104,6 +1120,8 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -1198,6 +1216,8 @@ async fn login_sets_cookie_and_cookie_auths() {
                         validation_command: None,
                         base_commit: None,
                         parent_acp_session_id: None,
+                        security_profile: None,
+                        network_mode: None,
                     })
                     .unwrap(),
                 ))
@@ -1313,6 +1333,8 @@ async fn oversized_prompt_returns_413() {
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let resp = app
         .clone()
@@ -1337,6 +1359,8 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let resp = app
         .clone()
@@ -1722,6 +1746,9 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 repo_lock_wait_ms: 0,
                 sandbox_backend: "none".into(),
                 enforced_limits: false,
+                repo_cache_bytes: 0,
+                workspace_bytes: 0,
+                network_mode: "none".into(),
             },
         )
         .await
@@ -1773,6 +1800,9 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         repo_lock_wait_ms: 0,
         sandbox_backend: "none".into(),
         enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
     };
     let resp = app
         .clone()
@@ -1804,7 +1834,8 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
     )
     .unwrap();
     let na = nodes
-        .as_array()
+        .get("items")
+        .and_then(|v| v.as_array())
         .unwrap()
         .iter()
         .find(|n| n["id"] == node_id)
@@ -2020,7 +2051,9 @@ async fn list_approvals(app: &Router, status: Option<&str>) -> Vec<ApprovalView>
         .await
         .unwrap();
     assert!(resp.status().is_success());
-    serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap()
+    let list: ListResponse<ApprovalView> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    list.items
 }
 
 #[tokio::test]
@@ -2041,6 +2074,8 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let created = app
         .clone()
@@ -2171,7 +2206,7 @@ async fn workflow_create_list_show_run_and_steps() {
         .unwrap();
     let list: serde_json::Value =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list.get("items").unwrap().as_array().unwrap().len(), 1);
 
     // show
     let resp = app
@@ -3378,6 +3413,8 @@ async fn artifact_get_rejects_traversal_name() {
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let resp = app
         .clone()
@@ -3506,10 +3543,10 @@ async fn workflow_budget_round_trips_via_json_create_and_get() {
         .oneshot(get_auth("/v1/workflows", &test_token(&app).await))
         .await
         .unwrap();
-    let list: Vec<WorkflowTemplate> =
+    let list: ListResponse<WorkflowTemplate> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(list.len(), 1);
-    assert!(list[0].budget.is_some());
+    assert_eq!(list.items.len(), 1);
+    assert!(list.items[0].budget.is_some());
 }
 
 #[tokio::test]
@@ -3614,6 +3651,7 @@ async fn node_protocol_mismatch_marks_degraded() {
         max_concurrency: 2,
         agent_version: "t".into(),
         protocol_version: Some("0".into()),
+        permission_interception: "wrapper".into(),
     };
     let er = app
         .clone()
@@ -3632,9 +3670,10 @@ async fn node_protocol_mismatch_marks_degraded() {
         .await
         .unwrap();
     assert_eq!(nodes.status(), StatusCode::OK);
-    let nodes: Vec<NodeView> =
+    let nodes: ListResponse<NodeView> =
         serde_json::from_slice(&to_bytes(nodes.into_body(), usize::MAX).await.unwrap()).unwrap();
     let node = nodes
+        .items
         .iter()
         .find(|n| n.id == er.node_id)
         .expect("node present");
@@ -3784,6 +3823,9 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         repo_lock_wait_ms: 0,
         sandbox_backend: "none".into(),
         enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
     };
     let resp = app
         .clone()
@@ -4210,6 +4252,8 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let resp = app
         .clone()
@@ -5779,6 +5823,8 @@ async fn list_tasks_filters_by_status_repository_node() {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
         })
         .unwrap()
     };
@@ -5802,9 +5848,9 @@ async fn list_tasks_filters_by_status_repository_node() {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let tasks: Vec<TaskView> =
+        let tasks: ListResponse<TaskView> =
             serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-        tasks.into_iter().map(|t| t.repository).collect()
+        tasks.items.into_iter().map(|t| t.repository).collect()
     }
 
     // No filter -> both repos present.
@@ -6209,6 +6255,9 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         repo_lock_wait_ms: 0,
         sandbox_backend: "none".into(),
         enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
     };
     let resp = app
         .clone()
@@ -6225,9 +6274,9 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         .oneshot(get_auth("/v1/nodes", &test_token(&app).await))
         .await
         .unwrap();
-    let nodes: Vec<NodeView> =
+    let nodes: ListResponse<NodeView> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    let mine = nodes.iter().find(|n| n.id == node_id).expect("node listed");
+    let mine = nodes.items.iter().find(|n| n.id == node_id).expect("node listed");
     assert!(mine.unsafe_active, "unsafe flag surfaced on node view");
     assert_eq!(mine.permission_interception, "wrapper");
     // Hardening P2 item 35: storage pressure surfaced on the node view.
@@ -6431,6 +6480,8 @@ async fn list_tasks_keyset_pagination() {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
         })
         .unwrap()
     };
@@ -6455,17 +6506,18 @@ async fn list_tasks_keyset_pagination() {
         .oneshot(get_auth("/v1/tasks?limit=2", &cred_user))
         .await
         .unwrap();
-    let page1: Vec<TaskView> =
+    let page1: ListResponse<TaskView> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(page1.len(), 2);
-    assert_eq!(page1[0].id, created[0].id);
-    assert_eq!(page1[1].id, created[1].id);
+    assert_eq!(page1.items.len(), 2);
+    assert_eq!(page1.items[0].id, created[0].id);
+    assert_eq!(page1.items[1].id, created[1].id);
+    assert!(page1.next_cursor.is_some());
 
     // Page 2: after (created_at, id) of the last page-1 row. ISO-8601
     // timestamps contain `:` and `+` which axum's query decoder treats
     // specially — percent-encode them manually.
     let enc = |s: &str| s.replace('+', "%2B").replace(':', "%3A");
-    let last = &page1[1];
+    let last = &page1.items[1];
     let resp = app
         .clone()
         .oneshot(get_auth(
@@ -6479,14 +6531,15 @@ async fn list_tasks_keyset_pagination() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let page2: Vec<TaskView> =
+    let page2: ListResponse<TaskView> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(page2.len(), 2);
-    assert_eq!(page2[0].id, created[2].id);
-    assert_eq!(page2[1].id, created[3].id);
+    assert_eq!(page2.items.len(), 2);
+    assert_eq!(page2.items[0].id, created[2].id);
+    assert_eq!(page2.items[1].id, created[3].id);
+    assert!(page2.next_cursor.is_some());
 
     // Page 3: after page-2's last row → remaining 1 task.
-    let last = &page2[1];
+    let last = &page2.items[1];
     let resp = app
         .clone()
         .oneshot(get_auth(
@@ -6499,16 +6552,18 @@ async fn list_tasks_keyset_pagination() {
         ))
         .await
         .unwrap();
-    let page3: Vec<TaskView> =
+    let page3: ListResponse<TaskView> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(page3.len(), 1);
-    assert_eq!(page3[0].id, created[4].id);
+    assert_eq!(page3.items.len(), 1);
+    assert_eq!(page3.items[0].id, created[4].id);
+    assert!(page3.next_cursor.is_none());
 
     // No overlap across pages.
     let ids: std::collections::HashSet<String> = page1
+        .items
         .iter()
-        .chain(page2.iter())
-        .chain(page3.iter())
+        .chain(page2.items.iter())
+        .chain(page3.items.iter())
         .map(|t| t.id.clone())
         .collect();
     assert_eq!(ids.len(), 5, "keyset pages must not overlap or skip");
@@ -6585,6 +6640,8 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
         })
         .unwrap();
         let r = app
@@ -6688,7 +6745,7 @@ async fn workflow_runs_keyset_pagination() {
     runs.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
 
     let enc = |s: &str| s.replace('+', "%2B").replace(':', "%3A");
-    async fn page(app: &Router, qs: &str) -> Vec<WorkflowRun> {
+    async fn page(app: &Router, qs: &str) -> ListResponse<WorkflowRun> {
         let resp = app
             .clone()
             .oneshot(get_auth(
@@ -6703,39 +6760,43 @@ async fn workflow_runs_keyset_pagination() {
 
     // Page 1: limit 2.
     let p1 = page(&app, "?limit=2").await;
-    assert_eq!(p1.len(), 2);
-    assert_eq!(p1[0].id, runs[0].id);
-    assert_eq!(p1[1].id, runs[1].id);
+    assert_eq!(p1.items.len(), 2);
+    assert_eq!(p1.items[0].id, runs[0].id);
+    assert_eq!(p1.items[1].id, runs[1].id);
+    assert!(p1.next_cursor.is_some());
     // Page 2: after p1's last row.
     let p2 = page(
         &app,
         &format!(
             "?limit=2&after_created_at={}&after_id={}",
-            enc(&p1[1].created_at),
-            p1[1].id
+            enc(&p1.items[1].created_at),
+            p1.items[1].id
         ),
     )
     .await;
-    assert_eq!(p2.len(), 2);
-    assert_eq!(p2[0].id, runs[2].id);
-    assert_eq!(p2[1].id, runs[3].id);
+    assert_eq!(p2.items.len(), 2);
+    assert_eq!(p2.items[0].id, runs[2].id);
+    assert_eq!(p2.items[1].id, runs[3].id);
+    assert!(p2.next_cursor.is_some());
     // Page 3: remaining 1.
     let p3 = page(
         &app,
         &format!(
             "?limit=2&after_created_at={}&after_id={}",
-            enc(&p2[1].created_at),
-            p2[1].id
+            enc(&p2.items[1].created_at),
+            p2.items[1].id
         ),
     )
     .await;
-    assert_eq!(p3.len(), 1);
-    assert_eq!(p3[0].id, runs[4].id);
+    assert_eq!(p3.items.len(), 1);
+    assert_eq!(p3.items[0].id, runs[4].id);
+    assert!(p3.next_cursor.is_none());
 
     let ids: std::collections::HashSet<String> = p1
+        .items
         .iter()
-        .chain(p2.iter())
-        .chain(p3.iter())
+        .chain(p2.items.iter())
+        .chain(p3.items.iter())
         .map(|r| r.id.clone())
         .collect();
     assert_eq!(ids.len(), 5, "workflow-run pages must not overlap or skip");
@@ -6759,6 +6820,8 @@ async fn approvals_keyset_pagination() {
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let created = app
         .clone()
@@ -6812,7 +6875,7 @@ async fn approvals_keyset_pagination() {
     approvals.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
 
     let enc = |s: &str| s.replace('+', "%2B").replace(':', "%3A");
-    async fn page(app: &Router, token: &str, qs: &str) -> Vec<ApprovalView> {
+    async fn page(app: &Router, token: &str, qs: &str) -> ListResponse<ApprovalView> {
         let resp = app
             .clone()
             .oneshot(get_auth(&format!("/v1/approvals{qs}"), token))
@@ -6823,33 +6886,37 @@ async fn approvals_keyset_pagination() {
     }
 
     let p1 = page(&app, &token, "?limit=2").await;
-    assert_eq!(p1.len(), 2);
+    assert_eq!(p1.items.len(), 2);
+    assert!(p1.next_cursor.is_some());
     let p2 = page(
         &app,
         &token,
         &format!(
             "?limit=2&after_created_at={}&after_id={}",
-            enc(&p1[1].created_at),
-            p1[1].id
+            enc(&p1.items[1].created_at),
+            p1.items[1].id
         ),
     )
     .await;
-    assert_eq!(p2.len(), 2);
+    assert_eq!(p2.items.len(), 2);
+    assert!(p2.next_cursor.is_some());
     let p3 = page(
         &app,
         &token,
         &format!(
             "?limit=2&after_created_at={}&after_id={}",
-            enc(&p2[1].created_at),
-            p2[1].id
+            enc(&p2.items[1].created_at),
+            p2.items[1].id
         ),
     )
     .await;
-    assert_eq!(p3.len(), 1);
+    assert_eq!(p3.items.len(), 1);
+    assert!(p3.next_cursor.is_none());
     let ids: std::collections::HashSet<String> = p1
+        .items
         .iter()
-        .chain(p2.iter())
-        .chain(p3.iter())
+        .chain(p2.items.iter())
+        .chain(p3.items.iter())
         .map(|a| a.id.clone())
         .collect();
     assert_eq!(ids.len(), 5, "approval pages must not overlap or skip");
@@ -6915,4 +6982,140 @@ async fn artifact_quota_refuses_uploads_over_cap() {
             None => std::env::remove_var(k),
         }
     }
+}
+
+/// Hardening P0 item 5: strict security profile enforcement.
+/// Task with profile ending in "-strict" requires structured permission
+/// interception and must NOT be assigned to nodes with wrapper adapters.
+#[tokio::test]
+async fn strict_profile_refuses_wrapper_adapter() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Create a node with wrapper adapter (permission_interception = "wrapper")
+    let (wrapper_node_id, wrapper_cred) =
+        enroll(&app, "node-wrapper", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Create a task with strict security profile
+    let strict_req = CreateTaskRequest {
+        prompt: "strict task".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+        security_profile: Some("default-strict".into()),
+        network_mode: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/tasks",
+            serde_json::to_string(&strict_req).unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let task: TaskView =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    // Task should remain Queued because wrapper node is ineligible
+    let view = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/tasks/{}", task.id), &token))
+        .await
+        .unwrap();
+    let task_view: TaskView =
+        serde_json::from_slice(&to_bytes(view.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(task_view.status, TaskStatus::Queued);
+
+    // Check task_eligibility reports the wrapper node as ineligible
+    let elig_resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{}/eligibility", task.id),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let elig: TaskEligibility =
+        serde_json::from_slice(&to_bytes(elig_resp.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(!elig.nodes.is_empty());
+    let wrapper_elig = elig
+        .nodes
+        .iter()
+        .find(|n| n.node_id == wrapper_node_id)
+        .unwrap();
+    assert!(!wrapper_elig.eligible);
+    assert!(wrapper_elig
+        .reasons
+        .iter()
+        .any(|r| r.contains("requires structured permission interception")));
+
+    // Now manually update the node to have structured permission interception
+    // (simulating an ACP-only node) and verify the task becomes eligible
+    sqlx::query("UPDATE nodes SET permission_interception = 'structured' WHERE id = ?")
+        .bind(&wrapper_node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+
+    // Poll to trigger assignment (try_assign is called on poll)
+    let poll_req = PollRequest {
+        node_id: wrapper_node_id.clone(),
+        name: "node-wrapper".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
+    };
+    let _ = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/poll",
+            serde_json::to_string(&poll_req).unwrap(),
+            &wrapper_cred,
+        ))
+        .await
+        .unwrap();
+
+    // Check eligibility after update
+    let elig_resp2 = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{}/eligibility", task.id),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let elig2: TaskEligibility =
+        serde_json::from_slice(&to_bytes(elig_resp2.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    eprintln!("Eligibility after update: {:?}", elig2);
+    let wrapper_elig2 = elig2
+        .nodes
+        .iter()
+        .find(|n| n.node_id == wrapper_node_id)
+        .unwrap();
+    assert!(
+        wrapper_elig2.eligible,
+        "Node should be eligible after update: {:?}",
+        wrapper_elig2.reasons
+    );
+
+    // Task should now be assigned
+    let view = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/tasks/{}", task.id), &token))
+        .await
+        .unwrap();
+    let task_view: TaskView =
+        serde_json::from_slice(&to_bytes(view.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(task_view.status, TaskStatus::Assigned);
+    assert!(task_view.assigned_attempt_id.is_some());
 }
