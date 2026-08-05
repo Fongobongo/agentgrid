@@ -421,7 +421,7 @@
 - [x] Реагировать на cancel во время validation. (`tokio::select!` + `wait_for_cancel`; cancel → `terminate_group` + `validation_cancelled`)
 - [x] Создавать process group/cgroup для validation. (`process_group(0)` на spawn)
 - [x] Убивать всё дерево процессов. (`terminate_group` SIGTERM → 10s grace → SIGKILL)
-- [ ] Применять sandbox policy. (unsafe env guard применён; полный sandbox prefix для validation — P2 следом за ExecutionBackend)
+- [x] Применять sandbox policy. (validation теперь идёт через `sandbox_prefix`: при AGENTGRID_SANDBOX=docker команда выполняется в том же hardened контейнере (cap-drop/no-new-privileges/network none/resource limits), не как голый host `sh -c`; unsafe env guard сохранён; 5 validation тестов green)
 - [x] Применять resource limits. (Docker backend: --pids-limit/--memory/--cpus via AGENTGRID_SANDBOX_* env; ProcessBackend marked unenforced via enforced_limits=false)
 - [x] Ограничить stdout/stderr bytes. (validation streams через `read_stream` с `AGENTGRID_MAX_LINE_BYTES` cap)
 - [x] Обрабатывать invalid UTF-8 без остановки чтения. (`read_stream` uses `String::from_utf8_lossy` — invalid UTF-8 is replaced with the Unicode replacement character rather than crashing the reader. Test `read_stream_handles_invalid_utf8`.)

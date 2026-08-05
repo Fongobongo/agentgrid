@@ -75,8 +75,20 @@ pub async fn run_validation(
     // validation_command), so `sh -c` is the documented contract; stdout and
     // stderr are piped separately and merged by the same lossy/line-capped
     // streaming the agent output uses.
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c")
+    // Hardening P2 item 424: apply the sandbox policy to validation too — when
+    // the sandbox is Docker, the validation command runs inside the same
+    // hardened container the agent uses (cap-drop, no-new-privileges, network
+    // none, read-only + tmpfs, resource limits), not as a bare host `sh -c`.
+    let kind = sandbox_kind();
+    let (program, prefix_args) = crate::sandbox::sandbox_prefix(
+        kind,
+        workdir,
+        "sh",
+        None, // validation has no task network_mode; sandbox env default applies
+    );
+    let mut cmd = tokio::process::Command::new(&program);
+    cmd.args(prefix_args)
+        .arg("-c")
         .arg(command)
         .current_dir(workdir)
         .process_group(0)
