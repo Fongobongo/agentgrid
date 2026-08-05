@@ -10,6 +10,7 @@ use auth::{
 };
 mod config;
 mod middleware;
+mod routes;
 pub mod store;
 mod tls;
 pub mod workflow;
@@ -23,25 +24,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use agentgrid_common::{
-    AppendMessageRequest, ApprovalEvent, ApprovalView, CancelState, CompleteAttemptRequest,
-    CreateAgentSessionRequest, CreateConversationRequest, CreateRepositoryRequest,
-    CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest, EnrollRequest,
-    EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest, IngestEventsRequest,
-    ListResponse, McpServer, McpServerCreate, PollRequest, PollResponse, RepositoryView,
-    TaskEligibility, TaskView, UploadArtifactRequest, WorkflowProjection, WorkflowRun,
-    WorkflowRunWithSteps, WorkflowSchedule, WorkflowScheduleCreate, WorkflowTemplate,
+    AppendMessageRequest, CancelState, CompleteAttemptRequest, CreateAgentSessionRequest,
+    CreateConversationRequest, CreateRepositoryRequest, CreateTaskRequest, EventsQuery,
+    IngestEventsRequest, ListResponse, McpServer, McpServerCreate, PollRequest, PollResponse,
+    RepositoryView,
 };
 use axum::{
-    body::Bytes,
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use futures_core::Stream;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use serde::Deserialize;
 use store::Store;
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -54,7 +50,7 @@ const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 /// plaintext dev keeps working.
 pub struct AppState {
     pub store: Store,
-    assignment_notify: Arc<Notify>,
+    pub(crate) assignment_notify: Arc<Notify>,
     pub(crate) jwt_secret: Vec<u8>,
     /// Directory with the built web UI (Stage 4.3). Served as static files;
     /// `None` disables the UI.
@@ -277,20 +273,44 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health/live", get(auth::health_live))
         .route("/health/ready", get(auth::health_ready))
         .route("/metrics", get(metrics))
-        .route("/v1/tasks", post(create_task).get(list_tasks))
-        .route("/v1/tasks/{id}", get(show_task))
+        .route(
+            "/v1/tasks",
+            post(routes::tasks::create_task).get(routes::tasks::list_tasks),
+        )
+        .route("/v1/tasks/{id}", get(routes::tasks::show_task))
         .route("/v1/tasks/{id}/events", get(get_events))
         .route("/v1/tasks/{id}/events/stream", get(events_stream))
-        .route("/v1/tasks/{id}/cancel", post(cancel_task_handler))
-        .route("/v1/tasks/{id}/retry", post(retry_task_handler))
-        .route("/v1/tasks/{id}/eligibility", get(task_eligibility_handler))
-        .route("/v1/approvals", get(list_approvals_handler))
-        .route("/v1/approvals/{id}", get(get_approval_handler))
-        .route("/v1/approvals/{id}/allow", post(allow_approval_handler))
-        .route("/v1/approvals/{id}/deny", post(deny_approval_handler))
+        .route(
+            "/v1/tasks/{id}/cancel",
+            post(routes::tasks::cancel_task_handler),
+        )
+        .route(
+            "/v1/tasks/{id}/retry",
+            post(routes::tasks::retry_task_handler),
+        )
+        .route(
+            "/v1/tasks/{id}/eligibility",
+            get(routes::tasks::task_eligibility_handler),
+        )
+        .route(
+            "/v1/approvals",
+            get(routes::approvals::list_approvals_handler),
+        )
+        .route(
+            "/v1/approvals/{id}",
+            get(routes::approvals::get_approval_handler),
+        )
+        .route(
+            "/v1/approvals/{id}/allow",
+            post(routes::approvals::allow_approval_handler),
+        )
+        .route(
+            "/v1/approvals/{id}/deny",
+            post(routes::approvals::deny_approval_handler),
+        )
         .route(
             "/v1/tasks/{id}/approvals",
-            post(create_approval_for_task_handler),
+            post(routes::approvals::create_approval_for_task_handler),
         )
         .route("/v1/auth/setup", post(auth::auth_setup))
         .route("/v1/auth/login", post(auth::auth_login))
@@ -311,17 +331,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/profiles/{id}/activate", post(activate_profile_handler))
         .route("/v1/admin/backup", post(admin_backup))
         .route("/v1/admin/storage-gc", post(storage_gc_handler))
-        .route("/v1/nodes", get(list_nodes))
-        .route("/v1/nodes/enrollment-token", post(create_enrollment_token))
-        .route("/v1/nodes/{id}", delete(revoke_node))
-        .route("/v1/nodes/{id}/drain", post(drain_node_handler))
+        .route("/v1/nodes", get(routes::nodes::list_nodes))
+        .route(
+            "/v1/nodes/enrollment-token",
+            post(routes::nodes::create_enrollment_token),
+        )
+        .route("/v1/nodes/{id}", delete(routes::nodes::revoke_node))
+        .route(
+            "/v1/nodes/{id}/drain",
+            post(routes::nodes::drain_node_handler),
+        )
         .route(
             "/v1/repositories",
             post(create_repository).get(list_repositories),
         )
-        .route("/v1/node/enroll", post(enroll))
+        .route("/v1/node/enroll", post(routes::nodes::enroll))
         .route("/v1/node/poll", post(poll))
-        .route("/v1/node/heartbeat", post(heartbeat))
+        .route("/v1/node/heartbeat", post(routes::nodes::heartbeat))
         .route("/v1/node/attempts/{id}/cancel", get(attempt_cancel_handler))
         .route("/v1/node/attempts/{id}/events", post(ingest_events))
         .route("/v1/node/attempts/{id}/complete", post(complete_attempt))
@@ -334,15 +360,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/node/attempts/{id}/session",
             post(create_agent_session_handler),
         )
-        .route("/v1/node/attempts/{id}/artifacts", post(upload_artifact))
+        .route(
+            "/v1/node/attempts/{id}/artifacts",
+            post(routes::artifacts::upload_artifact),
+        )
         .route(
             "/v1/node/attempts/{id}/artifacts/raw",
-            post(upload_artifact_raw),
+            post(routes::artifacts::upload_artifact_raw),
         )
-        .route("/v1/tasks/{id}/artifacts/{name}", get(get_artifact))
+        .route(
+            "/v1/tasks/{id}/artifacts/{name}",
+            get(routes::artifacts::get_artifact),
+        )
         .route(
             "/v1/node/tasks/{id}/artifacts/{name}",
-            get(get_artifact_node),
+            get(routes::artifacts::get_artifact_node),
         )
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations/{id}", get(show_conversation))
@@ -350,32 +382,51 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/conversations/{id}/messages",
             post(append_conversation_message).get(list_conversation_messages),
         )
-        .route("/v1/workflows", post(create_workflow).get(list_workflows))
-        .route("/v1/workflows/{id}", get(show_workflow))
-        .route("/v1/workflows/{id}/runs", post(create_workflow_run))
+        .route(
+            "/v1/workflows",
+            post(routes::workflows::create_workflow).get(routes::workflows::list_workflows),
+        )
+        .route("/v1/workflows/{id}", get(routes::workflows::show_workflow))
+        .route(
+            "/v1/workflows/{id}/runs",
+            post(routes::workflows::create_workflow_run),
+        )
         .route(
             "/v1/workflows/{id}/schedules",
-            post(create_workflow_schedule).get(list_workflow_schedules),
+            post(routes::workflows::create_workflow_schedule)
+                .get(routes::workflows::list_workflow_schedules),
         )
         .route(
             "/v1/workflows/{id}/schedules/{sid}",
-            delete(delete_workflow_schedule),
+            delete(routes::workflows::delete_workflow_schedule),
         )
-        .route("/v1/workflow-runs", get(list_workflow_runs))
-        .route("/v1/workflow-runs/{id}", get(show_workflow_run))
+        .route(
+            "/v1/workflow-runs",
+            get(routes::workflows::list_workflow_runs),
+        )
+        .route(
+            "/v1/workflow-runs/{id}",
+            get(routes::workflows::show_workflow_run),
+        )
         .route(
             "/v1/workflow-runs/{id}/projection",
-            get(workflow_run_projection),
+            get(routes::workflows::workflow_run_projection),
         )
-        .route("/v1/workflow-runs/{id}/tick", post(tick_workflow_run))
-        .route("/v1/workflow-runs/{id}/plan", get(workflow_run_plan))
+        .route(
+            "/v1/workflow-runs/{id}/tick",
+            post(routes::workflows::tick_workflow_run),
+        )
+        .route(
+            "/v1/workflow-runs/{id}/plan",
+            get(routes::workflows::workflow_run_plan),
+        )
         .route(
             "/v1/workflow-runs/{id}/approve-plan",
-            post(approve_workflow_plan_handler),
+            post(routes::workflows::approve_workflow_plan_handler),
         )
         .route(
             "/v1/workflow-runs/{id}/cancel",
-            post(cancel_workflow_run_handler),
+            post(routes::workflows::cancel_workflow_run_handler),
         )
         .layer(DefaultBodyLimit::max(state.limits.artifact))
         .layer(axum::middleware::from_fn_with_state(
@@ -403,76 +454,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn workflow_run_plan(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<agentgrid_common::WorkflowProjection>, StatusCode> {
-    // Stage 13: exposes the pending plan on a `PlanReady` run (the projection
-    // already carries `run.status`); the bare plan text is the architect's
-    // emitted YAML/JSON — read-only so an operator can inspect before approving.
-    let _ = state.store.get_workflow_run_plan(&id).await;
-    match state.store.get_workflow_run_projection(&id).await {
-        Ok(Some(p)) => Ok(Json(p)),
-        // 404 if the run doesn't exist; the plan field lives on the projection.
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(_) => Err(StatusCode::NOT_FOUND),
-    }
-}
-
-async fn approve_workflow_plan_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<agentgrid_common::WorkflowRunWithSteps>, StatusCode> {
-    match state.store.approve_workflow_plan(&id).await {
-        Ok(()) => {
-            // Wake the scheduler so the freshly-expanded steps assign.
-            state.assignment_notify.notify_waiters();
-            match state.store.get_workflow_run(&id).await {
-                Ok(Some(r)) => {
-                    let steps = state
-                        .store
-                        .get_workflow_run_steps(&id)
-                        .await
-                        .unwrap_or_default();
-                    Ok(Json(agentgrid_common::WorkflowRunWithSteps {
-                        run: r,
-                        steps,
-                    }))
-                }
-                Ok(None) => Err(StatusCode::NOT_FOUND),
-                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-            }
-        }
-        Err(e) => {
-            tracing::warn!("approve_workflow_plan failed for {id}: {e}");
-            // Wrong-state / bad-plan => 409, missing run => 404, other => 500.
-            let msg = e.to_string();
-            if msg.contains("unknown workflow run") || msg.contains("no plan to approve") {
-                Err(StatusCode::NOT_FOUND)
-            } else if msg.contains("is not awaiting plan approval") || msg.contains("plan") {
-                Err(StatusCode::CONFLICT)
-            } else {
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
-            }
-        }
-    }
-}
-
-async fn cancel_workflow_run_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> StatusCode {
-    match state.store.cancel_workflow_run(&id).await {
-        Ok(true) => StatusCode::OK,
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("cancel_workflow_run failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-/// Stage 2.5: compact-copy the database to `path` via `VACUUM INTO`.
-/// User-authenticated (the global user-auth middleware covers it).
 async fn admin_backup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
@@ -1219,566 +1200,7 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
     )
 }
 
-async fn create_task(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Json(req): Json<CreateTaskRequest>,
-) -> Result<(StatusCode, Json<TaskView>), StatusCode> {
-    if req.prompt.len() > state.limits.prompt {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
-    }
-    match state.store.create_task(&req).await {
-        Ok(view) => {
-            state.assignment_notify.notify_waiters();
-            let _ = state
-                .store
-                .audit(
-                    "user",
-                    auth.as_ref().map(|e| e.0.username.as_str()),
-                    "task.create",
-                    Some(&view.id),
-                    None,
-                )
-                .await;
-            Ok((StatusCode::CREATED, Json(view)))
-        }
-        Err(e) => {
-            tracing::error!("create_task failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn list_tasks(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<TaskListQuery>,
-) -> Result<Json<ListResponse<TaskView>>, StatusCode> {
-    // Hardening P2 item 19: never return an empty list on a DB error — that
-    // would read as "no tasks" to the client. Surface storage outage as 503.
-    match state
-        .store
-        .list_tasks_filtered(
-            q.status.as_deref(),
-            q.repository.as_deref(),
-            q.node_id.as_deref(),
-            task_cursor(&q),
-            q.limit,
-        )
-        .await
-    {
-        Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
-                items.last().map(|t| format!("{},{}", t.created_at, t.id))
-            } else {
-                None
-            };
-            Ok(Json(ListResponse::new(items, next_cursor)))
-        }
-        Err(e) => {
-            tracing::error!("list_tasks failed: {e}");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-/// Hardening P2 item 20: optional server-side filters + keyset cursor for
-/// `GET /v1/tasks`. `after_created_at` + `after_id` form a keyset cursor
-/// (rows strictly after `(created_at, id)`); `limit` caps the page (server
-/// ceiling 1000). Both cursor parts must be present together.
-#[derive(Debug, Default, serde::Deserialize)]
-struct TaskListQuery {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    repository: Option<String>,
-    #[serde(default)]
-    node_id: Option<String>,
-    #[serde(default)]
-    after_created_at: Option<String>,
-    #[serde(default)]
-    after_id: Option<String>,
-    #[serde(default)]
-    limit: Option<u64>,
-}
-
-/// Combine the optional keyset-cursor parts into the store's `Option<(String,
-/// String)>`. Only a complete pair is a cursor; a lone half is ignored so old
-/// clients (and garbage input) fall back to the first page.
-fn task_cursor(q: &TaskListQuery) -> Option<(String, String)> {
-    match (&q.after_created_at, &q.after_id) {
-        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
-        _ => None,
-    }
-}
-
-async fn show_task(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<TaskView>, StatusCode> {
-    state
-        .store
-        .show_task(&id)
-        .await
-        .map_err(|e| {
-            tracing::error!("show_task failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
-}
-
-async fn task_eligibility_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<TaskEligibility>, StatusCode> {
-    match state.store.task_eligibility(&id).await {
-        Ok(Some(elig)) => Ok(Json(elig)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("task_eligibility failed: {e:?}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
 // ----- workflows (Stage 7.2) -----
-
-async fn create_workflow(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<(StatusCode, Json<WorkflowTemplate>), StatusCode> {
-    let is_yaml = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("yaml") || v.contains("yml"))
-        .unwrap_or(false);
-    let req: CreateWorkflowRequest = if is_yaml {
-        let text = String::from_utf8_lossy(&body);
-        let t = WorkflowTemplate::from_yaml(&text).map_err(|e| {
-            tracing::error!("workflow yaml parse failed: {e}");
-            StatusCode::BAD_REQUEST
-        })?;
-        t.validate_dag().map_err(|e| {
-            tracing::warn!("workflow DAG invalid: {e}");
-            StatusCode::BAD_REQUEST
-        })?;
-        CreateWorkflowRequest {
-            name: t.name,
-            steps: t.steps,
-            context: None,
-            budget: t.budget,
-        }
-    } else {
-        serde_json::from_slice(&body).map_err(|e| {
-            tracing::error!("workflow json parse failed: {e}");
-            StatusCode::BAD_REQUEST
-        })?
-    };
-    // Validate the graph (ADR 0004) on the JSON path too: YAML is checked above,
-    // JSON-built templates go through the same invariant so a malformed graph
-    // never reaches the scheduler.
-    WorkflowTemplate {
-        id: String::new(),
-        name: req.name.clone(),
-        steps: req.steps.clone(),
-        budget: req.budget.clone(),
-        created_at: String::new(),
-    }
-    .validate_dag()
-    .map_err(|e| {
-        tracing::warn!("workflow DAG invalid: {e}");
-        StatusCode::BAD_REQUEST
-    })?;
-    state
-        .store
-        .create_workflow_template(&req.name, &req.steps, &req.budget)
-        .await
-        .map(|t| (StatusCode::CREATED, Json(t)))
-        .map_err(|e| {
-            tracing::error!("create_workflow failed: {e}");
-            StatusCode::BAD_REQUEST
-        })
-}
-
-async fn list_workflows(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<WorkflowRunsQuery>,
-) -> Result<Json<ListResponse<WorkflowTemplate>>, StatusCode> {
-    // Hardening P2 item 19: never return an empty list on a DB error — surface
-    // storage outage as 503 so the client does not read it as "no workflows".
-    let after = match (&q.after_created_at, &q.after_id) {
-        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
-        _ => None,
-    };
-    match state.store.list_workflow_templates(after, q.limit).await {
-        Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
-                items.last().map(|t| format!("{},{}", t.created_at, t.id))
-            } else {
-                None
-            };
-            Ok(Json(ListResponse::new(items, next_cursor)))
-        }
-        Err(e) => {
-            tracing::error!("list_workflows failed: {e}");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-async fn show_workflow(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<WorkflowTemplate>, StatusCode> {
-    match state.store.get_workflow_template(&id).await {
-        Ok(Some(t)) => Ok(Json(t)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("show_workflow failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn create_workflow_run(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<CreateWorkflowRunRequest>,
-) -> Result<(StatusCode, Json<WorkflowRun>), StatusCode> {
-    state
-        .store
-        .create_workflow_run(
-            &id,
-            req.context.as_deref(),
-            req.repository.as_deref(),
-            req.base_commit.as_deref(),
-        )
-        .await
-        .map(|r| (StatusCode::CREATED, Json(r)))
-        .map_err(|e| {
-            tracing::error!("create_workflow_run failed: {e}");
-            StatusCode::BAD_REQUEST
-        })
-}
-
-/// Stage 13: create a scheduled trigger for a workflow template.
-async fn create_workflow_schedule(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<WorkflowScheduleCreate>,
-) -> Result<(StatusCode, Json<WorkflowSchedule>), StatusCode> {
-    state
-        .store
-        .create_workflow_schedule(&id, &req)
-        .await
-        .map(|s| (StatusCode::CREATED, Json(s)))
-        .map_err(|e| {
-            tracing::warn!("create_workflow_schedule failed: {e}");
-            StatusCode::BAD_REQUEST
-        })
-}
-
-async fn list_workflow_schedules(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(q): Query<WorkflowRunsQuery>,
-) -> Result<Json<ListResponse<WorkflowSchedule>>, StatusCode> {
-    // Hardening P2 item 19: never return an empty list on a DB error — surface
-    // storage outage as 503 so the client does not read it as "no schedules".
-    let after = match (&q.after_created_at, &q.after_id) {
-        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
-        _ => None,
-    };
-    match state
-        .store
-        .list_workflow_schedules(Some(&id), after, q.limit)
-        .await
-    {
-        Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
-                items.last().map(|s| format!("{},{}", s.created_at, s.id))
-            } else {
-                None
-            };
-            Ok(Json(ListResponse::new(items, next_cursor)))
-        }
-        Err(e) => {
-            tracing::error!("list_workflow_schedules failed: {e}");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-async fn delete_workflow_schedule(
-    State(state): State<Arc<AppState>>,
-    Path((_id, sid)): Path<(String, String)>,
-) -> StatusCode {
-    match state.store.delete_workflow_schedule(&sid).await {
-        Ok(true) => StatusCode::NO_CONTENT,
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("delete_workflow_schedule failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-/// Hardening P2 item 20: query for `GET /v1/workflow-runs` — keyset cursor
-/// (`after_created_at` + `after_id`) and a server page cap.
-#[derive(Debug, Default, serde::Deserialize)]
-struct WorkflowRunsQuery {
-    #[serde(default)]
-    after_created_at: Option<String>,
-    #[serde(default)]
-    after_id: Option<String>,
-    #[serde(default)]
-    limit: Option<u64>,
-}
-
-async fn list_workflow_runs(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<WorkflowRunsQuery>,
-) -> Result<Json<ListResponse<WorkflowRun>>, StatusCode> {
-    // Hardening P2 item 19: never return an empty list on a DB error — surface
-    // storage outage as 503 so the client does not read it as "no runs".
-    let after = match (&q.after_created_at, &q.after_id) {
-        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
-        _ => None,
-    };
-    match state.store.list_workflow_runs(after, q.limit).await {
-        Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
-                items.last().map(|r| format!("{},{}", r.created_at, r.id))
-            } else {
-                None
-            };
-            Ok(Json(ListResponse::new(items, next_cursor)))
-        }
-        Err(e) => {
-            tracing::error!("list_workflow_runs failed: {e}");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-async fn show_workflow_run(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<WorkflowRunWithSteps>, StatusCode> {
-    let run = state.store.get_workflow_run(&id).await;
-    let steps = state.store.get_workflow_run_steps(&id).await;
-    match (run, steps) {
-        (Ok(Some(r)), Ok(s)) => Ok(Json(WorkflowRunWithSteps { run: r, steps: s })),
-        (Ok(None), _) => Err(StatusCode::NOT_FOUND),
-        _ => {
-            tracing::error!("show_workflow_run failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-/// Stage 8 ACP plan projection: live roles/steps/nodes/verdicts for a run.
-async fn workflow_run_projection(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<WorkflowProjection>, StatusCode> {
-    match state.store.get_workflow_run_projection(&id).await {
-        Ok(Some(p)) => Ok(Json(p)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("workflow_run_projection failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn tick_workflow_run(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<WorkflowRunWithSteps>, StatusCode> {
-    if state.store.tick_workflow_run(&id).await.is_err() {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    // Wake the scheduler so freshly-created step tasks get assigned promptly.
-    state.assignment_notify.notify_waiters();
-    match state.store.get_workflow_run(&id).await {
-        Ok(Some(r)) => {
-            let steps = state
-                .store
-                .get_workflow_run_steps(&id)
-                .await
-                .unwrap_or_default();
-            Ok(Json(WorkflowRunWithSteps { run: r, steps }))
-        }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn list_nodes(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<WorkflowRunsQuery>,
-) -> Result<Json<ListResponse<agentgrid_common::NodeView>>, StatusCode> {
-    // Hardening P2 item 19: never return an empty list on a DB error — that
-    // would read as "no nodes" to the client. Surface storage outage as 503.
-    let after = match (&q.after_created_at, &q.after_id) {
-        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
-        _ => None,
-    };
-    match state.store.list_nodes(after, q.limit).await {
-        Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
-                items
-                    .last()
-                    .map(|n| format!("{},{}", n.last_heartbeat_at, n.id))
-            } else {
-                None
-            };
-            Ok(Json(ListResponse::new(items, next_cursor)))
-        }
-        Err(e) => {
-            tracing::error!("list_nodes failed: {e}");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-async fn create_enrollment_token(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<EnrollTokenResponse>, StatusCode> {
-    state
-        .store
-        .create_enrollment_token()
-        .await
-        .map(|(token, expires_at)| Json(EnrollTokenResponse { token, expires_at }))
-        .map_err(|e| {
-            tracing::error!("create_enrollment_token failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
-}
-
-async fn enroll(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<EnrollRequest>,
-) -> (StatusCode, Json<Option<EnrollResponse>>) {
-    match state.store.enroll_node(&req).await {
-        Ok(Some(r)) => {
-            if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
-                let _ = state.store.set_node_degraded(&r.node_id).await;
-            }
-            (StatusCode::OK, Json(Some(r)))
-        }
-        Ok(None) => (StatusCode::BAD_REQUEST, Json(None)),
-        Err(e) => {
-            tracing::error!("enroll failed: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(None))
-        }
-    }
-}
-
-async fn heartbeat(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Json(req): Json<HeartbeatRequest>,
-) -> StatusCode {
-    if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
-        let _ = state.store.set_node_degraded(&auth.node_id).await;
-    }
-    match state.store.heartbeat(&auth.node_id, &req).await {
-        Ok(true) => {
-            // Stage 9.2: auto-fill the trust ledger from heartbeat discovery.
-            // Upsert is idempotent and never overwrites an operator decision.
-            let discovered: Vec<(String, String)> = req
-                .discovered_skills
-                .iter()
-                .map(|s| (s.name.clone(), s.source.clone()))
-                .collect();
-            if !discovered.is_empty() {
-                if let Err(e) = state.store.upsert_discovered_skills(&discovered).await {
-                    // Discovery is best-effort; never fail the heartbeat on it.
-                    tracing::warn!("skill discovery upsert failed: {e}");
-                }
-            }
-            StatusCode::OK
-        }
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("heartbeat failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-async fn revoke_node(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Path(id): Path<String>,
-) -> StatusCode {
-    match state.store.revoke_node(&id).await {
-        Ok(true) => {
-            // Hardening P2 item 35: audit the security-sensitive mutation.
-            let _ = state
-                .store
-                .audit(
-                    "user",
-                    auth.as_ref().map(|e| e.0.username.as_str()),
-                    "node.revoke",
-                    Some(&id),
-                    None,
-                )
-                .await;
-            StatusCode::OK
-        }
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("revoke_node failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-/// Hardening P2 item 37: drain (or undrain) a node for maintenance. A drained
-/// node stops receiving NEW assignments while its in-flight attempts run to
-/// completion; the heartbeat keeps it online.
-async fn drain_node_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Path(id): Path<String>,
-    Query(q): Query<NodeDrainQuery>,
-) -> StatusCode {
-    let drained = q.drain.unwrap_or(true);
-    match state.store.set_node_drained(&id, drained).await {
-        Ok(true) => {
-            let _ = state
-                .store
-                .audit(
-                    "user",
-                    auth.as_ref().map(|e| e.0.username.as_str()),
-                    if drained {
-                        "node.drain"
-                    } else {
-                        "node.undrain"
-                    },
-                    Some(&id),
-                    None,
-                )
-                .await;
-            StatusCode::OK
-        }
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("set_node_drained failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct NodeDrainQuery {
-    #[serde(default)]
-    drain: Option<bool>,
-}
 
 async fn create_repository(
     State(state): State<Arc<AppState>>,
@@ -1847,7 +1269,7 @@ fn validate_git_url(url: &str) -> Result<(), &'static str> {
 
 async fn list_repositories(
     State(state): State<Arc<AppState>>,
-    Query(q): Query<WorkflowRunsQuery>,
+    Query(q): Query<routes::WorkflowRunsQuery>,
 ) -> Result<Json<ListResponse<RepositoryView>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — surface
     // storage outage as 503 so the client does not read it as "no repos".
@@ -2033,352 +1455,6 @@ async fn list_conversation_messages(
     }
 }
 
-async fn get_artifact(
-    State(state): State<Arc<AppState>>,
-    Path((task_id, name)): Path<(String, String)>,
-) -> Result<Response, StatusCode> {
-    // Stage 2.2: a crafted name (../, absolute, ...) must not traverse out of
-    // the artifact root via store::read_artifact's join. Reject as 404 so a
-    // denial does not disclose whether the task/artifact exists.
-    if !is_safe_artifact_name(&name) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    match state.store.read_artifact_bytes(&task_id, &name).await {
-        Ok(Some(bytes)) => {
-            let mt = state
-                .store
-                .read_artifact_meta(&task_id, &name)
-                .await
-                .ok()
-                .flatten();
-            Ok(artifact_response(
-                bytes,
-                mt.as_ref().and_then(|m| m.media_type.as_deref()),
-                &name,
-                mt.as_ref().and_then(|m| m.sha256.as_deref()),
-            ))
-        }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("read_artifact failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn get_artifact_node(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path((task_id, name)): Path<(String, String)>,
-) -> Result<Response, StatusCode> {
-    // Stage 8 / line 257: node-side mirror of `get_artifact` so the node can
-    // fetch an upstream worker's `changes.patch` artifact with its own
-    // node-credential (no user JWT available on the node). Same safety:
-    // reject traversal names as 404.
-    if !is_safe_artifact_name(&name) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    // Hardening P0: authorize the caller node to read this producer task's
-    // artifact (workflow dependency producer -> consumer attempt owned by
-    // the caller). Always 404 on denial to avoid disclosing existence.
-    let allowed = state
-        .store
-        .can_node_read_upstream_artifact(&auth.node_id, &task_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("can_node_read_upstream_artifact failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    if !allowed {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    match state.store.read_artifact_bytes(&task_id, &name).await {
-        Ok(Some(bytes)) => {
-            let mt = state
-                .store
-                .read_artifact_meta(&task_id, &name)
-                .await
-                .ok()
-                .flatten();
-            Ok(artifact_response(
-                bytes,
-                mt.as_ref().and_then(|m| m.media_type.as_deref()),
-                &name,
-                mt.as_ref().and_then(|m| m.sha256.as_deref()),
-            ))
-        }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("read_artifact (node) failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn upload_artifact(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path(attempt_id): Path<String>,
-    headers: HeaderMap,
-    Json(req): Json<UploadArtifactRequest>,
-) -> Response {
-    // Stage 2.2: never let a crafted name escape the artifact root
-    // (../../etc/passwd, absolute paths, separators). Validated before the
-    // ownership check so a traversal attempt never reaches the store and
-    // never discloses attempt existence.
-    if !is_safe_artifact_name(&req.name) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
-        return code.into_response();
-    }
-    if req.content.len() > state.limits.artifact {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
-    // Hardening P1 item 15: artifact storage quota (see upload_artifact_raw).
-    if let Some(quota_mb) = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if quota_mb > 0 {
-            let used = state.store.artifact_storage_bytes().await.unwrap_or(0);
-            if used + req.content.len() as u64 > quota_mb * 1024 * 1024 {
-                return StatusCode::INSUFFICIENT_STORAGE.into_response();
-            }
-        }
-    }
-    match state
-        .store
-        .save_artifact_bytes(
-            &attempt_id,
-            &req.name,
-            req.content.as_bytes(),
-            req.media_type.as_deref(),
-            req.sha256.as_deref(),
-        )
-        .await
-    {
-        Ok(resp) => axum::Json(resp).into_response(),
-        Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
-            StatusCode::UNPROCESSABLE_ENTITY.into_response()
-        }
-        Err(crate::store::StoreArtifactError::InvalidAttemptId) => {
-            StatusCode::BAD_REQUEST.into_response()
-        }
-        Err(e) => {
-            tracing::error!("save_artifact failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-/// Stage 2.2 binary-safe artifact upload: the request body is raw bytes (not
-/// UTF-8 JSON), with the artifact name, optional media type, and optional hex
-/// SHA-256 carried in headers. Idempotent per (attempt_id, name) on the store.
-/// The node uses this for `changes.patch` (binary diffs) and any non-text
-/// artifact; the legacy JSON endpoint stays for text-only clients.
-async fn upload_artifact_raw(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path(attempt_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
-        return code.into_response();
-    }
-    if body.len() > state.limits.artifact {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
-    // Hardening P1 item 15: artifact storage quota — refuse uploads past
-    // `AGENTGRID_ARTIFACT_QUOTA_MB` (0 = unlimited) so the artifact volume
-    // cannot grow without bound.
-    if let Some(quota_mb) = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if quota_mb > 0 {
-            let used = state.store.artifact_storage_bytes().await.unwrap_or(0);
-            if used + body.len() as u64 > quota_mb * 1024 * 1024 {
-                return StatusCode::INSUFFICIENT_STORAGE.into_response();
-            }
-        }
-    }
-    let name = match headers
-        .get("x-artifact-name")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-    {
-        Some(n) => n,
-        None => return StatusCode::BAD_REQUEST.into_response(),
-    };
-    if !is_safe_artifact_name(&name) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let media_type = headers
-        .get("x-artifact-media-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let sha256 = headers
-        .get("x-artifact-sha256")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    match state
-        .store
-        .save_artifact_bytes(
-            &attempt_id,
-            &name,
-            &body,
-            media_type.as_deref(),
-            sha256.as_deref(),
-        )
-        .await
-    {
-        Ok(resp) => axum::Json(resp).into_response(),
-        Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
-            StatusCode::UNPROCESSABLE_ENTITY.into_response()
-        }
-        Err(crate::store::StoreArtifactError::InvalidAttemptId) => {
-            StatusCode::BAD_REQUEST.into_response()
-        }
-        Err(e) => {
-            tracing::error!("save_artifact_bytes failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-/// Hardening P0 (stored XSS / download safety): build a `Response` for a
-/// served artifact. A small allowlist of inline-safe media types may be
-/// served with their stored `Content-Type`; everything else is forced to
-/// `application/octet-stream`. HTML / SVG / JavaScript / XML and unknown
-/// types are always sent as an **attachment** with `Content-Disposition`,
-/// and every artifact response adds `X-Content-Type-Options: nosniff` so a
-/// browser never sniffs a download as HTML/script. `name` is encoded as a
-/// safe RFC 6266 `filename` (ASCII-only, control chars stripped).
-fn artifact_response(
-    bytes: Vec<u8>,
-    media_type: Option<&str>,
-    name: &str,
-    sha256: Option<&str>,
-) -> Response {
-    const INLINE_SAFE: &[&str] = &[
-        "application/octet-stream",
-        "text/plain",
-        "application/json",
-        "application/zip",
-        "application/gzip",
-        "application/x-tar",
-        "application/x-bzip2",
-        "image/png",
-        "image/jpeg",
-        "image/gif",
-        "image/webp",
-    ];
-    const ACTIVE: &[&str] = &[
-        "text/html",
-        "text/xml",
-        "application/xml",
-        "application/xhtml+xml",
-        "image/svg+xml",
-        "application/javascript",
-        "text/javascript",
-        "application/ecmascript",
-    ];
-    let stored = media_type.unwrap_or("application/octet-stream").trim();
-    let (content_type, attachment) = if ACTIVE.contains(&stored) {
-        ("application/octet-stream", true)
-    } else if INLINE_SAFE.contains(&stored) {
-        (stored, false)
-    } else {
-        // Unknown type: never trust the client-requested type inline.
-        ("application/octet-stream", true)
-    };
-    // ponytail: extension-based sniﬃng is a P2 follow-up; the allowlist +
-    // nosniff + attachment triplet already blocks inline exﬆecution.
-    let safe_name: String = name
-        .chars()
-        .filter(|c| c.is_ascii() && !c.is_ascii_control() && *c != '/' && *c != '\\' && *c != '"')
-        .collect::<String>()
-        .trim_start_matches('.')
-        .to_string();
-    let mut resp = (
-        [
-            (header::CONTENT_TYPE, content_type),
-            (
-                header::HeaderName::from_static("x-content-type-options"),
-                "nosniff",
-            ),
-            // Hardening P0 item 3: artifacts are opaque data, never a document
-            // context. `default-src 'none'` blocks any plugin/inline execution
-            // even if a browser ignores nosniff; CORP same-origin keeps a
-            // cross-origin page from reading artifact bytes.
-            (
-                header::HeaderName::from_static("content-security-policy"),
-                "default-src 'none'; frame-ancestors 'none'",
-            ),
-            (
-                header::HeaderName::from_static("cross-origin-resource-policy"),
-                "same-origin",
-            ),
-        ],
-        Bytes::from(bytes),
-    )
-        .into_response();
-    if attachment {
-        let cd = if safe_name.is_empty() {
-            "attachment".to_string()
-        } else {
-            format!("attachment; filename=\"{}\"", safe_name)
-        };
-        if let Ok(v) = axum::http::HeaderValue::from_str(&cd) {
-            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
-        }
-    }
-    // Hardening P2 item 36: expose the server-computed content hash so
-    // clients (web UI) can show the artifact's integrity digest.
-    if let Some(sha) = sha256 {
-        if let Ok(v) = axum::http::HeaderValue::from_str(sha) {
-            resp.headers_mut()
-                .insert(header::HeaderName::from_static("x-artifact-sha256"), v);
-        }
-    }
-    resp
-}
-
-/// A safe artifact name is a single path segment: no separators, no `.`
-/// traversal, no NUL, bounded length (Stage 2.2).
-fn is_safe_artifact_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 255 {
-        return false;
-    }
-    if name.contains('/') || name.contains('\\') || name.contains('\0') {
-        return false;
-    }
-    if name == "." || name == ".." || name.starts_with("../") || name.starts_with("..\\") {
-        return false;
-    }
-    name.chars().all(|c| !c.is_control())
-}
-
 /// Resolve the SSE `after` cursor for a reconnect. `Last-Event-ID` header
 /// (browser default) carries the global `ingest_id` of the last delivered
 /// event (Hardening P0 item 9), and an explicit `after_ingest` query wins.
@@ -2548,213 +1624,6 @@ async fn attempt_cancel_handler(
         cancel_requested: requested,
     })
     .into_response()
-}
-
-async fn cancel_task_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Path(task_id): Path<String>,
-) -> StatusCode {
-    match state.store.cancel_task(&task_id).await {
-        Ok(true) => {
-            let _ = state
-                .store
-                .audit(
-                    "user",
-                    auth.as_ref().map(|e| e.0.username.as_str()),
-                    "task.cancel",
-                    Some(&task_id),
-                    None,
-                )
-                .await;
-            StatusCode::OK
-        }
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("cancel_task failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct ApprovalListQuery {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    after_created_at: Option<String>,
-    #[serde(default)]
-    after_id: Option<String>,
-    #[serde(default)]
-    limit: Option<u64>,
-}
-
-async fn list_approvals_handler(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<ApprovalListQuery>,
-) -> Result<Json<ListResponse<ApprovalView>>, StatusCode> {
-    let status = q
-        .status
-        .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok());
-    // Hardening P2 item 20: keyset cursor — only a complete pair is a cursor.
-    let after = match (&q.after_created_at, &q.after_id) {
-        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
-        _ => None,
-    };
-    match state.store.list_approvals(status, after, q.limit).await {
-        Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
-                items.last().map(|a| format!("{},{}", a.created_at, a.id))
-            } else {
-                None
-            };
-            Ok(Json(ListResponse::new(items, next_cursor)))
-        }
-        Err(e) => {
-            tracing::error!("list_approvals failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn allow_approval_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Path(id): Path<String>,
-    body: Option<Json<AnswerApprovalBody>>,
-) -> StatusCode {
-    let actor = auth
-        .as_ref()
-        .map(|e| e.0.username.as_str())
-        .unwrap_or("system");
-    let reason = body.and_then(|b| b.0.reason).filter(|s| !s.is_empty());
-    match state
-        .store
-        .answer_approval(&id, ApprovalEvent::Allow, reason.as_deref(), actor)
-        .await
-    {
-        Ok(_) => StatusCode::OK,
-        Err(e) => {
-            tracing::error!("allow_approval failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-async fn deny_approval_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Path(id): Path<String>,
-    body: Option<Json<AnswerApprovalBody>>,
-) -> StatusCode {
-    let actor = auth
-        .as_ref()
-        .map(|e| e.0.username.as_str())
-        .unwrap_or("system");
-    let reason = body
-        .and_then(|b| b.0.reason)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "denied by operator".to_string());
-    match state
-        .store
-        .answer_approval(&id, ApprovalEvent::Deny, Some(&reason), actor)
-        .await
-    {
-        Ok(_) => StatusCode::OK,
-        Err(e) => {
-            tracing::error!("deny_approval failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct AnswerApprovalBody {
-    /// Optional operator reason recorded with the decision (shown in the UI/CLI
-    /// and audit). Omitted = default placeholder.
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateApprovalBody {
-    attempt_id: String,
-    session_id: Option<String>,
-    permission: serde_json::Value,
-    #[serde(default)]
-    scope: Option<String>,
-}
-
-/// Stage 5: an ACP agent's `session/request_permission` creates a durable,
-/// operator-answerable approval. Returns its id so the daemon can poll.
-async fn create_approval_for_task_handler(
-    State(state): State<Arc<AppState>>,
-    _auth: Option<Extension<AuthedUser>>,
-    Path(task_id): Path<String>,
-    Json(body): Json<CreateApprovalBody>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let perm = serde_json::to_string(&body.permission).unwrap_or_default();
-    match state
-        .store
-        .create_approval(
-            &task_id,
-            &body.attempt_id,
-            body.session_id.as_deref(),
-            &perm,
-            300,
-            None,
-            body.scope.as_deref().unwrap_or("session"),
-        )
-        .await
-    {
-        Ok(id) => Ok(Json(serde_json::json!({ "id": id }))),
-        Err(e) => {
-            tracing::error!("create_approval failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn get_approval_handler(
-    State(state): State<Arc<AppState>>,
-    _auth: Option<Extension<AuthedUser>>,
-    Path(id): Path<String>,
-) -> Result<Json<ApprovalView>, StatusCode> {
-    match state.store.get_approval(&id).await {
-        Ok(Some(v)) => Ok(Json(v)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("get_approval failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn retry_task_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Path(task_id): Path<String>,
-) -> StatusCode {
-    match state.store.retry_task(&task_id).await {
-        Ok(true) => {
-            let _ = state
-                .store
-                .audit(
-                    "user",
-                    auth.as_ref().map(|e| e.0.username.as_str()),
-                    "task.retry",
-                    Some(&task_id),
-                    None,
-                )
-                .await;
-            StatusCode::OK
-        }
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("retry_task failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
 }
 
 async fn ingest_events(
@@ -3084,97 +1953,5 @@ mod sse_tests {
         // Pre-0037 client: no after_ingest, no Last-Event-ID — the per-attempt
         // after_sequence is passed through unchanged.
         assert_eq!(sse_resume_after(None, 42, None), (None, 42));
-    }
-}
-
-#[cfg(test)]
-mod artifact_response_tests {
-    use super::artifact_response;
-    use axum::body::{to_bytes, Body};
-    use axum::http::Response;
-
-    fn hdr(resp: &Response<Body>, name: &str) -> Option<String> {
-        resp.headers()
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-    }
-
-    #[tokio::test]
-    async fn html_served_as_attachment_octetstream_with_nosniff() {
-        let resp = artifact_response(b"<html></html>".to_vec(), Some("text/html"), "x.html", None);
-        assert_eq!(
-            hdr(&resp, "content-type").as_deref(),
-            Some("application/octet-stream")
-        );
-        assert_eq!(
-            hdr(&resp, "x-content-type-options").as_deref(),
-            Some("nosniff")
-        );
-        let cd = hdr(&resp, "content-disposition").unwrap_or_default();
-        assert!(cd.starts_with("attachment"), "cd={cd}");
-        assert!(cd.contains("filename=\"x.html\""));
-        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn svg_served_as_attachment_octetstream_with_nosniff() {
-        let resp = artifact_response(b"<svg/>".to_vec(), Some("image/svg+xml"), "logo.svg", None);
-        assert_eq!(
-            hdr(&resp, "content-type").as_deref(),
-            Some("application/octet-stream")
-        );
-        assert_eq!(
-            hdr(&resp, "x-content-type-options").as_deref(),
-            Some("nosniff")
-        );
-        let cd = hdr(&resp, "content-disposition").unwrap_or_default();
-        assert!(cd.starts_with("attachment") && cd.contains("filename=\"logo.svg\""));
-    }
-
-    #[tokio::test]
-    async fn png_allowed_inline_no_attachment() {
-        let resp = artifact_response(b"\x89PNG".to_vec(), Some("image/png"), "blob.png", None);
-        assert_eq!(hdr(&resp, "content-type").as_deref(), Some("image/png"));
-        assert_eq!(
-            hdr(&resp, "x-content-type-options").as_deref(),
-            Some("nosniff")
-        );
-        assert!(
-            hdr(&resp, "content-disposition").is_none(),
-            "no attachment for inline-safe"
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_type_forced_octetstream_attachment() {
-        let resp = artifact_response(
-            b"x".to_vec(),
-            Some("application/x-crazy"),
-            "weird.dat",
-            None,
-        );
-        assert_eq!(
-            hdr(&resp, "content-type").as_deref(),
-            Some("application/octet-stream")
-        );
-        assert_eq!(
-            hdr(&resp, "x-content-type-options").as_deref(),
-            Some("nosniff")
-        );
-        assert!(hdr(&resp, "content-disposition")
-            .unwrap_or_default()
-            .contains("attachment"));
-    }
-
-    #[tokio::test]
-    async fn filename_control_and_separator_chars_stripped() {
-        // name "../e<TAB>v<QUOTE>x" -> separators/control/quote stripped to "evx"
-        let resp = artifact_response(b"x".to_vec(), Some("text/html"), "../e\tv\"x", None);
-        let cd = hdr(&resp, "content-disposition").unwrap_or_default();
-        assert!(
-            cd.contains("filename=\"evx\"") || cd == "attachment",
-            "cd={cd}"
-        );
     }
 }
