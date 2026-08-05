@@ -27,6 +27,16 @@ use serde::{Deserialize, Serialize};
 // Allows terminal state transitions to be durably recorded even when
 // the outbox is full of Stdout/Stderr/Metric events.
 const TERMINAL_RESERVED_BYTES: u64 = 64 * 1024;
+/// Plan 370: completion outbox compacts (markers folded, acked lines
+/// dropped) once the file exceeds this many bytes. Default 1 MiB; tune via
+/// `AGENTGRID_COMPLETION_COMPACT_BYTES`.
+fn compact_threshold() -> u64 {
+    std::env::var("AGENTGRID_COMPLETION_COMPACT_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024 * 1024)
+}
+
 
 #[derive(Serialize, Deserialize)]
 struct EventLine {
@@ -413,17 +423,54 @@ impl CompletionOutbox {
     }
 
     /// Drop a completion line once the CP has acked it (terminal state set).
+    /// Plan 370: append-only `{"drop":"<attempt_id>"}` marker (O(1), no
+    /// rewrite) instead of rewriting the whole file per ack. The file is
+    /// compacted (markers folded, dropped lines removed) only when it grows
+    /// past [`CompletionOutbox::compact`]'s threshold, so the common path
+    /// stays O(1) and the durable file stays bounded.
     pub fn ack(&self, attempt_id: &str) -> Result<()> {
         let _g = self.file.lock().unwrap();
+        let marker = format!("{{\"drop\":\"{attempt_id}\"}}\n");
+        use std::io::Write;
+        let mut f = match std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        f.write_all(marker.as_bytes())?;
+        f.sync_all()?;
+        fsync_parent(&self.path)?;
+        // Threshold compaction: fold markers + drop acked lines in one pass
+        // when the file grows large, keeping startup/reconciliation O(n) only
+        // occasionally.
+        if f.metadata()?.len() > compact_threshold() {
+            drop(f);
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    /// Rewrite the file keeping only un-acked completions and dropping stale
+    /// markers. Called by [`CompletionOutbox::ack`] at the compaction
+    /// threshold and by startup recovery when the marker set is large.
+    fn compact(&self) -> Result<()> {
         let content = match std::fs::read_to_string(&self.path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
+        let dropped = Self::dropped_attempts(&content);
         let mut survivors = String::new();
         for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
+            }
+            if serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| v.get("drop").map(|d| d.as_str().unwrap_or_default().to_string()))
+                .is_some()
+            {
+                continue; // drop markers never survive compaction
             }
             let l: CompletionLine = match serde_json::from_str(line) {
                 Ok(l) => l,
@@ -433,15 +480,13 @@ impl CompletionOutbox {
                     continue;
                 }
             };
-            if l.attempt_id != attempt_id {
+            if !dropped.contains(&l.attempt_id) {
                 survivors.push_str(line);
                 survivors.push('\n');
             }
         }
         let tmp = self.path.with_extension("jsonl.tmp");
         std::fs::write(&tmp, &survivors)?;
-        // Hardening P1 item 11: fsync the temp file size/data and the parent
-        // dir before the rename so the ack compaction survives a power loss.
         {
             let f = std::fs::OpenOptions::new().write(true).open(&tmp)?;
             f.sync_all()?;
@@ -449,6 +494,19 @@ impl CompletionOutbox {
         fsync_parent(&tmp)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
+    }
+
+    /// Attempt ids recorded as dropped in `content` (from `{"drop": ...}`
+    /// markers). Idempotent under repeated markers.
+    fn dropped_attempts(content: &str) -> std::collections::HashSet<String> {
+        content
+            .lines()
+            .filter_map(|l| {
+                serde_json::from_str::<serde_json::Value>(l)
+                    .ok()
+                    .and_then(|v| v.get("drop").and_then(|d| d.as_str().map(String::from)))
+            })
+            .collect()
     }
 
     /// All pending completion records (for startup reconciliation). Hardening
@@ -461,6 +519,9 @@ impl CompletionOutbox {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(e.into()),
         };
+        // Plan 370: drop markers are folded into the effective pending set
+        // (an attempt with a marker is acked, not pending).
+        let dropped = Self::dropped_attempts(&content);
         let mut out = vec![];
         let mut quarantined = String::new();
         let mut clean = String::new();
@@ -468,11 +529,21 @@ impl CompletionOutbox {
             if line.trim().is_empty() {
                 continue;
             }
+            // Skip drop markers entirely.
+            if serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .map(|v| v.get("drop").is_some())
+                .unwrap_or(false)
+            {
+                continue;
+            }
             match serde_json::from_str::<CompletionLine>(line) {
                 Ok(l) => {
                     clean.push_str(line);
                     clean.push('\n');
-                    out.push(l);
+                    if !dropped.contains(&l.attempt_id) {
+                        out.push(l);
+                    }
                 }
                 Err(_) => {
                     quarantined.push_str(line);
@@ -747,6 +818,59 @@ mod tests {
         assert_eq!(r.acp_session_id.as_deref(), Some("sess-1"));
         co2.ack("att-9").unwrap();
         assert!(co2.pending().unwrap().is_empty(), "acked completion gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Plan 370: ack is append-only (drop marker) and pending() folds the
+    /// markers; compaction rewrites only at the size threshold.
+    #[test]
+    fn completion_outbox_ack_appends_marker_and_compacts_at_threshold() {
+        let dir = tmpdir("comp370");
+        let co = CompletionOutbox::open(&dir).unwrap();
+        let req = CompleteAttemptRequest {
+            exit_code: 0,
+            commit_sha: Some("abc".into()),
+            error_code: None,
+            resolved_base_sha: None,
+            remote_head_at_start: None,
+            remote_head_at_finish: None,
+            acp_session_id: None,
+            plan: None,
+            provenance: None,
+            pending_artifacts: vec![],
+        };
+        co.record("att-1", &req, "f").unwrap();
+        co.record("att-2", &req, "f").unwrap();
+        // ack appends a marker; both lines stay on disk until compaction.
+        co.ack("att-1").unwrap();
+        let content = std::fs::read_to_string(co.path.clone()).unwrap();
+        assert!(
+            content.contains("\"drop\":\"att-1\""),
+            "ack must append a drop marker, not rewrite: {content}"
+        );
+        assert!(
+            content.contains("att-2"),
+            "un-acked completion line must survive an ack (no full rewrite)"
+        );
+        // pending() folds the marker: att-1 gone, att-2 still pending.
+        let pending = co.pending().unwrap();
+        let ids: Vec<&str> = pending.iter().map(|l| l.attempt_id.as_str()).collect();
+        assert_eq!(ids, vec!["att-2"]);
+        // Forced tiny threshold -> ack triggers compaction: markers folded,
+        // acked line physically gone.
+        std::env::set_var("AGENTGRID_COMPLETION_COMPACT_BYTES", "1");
+        co.ack("att-2").unwrap();
+        std::env::remove_var("AGENTGRID_COMPLETION_COMPACT_BYTES");
+        let content = std::fs::read_to_string(co.path.clone()).unwrap();
+        assert!(
+            !content.contains("\"drop\""),
+            "compaction must fold markers: {content}"
+        );
+        assert!(
+            !content.contains("att-1") && !content.contains("att-2"),
+            "compaction must physically drop acked lines: {content}"
+        );
+        assert!(co.pending().unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

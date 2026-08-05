@@ -367,7 +367,7 @@
 - [x] Писать временный файл с уникальным именем. (`record`/`ack` use sibling `<path>.jsonl.tmp[-rec]` files unique per path; consumed by rename.)
 - [x] `sync_all` перед rename. (temp file `sync_all()` before the rename in both record and ack compaction paths.)
 - [x] `fsync` parent directory после rename. (new `fsync_parent(path)` helper fdatasyncs the parent directory after sync_all+before/around rename in record and both ack paths; covers the durability gap where a renamed-in change survives data sync but the directory entry change is still in the page cache.)
-- [ ] Использовать immutable segments + checkpoint вместо полного rewrite на ACK.
+- [x] Использовать immutable segments + checkpoint вместо полного rewrite на ACK. (outbox.rs: ack теперь append-only `{"drop":"<attempt_id>"}` marker (O(1), fsync + fsync_parent); pending() фолдит маркеры; compact() переписывает файл только при превышении `AGENTGRID_COMPLETION_COMPACT_BYTES` (default 1 MiB). Тест `completion_outbox_ack_appends_marker_and_compacts_at_threshold`)
 - [x] Терпимо обрабатывать truncated trailing JSON line. (`emit_line` non-JSON → raw stdout/stderr event; byte loop flushes partial EOF tail; oversized line truncated+flushed)
 - [x] Карантинить повреждённые middle records, не теряя остальные. (`quarantine_rewrite` moves unparseable lines to `<outbox>/quarantine/<file>-<ts>` atomically; valid records survive. Tests: `completion_outbox_quarantines_corrupt_line`)
 
