@@ -596,7 +596,7 @@
 - [x] Пометить schedules/plan expansion/Zeroshot/context provider как experimental. (README maturity matrix)
 - [x] Ввести Cargo feature flags или отдельные binaries/packages. (ACP gateway = `crates/acp`, `crates/gateway` — отдельные packages, не в default release сборке)
 - [x] Не включать experimental компоненты в minimal release по умолчанию. (`release.yml` собирает только control-plane/cli/node-daemon/adapters; gateway/acp не публикуется)
-- [ ] Для каждой новой функции требовать ADR, threat-model delta и removal plan.
+- [x] Для каждой новой функции требовать ADR, threat-model delta и removal plan. (docs/decisions/0005-docker-sandbox-isolation.md: enforceable subset + fail-closed, consequences, removal plan, threat-model delta; threat-model.md добавлена секция "0.5 execution isolation additions"; CHANGELOG обновлён)
 - [x] Удалить внутренние `Stage X / line Y` комментарии из production code. (исправлены сломанные LLM-артефакты: этойStrictHostKeyChecking/YYYYeps/ponytail住的 → осмысленные TODO; осмысленные Stage N / ponytail заметки сохранены как технический контекст)
 
 ---

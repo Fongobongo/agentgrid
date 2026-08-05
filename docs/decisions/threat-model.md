@@ -115,5 +115,26 @@ External ACP clients can drive the grid as an ACP agent (Stage 6) since 0.2.
 
 - Strong per-adapter command interception (needs structured tool calls — ACP or
   a backend policy), so wrapper-only adapters are not claimed "strict".
-- Network/FS isolation beyond the optional Docker sandbox profile.
+- Per-connection egress audit and per-CIDR egress filtering (docker CLI cannot
+  express them; see ADR 0005 — `restricted` maps to `--network none` and
+  `allowlist:` refuses to start, fail-closed, until an egress proxy lands).
 - Multi-region / shared-nothing CP failover (single active instance by design).
+
+## 0.5 execution isolation additions (ADR 0005)
+
+- **Orphan containers:** containers are stamped `--label agentgrid.node=<id>`
+  and removed at daemon startup, so a SIGKILLed daemon's stranded containers
+  are reclaimed. (P1 633)
+- **Sandbox smoke test:** adapters are probed inside the image
+  (`command -v <bin>`) at startup; a missing in-image adapter marks the node
+  degraded. (P1 637)
+- **Runtime probe:** `docker version --format {{.Server.Version}}` at startup
+  when the sandbox is configured; an unreachable runtime is loud, not silent.
+  (P1 617)
+- **Artifact mount:** `AGENTGRID_SANDBOX_ARTIFACT_DIR` mounts a writable
+  `/artifacts` independent of `--read-only`, so a read-only worktree still
+  has a writable output place. (P1 630)
+- **Honest capability report:** `enforced_limits` is true only when Docker +
+  resource limits + effective network `none` all hold; a bridge/unrestricted
+  node reports false rather than claiming isolation it does not apply.
+  (P1 960)

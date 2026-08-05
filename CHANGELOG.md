@@ -145,6 +145,17 @@ All notable changes to this project are documented in this file.
   credentials are never attached. Tests assert cap-drop / no-new-privileges /
   network-none / read-only+tmpfs / pids-memory-cpus flags and the digest pin are
   emitted. `AGENTGRID_SANDBOX_IMAGE` has no default credentials change.
+- **Sandbox isolation (ADR 0005):** task network modes map to docker-native
+  networks (`restricted` → `--network none`, strictly more isolated than
+  promised; `unrestricted` → `bridge`). `allowlist:` egress specs are
+  validated but refused at startup — docker cannot express per-CIDR egress
+  filtering, so running would silently mean full egress. Every container is
+  stamped `--label agentgrid.node=<id>` and this daemon's orphans are removed
+  at startup. Adapters are smoke-tested inside the image (`command -v <bin>`);
+  a missing in-image adapter marks the node degraded. The runtime version is
+  probed at startup. `AGENTGRID_SANDBOX_ARTIFACT_DIR` mounts a writable
+  `/artifacts` independent of `--read-only`. `enforced_limits` in heartbeats
+  is true only when Docker + resource limits + network `none` all hold.
 
 ### Security (hardening P0/P1/P2 — session hardening pass)
 
