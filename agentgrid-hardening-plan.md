@@ -353,13 +353,13 @@
 
 ### Если SQLite
 
-- [ ] Добавить локальную node SQLite DB.
+- [x] ~~Добавить локальную node SQLite DB.~~ (N/A — ветка "Если SQLite" не выбрана; ADR зафиксировал segmented-JSONL дизайн, все пункты ветки "Если segmented files" выполнены)
 - [x] Хранить event payload, attempt, sequence, state и timestamps. (EventOutbox JSONL: seq, type, payload; per-attempt file; monotonic seq per attempt)
 - [x] Хранить полный `CompleteAttemptRequest`. (CompletionOutbox persists complete request in completions.jsonl; idempotent redelivery on restart)
 - [x] Хранить pending artifact manifests. (artifact_spool::pending returns (attempt_id, name, path) for all staged files; poll_loop retries upload on restart)
 - [x] Удалять rows только после server ACK. (drain_pending returns unacked; CP ingest is idempotent ON CONFLICT (attempt_id, sequence) DO NOTHING; node removes only acked)
 - [x] Использовать WAL, `synchronous=FULL` для критичных completion records или обосновать NORMAL. (CP: WAL + synchronous=NORMAL (configurable); outbox/completion use atomic tmp+fsync+rename for durability; completion_outbox has its own fsync)
-- [ ] Добавить local DB integrity check/recovery.
+- [x] ~~Добавить local DB integrity check/recovery.~~ (N/A — SQLite ветка не выбрана; вместо неё: quarantine_rewrite карантинит повреждённые middle records, truncated trailing line терпится, atomic tmp+fsync+rename защищает от torn writes)
 
 ### Если segmented files
 
