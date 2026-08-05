@@ -715,8 +715,8 @@
 - [x] Публиковать `adapter-mock`.
 - [x] Публиковать `adapter-claude`.
 - [x] Публиковать `adapter-opencode`. (добавлен в SHA256SUMS + artifacts + release)
-- [ ] Публиковать `agentgrid-gateway`, если он входит в release.
-- [ ] Публиковать `agentgrid-acp-agent`, если он входит в release.
+- [x] Публиковать `agentgrid-gateway`. (решение: входит в release; `--version` добавлен через clap `version` атрибут; добавлен в build/smoke/checksums/upload release.yml)
+- [x] Публиковать `agentgrid-acp-agent`. (решение: входит в release; `--version` добавлен (env CARGO_PKG_VERSION); добавлен в build/smoke/checksums/upload release.yml)
 - [x] Публиковать web bundle/version manifest. (web/dist загружается как artifact)
 - [x] Проверять checksums всех опубликованных файлов. (`SHA256SUMS.<target>` в release assets)
 - [x] Добавить install/upgrade/rollback smoke test. (release.yml smoke step: каждый опубликованный бинарь стартует и печатает --version перед сборкой checksums; adapter-mock без флага — пропущен)

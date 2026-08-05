@@ -61,11 +61,13 @@ jobs:
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }} \
               -p agentgrid-control-plane -p agentgrid-cli \
-              -p agentgrid-node-daemon -p agentgrid-adapters
+              -p agentgrid-node-daemon -p agentgrid-adapters \
+              -p agentgrid-gateway -p agentgrid-acp
           else
             cargo build --release --target ${{ matrix.target }} \
               -p agentgrid-control-plane -p agentgrid-cli \
-              -p agentgrid-node-daemon -p agentgrid-adapters
+              -p agentgrid-node-daemon -p agentgrid-adapters \
+              -p agentgrid-gateway -p agentgrid-acp
           fi
 
       - name: binary size guardrail
@@ -86,13 +88,15 @@ jobs:
           ./ag --version
           ./agentgrid-control-plane --version
           ./agentgrid-node-daemon --version
+          ./agentgrid-gateway --version
+          ./agentgrid-acp-agent --version
           ./adapter-claude --version
           ./adapter-opencode --version
 
       - name: checksums (SHA256SUMS)
         run: |
           cd "target/${{ matrix.target }}/release"
-          sha256sum agentgrid-control-plane ag agentgrid-node-daemon adapter-mock adapter-claude adapter-opencode \
+          sha256sum agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-opencode \
             > SHA256SUMS
           cat SHA256SUMS
 
@@ -104,6 +108,8 @@ jobs:
             target/${{ matrix.target }}/release/agentgrid-control-plane
             target/${{ matrix.target }}/release/ag
             target/${{ matrix.target }}/release/agentgrid-node-daemon
+            target/${{ matrix.target }}/release/agentgrid-gateway
+            target/${{ matrix.target }}/release/agentgrid-acp-agent
             target/${{ matrix.target }}/release/adapter-mock
             target/${{ matrix.target }}/release/adapter-claude
             target/${{ matrix.target }}/release/adapter-opencode
@@ -133,7 +139,8 @@ jobs:
           mkdir -p release-assets
           find artifacts -type f \
             \( -name 'agentgrid-control-plane' -o -name 'ag' \
-               -o -name 'agentgrid-node-daemon' -o -name 'adapter-mock' \
+               -o -name 'agentgrid-node-daemon' -o -name 'agentgrid-gateway' \
+               -o -name 'agentgrid-acp-agent' -o -name 'adapter-mock' \
                -o -name 'adapter-claude' -o -name 'adapter-opencode' -o -name 'SHA256SUMS' \) \
             -exec cp {} release-assets/ \;
           # Namespace SHA256SUMS per target to avoid collisions.

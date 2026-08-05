@@ -9,8 +9,17 @@ use agentgrid_acp::gateway::GatewayAgent;
 use agentgrid_acp::server::AcpServer;
 use tokio::io::{stdin, stdout};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Hardening plan 719: `--version` support so the release smoke test (and
+    // operators) can verify the shipped binary.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("agentgrid-acp-agent {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    tokio::runtime::Runtime::new().expect("tokio runtime").block_on(async_main());
+}
+
+async fn async_main() {
     let server =
         std::env::var("AGENTGRID_SERVER").unwrap_or_else(|_| "http://127.0.0.1:7800".into());
     let token = std::env::var("AGENTGRID_TOKEN").ok();

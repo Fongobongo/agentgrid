@@ -66,7 +66,7 @@ fn load_admins() -> Vec<i64> {
 }
 
 #[derive(clap::Parser)]
-#[command(name = "agentgrid-gateway")]
+#[command(name = "agentgrid-gateway", version)]
 enum Args {
     /// Run the chat bridge (Telegram long-poll loop).
     Run(RunArgs),
@@ -206,6 +206,8 @@ impl<'a> ControlPlane<'a> {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
         };
         let r = self.post("/v1/tasks").json(&req).send().await?;
         let status = r.status();
