@@ -814,7 +814,7 @@
 - [x] Скачивать активные artifacts как attachment. (web TaskDetails: Download-ссылки на changes.patch / validation.log через /v1/tasks/{id}/artifacts/{name}; сервер отдаёт Content-Disposition attachment для активных типов)
 - [x] Добавить pagination для длинных списков. (серверные caps: tasks/events limit, keyset cursor; web: TaskDetails 5000-cap с окном 4000, Dashboard last-10 — клиентские ограничения для длинных списков)
 - [x] Добавить error states вместо пустых таблиц при API failure. (Dashboard/Nodes/Approvals/Skills/TaskDetails через ErrorBox; Workflows через .error banner — ошибки показаны, пустых таблиц при failure нет)
-- [ ] Добавить component/API tests.
+- [x] Добавить component/API tests. (crates/control-plane/tests/component.rs: реальный TCP-сервер (axum::serve на ephemeral порту), health/metrics по сети + полный auth→task flow; 401 без токена; reqwest dev-dep)
 - [x] Добавить CSP и security headers. (per-route CSP already set on the SPA shell + artifact responses; new `security_headers_middleware` applies default `Referrer-Policy: no-referrer` + a restrictive `Permissions-Policy` (no camera/mic/geolocation/etc.) to every response; HSTS opt-in via `AGENTGRID_HSTS=1` so a plain-HTTP/reverse-proxixed TLS CP does not pin the wrong cert. Test `security_headers_applied_by_default`.)
 
 ## 37. CLI/TUI — P2/P3
