@@ -5,7 +5,7 @@
 //! persistence in Stage 2.1.
 
 mod auth;
-use auth::{AuthedUser, Claims};
+use auth::Claims;
 mod config;
 mod middleware;
 mod routes;
@@ -20,12 +20,10 @@ use crate::config::{env_usize, EventRate, Limits, LoginRate, SetupToken, SETUP_T
 use crate::store::is_safe_opaque_id;
 use std::sync::Arc;
 
-use agentgrid_common::{McpServer, McpServerCreate};
 use axum::{
-    extract::{DefaultBodyLimit, Extension, Path, Query, State},
-    http::StatusCode,
+    extract::DefaultBodyLimit,
     routing::{delete, get, post},
-    Json, Router,
+    Router,
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use store::Store;
@@ -262,7 +260,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health/live", get(auth::health_live))
         .route("/health/ready", get(auth::health_ready))
-        .route("/metrics", get(metrics))
+        .route("/metrics", get(routes::maintenance::metrics))
         .route(
             "/v1/tasks",
             post(routes::tasks::create_task).get(routes::tasks::list_tasks),
@@ -308,22 +306,53 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/auth/setup", post(auth::auth_setup))
         .route("/v1/auth/login", post(auth::auth_login))
         .route("/v1/auth/logout", post(auth::auth_logout))
-        .route("/v1/policy/evaluate", post(evaluate_policy))
-        .route("/v1/skills", get(list_skills_trust_handler))
-        .route("/v1/skills/{name}", get(get_skill_trust_handler))
-        .route("/v1/skills/{name}/trust", post(trust_skill_handler))
-        .route("/v1/skills/{name}/untrust", post(untrust_skill_handler))
+        .route(
+            "/v1/policy/evaluate",
+            post(routes::profiles::evaluate_policy),
+        )
+        .route(
+            "/v1/skills",
+            get(routes::profiles::list_skills_trust_handler),
+        )
+        .route(
+            "/v1/skills/{name}",
+            get(routes::profiles::get_skill_trust_handler),
+        )
+        .route(
+            "/v1/skills/{name}/trust",
+            post(routes::profiles::trust_skill_handler),
+        )
+        .route(
+            "/v1/skills/{name}/untrust",
+            post(routes::profiles::untrust_skill_handler),
+        )
         .route(
             "/v1/mcp-servers",
-            get(list_mcp_servers_handler).post(create_mcp_server_handler),
+            get(routes::profiles::list_mcp_servers_handler)
+                .post(routes::profiles::create_mcp_server_handler),
         )
-        .route("/v1/mcp-servers/{id}", delete(delete_mcp_server_handler))
-        .route("/v1/profiles", get(list_profiles_handler))
-        .route("/v1/profiles/{id}", get(get_profile_handler))
-        .route("/v1/profiles/{id}", post(create_profile_handler))
-        .route("/v1/profiles/{id}/activate", post(activate_profile_handler))
-        .route("/v1/admin/backup", post(admin_backup))
-        .route("/v1/admin/storage-gc", post(storage_gc_handler))
+        .route(
+            "/v1/mcp-servers/{id}",
+            delete(routes::profiles::delete_mcp_server_handler),
+        )
+        .route("/v1/profiles", get(routes::profiles::list_profiles_handler))
+        .route(
+            "/v1/profiles/{id}",
+            get(routes::profiles::get_profile_handler),
+        )
+        .route(
+            "/v1/profiles/{id}",
+            post(routes::profiles::create_profile_handler),
+        )
+        .route(
+            "/v1/profiles/{id}/activate",
+            post(routes::profiles::activate_profile_handler),
+        )
+        .route("/v1/admin/backup", post(routes::maintenance::admin_backup))
+        .route(
+            "/v1/admin/storage-gc",
+            post(routes::maintenance::storage_gc_handler),
+        )
         .route("/v1/nodes", get(routes::nodes::list_nodes))
         .route(
             "/v1/nodes/enrollment-token",
@@ -465,752 +494,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn(middleware::request_id_middleware))
         .fallback(middleware::spa_fallback)
         .with_state(state)
-}
-
-async fn admin_backup(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<BackupRequest>,
-) -> StatusCode {
-    match state.store.backup_to(&req.path).await {
-        Ok(()) => StatusCode::OK,
-        Err(e) => {
-            tracing::error!("backup failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct BackupRequest {
-    path: String,
-}
-
-/// Hardening P1 item 15: `ag storage gc` — reconcile the artifact tree against
-/// the metadata table. `dry_run=true` only reports drift
-/// `{orphan_files, orphan_bytes, metadata_without_file, free_mb}`; `false`
-/// deletes orphan files and prunes dangling metadata rows.
-#[derive(serde::Deserialize)]
-struct StorageGcRequest {
-    #[serde(default)]
-    dry_run: bool,
-}
-
-async fn storage_gc_handler(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<StorageGcRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    match state.store.storage_reconcile(req.dry_run).await {
-        Ok((orphan_files, orphan_bytes, metadata_without_file)) => {
-            let free = state.store.free_bytes() / (1024 * 1024);
-            let _ = state
-                .store
-                .audit(
-                    "system",
-                    None,
-                    "storage.gc",
-                    None,
-                    Some(
-                        &serde_json::json!({
-                            "dry_run": req.dry_run,
-                            "orphan_files": orphan_files,
-                            "orphan_bytes": orphan_bytes,
-                            "metadata_without_file": metadata_without_file,
-                        })
-                        .to_string(),
-                    ),
-                )
-                .await;
-            Ok(Json(serde_json::json!({
-                "dry_run": req.dry_run,
-                "orphan_files": orphan_files,
-                "orphan_bytes": orphan_bytes,
-                "metadata_without_file": metadata_without_file,
-                "free_mb": free,
-            })))
-        }
-        Err(e) => {
-            tracing::error!("storage gc failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-/// its verdict. Fail-closed: a provider error yields `ask`, never `allow`.
-async fn evaluate_policy(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<EvaluatePolicyRequest>,
-) -> Json<agentgrid_common::PolicyVerdict> {
-    let level = req.autonomy.unwrap_or_default();
-    let verdict = agentgrid_common::BuiltinPolicyProvider::new()
-        .evaluate_with(level, &req.command, &req.cwd)
-        .unwrap_or_else(|e| agentgrid_common::PolicyVerdict::fail_closed(&e.0));
-    // Fail-closed audit: every policy decision is recorded so dangerous commands
-    // are never silent.
-    let payload = serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".to_string());
-    let _ = state
-        .store
-        .audit(
-            "system",
-            None,
-            "policy.evaluate",
-            Some(&req.command),
-            Some(&payload),
-        )
-        .await;
-    Json(verdict)
-}
-
-// ---- Skill trust (Stage 9.2) ----
-
-/// Query param for listing trust: `?source=project` filters by source tier.
-#[derive(serde::Deserialize)]
-struct SkillTrustQuery {
-    source: Option<String>,
-}
-
-async fn list_skills_trust_handler(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<SkillTrustQuery>,
-) -> Result<Json<Vec<agentgrid_common::SkillTrustView>>, StatusCode> {
-    let rows = state.store.list_skill_trust().await.map_err(|e| {
-        tracing::error!("list_skill_trust failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    Ok(Json(match q.source {
-        Some(s) => rows.into_iter().filter(|r| r.source == s).collect(),
-        None => rows,
-    }))
-}
-
-async fn get_skill_trust_handler(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<SkillTrustQuery>,
-    Path(name): Path<String>,
-) -> Result<Json<agentgrid_common::SkillTrustView>, StatusCode> {
-    let source = q.source.unwrap_or_else(|| "project".to_string());
-    state
-        .store
-        .get_skill_trust(&name, &source)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            tracing::error!("get_skill_trust failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
-}
-
-async fn trust_skill_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Query(q): Query<SkillTrustQuery>,
-    Path(name): Path<String>,
-) -> StatusCode {
-    set_skill_trust(state, auth, &name, q.source.as_deref(), true).await
-}
-
-async fn untrust_skill_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Query(q): Query<SkillTrustQuery>,
-    Path(name): Path<String>,
-) -> StatusCode {
-    set_skill_trust(state, auth, &name, q.source.as_deref(), false).await
-}
-
-/// Stage 13: list all registered MCP servers.
-async fn list_mcp_servers_handler(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<McpServer>>, StatusCode> {
-    // Hardening P2 item 19: never return an empty list on a DB error — surface
-    // storage outage as 503 so the client does not read it as "no servers".
-    match state.store.list_mcp_servers().await {
-        Ok(s) => Ok(Json(s)),
-        Err(e) => {
-            tracing::error!("list_mcp_servers failed: {e}");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-/// Stage 13: register (or replace) an MCP server in the operator registry.
-async fn create_mcp_server_handler(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<McpServerCreate>,
-) -> Result<Json<McpServer>, StatusCode> {
-    state
-        .store
-        .upsert_mcp_server(&req)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            tracing::warn!("create_mcp_server failed: {e}");
-            StatusCode::BAD_REQUEST
-        })
-}
-
-/// Stage 13: delete an MCP server from the registry.
-async fn delete_mcp_server_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> StatusCode {
-    match state.store.delete_mcp_server(&id).await {
-        Ok(true) => StatusCode::NO_CONTENT,
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("delete_mcp_server failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-async fn set_skill_trust(
-    state: Arc<AppState>,
-    auth: Option<Extension<AuthedUser>>,
-    name: &str,
-    source: Option<&str>,
-    trusted: bool,
-) -> StatusCode {
-    let actor = auth
-        .as_ref()
-        .map(|e| e.0.username.as_str())
-        .unwrap_or("system");
-    let source = source.unwrap_or("project");
-    if let Err(e) = state
-        .store
-        .set_skill_trust(name, source, trusted, actor)
-        .await
-    {
-        tracing::error!("set_skill_trust failed: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
-    let _ = state
-        .store
-        .audit(
-            actor,
-            None,
-            "skill.trust",
-            Some(&format!("{name}/{source}")),
-            Some(if trusted { "trusted" } else { "untrusted" }),
-        )
-        .await;
-    StatusCode::OK
-}
-
-// ---- Agent profiles (Stage 13) ----
-
-async fn list_profiles_handler(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<String>>, StatusCode> {
-    state.store.list_profiles().await.map(Json).map_err(|e| {
-        tracing::error!("list_profiles failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })
-}
-
-async fn get_profile_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<Vec<agentgrid_common::AgentProfile>>, StatusCode> {
-    state
-        .store
-        .list_profile_revisions(&id)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            tracing::error!("get_profile failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
-}
-
-async fn create_profile_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Path(id): Path<String>,
-    Json(body): Json<agentgrid_common::AgentProfileCreate>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let actor = auth
-        .as_ref()
-        .map(|e| e.0.username.as_str())
-        .unwrap_or("system");
-    match state.store.create_profile_revision(&id, &body, actor).await {
-        Ok(rev) => {
-            let _ = state
-                .store
-                .audit(
-                    actor,
-                    None,
-                    "profile.create",
-                    Some(&format!("{id}/{rev}")),
-                    None,
-                )
-                .await;
-            Ok(Json(serde_json::json!({ "id": id, "revision": rev })))
-        }
-        Err(e) => {
-            tracing::error!("create_profile failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn activate_profile_handler(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Path(id): Path<String>,
-    Json(body): Json<agentgrid_common::ActivateProfile>,
-) -> StatusCode {
-    let actor = auth
-        .as_ref()
-        .map(|e| e.0.username.as_str())
-        .unwrap_or("system");
-    if let Err(e) = state.store.activate_profile(&id, body.revision).await {
-        tracing::error!("activate_profile failed: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
-    let _ = state
-        .store
-        .audit(
-            actor,
-            None,
-            "profile.activate",
-            Some(&format!("{id}/{}", body.revision)),
-            None,
-        )
-        .await;
-    StatusCode::OK
-}
-
-#[derive(serde::Deserialize)]
-struct EvaluatePolicyRequest {
-    command: String,
-    #[serde(default)]
-    cwd: String,
-    #[serde(default)]
-    autonomy: Option<agentgrid_common::AutonomyLevel>,
-}
-
-async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::response::Response) {
-    use axum::response::IntoResponse;
-    let nodes = match state.store.list_nodes(None, None).await {
-        Ok(n) => n,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".into_response()),
-    };
-    let tasks = match state.store.list_tasks().await {
-        Ok(t) => t,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".into_response()),
-    };
-    let attempts = state.store.count_attempts().await.unwrap_or(0);
-
-    let mut node_status = std::collections::HashMap::<String, u64>::new();
-    for n in &nodes {
-        *node_status.entry(format!("{}", n.status)).or_insert(0) += 1;
-    }
-    let mut task_status = std::collections::HashMap::<String, u64>::new();
-    for t in &tasks {
-        *task_status.entry(format!("{}", t.status)).or_insert(0) += 1;
-    }
-
-    // Task duration histogram + terminal outcome counters (Stage 5.2).
-    let mut buckets: [(u64, u64); 5] = [(60, 0), (300, 0), (1800, 0), (3600, 0), (u64::MAX, 0)];
-    let mut dur_sum = 0u64;
-    let mut dur_count = 0u64;
-    let mut outcome: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for t in &tasks {
-        if let (Some(f), c) = (t.finished_at.as_deref(), t.created_at.as_str()) {
-            if let (Ok(fdt), Ok(cdt)) = (
-                chrono::DateTime::parse_from_rfc3339(f),
-                chrono::DateTime::parse_from_rfc3339(c),
-            ) {
-                let secs = (fdt - cdt).num_seconds().max(0) as u64;
-                dur_sum += secs;
-                dur_count += 1;
-                for b in buckets.iter_mut() {
-                    if secs <= b.0 {
-                        b.1 += 1;
-                    }
-                }
-            }
-        }
-        let st = format!("{}", t.status);
-        if st == "succeeded" || st == "failed" || st == "cancelled" {
-            *outcome.entry(st).or_insert(0) += 1;
-        }
-    }
-
-    let mut s = String::new();
-    s.push_str("# HELP agentgrid_nodes Nodes by status.\n");
-    s.push_str("# TYPE agentgrid_nodes gauge\n");
-    for (st, c) in &node_status {
-        s.push_str(&format!("agentgrid_nodes{{status=\"{st}\"}} {c}\n"));
-    }
-    s.push_str("# HELP agentgrid_tasks Tasks by status.\n");
-    s.push_str("# TYPE agentgrid_tasks gauge\n");
-    for (st, c) in &task_status {
-        s.push_str(&format!("agentgrid_tasks{{status=\"{st}\"}} {c}\n"));
-    }
-    s.push_str("# HELP agentgrid_attempts_total Total attempts.\n");
-    s.push_str("# TYPE agentgrid_attempts_total counter\n");
-    s.push_str(&format!("agentgrid_attempts_total {attempts}\n"));
-
-    s.push_str("# HELP agentgrid_task_duration_seconds Task duration (finished tasks).\n");
-    s.push_str("# TYPE agentgrid_task_duration_seconds histogram\n");
-    for (le, c) in &buckets {
-        let le_s = if *le == u64::MAX {
-            "+Inf".to_string()
-        } else {
-            le.to_string()
-        };
-        s.push_str(&format!(
-            "agentgrid_task_duration_seconds_bucket{{le=\"{le_s}\"}} {c}\n"
-        ));
-    }
-    s.push_str(&format!("agentgrid_task_duration_seconds_sum {dur_sum}\n"));
-    s.push_str(&format!(
-        "agentgrid_task_duration_seconds_count {dur_count}\n"
-    ));
-
-    s.push_str("# HELP agentgrid_tasks_total Terminal task outcomes (cumulative).\n");
-    s.push_str("# TYPE agentgrid_tasks_total counter\n");
-    for (st, c) in &outcome {
-        s.push_str(&format!("agentgrid_tasks_total{{status=\"{st}\"}} {c}\n"));
-    }
-
-    s.push_str("# HELP agentgrid_node_free_disk_mb Free disk reported via heartbeat.\n");
-    s.push_str("# TYPE agentgrid_node_free_disk_mb gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_free_disk_mb{{node=\"{}\"}} {}\n",
-            n.name, n.free_disk_mb
-        ));
-    }
-    s.push_str("# HELP agentgrid_node_load_avg Load average reported via heartbeat.\n");
-    s.push_str("# TYPE agentgrid_node_load_avg gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_load_avg{{node=\"{}\"}} {}\n",
-            n.name, n.load_avg
-        ));
-    }
-
-    s.push_str("# HELP agentgrid_sqlite_db_bytes Main database file size in bytes.\n");
-    s.push_str("# TYPE agentgrid_sqlite_db_bytes gauge\n");
-    let db_bytes = std::fs::metadata(&state.db_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    s.push_str(&format!("agentgrid_sqlite_db_bytes {db_bytes}\n"));
-    s.push_str("# HELP agentgrid_sqlite_wal_bytes WAL file size in bytes.\n");
-    s.push_str("# TYPE agentgrid_sqlite_wal_bytes gauge\n");
-    let wal_bytes = std::fs::metadata(format!("{}-wal", state.db_path))
-        .map(|m| m.len())
-        .unwrap_or(0);
-    s.push_str(&format!("agentgrid_sqlite_wal_bytes {wal_bytes}\n"));
-
-    s.push_str(
-        "# HELP agentgrid_scheduler_latency_ms Last scheduler latency: queued→assigned in ms.\n",
-    );
-    s.push_str("# TYPE agentgrid_scheduler_latency_ms gauge\n");
-    s.push_str(&format!(
-        "agentgrid_scheduler_latency_ms {}\n",
-        state
-            .store
-            .scheduler_latency_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str(
-        "# HELP agentgrid_scheduler_assignments_total Total assignments made by the scheduler.\n",
-    );
-    s.push_str("# TYPE agentgrid_scheduler_assignments_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_scheduler_assignments_total {}\n",
-        state
-            .store
-            .scheduler_assignments
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-
-    s.push_str(
-        "# HELP agentgrid_sqlite_checkpoint_ms Last wal_checkpoint(TRUNCATE) duration in ms.\n",
-    );
-    s.push_str("# TYPE agentgrid_sqlite_checkpoint_ms gauge\n");
-    s.push_str(&format!(
-        "agentgrid_sqlite_checkpoint_ms {}\n",
-        state
-            .store
-            .checkpoint_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str(
-        "# HELP agentgrid_sqlite_busy_total Cumulative SQLITE_BUSY/locked-class failures.\n",
-    );
-    s.push_str("# TYPE agentgrid_sqlite_busy_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_sqlite_busy_total {}\n",
-        state
-            .store
-            .sqlite_busy
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-
-    // Hardening P2 item 35: security-observability counters.
-    s.push_str(
-        "# HELP agentgrid_cross_node_rejects_total Cross-node mutation/read attempts rejected (wrong owner).
-",
-    );
-    s.push_str("# TYPE agentgrid_cross_node_rejects_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_cross_node_rejects_total {}\n",
-        state
-            .cross_node_rejects
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str(
-        "# HELP agentgrid_stale_fencing_tokens_total Mutations rejected for a stale fencing token.
-",
-    );
-    s.push_str("# TYPE agentgrid_stale_fencing_tokens_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_stale_fencing_tokens_total {}\n",
-        state
-            .stale_fencing_tokens
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str(
-        "# HELP agentgrid_event_rejections_total Event batches rejected (terminal attempt / too large / count cap).
-",
-    );
-    s.push_str("# TYPE agentgrid_event_rejections_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_event_rejections_total {}\n",
-        state
-            .event_rejections
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    // Hardening P1 item 14: event-sequence gaps a batch introduced (max
-    // sequence in the batch exceeded the contiguous prefix). Monotonic across
-    // batches; the durable outbox still redrives the missing sequences.
-    s.push_str(
-        "# HELP agentgrid_event_gaps_total Event-sequence gaps introduced by a batch (max seq > contiguous prefix).",
-    );
-    s.push_str("\n# TYPE agentgrid_event_gaps_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_event_gaps_total {}\n",
-        state.event_gaps.load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    // Hardening P2 item 35: lease-expiry reverts (the lease/ACK race path).
-    s.push_str(
-        "# HELP agentgrid_lease_reverts_total Expired-lease assignments re-queued by the sweep.",
-    );
-    s.push_str("\n# TYPE agentgrid_lease_reverts_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_lease_reverts_total {}\n",
-        state
-            .store
-            .lease_reverts
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str(
-        "# HELP agentgrid_active_attempt_drift_total Drifted active_attempts counters repaired by reconcile.",
-    );
-    s.push_str("\n# TYPE agentgrid_active_attempt_drift_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_active_attempt_drift_total {}\n",
-        state
-            .store
-            .active_attempt_drift
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str(
-        "# HELP agentgrid_artifact_cleanup_bytes_total Cumulative bytes reclaimed by artifact retention.",
-    );
-    s.push_str("\n# TYPE agentgrid_artifact_cleanup_bytes_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_artifact_cleanup_bytes_total {}\n",
-        state
-            .store
-            .artifact_cleanup_bytes
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str("# HELP agentgrid_artifact_cleanup_runs_total Total artifact cleanup runs.");
-    s.push_str("\n# TYPE agentgrid_artifact_cleanup_runs_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_artifact_cleanup_runs_total {}\n",
-        state
-            .store
-            .artifact_cleanup_runs
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str("# HELP agentgrid_artifact_cleanup_failures_total Total artifact cleanup failures.");
-    s.push_str("\n# TYPE agentgrid_artifact_cleanup_failures_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_artifact_cleanup_failures_total {}\n",
-        state
-            .store
-            .artifact_cleanup_failures
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str(
-        "# HELP agentgrid_artifact_cleanup_duration_seconds_total Total artifact cleanup duration in seconds.",
-    );
-    s.push_str("\n# TYPE agentgrid_artifact_cleanup_duration_seconds_total counter\n");
-    s.push_str(&format!(
-        "agentgrid_artifact_cleanup_duration_seconds_total {}\n",
-        state
-            .store
-            .artifact_cleanup_duration_secs
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-
-    // Hardening P2 item 35: validation duration histogram + outcomes.
-    s.push_str(
-        "# HELP agentgrid_validation_duration_ms Validation duration (validating-state window).\n",
-    );
-    s.push_str("# TYPE agentgrid_validation_duration_ms histogram\n");
-    s.push_str(&format!(
-        "agentgrid_validation_duration_ms_sum {}\n",
-        state
-            .store
-            .validation_duration_sum
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str(&format!(
-        "agentgrid_validation_duration_ms_count {}\n",
-        state
-            .store
-            .validation_duration_count
-            .load(std::sync::atomic::Ordering::Relaxed)
-    ));
-    s.push_str("# HELP agentgrid_validation_outcomes_total Validation outcomes.\n");
-    s.push_str("# TYPE agentgrid_validation_outcomes_total counter\n");
-    for (k, v) in state.store.validation_outcomes.lock().unwrap().iter() {
-        s.push_str(&format!(
-            "agentgrid_validation_outcomes_total{{outcome=\"{k}\"}} {v}\n"
-        ));
-    }
-    s.push_str(
-        "# HELP agentgrid_attempts_by_security_profile_total Attempts by security profile.\n",
-    );
-    s.push_str("# TYPE agentgrid_attempts_by_security_profile_total counter\n");
-    for (k, v) in state.store.security_profile_attempts.lock().unwrap().iter() {
-        s.push_str(&format!(
-            "agentgrid_attempts_by_security_profile_total{{profile=\"{k}\"}} {v}\n"
-        ));
-    }
-
-    // Hardening P2 items 10/35: per-node storage & lock gauges from heartbeat.
-    s.push_str("# HELP agentgrid_node_outbox_bytes Bytes buffered in the node's durable outbox.\n");
-    s.push_str("# TYPE agentgrid_node_outbox_bytes gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_outbox_bytes{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_bytes
-        ));
-    }
-    s.push_str("# HELP agentgrid_node_outbox_rows Pending outbox rows on the node.\n");
-    s.push_str("# TYPE agentgrid_node_outbox_rows gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_outbox_rows{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_rows
-        ));
-    }
-    s.push_str("# HELP agentgrid_node_outbox_oldest_pending_age_ms Age of the oldest unacked outbox event.\n");
-    s.push_str("# TYPE agentgrid_node_outbox_oldest_pending_age_ms gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_outbox_oldest_pending_age_ms{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_oldest_pending_age_ms
-        ));
-    }
-    s.push_str("# HELP agentgrid_node_outbox_corruption_total Quarantined corrupt outbox records on the node.\n");
-    s.push_str("# TYPE agentgrid_node_outbox_corruption_total gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_outbox_corruption_total{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_corruption_count
-        ));
-    }
-    s.push_str(
-        "# HELP agentgrid_node_outbox_completion_rows Pending completion records on the node.\n",
-    );
-    s.push_str("# TYPE agentgrid_node_outbox_completion_rows gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_outbox_completion_rows{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_completion_rows
-        ));
-    }
-    s.push_str(
-        "# HELP agentgrid_node_artifact_spool_bytes Bytes staged in the node's artifact spool.\n",
-    );
-    s.push_str("# TYPE agentgrid_node_artifact_spool_bytes gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_artifact_spool_bytes{{node=\"{}\"}} {}\n",
-            n.name, n.artifact_spool_bytes
-        ));
-    }
-    s.push_str(
-        "# HELP agentgrid_node_repo_lock_wait_ms Cumulative repository-lock wait on the node.\n",
-    );
-    s.push_str("# TYPE agentgrid_node_repo_lock_wait_ms gauge\n");
-    for n in &nodes {
-        s.push_str(&format!(
-            "agentgrid_node_repo_lock_wait_ms{{node=\"{}\"}} {}\n",
-            n.name, n.repo_lock_wait_ms
-        ));
-        s.push_str("# HELP agentgrid_node_sandbox_backend Sandbox backend kind per node.\n");
-        s.push_str("# TYPE agentgrid_node_sandbox_backend gauge\n");
-        for n in &nodes {
-            s.push_str(&format!(
-                "agentgrid_node_sandbox_backend{{node=\"{}\",backend=\"{}\"}} 1\n",
-                n.name, n.sandbox_backend
-            ));
-        }
-        s.push_str(
-            "# HELP agentgrid_node_enforced_limits Whether sandbox enforces resource limits.\n",
-        );
-        s.push_str("# TYPE agentgrid_node_enforced_limits gauge\n");
-        for n in &nodes {
-            s.push_str(&format!(
-                "agentgrid_node_enforced_limits{{node=\"{}\"}} {}\n",
-                n.name,
-                if n.enforced_limits { 1 } else { 0 }
-            ));
-        }
-        // Hardening P2 item 659: node network mode
-        s.push_str(
-            "# HELP agentgrid_node_network_mode Network mode per node.
-",
-        );
-        s.push_str(
-            "# TYPE agentgrid_node_network_mode gauge
-",
-        );
-        for n in &nodes {
-            let mode = match n.network_mode.as_str() {
-                "none" => 0,
-                "restricted" => 1,
-                "unrestricted" => 2,
-                _ => 0,
-            };
-            let labels = format!("node=\"{}\",mode=\"{}\"", n.name, n.network_mode);
-            s.push_str(&format!(
-                "agentgrid_node_network_mode{{{}}} {}",
-                labels, mode
-            ));
-        }
-    }
-
-    (
-        StatusCode::OK,
-        (
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; version=0.0.4",
-            )],
-            s,
-        )
-            .into_response(),
-    )
 }
 
 // ----- workflows (Stage 7.2) -----

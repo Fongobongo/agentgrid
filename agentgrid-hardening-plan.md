@@ -495,17 +495,17 @@
 - [x] Создать `app.rs`/`router.rs`. (build_router + serve остаются в lib.rs как единая точка сборки; дальнейшая декомпозиция маршрутов по секциям ниже)
 - [x] Вынести config и env validation в `config.rs`. (новый `crates/control-plane/src/config.rs`: Limits, SetupToken, LoginRate, EventRate, env_usize — извлечены из lib.rs)
 - [x] Вынести auth middleware/JWT/setup/login. (новый `crates/control-plane/src/auth.rs`: Claims, JWT issue/verify, require_user_auth/require_node_auth, check_attempt_owner, check_fencing_token, auth_setup/login/logout, health_live/ready)
-- [ ] Вынести task routes.
-- [ ] Вынести node/attempt routes.
-- [ ] Вынести artifact routes.
-- [ ] Вынести workflow routes.
-- [ ] Вынести approval routes.
-- [ ] Вынести profile/skills/MCP routes.
+- [x] Вынести task routes. (crates/control-plane/src/routes/tasks.rs: create/list/show/eligibility/cancel/retry)
+- [x] Вынести node/attempt routes. (routes/nodes.rs: list/enroll/heartbeat/revoke/drain; routes/attempts.rs: cancel/ingest/complete/ack/validate/agent-session; routes/events.rs: poll/SSE)
+- [x] Вынести artifact routes. (routes/artifacts.rs: get/upload JSON+raw + artifact_response + tests)
+- [x] Вынести workflow routes. (routes/workflows.rs: templates/runs/schedules/projection/tick/plan/approve/cancel)
+- [x] Вынести approval routes. (routes/approvals.rs: list/allow/deny/create/get)
+- [x] Вынести profile/skills/MCP routes. (routes/profiles.rs: policy evaluate, skill trust, mcp servers, agent profiles; routes/maintenance.rs: backup/storage-gc/metrics; routes/repositories.rs + conversations.rs)
 - [x] Вынести static serving. (новый `crates/control-plane/src/middleware.rs`: security_headers_middleware, request_id_middleware, spa_fallback, api_error, RequestId)
 - [x] Вынести TLS listener. (новый `crates/control-plane/src/tls.rs`: TlsListener, load_tls_acceptor, shutdown_signal + test)
 - [ ] Вынести maintenance tasks.
-- [ ] Установить ориентир: production module менее 800–1000 строк.
-- [ ] Оставить handlers тонкими: auth → validate → service → response.
+- [x] Установить ориентир: production module менее 800–1000 строк. (lib.rs 3769 → 510; каждый route/auth/middleware/tls модуль < 510 строк; store.rs 5235 остаётся отдельной задачей §17 store decomposition)
+- [x] Оставить handlers тонкими: auth → validate → service → response. (middleware/extensions делают auth; handler валидирует вход, зовёт store, формирует response)
 
 ## 17. Декомпозиция node daemon — P2
 
