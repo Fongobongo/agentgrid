@@ -173,10 +173,20 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                     sandbox::SandboxKind::None => "none".to_string(),
                     sandbox::SandboxKind::Docker => "docker".to_string(),
                 },
+                // Plan 960: report exactly what is applied. Docker always
+                // applies cap-drop + no-new-privileges; `enforced_limits` is
+                // true when resource limits are actually set AND the effective
+                // network is isolated (none). A `--network bridge` override
+                // means egress isolation is NOT applied, so the flag reflects
+                // that honestly.
                 enforced_limits: matches!(cfg.sandbox, sandbox::SandboxKind::Docker)
+                    && sandbox::resolved_network_mode(&cfg.network_mode) == "none"
                     && (std::env::var("AGENTGRID_SANDBOX_PIDS_LIMIT").is_ok()
                         || std::env::var("AGENTGRID_SANDBOX_MEMORY").is_ok()
                         || std::env::var("AGENTGRID_SANDBOX_CPUS").is_ok()),
+                // Node policy ceiling (max allowed task mode). The resolved
+                // docker network applied at spawn (restricted→none) is logged
+                // per-attempt (egress audit) — this field stays the policy.
                 network_mode: cfg.network_mode.clone(),
             };
             if let Err(e) = client

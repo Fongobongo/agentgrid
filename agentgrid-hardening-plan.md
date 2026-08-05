@@ -957,7 +957,7 @@
 - [x] Default adapter path не отключает permissions без явного unsafe opt-in. (`AGENTGRID_UNSAFE_UNATTENDED=1`; Claude `--dangerously-skip-permissions` / opencode `--auto` gated)
 - [x] Production node не запускается как root. (`install-node.sh` создаёт unprivileged `agentgrid` user; systemd `User=agentgrid`; нет `AGENTGRID_ALLOW_ROOT`)
 - [x] Production compose не содержит стандартных credentials. (`docker-compose.yml` без baked secrets; `up.sh` генерирует random JWT + admin pass; demo compose явно помечен insecure)
-- [ ] Sandbox capability соответствует реально применённой изоляции.
+- [x] Sandbox capability соответствует реально применённой изоляции. (heartbeat `enforced_limits` честен: Docker + resource limits set + effective network isolated (none); `--network bridge` override или max=unrestricted → flag=false, т.к. egress НЕ изолирован. Node policy ceiling остаётся raw в heartbeat — scheduler rank-сравнение)
 - [x] Storage имеет retention, global quotas и disk-pressure behavior. (retention cleanup + orphan/dangling reconcile + `ag storage gc` + critical-disk watermark)
 - [ ] Giant production modules декомпозированы до обозримых границ.
 - [x] API ошибки не маскируются пустыми успешными responses. (list handlers → 503 при storage ошибке; не пустые массивы)
