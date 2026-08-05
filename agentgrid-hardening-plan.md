@@ -630,7 +630,7 @@
 - [ ] Отдельный artifact/output mount.
 - [x] Не монтировать Docker socket, host home, SSH agent и credentials. (mounting только worktree `/ag`; daemon env_clear + allowlist, socket/host не подключается подбору)
 - [ ] Добавить network allowlist mode после `none`.
-- [ ] Удалять orphan containers после daemon crash.
+- [x] Удалять orphan containers после daemon crash. (sandbox.rs: `--label agentgrid.node=<node_id>` на каждый container + `cleanup_orphan_containers()` на старте: `docker ps -aq --filter label=agentgrid.node=<id>` → `docker rm -f`; main.rs вызывает после enrollment при AGENTGRID_SANDBOX=docker)
 
 ### Тесты
 

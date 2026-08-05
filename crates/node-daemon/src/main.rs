@@ -526,6 +526,12 @@ async fn main() -> Result<()> {
         }
     }
     let cred = load_or_enroll(&cfg).await?;
+    sandbox::set_node_id(&cred.node_id);
+    // Plan §25: a hard-crashed daemon can strand attached containers; clean
+    // this daemon's orphans before polling so slots aren't leaked.
+    if matches!(cfg.sandbox, sandbox::SandboxKind::Docker) {
+        sandbox::cleanup_orphan_containers().await;
+    }
     tracing::info!(
         node_id = %cred.node_id,
         server = %cfg.server,

@@ -85,6 +85,12 @@ fn docker_run_head(workdir: &std::path::Path, network_mode: Option<&str>) -> Vec
         "--cap-drop=ALL".to_string(),
         "--security-opt=no-new-privileges".to_string(),
     ];
+    // Plan §25: stamp the owning daemon on every container so a hard-crashed
+    // daemon's orphaned containers are findable/removable at next startup.
+    if let Some(node_id) = NODE_ID.get() {
+        v.push("--label".to_string());
+        v.push(format!("agentgrid.node={node_id}"));
+    }
     // Task network_mode overrides env, clamped by node max (enforced at CP).
     let net = network_mode
         .map(|s| s.to_string())
@@ -225,6 +231,75 @@ pub async fn probe_runtime_version() -> anyhow::Result<Option<String>> {
     Ok(if v.is_empty() { None } else { Some(v) })
 }
 
+/// Per-daemon identity stamped as `--label agentgrid.node=<id>` on every
+/// sandbox container, so orphan cleanup after a hard daemon crash can find
+/// (and remove) exactly this daemon's containers. Set once at startup by
+/// `main`; containers spawned before that cannot exist (no sandbox runs
+/// before enrollment).
+static NODE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_node_id(id: &str) {
+    let _ = NODE_ID.set(id.to_string());
+}
+
+/// Remove containers this daemon left running after a hard crash (plan §25:
+/// `docker run` is attached, so a SIGKILLed daemon can strand a container;
+/// `--rm` only fires on clean exits). Kills and removes `agentgrid.node=<id>`
+/// containers — best-effort; a missing runtime is not fatal at startup.
+pub async fn cleanup_orphan_containers() {
+    let Some(node_id) = NODE_ID.get() else {
+        return;
+    };
+    let runtime = std::env::var("AGENTGRID_SANDBOX_RUNTIME")
+        .unwrap_or_else(|_| "docker".to_string());
+    let label = format!("agentgrid.node={node_id}");
+    let out = match tokio::process::Command::new(&runtime)
+        .args(["ps", "-aq", "--filter", &label])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(error = %e, "orphan-container scan failed");
+            return;
+        }
+    };
+    if !out.status.success() {
+        tracing::warn!(
+            "orphan-container scan failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return;
+    }
+    let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let kill = match tokio::process::Command::new(&runtime)
+        .args(["rm", "-f"])
+        .args(&ids)
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(error = %e, "orphan-container removal failed");
+            return;
+        }
+    };
+    if kill.status.success() {
+        tracing::info!(count = ids.len(), "removed orphan sandbox containers");
+    } else {
+        tracing::warn!(
+            "orphan-container removal failed: {}",
+            String::from_utf8_lossy(&kill.stderr).trim()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +329,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        set_node_id("node-test-633");
         let (p, a) = sandbox_command(
             SandboxKind::Docker,
             "claude",
@@ -268,6 +344,9 @@ mod tests {
         // Hardening §25: cap-drop + no-new-privileges always present.
         assert!(a.contains(&"--cap-drop=ALL".to_string()));
         assert!(a.contains(&"--security-opt=no-new-privileges".to_string()));
+        // Plan §25: owning-daemon label is stamped when node id is known.
+        assert!(a.contains(&"--label".to_string()));
+        assert!(a.contains(&"agentgrid.node=node-test-633".to_string()));
         // Default network isolation.
         assert_eq!(
             a[a.iter().position(|x| x == "--network").unwrap() + 1],
