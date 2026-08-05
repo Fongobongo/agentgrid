@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Stage 5.3: install the agentgrid node daemon on a clean Linux host (<10 min).
 #
-#   ./install-node.sh --server https://cp.example.com --token <enroll-token>
+#   ./install-node.sh --server https://cp.example.com --token <enroll-token> \
+#       --staging ./release-bin --adapters mock,claude
 #
 # Creates the unprivileged 'agentgrid' user, data directories, a systemd unit
-# with hardened sandboxing, and enrolls the node. Requires systemd.
+# with hardened sandboxing, installs the daemon + selected adapter binaries
+# from the release staging dir (checksum-verified), and enrolls the node.
+# Requires systemd.
 set -euo pipefail
 
 SERVER=""
@@ -14,19 +17,49 @@ BIN_DIR="/usr/local/bin"
 DATA_DIR="/var/lib/agentgrid"
 WORKSPACE="$DATA_DIR/workspace"
 REPOS="$DATA_DIR/repos"
+# Plan 224: adapters ship with the daemon. `--adapters mock,claude` installs
+# adapter-mock + adapter-claude into BIN_DIR. `--staging <dir>` points at the
+# release tarball dir (default: ./bin relative to this script) holding the
+# prebuilt binaries + checksums.txt.
+ADAPTERS="mock"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STAGING="$SCRIPT_DIR/bin"
 
-usage() { echo "usage: $0 --server <url> --token <token> [--name <node>] [--bin-dir <dir>]"; exit 1; }
+usage() { echo "usage: $0 --server <url> --token <token> [--name <node>] [--bin-dir <dir>] [--adapters mock[,claude,...]] [--staging <dir>]"; exit 1; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --server) SERVER="$2"; shift 2;;
     --token)  TOKEN="$2";  shift 2;;
     --name)   NAME="$2";   shift 2;;
     --bin-dir) BIN_DIR="$2"; shift 2;;
+    --adapters) ADAPTERS="$2"; shift 2;;
+    --staging) STAGING="$2"; shift 2;;
     *) usage;;
   esac
 done
 [ -n "$SERVER" ] && [ -n "$TOKEN" ] || usage
-for b in agentgrid-node-daemon adapter-mock; do
+
+# Plan 224: install the daemon + selected adapters from the release staging
+# dir into BIN_DIR (verify checksum when available, like the checksum flag
+# flow in install-control-plane.sh). Fails loud when a binary is missing.
+echo ">> installing binaries"
+install_bin() {
+  local b="$1"
+  [ -f "$STAGING/$b" ] || { echo "missing $STAGING/$b (run --staging <release-dir> or build first)"; exit 1; }
+  if [ -f "$STAGING/checksums.txt" ]; then
+    ( cd "$STAGING" && sha256sum -c --quiet --ignore-missing checksums.txt ) 2>/dev/null \
+      || { echo "checksum mismatch for $b"; exit 1; }
+  fi
+  install -m 0755 -o root -g root "$STAGING/$b" "$BIN_DIR/$b"
+}
+install_bin agentgrid-node-daemon
+IFS=',' read -r -a adapter_list <<< "$ADAPTERS"
+for a in "${adapter_list[@]}"; do
+  [ -n "$a" ] || continue
+  install_bin "adapter-$a"
+done
+for b in agentgrid-node-daemon "${adapter_list[@]}"; do
+  [ -n "$b" ] || continue
   command -v "$BIN_DIR/$b" >/dev/null 2>&1 || { echo "missing $BIN_DIR/$b"; exit 1; }
 done
 command -v systemctl >/dev/null 2>&1 || { echo "systemd required"; exit 1; }

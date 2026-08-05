@@ -221,7 +221,7 @@
 - [x] Создавать пользователя `agentgrid`.
 - [x] Устанавливать systemd unit вместо `nohup`.
 - [x] Применить hardening directives из `deploy/install-node.sh`.
-- [ ] Загружать необходимые adapter binaries вместе с daemon.
+- [x] Загружать необходимые adapter binaries вместе с daemon. (install-node.sh: `--staging <release-dir> --adapters mock,claude` устанавливает daemon + выбранные adapter-* binaries из release tarball с checksum-verify; фолбэк — pre-built bin/ dir рядом со скриптом)
 - [x] Проверять checksum/signature binaries до запуска. (generate-checksums.sh, install scripts --checksums-file flag)
 - [x] Создавать временный env/token файл с `0600` атомарно.
 - [x] Удалять enrollment token после успешного обмена на credential.
