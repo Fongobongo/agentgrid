@@ -528,8 +528,8 @@
 
 ## 18. Store/service separation — P2
 
-- [ ] Разделить store на users/nodes/tasks/attempts/events/artifacts/conversations/maintenance.
-- [ ] Оставить SQL-only обязанности в repository layer.
+- [x] Разделить store на users/nodes/tasks/attempts/events/artifacts/conversations/maintenance. (store.rs 5235→2854: 15 submodules — users, nodes, conversations, artifacts, tasks, repositories, scheduler, events, attempts, maintenance + существующие approvals/profiles/skills/workflows; 104 api + 60 lib tests green)
+- [x] Оставить SQL-only обязанности в repository layer. (row mappers + SQL helpers остались в store.rs как pub(super); каждый submodule — impl Store с SQL-only методами)
 - [ ] Вынести scheduler в service layer.
 - [ ] Вынести attempt lifecycle в service layer.
 - [ ] Вынести artifact authorization/storage в service layer.
