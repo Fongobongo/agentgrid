@@ -481,6 +481,18 @@ async fn main() -> Result<()> {
         }
     }
     tokio::fs::create_dir_all(&cfg.workspace_root).await?;
+    // Plan §25: verify the container runtime (version + daemon reachable)
+    // when the sandbox is configured. Fails loud at startup so a broken
+    // Docker/Podman setup never silently degrades into unsandboxed runs.
+    if matches!(cfg.sandbox, sandbox::SandboxKind::Docker) {
+        match sandbox::probe_runtime_version().await {
+            Ok(Some(v)) => tracing::info!(runtime = %v, "container runtime ready"),
+            Ok(None) => tracing::warn!(
+                "container runtime configured but unreachable (binary missing or daemon down); sandboxed runs will fail at spawn"
+            ),
+            Err(e) => tracing::warn!(error = %e, "container runtime probe failed"),
+        }
+    }
     // Stage 2.3: reclaim workspace dirs + worktree gitlinks a prior (killed)
     // run left behind. Default 24h retention; tune with
     // AGENTGRID_WORKSPACE_RETENTION_HOURS (0 disables pruning).

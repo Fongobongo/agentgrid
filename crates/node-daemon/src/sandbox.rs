@@ -205,9 +205,36 @@ pub fn unsafe_env_guard(kind: SandboxKind) -> Vec<String> {
     remove
 }
 
+/// Probe the container runtime (plan §25: verify runtime version and
+/// capability at startup, not just binary presence). Runs
+/// `docker version --format '{{.Server.Version}}'` (podman accepts the same
+/// flag) and returns the server version. `Ok(None)` when the runtime binary
+/// is missing or the daemon is unreachable — the caller decides whether that
+/// is fatal.
+pub async fn probe_runtime_version() -> anyhow::Result<Option<String>> {
+    let runtime = std::env::var("AGENTGRID_SANDBOX_RUNTIME")
+        .unwrap_or_else(|_| "docker".to_string());
+    let out = tokio::process::Command::new(&runtime)
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if v.is_empty() { None } else { Some(v) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Process-global env vars are shared across tests; serialize the
+    /// sandbox-env mutators so parallel runs cannot race on
+    /// `AGENTGRID_SANDBOX_*` (pre-existing flake: docker_pins_image_by_digest
+    /// vs docker_opts_read_only_and_resource_limits).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn none_passthrough() {
@@ -224,6 +251,7 @@ mod tests {
 
     #[test]
     fn docker_wraps_command() {
+        let _g = ENV_LOCK.lock().unwrap();
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         let (p, a) = sandbox_command(
@@ -266,6 +294,7 @@ mod tests {
 
     #[test]
     fn docker_prefix_wraps_program() {
+        let _g = ENV_LOCK.lock().unwrap();
         // Legacy wrapper path: program runs inside the image after `--`, with
         // an empty `args` slot (ProcessBackend appends `--prompt` itself).
         clear_sandbox_env();
@@ -300,6 +329,7 @@ mod tests {
 
     #[test]
     fn docker_pins_image_by_digest() {
+        let _g = ENV_LOCK.lock().unwrap();
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE_DIGEST", "sha256:deadbeef");
@@ -318,6 +348,7 @@ mod tests {
 
     #[test]
     fn docker_opts_read_only_and_resource_limits() {
+        let _g = ENV_LOCK.lock().unwrap();
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_SANDBOX_NETWORK", "bridge");

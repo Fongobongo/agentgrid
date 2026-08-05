@@ -614,7 +614,7 @@
 ## 25. Docker/Podman backend — P1
 
 - [x] Не объединять `docker|podman` в один hardcoded `docker` binary. (sandbox.rs: `docker|podman` → SandboxKind::Docker, runtime бинарь из PATH; probe проверяет наличие)
-- [ ] Проверять runtime version и capability.
+- [x] Проверять runtime version и capability. (sandbox.rs: probe_runtime_version — `docker version --format {{.Server.Version}}` на старте при AGENTGRID_SANDBOX=docker; main.rs логирует результат, fail-loud если runtime недоступен; + тест-race fix: ENV_LOCK сериализует env-mutating sandbox тесты)
 - [x] Pin image по digest. (`AGENTGRID_SANDBOX_IMAGE_DIGEST` → `<tag>@sha256:…`; уже-digested ref не трогается; тест `docker_pins_image_by_digest`)
 - [x] Убедиться, что adapter и agent CLI реально существуют в image. (probe_adapter at startup caches versions; capability check against profile adapter_version before assignment)
 - [x] Передавать только allowlisted env через `--env`/env-file. (ProcessBackend: env_clear + PATH/HOME + adapter_env + profile secret_requirements; no daemon env leakage)
