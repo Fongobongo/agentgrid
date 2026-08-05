@@ -62,6 +62,44 @@ pub fn sandbox_prefix(
     }
 }
 
+/// True when `net` is an `allowlist:` spec and every CIDR in it parses.
+/// Egress allowlisting is NOT enforceable via the docker CLI alone (no native
+/// per-CIDR egress filter) — see [`net_allowlist_enforceable`].
+fn valid_allowlist_spec(net: &str) -> bool {
+    let Some(cidrs) = net.strip_prefix("allowlist:") else {
+        return false;
+    };
+    !cidrs.is_empty() && cidrs.split(',').all(|c| parse_cidr(c).is_some())
+}
+
+/// Accepts `IP/len` (v4 or v6) and returns the parsed network address + prefix
+/// length on success. No new dependency: the handful of checks below cover the
+/// forms operators actually type.
+fn parse_cidr(s: &str) -> Option<()> {
+    let (ip, len) = s.split_once('/')?;
+    let len: u8 = len.parse().ok()?;
+    if ip.contains(':') {
+        (len <= 128 && parse_ipv6(ip)).then_some(())
+    } else {
+        (len <= 32 && parse_ipv4(ip)).then_some(())
+    }
+}
+
+fn parse_ipv4(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| {
+            p.parse::<u8>().is_ok() && !(p.len() > 1 && p.starts_with('0'))
+        })
+}
+
+fn parse_ipv6(s: &str) -> bool {
+    // Minimal: must contain a colon and only hex/colon/dot chars.
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+}
+
 /// Build the leading `docker run …` argument vector shared by both spawn
 /// paths: housekeeping flags (`--rm -i`), the security hardening flags (plan
 /// §25: cap-drop, no-new-privileges, network none, optional read-only + tmpfs,
@@ -122,6 +160,16 @@ fn docker_run_head(workdir: &std::path::Path, network_mode: Option<&str>) -> Vec
         if !c.is_empty() {
             v.push("--cpus".to_string());
             v.push(c);
+        }
+    }
+    // Plan §25: separate artifact/output mount. When the worktree is
+    // read-only the agent still needs a writable place for outputs:
+    // `AGENTGRID_SANDBOX_ARTIFACT_DIR=<host dir>` mounts it read-write at
+    // `/artifacts` in the container (independent of --read-only).
+    if let Ok(d) = std::env::var("AGENTGRID_SANDBOX_ARTIFACT_DIR") {
+        if !d.is_empty() {
+            v.push("-v".to_string());
+            v.push(format!("{d}:/artifacts"));
         }
     }
     v.push("-v".to_string());
@@ -209,6 +257,25 @@ pub fn unsafe_env_guard(kind: SandboxKind) -> Vec<String> {
          so the adapter runs in safe mode"
     );
     remove
+}
+
+/// Plan §25: fail-closed validation of the network mode at daemon startup.
+/// `allowlist:` egress specs are syntactically validated (so a typo'd CIDR
+/// fails here, not mid-attempt) but refused — docker has no native egress
+/// allowlist, so running would silently deliver full egress. Returns Err for
+/// a malformed or unenforceable spec; Ok for `none`/`bridge`/`host`/`internal`.
+pub fn validate_network_mode(net: &str) -> anyhow::Result<()> {
+    if net.starts_with("allowlist:") {
+        if !valid_allowlist_spec(net) {
+            anyhow::bail!(
+                "AGENTGRID_SANDBOX_NETWORK={net}: malformed allowlist spec (expected                  allowlist:<cidr>[,<cidr>…], e.g. allowlist:10.0.0.0/8,1.2.3.4/32)"
+            );
+        }
+        anyhow::bail!(
+            "AGENTGRID_SANDBOX_NETWORK={net}: egress allowlist is not enforceable via the              docker CLI (no native per-CIDR egress filter); refusing to run with a silently              unenforced allowlist. Use none/bridge/host, or wire an egress proxy and pass              its network"
+        );
+    }
+    Ok(())
 }
 
 /// Probe the container runtime (plan §25: verify runtime version and
@@ -425,6 +492,7 @@ mod tests {
             "AGENTGRID_SANDBOX_PIDS_LIMIT",
             "AGENTGRID_SANDBOX_MEMORY",
             "AGENTGRID_SANDBOX_CPUS",
+            "AGENTGRID_SANDBOX_ARTIFACT_DIR",
         ] {
             std::env::remove_var(k);
         }
@@ -474,6 +542,62 @@ mod tests {
         assert_eq!(a[at("--pids-limit")], "128");
         assert_eq!(a[at("--memory")], "512m");
         assert_eq!(a[at("--cpus")], "1.5");
+    }
+
+    #[test]
+    fn allowlist_spec_validation_accepts_cidrs_and_rejects_garbage() {
+        assert!(valid_allowlist_spec("allowlist:10.0.0.0/8"));
+        assert!(valid_allowlist_spec("allowlist:10.0.0.0/8,1.2.3.4/32"));
+        assert!(valid_allowlist_spec("allowlist:2001:db8::/32"));
+        assert!(!valid_allowlist_spec("allowlist:"), "empty allowlist");
+        assert!(!valid_allowlist_spec("allowlist:10.0.0.0/99"), "v4 len > 32");
+        assert!(!valid_allowlist_spec("allowlist:not-an-ip/8"));
+        assert!(!valid_allowlist_spec("bridge"), "non-allowlist is not a spec");
+    }
+
+    #[test]
+    fn allowlist_fails_closed_at_startup() {
+        // Enforceable modes pass.
+        for ok in ["none", "bridge", "host", "internal"] {
+            assert!(validate_network_mode(ok).is_ok(), "{ok} must pass");
+        }
+        // Malformed allowlist -> Err (typo'd CIDR caught before any attempt).
+        assert!(validate_network_mode("allowlist:1.2.3.4/99").is_err());
+        // Well-formed but unenforceable -> Err (never silently full egress).
+        let e = validate_network_mode("allowlist:10.0.0.0/8").unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("not enforceable") || msg.contains("refusing"),
+            "error must explain the refusal: {msg}"
+        );
+    }
+
+    #[test]
+    fn docker_artifact_mount_is_read_write_and_independent_of_read_only() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        std::env::set_var("AGENTGRID_SANDBOX_ARTIFACT_DIR", "/host/art");
+        std::env::set_var("AGENTGRID_SANDBOX_READ_ONLY", "1");
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+        );
+        clear_sandbox_env();
+        assert!(
+            a.contains(&"/host/art:/artifacts".to_string()),
+            "artifact dir must be mounted read-write at /artifacts: {a:?}"
+        );
+        assert!(a.contains(&"--read-only".to_string()));
+        // The artifact mount must not carry :ro even under --read-only.
+        let art_idx = a.iter().position(|x| x == "/host/art:/artifacts").unwrap();
+        assert!(
+            !a[art_idx].ends_with(":ro"),
+            "artifact mount stays read-write under --read-only"
+        );
     }
 
     #[test]
