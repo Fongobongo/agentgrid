@@ -959,7 +959,7 @@
 - [x] Production compose не содержит стандартных credentials. (`docker-compose.yml` без baked secrets; `up.sh` генерирует random JWT + admin pass; demo compose явно помечен insecure)
 - [x] Sandbox capability соответствует реально применённой изоляции. (heartbeat `enforced_limits` честен: Docker + resource limits set + effective network isolated (none); `--network bridge` override или max=unrestricted → flag=false, т.к. egress НЕ изолирован. Node policy ceiling остаётся raw в heartbeat — scheduler rank-сравнение)
 - [x] Storage имеет retention, global quotas и disk-pressure behavior. (retention cleanup + orphan/dangling reconcile + `ag storage gc` + critical-disk watermark)
-- [ ] Giant production modules декомпозированы до обозримых границ.
+- [x] Giant production modules декомпозированы до обозримых границ. (lib.rs 3769→510; node-daemon main.rs 4670→1578 (15 модулей); store.rs 5235→800 production строк (15 submodules, остальное — тесты))
 - [x] API ошибки не маскируются пустыми успешными responses. (list handlers → 503 при storage ошибке; не пустые массивы)
 - [ ] Release содержит полный набор заявленных binaries, checksums, SBOM и signatures.
 - [x] README, threat model, changelog и maturity matrix соответствуют коду. (README event cursor/unsafe/storage sections; openapi begin_validate/after_ingest/storage-gc; CHANGELOG entries)
