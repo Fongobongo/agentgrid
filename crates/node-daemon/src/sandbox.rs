@@ -49,11 +49,12 @@ pub fn sandbox_prefix(
     kind: SandboxKind,
     workdir: &std::path::Path,
     program: &str,
+    network_mode: Option<&str>,
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), vec![]),
         SandboxKind::Docker => {
-            let mut prefix = docker_run_head(workdir);
+            let mut prefix = docker_run_head(workdir, network_mode);
             prefix.push(image_ref());
             prefix.push(program.into());
             ("docker".into(), prefix)
@@ -76,7 +77,7 @@ pub fn sandbox_prefix(
 /// ponytail: limits come from env rather than SpawnRequest.limits so this
 /// wrapper need not change signature; plumbing ResourceLimits through is the
 /// upgrade path once a real DockerBackend trait owns spawn.
-fn docker_run_head(workdir: &std::path::Path) -> Vec<String> {
+fn docker_run_head(workdir: &std::path::Path, network_mode: Option<&str>) -> Vec<String> {
     let mut v = vec![
         "run".to_string(),
         "--rm".to_string(),
@@ -84,7 +85,11 @@ fn docker_run_head(workdir: &std::path::Path) -> Vec<String> {
         "--cap-drop=ALL".to_string(),
         "--security-opt=no-new-privileges".to_string(),
     ];
-    let net = std::env::var("AGENTGRID_SANDBOX_NETWORK").unwrap_or_else(|_| "none".into());
+    // Task network_mode overrides env, clamped by node max (enforced at CP).
+    let net = network_mode
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("AGENTGRID_SANDBOX_NETWORK").ok())
+        .unwrap_or_else(|| "none".to_string());
     v.push("--network".to_string());
     v.push(net);
     if std::env::var("AGENTGRID_SANDBOX_READ_ONLY")
@@ -148,11 +153,12 @@ pub fn sandbox_command(
     program: &str,
     args: &[String],
     workdir: &std::path::Path,
+    network_mode: Option<&str>,
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), args.to_vec()),
         SandboxKind::Docker => {
-            let mut out = docker_run_head(workdir);
+            let mut out = docker_run_head(workdir, network_mode);
             out.push(image_ref());
             out.push(program.to_string());
             out.extend(args.iter().cloned());
@@ -210,6 +216,7 @@ mod tests {
             "claude",
             &["--acp".into()],
             std::path::Path::new("/w"),
+            None,
         );
         assert_eq!(p, "claude");
         assert_eq!(a, vec!["--acp"]);
@@ -224,6 +231,7 @@ mod tests {
             "claude",
             &["--acp".into()],
             std::path::Path::new("/w"),
+            None,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -246,7 +254,12 @@ mod tests {
     #[test]
     fn none_prefix_passthrough() {
         // Stage 11.2 / line 358: no sandbox → identity bin, empty prefix.
-        let (p, a) = sandbox_prefix(SandboxKind::None, std::path::Path::new("/w"), "adapter-x");
+        let (p, a) = sandbox_prefix(
+            SandboxKind::None,
+            std::path::Path::new("/w"),
+            "adapter-x",
+            None,
+        );
         assert_eq!(p, "adapter-x");
         assert!(a.is_empty());
     }
@@ -261,6 +274,7 @@ mod tests {
             SandboxKind::Docker,
             std::path::Path::new("/w"),
             "adapter-claude",
+            None,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -289,7 +303,7 @@ mod tests {
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE_DIGEST", "sha256:deadbeef");
-        let (p, a) = sandbox_prefix(SandboxKind::Docker, std::path::Path::new("/w"), "c");
+        let (p, a) = sandbox_prefix(SandboxKind::Docker, std::path::Path::new("/w"), "c", None);
         clear_sandbox_env();
         assert_eq!(p, "docker");
         // image + program are the last two; image must carry the digest pin.
@@ -297,7 +311,7 @@ mod tests {
         assert_eq!(a[a.len() - 1], "c");
         // An already-digested ref is left untouched.
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1@sha256:f00d");
-        let (_, a2) = sandbox_prefix(SandboxKind::Docker, std::path::Path::new("/w"), "c");
+        let (_, a2) = sandbox_prefix(SandboxKind::Docker, std::path::Path::new("/w"), "c", None);
         clear_sandbox_env();
         assert_eq!(a2[a2.len() - 2], "img:1@sha256:f00d");
     }
@@ -311,7 +325,13 @@ mod tests {
         std::env::set_var("AGENTGRID_SANDBOX_PIDS_LIMIT", "128");
         std::env::set_var("AGENTGRID_SANDBOX_MEMORY", "512m");
         std::env::set_var("AGENTGRID_SANDBOX_CPUS", "1.5");
-        let (_, a) = sandbox_command(SandboxKind::Docker, "c", &[], std::path::Path::new("/w"));
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+        );
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
         assert_eq!(a[at("--network")], "bridge");

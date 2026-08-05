@@ -10,6 +10,7 @@
 //! plane cannot inject a shell command. Tokens are validated as defense-in-depth
 //! (Stage 2.3).
 
+use rand::Rng;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,6 +37,24 @@ pub fn repo_lock_wait_ms() -> u64 {
     REPO_LOCK_WAIT_MS.load(Ordering::Relaxed)
 }
 
+/// Hardening P2 item 35: repository cache size in bytes.
+/// Updated on clone/fetch with periodic disk size refresh.
+static REPO_CACHE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Hardening P2 item 35: workspace size in bytes.
+/// Updated on worktree add with periodic disk size refresh.
+static WORKSPACE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the current repository cache size in bytes.
+pub fn repo_cache_bytes() -> u64 {
+    REPO_CACHE_BYTES.load(Ordering::Relaxed)
+}
+
+/// Returns the current workspace size in bytes.
+pub fn workspace_bytes() -> u64 {
+    WORKSPACE_BYTES.load(Ordering::Relaxed)
+}
+
 fn repo_lock(repo: &str) -> std::sync::Arc<Mutex<()>> {
     let map = REPO_LOCKS.get_or_init(Mutex::default);
     let mut guard = map.lock().unwrap();
@@ -43,6 +62,91 @@ fn repo_lock(repo: &str) -> std::sync::Arc<Mutex<()>> {
         .entry(repo.to_string())
         .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
         .clone()
+}
+
+/// Hardening P2 item 35: get configured quota limits from environment.
+/// Returns None if unlimited (env not set or 0).
+fn repo_cache_quota_mb() -> Option<u64> {
+    std::env::var("AGENTGRID_REPO_CACHE_QUOTA_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+}
+
+fn workspace_quota_mb() -> Option<u64> {
+    std::env::var("AGENTGRID_WORKSPACE_QUOTA_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+}
+
+/// Hardening P2 item 35: check if adding `additional_bytes` would exceed the
+/// repository cache quota. Returns Err if quota would be exceeded.
+fn check_repo_cache_quota(additional_bytes: u64) -> Result<()> {
+    if let Some(quota_mb) = repo_cache_quota_mb() {
+        let current = REPO_CACHE_BYTES.load(Ordering::Relaxed);
+        let new_total = current.saturating_add(additional_bytes);
+        if new_total > quota_mb * 1024 * 1024 {
+            anyhow::bail!(
+                "repository cache quota exceeded: current {} MB + {} MB > {} MB limit",
+                current / 1024 / 1024,
+                additional_bytes / 1024 / 1024,
+                quota_mb
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Hardening P2 item 35: check if adding `additional_bytes` would exceed the
+/// workspace quota. Returns Err if quota would be exceeded.
+fn check_workspace_quota(additional_bytes: u64) -> Result<()> {
+    if let Some(quota_mb) = workspace_quota_mb() {
+        let current = WORKSPACE_BYTES.load(Ordering::Relaxed);
+        let new_total = current.saturating_add(additional_bytes);
+        if new_total > quota_mb * 1024 * 1024 {
+            anyhow::bail!(
+                "workspace quota exceeded: current {} MB + {} MB > {} MB limit",
+                current / 1024 / 1024,
+                additional_bytes / 1024 / 1024,
+                quota_mb
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Hardening P2 item 35: periodically refresh quota metrics from actual disk
+/// usage to account for external changes (e.g., manual cleanup, pruning).
+/// Called with ~10% probability per check to avoid excessive stat calls.
+fn update_quota_metrics(repository_root: &Path, workspace_root: &Path) {
+    use std::sync::atomic::Ordering;
+    // 10% chance to refresh from disk
+    if rand::thread_rng().gen_range(0..=9) == 0 {
+        if let Ok(size) = dir_size(repository_root) {
+            REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
+        }
+        if let Ok(size) = dir_size(workspace_root) {
+            WORKSPACE_BYTES.store(size, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Calculate total size of a directory in bytes.
+fn dir_size(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    if path.exists() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            } else if metadata.is_dir() {
+                total = total.saturating_add(dir_size(&entry.path())?);
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// Hardening P1 item 32: a cross-process `flock` on a per-repo lock file so two
@@ -232,6 +336,9 @@ pub fn prepare_workspace(
     upstream_commits: &[String],
     upstream_patches: &[(String, Vec<u8>)],
 ) -> Result<Workspace> {
+    // Hardening P2 item 35: periodically refresh quota metrics from disk.
+    update_quota_metrics(repository_root, workspace_root);
+
     let ws = workspace_root.join(&assignment.attempt_id);
     std::fs::create_dir_all(&ws)?;
     if assignment.git_url.is_empty() {
@@ -274,9 +381,20 @@ pub fn prepare_workspace(
     if repo_dir.join("HEAD").exists() {
         // Already a bare mirror: refresh all refs.
         git(&repo_dir, &["fetch", "origin", "--prune"])?;
+        // Hardening P2 item 35: check repo cache quota after fetch.
+        update_quota_metrics(repository_root, workspace_root);
+        if let Ok(size) = dir_size(repository_root) {
+            check_repo_cache_quota(size.saturating_sub(REPO_CACHE_BYTES.load(Ordering::Relaxed)))?;
+            REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
+        }
     } else {
         std::fs::create_dir_all(repository_root)?;
         git(repository_root, &["clone", "--mirror", gurl, repo])?;
+        // Hardening P2 item 35: check repo cache quota after clone.
+        if let Ok(size) = dir_size(repository_root) {
+            check_repo_cache_quota(size)?;
+            REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
+        }
     }
 
     // Stage 8: if a fixed base_commit is requested, every attempt of this step
@@ -363,6 +481,11 @@ pub fn prepare_workspace(
             start_point,
         ],
     )?;
+    // Hardening P2 item 35: check workspace quota after worktree add.
+    if let Ok(size) = dir_size(workspace_root) {
+        check_workspace_quota(size.saturating_sub(WORKSPACE_BYTES.load(Ordering::Relaxed)))?;
+        WORKSPACE_BYTES.store(size, Ordering::Relaxed);
+    }
     // Stage 8 / line 239 / line 240: land upstream worker commits into
     // this worktree before the agent runs.
     //  - Integrator: cherry-pick *each* upstream worker commit so the worktree
@@ -753,6 +876,7 @@ mod tests {
             validation_timeout_secs: None,
             base_commit: None,
             parent_acp_session_id: None,
+            network_mode: None,
             provenance: None,
             upstream_commits: vec![],
             upstream_task_ids: vec![],
@@ -1056,6 +1180,7 @@ mod tests {
                     validation_timeout_secs: None,
                     base_commit: None,
                     parent_acp_session_id: None,
+                    network_mode: None,
                     provenance: None,
                     upstream_commits: vec![],
                     upstream_task_ids: vec![],
