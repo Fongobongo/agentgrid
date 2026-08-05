@@ -5,9 +5,7 @@
 //! persistence in Stage 2.1.
 
 mod auth;
-use auth::{
-    check_attempt_owner, check_fencing_token, fencing_token_header, AuthedNode, AuthedUser, Claims,
-};
+use auth::{AuthedUser, Claims};
 mod config;
 mod middleware;
 mod routes;
@@ -21,28 +19,20 @@ pub mod otel;
 use crate::config::{env_usize, EventRate, Limits, LoginRate, SetupToken, SETUP_TOKEN_TTL};
 use crate::store::is_safe_opaque_id;
 use std::sync::Arc;
-use std::time::Instant;
 
-use agentgrid_common::{
-    AppendMessageRequest, CancelState, CompleteAttemptRequest, CreateAgentSessionRequest,
-    CreateConversationRequest, CreateRepositoryRequest, CreateTaskRequest, EventsQuery,
-    IngestEventsRequest, ListResponse, McpServer, McpServerCreate, PollRequest, PollResponse,
-    RepositoryView,
-};
+use agentgrid_common::{McpServer, McpServerCreate};
 use axum::{
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::StatusCode,
     routing::{delete, get, post},
     Json, Router,
 };
-use futures_core::Stream;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use store::Store;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+pub(crate) const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// Stage 2.5: the cookie name carrying the session JWT, set HttpOnly so the
 /// browser cannot read it (no XSS token theft) with SameSite=Strict (CSRF
@@ -56,7 +46,7 @@ pub struct AppState {
     /// `None` disables the UI.
     pub(crate) web_root: Option<std::path::PathBuf>,
     /// Request size ceilings (Stage 5.1).
-    limits: Limits,
+    pub(crate) limits: Limits,
     /// Database file path (for SQLite size metrics, Stage 5.2).
     db_path: String,
     /// Brute-force protection on `/v1/auth/login` (Stage 2.5).
@@ -65,7 +55,7 @@ pub struct AppState {
     /// window). A node that floods the control plane with event batches beyond
     /// `event_rate_max` / `event_rate_window_secs` gets 429 instead of more
     /// DB writes. Defaults: 60 req / 10s (covers a healthy streamer).
-    event_rate: Arc<tokio::sync::Mutex<EventRate>>,
+    pub(crate) event_rate: Arc<tokio::sync::Mutex<EventRate>>,
     /// One-time bootstrap setup token (hardening P0): printed once to stdout
     /// when no users exist; required to create the first user; consumed on
     /// first use. `None` once bootstrap is complete or the token has been used
@@ -278,8 +268,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::tasks::create_task).get(routes::tasks::list_tasks),
         )
         .route("/v1/tasks/{id}", get(routes::tasks::show_task))
-        .route("/v1/tasks/{id}/events", get(get_events))
-        .route("/v1/tasks/{id}/events/stream", get(events_stream))
+        .route("/v1/tasks/{id}/events", get(routes::events::get_events))
+        .route(
+            "/v1/tasks/{id}/events/stream",
+            get(routes::events::events_stream),
+        )
         .route(
             "/v1/tasks/{id}/cancel",
             post(routes::tasks::cancel_task_handler),
@@ -343,22 +336,35 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/repositories",
-            post(create_repository).get(list_repositories),
+            post(routes::repositories::create_repository)
+                .get(routes::repositories::list_repositories),
         )
         .route("/v1/node/enroll", post(routes::nodes::enroll))
-        .route("/v1/node/poll", post(poll))
+        .route("/v1/node/poll", post(routes::events::poll))
         .route("/v1/node/heartbeat", post(routes::nodes::heartbeat))
-        .route("/v1/node/attempts/{id}/cancel", get(attempt_cancel_handler))
-        .route("/v1/node/attempts/{id}/events", post(ingest_events))
-        .route("/v1/node/attempts/{id}/complete", post(complete_attempt))
-        .route("/v1/node/attempts/{id}/ack", post(ack_attempt_handler))
+        .route(
+            "/v1/node/attempts/{id}/cancel",
+            get(routes::attempts::attempt_cancel_handler),
+        )
+        .route(
+            "/v1/node/attempts/{id}/events",
+            post(routes::attempts::ingest_events),
+        )
+        .route(
+            "/v1/node/attempts/{id}/complete",
+            post(routes::attempts::complete_attempt),
+        )
+        .route(
+            "/v1/node/attempts/{id}/ack",
+            post(routes::attempts::ack_attempt_handler),
+        )
         .route(
             "/v1/node/attempts/{id}/begin_validate",
-            post(begin_validate_handler),
+            post(routes::attempts::begin_validate_handler),
         )
         .route(
             "/v1/node/attempts/{id}/session",
-            post(create_agent_session_handler),
+            post(routes::attempts::create_agent_session_handler),
         )
         .route(
             "/v1/node/attempts/{id}/artifacts",
@@ -376,11 +382,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/node/tasks/{id}/artifacts/{name}",
             get(routes::artifacts::get_artifact_node),
         )
-        .route("/v1/conversations", post(create_conversation))
-        .route("/v1/conversations/{id}", get(show_conversation))
+        .route(
+            "/v1/conversations",
+            post(routes::conversations::create_conversation),
+        )
+        .route(
+            "/v1/conversations/{id}",
+            get(routes::conversations::show_conversation),
+        )
         .route(
             "/v1/conversations/{id}/messages",
-            post(append_conversation_message).get(list_conversation_messages),
+            post(routes::conversations::append_conversation_message)
+                .get(routes::conversations::list_conversation_messages),
         )
         .route(
             "/v1/workflows",
@@ -1202,665 +1215,6 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
 
 // ----- workflows (Stage 7.2) -----
 
-async fn create_repository(
-    State(state): State<Arc<AppState>>,
-    auth: Option<Extension<AuthedUser>>,
-    Json(req): Json<CreateRepositoryRequest>,
-) -> Result<(StatusCode, Json<RepositoryView>), (StatusCode, Json<serde_json::Value>)> {
-    // Hardening P1 item 32: vet the git_url scheme at the trust boundary so an
-    // operator cannot register a `javascript:`/`data:`/arbitrary URI git remote.
-    // Allow only git transports; `file://` is permitted for trusted local clones
-    // (test repos) — narrowing `file://` to a policy flag is a P1 follow-up.
-    if let Err(msg) = validate_git_url(&req.git_url) {
-        tracing::warn!("create_repository rejected git_url: {msg}");
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg})),
-        ));
-    }
-    match state.store.create_repository(&req).await {
-        Ok(v) => {
-            let _ = state
-                .store
-                .audit(
-                    "user",
-                    auth.as_ref().map(|e| e.0.username.as_str()),
-                    "repo.add",
-                    Some(&v.id),
-                    None,
-                )
-                .await;
-            Ok((StatusCode::CREATED, Json(v)))
-        }
-        Err(e) => {
-            tracing::error!("create_repository failed: {e}");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "internal error"})),
-            ))
-        }
-    }
-}
-
-/// Hardening P1 item 32: accept only git-class URL schemes. Returns Err(msg)
-/// for a scheme that could never be a legitimate git remote or that carries
-/// injection risk (`javascript:`, `data:`, ...). `scp`-style (`user@host:path`)
-/// and bare relative paths are allowed as git does.
-fn validate_git_url(url: &str) -> Result<(), &'static str> {
-    if url.is_empty() || url.trim().is_empty() {
-        return Err("git_url must not be empty");
-    }
-    if url.contains('\n') || url.contains('\r') {
-        return Err("git_url must not contain newlines");
-    }
-    if let Some(idx) = url.find(':') {
-        if url[idx..].starts_with("://") {
-            if !matches!(&url[..idx], "http" | "https" | "git" | "ssh" | "file") {
-                return Err("git_url scheme not allowed");
-            }
-        } else if !url[..idx].contains('@') {
-            // single colon, no `@host` -> a `scheme:path` URI (javascript:/data:),
-            // which git never accepts. scp-style `user@host:path` is fine.
-            return Err("git_url scheme not allowed");
-        }
-    }
-    Ok(())
-}
-
-async fn list_repositories(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<routes::WorkflowRunsQuery>,
-) -> Result<Json<ListResponse<RepositoryView>>, StatusCode> {
-    // Hardening P2 item 19: never return an empty list on a DB error — surface
-    // storage outage as 503 so the client does not read it as "no repos".
-    let after = match (&q.after_created_at, &q.after_id) {
-        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
-        _ => None,
-    };
-    match state.store.list_repositories(after, q.limit).await {
-        Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
-                items.last().map(|r| format!("{},{}", r.created_at, r.id))
-            } else {
-                None
-            };
-            Ok(Json(ListResponse::new(items, next_cursor)))
-        }
-        Err(e) => {
-            tracing::error!("list_repositories failed: {e}");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-// ----- conversations (stateful multi-turn chat routed to an agent) -----
-
-async fn create_conversation(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateConversationRequest>,
-) -> (StatusCode, Json<agentgrid_common::Conversation>) {
-    match state
-        .store
-        .create_conversation(&req.adapter, &req.repository)
-        .await
-    {
-        Ok(c) => (StatusCode::CREATED, Json(c)),
-        Err(e) => {
-            tracing::error!("create_conversation failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(agentgrid_common::Conversation {
-                    id: String::new(),
-                    adapter: String::new(),
-                    repository: String::new(),
-                    created_at: String::new(),
-                }),
-            )
-        }
-    }
-}
-
-async fn show_conversation(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<agentgrid_common::Conversation>, StatusCode> {
-    state
-        .store
-        .get_conversation(&id)
-        .await
-        .map_err(|e| {
-            tracing::error!("get_conversation failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
-}
-
-/// Compose the conversation history into a prompt the agent receives, so any
-/// node picking the task up sees the full shared context. Format is a simple
-/// transcript: `user:` / `assistant:` lines.
-fn compose_conversation_prompt(
-    messages: &[agentgrid_common::ConversationMessage],
-    new_user: &str,
-) -> String {
-    let mut s = String::new();
-    for m in messages {
-        s.push_str(m.role.as_str());
-        s.push_str(": ");
-        s.push_str(&m.content);
-        s.push('\n');
-    }
-    s.push_str("user: ");
-    s.push_str(new_user);
-    s
-}
-
-/// Append a user message and create a task carrying the composed conversation
-/// prompt. The task is assigned by the scheduler to any node serving
-/// `adapter`+`repository`. Returns the task id so the gateway can stream the
-/// answer.
-async fn append_conversation_message(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<AppendMessageRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
-    let conv = state
-        .store
-        .get_conversation(&id)
-        .await
-        .map_err(|e| {
-            tracing::error!("get_conversation failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let history = state
-        .store
-        .list_conversation_messages(&id, 0, 1000)
-        .await
-        .map_err(|e| {
-            tracing::error!("list_conversation_messages failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    let prompt = compose_conversation_prompt(&history, &req.content);
-    // Stage 11.5: if a prior turn finished an ACP session, resume it so the
-    // agent does not re-process the transcript from scratch.
-    let parent_acp_session_id = state
-        .store
-        .last_conversation_acp_session(&id)
-        .await
-        .map_err(|e| {
-            tracing::warn!("last_conversation_acp_session failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    let task_req = CreateTaskRequest {
-        prompt,
-        repository: conv.repository.clone(),
-        adapter: conv.adapter.clone(),
-        requested_node_id: None,
-        timeout_secs: None,
-        validation_command: None,
-        base_commit: None,
-        parent_acp_session_id,
-        security_profile: None,
-        network_mode: None,
-    };
-    let task = state.store.create_task(&task_req).await.map_err(|e| {
-        tracing::error!("create_task for conversation failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    state
-        .store
-        .append_conversation_message(&id, "user", &req.content, Some(&task.id))
-        .await
-        .map_err(|e| {
-            tracing::error!("append user message failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({"task_id": task.id, "conversation_id": id})),
-    ))
-}
-
-async fn list_conversation_messages(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<ListResponse<agentgrid_common::ConversationMessage>>, StatusCode> {
-    let after_seq = params
-        .get("after_seq")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let limit = params
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1000);
-    match state
-        .store
-        .list_conversation_messages(&id, after_seq, limit)
-        .await
-    {
-        Ok(items) => {
-            let next_cursor = if items.len() == limit as usize {
-                items.last().map(|m| m.seq.to_string())
-            } else {
-                None
-            };
-            Ok(Json(ListResponse::new(items, next_cursor)))
-        }
-        Err(e) => {
-            tracing::error!("list_conversation_messages failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-/// Resolve the SSE `after` cursor for a reconnect. `Last-Event-ID` header
-/// (browser default) carries the global `ingest_id` of the last delivered
-/// event (Hardening P0 item 9), and an explicit `after_ingest` query wins.
-/// Legacy `after_sequence` (per-attempt) is still accepted when neither is
-/// set, so pre-0037 clients keep working.
-fn sse_resume_after(
-    after_ingest: Option<u64>,
-    after_sequence: u64,
-    last_event_id: Option<&axum::http::HeaderValue>,
-) -> (Option<u64>, u64) {
-    let last = last_event_id
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
-    match last {
-        // `Last-Event-ID` is an ingest_id (the id: field on events since 0037).
-        Some(last) => (Some(last.max(after_ingest.unwrap_or(0))), after_sequence),
-        None => (after_ingest, after_sequence),
-    }
-}
-
-async fn events_stream(
-    State(state): State<Arc<AppState>>,
-    Path(task_id): Path<String>,
-    Query(q): Query<EventsQuery>,
-    headers: HeaderMap,
-) -> axum::response::sse::Sse<
-    impl Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
-> {
-    use axum::response::sse::{Event, Sse};
-    use std::time::Duration;
-    // SSE reconnect resume: `Last-Event-ID` header (browser default on
-    // reconnect) carries the global ingest_id of the last delivered event, but
-    // an explicit `after_ingest` query wins (lets a client force a different
-    // point). This gives no gaps/no dups across attempts: the next poll starts
-    // after the last delivered ingest_id.
-    let (mut after_ingest, after_sequence) = sse_resume_after(
-        q.after_ingest,
-        q.after_sequence,
-        headers.get("Last-Event-ID"),
-    );
-    let stream = async_stream::stream! {
-        loop {
-            match state
-                .store
-                .get_events(&task_id, after_ingest, after_sequence, Some(500))
-                .await
-            {
-                Ok(events) if !events.is_empty() => {
-                    for e in events {
-                        // Track both cursors: the global ingest_id drives
-                        // pagination; the legacy sequence stays accurate for
-                        // old clients that keep polling after_sequence.
-                        after_ingest = Some(after_ingest.unwrap_or(0).max(e.ingest_id));
-                        if let Ok(data) = serde_json::to_string(&e) {
-                            // SSE `id:` is the global ingest_id so a browser
-                            // sends `Last-Event-ID` as an ingest cursor on
-                            // reconnect (Hardening P0 item 9).
-                            yield Ok(
-                                Event::default()
-                                    .event("task-event")
-                                    .id(e.ingest_id.to_string())
-                                    .data(data),
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    };
-    Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("ping"),
-    )
-}
-
-async fn get_events(
-    State(state): State<Arc<AppState>>,
-    Path(task_id): Path<String>,
-    Query(q): Query<EventsQuery>,
-) -> Result<Json<Vec<agentgrid_common::TaskEvent>>, StatusCode> {
-    // Hardening P2 item 19: never return an empty list on a DB error — surface
-    // storage outage as 503 with a machine-readable code so the client does
-    // not read it as "no events".
-    match state
-        .store
-        .get_events(&task_id, q.after_ingest, q.after_sequence, q.limit)
-        .await
-    {
-        Ok(e) => Ok(Json(e)),
-        Err(e) => {
-            tracing::error!("get_events failed: {e}");
-            Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-    }
-}
-
-async fn poll(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Json(mut req): Json<PollRequest>,
-) -> (StatusCode, Json<PollResponse>) {
-    // The authenticated node id is the source of truth; ignore any client-supplied id.
-    req.node_id = auth.node_id;
-    if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
-        let _ = state.store.set_node_degraded(&req.node_id).await;
-    }
-    if let Err(e) = state.store.register_or_touch_node(&req).await {
-        tracing::error!("register node failed: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(PollResponse { assignment: None }),
-        );
-    }
-
-    let deadline = Instant::now() + POLL_TIMEOUT;
-    loop {
-        match state.store.try_assign(&req.node_id).await {
-            Ok(Some(assignment)) => {
-                return (
-                    StatusCode::OK,
-                    Json(PollResponse {
-                        assignment: Some(assignment),
-                    }),
-                );
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!("try_assign failed: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(PollResponse { assignment: None }),
-                );
-            }
-        }
-        if Instant::now() >= deadline {
-            return (StatusCode::OK, Json(PollResponse { assignment: None }));
-        }
-        let remaining = deadline - Instant::now();
-        tokio::select! {
-            _ = state.assignment_notify.notified() => {}
-            _ = tokio::time::sleep(remaining) => {
-                return (StatusCode::OK, Json(PollResponse { assignment: None }));
-            }
-        }
-    }
-}
-
-async fn attempt_cancel_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path(attempt_id): Path<String>,
-) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    // No fencing check here: this is a read of cancel_requested (a polling
-    // endpoint), not a mutation.
-    let requested = state
-        .store
-        .attempt_cancel_requested(&attempt_id)
-        .await
-        .unwrap_or(false);
-    Json(CancelState {
-        cancel_requested: requested,
-    })
-    .into_response()
-}
-
-async fn ingest_events(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path(attempt_id): Path<String>,
-    headers: HeaderMap,
-    Json(req): Json<IngestEventsRequest>,
-) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
-        return code.into_response();
-    }
-    for e in &req.events {
-        if e.payload.to_string().len() > state.limits.event {
-            state
-                .event_rejections
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-        }
-    }
-    // Hardening P1 item 14: per-node rate limit so a single node cannot flood
-    // the control plane with event batches. Over the limit → 429, with a
-    // counted rejection so it shows in metrics.
-    {
-        let now = chrono::Utc::now().timestamp();
-        let allowed = state.event_rate.lock().await.admit(&auth.node_id, now);
-        if !allowed {
-            state
-                .event_rejections
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return StatusCode::TOO_MANY_REQUESTS.into_response();
-        }
-    }
-    // Hardening P1 item 14: bound the batch itself — event count and the
-    // summed payload bytes — so one request cannot flood the store.
-    if req.events.len() > state.limits.event_batch_count {
-        state
-            .event_rejections
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
-    let total: usize = req.events.iter().map(|e| e.payload.to_string().len()).sum();
-    if total > state.limits.event_batch_bytes {
-        state
-            .event_rejections
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
-    match state.store.ingest_events(&attempt_id, &req).await {
-        Ok(ack) if ack.accepted > 0 || ack.highest_contiguous_sequence.is_some() => {
-            // Hardening P1 item 14: a batch whose max sequence exceeds the
-            // contiguous prefix (highest_contiguous_sequence) introduced a
-            // gap — out-of-order or skipped-sequence delivery. Count it once
-            // per such batch for observability; the durable outbox still
-            // redrives the missing sequences.
-            let max_seq = req.events.iter().map(|e| e.sequence).max();
-            if let (Some(max_seq), Some(prefix)) = (max_seq, ack.highest_contiguous_sequence) {
-                if max_seq > prefix {
-                    state
-                        .event_gaps
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            (StatusCode::OK, Json(ack)).into_response()
-        }
-        // Either the attempt is gone or it is terminal — both are
-        // rejections worth surfacing in observability.
-        Ok(_) => {
-            state
-                .event_rejections
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            StatusCode::NOT_FOUND.into_response()
-        }
-        Err(e) => {
-            tracing::error!("ingest_events failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-async fn complete_attempt(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path(attempt_id): Path<String>,
-    headers: HeaderMap,
-    Json(req): Json<CompleteAttemptRequest>,
-) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
-        return code.into_response();
-    }
-    match state.store.complete_attempt(&attempt_id, &req).await {
-        Ok(true) => StatusCode::OK.into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => {
-            // Hardening P1 item 13: map invalid state transition to 409 Conflict
-            // with a machine-readable code (hardening P2 item 19). The `?`
-            // operator wraps the raw `InvalidTransition` in anyhow (via its
-            // blanket From), NOT the StoreTransitionError marker — so check
-            // both shapes.
-            if e.downcast_ref::<crate::store::StoreTransitionError>()
-                .is_some()
-                || e.downcast_ref::<agentgrid_common::InvalidTransition>()
-                    .is_some()
-            {
-                return middleware::api_error(
-                    StatusCode::CONFLICT,
-                    "invalid_state_transition",
-                    "attempt cannot transition from its current state",
-                );
-            }
-            tracing::error!("complete_attempt failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
-}
-
-async fn ack_attempt_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path(attempt_id): Path<String>,
-    headers: HeaderMap,
-) -> StatusCode {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code;
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
-        return code;
-    }
-    match state.store.ack_attempt(&attempt_id).await {
-        Ok(true) => StatusCode::OK,
-        Ok(false) => StatusCode::NOT_FOUND,
-        Err(e) => {
-            tracing::error!("ack_attempt failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-/// Hardening P0 item 12: the node signals it has started the post-agent
-/// validation command; the CP moves the attempt (and task) `running →
-/// validating`. Ownership + fencing checked like every other node mutation.
-async fn begin_validate_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path(attempt_id): Path<String>,
-    headers: HeaderMap,
-) -> StatusCode {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code;
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
-        return code;
-    }
-    match state.store.begin_validate(&attempt_id).await {
-        Ok(true) => StatusCode::OK,
-        // Not `running` (already validating, terminal, or gone): idempotent
-        // no-op so a retried validation signal never 500s.
-        Ok(false) => StatusCode::OK,
-        Err(e) => {
-            tracing::error!("begin_validate failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-async fn create_agent_session_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthedNode>,
-    Path(attempt_id): Path<String>,
-    headers: HeaderMap,
-    Json(req): Json<CreateAgentSessionRequest>,
-) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
-        return code.into_response();
-    }
-    match state
-        .store
-        .create_agent_session(&attempt_id, &req.adapter)
-        .await
-    {
-        Ok(id) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "session_id": id })),
-        )
-            .into_response(),
-        Err(e) => {
-            // Hardening P2 item 19: log the full internal error chain here, but
-            // never send it to the client — return an opaque 500 body.
-            tracing::error!("create_agent_session failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "internal error"})),
-            )
-                .into_response()
-        }
-    }
-}
-
 /// Bind and serve. Starts background maintenance (lease/heartbeat jobs).
 /// If `AGENTGRID_TLS_CERT` and `AGENTGRID_TLS_KEY` are both set, the listener is
 /// wrapped in a rustls TLS acceptor (no system OpenSSL); otherwise plaintext.
@@ -1900,58 +1254,4 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod sse_tests {
-    use super::sse_resume_after;
-
-    fn header(v: &str) -> axum::http::HeaderValue {
-        axum::http::HeaderValue::from_str(v).unwrap()
-    }
-
-    #[test]
-    fn resume_uses_query_when_higher_than_header() {
-        // Explicit after_ingest query wins over Last-Event-ID when newer.
-        assert_eq!(
-            sse_resume_after(Some(5), 0, Some(&header("2"))),
-            (Some(5), 0)
-        );
-    }
-
-    #[test]
-    fn resume_uses_header_when_higher_than_query() {
-        // Last-Event-ID promotes a reconnect that started at 0 up to last
-        // ingest_id (Hardening P0 item 9: the header carries the global cursor).
-        assert_eq!(sse_resume_after(None, 0, Some(&header("7"))), (Some(7), 0));
-    }
-
-    #[test]
-    fn resume_takes_max_of_both() {
-        assert_eq!(
-            sse_resume_after(Some(3), 0, Some(&header("3"))),
-            (Some(3), 0)
-        );
-    }
-
-    #[test]
-    fn resume_without_header_is_query() {
-        assert_eq!(sse_resume_after(Some(9), 0, None), (Some(9), 0));
-    }
-
-    #[test]
-    fn resume_ignores_non_numeric_header() {
-        // A garbage Last-Event-ID falls back to the query (no gaps, no dup).
-        assert_eq!(
-            sse_resume_after(None, 0, Some(&header("garbage"))),
-            (None, 0)
-        );
-    }
-
-    #[test]
-    fn resume_legacy_sequence_without_ingest_cursor() {
-        // Pre-0037 client: no after_ingest, no Last-Event-ID — the per-attempt
-        // after_sequence is passed through unchanged.
-        assert_eq!(sse_resume_after(None, 42, None), (None, 42));
-    }
 }

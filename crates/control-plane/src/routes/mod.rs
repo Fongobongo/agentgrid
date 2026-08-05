@@ -3,7 +3,11 @@
 
 pub mod approvals;
 pub mod artifacts;
+pub mod attempts;
+pub mod conversations;
+pub mod events;
 pub mod nodes;
+pub mod repositories;
 pub mod tasks;
 pub mod workflows;
 
