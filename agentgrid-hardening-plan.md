@@ -961,7 +961,7 @@
 - [x] Storage имеет retention, global quotas и disk-pressure behavior. (retention cleanup + orphan/dangling reconcile + `ag storage gc` + critical-disk watermark)
 - [x] Giant production modules декомпозированы до обозримых границ. (lib.rs 3769→510; node-daemon main.rs 4670→1578 (15 модулей); store.rs 5235→800 production строк (15 submodules, остальное — тесты))
 - [x] API ошибки не маскируются пустыми успешными responses. (list handlers → 503 при storage ошибке; не пустые массивы)
-- [ ] Release содержит полный набор заявленных binaries, checksums, SBOM и signatures.
+- [x] Release содержит полный набор заявленных binaries, checksums, SBOM и signatures. (8 binaries: control-plane, ag, node-daemon, gateway, acp-agent, adapter-mock/claude/opencode; SHA256SUMS per target; SBOM CycloneDX теперь генерится в самом release job в release-assets; cosign keyless signatures на checksums; attest-build-provenance на все release-assets/*)
 - [x] README, threat model, changelog и maturity matrix соответствуют коду. (README event cursor/unsafe/storage sections; openapi begin_validate/after_ingest/storage-gc; CHANGELOG entries)
 - [ ] Полный CI/release gate зелёный.
 
