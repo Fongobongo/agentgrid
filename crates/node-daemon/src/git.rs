@@ -1521,4 +1521,39 @@ mod tests {
         std::env::remove_var("AGENTGRID_ALLOW_MISSING_UPSTREAM");
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// Hardening plan 928: two daemon processes (or two attempts) on one repo
+    /// root must not race the bare-mirror fetch/worktree-add. flock is per
+    /// open-file-description, so a second open in the same process contends
+    /// exactly like a sibling daemon's open — this test proves the
+    /// serialization: holder blocks contender, release unblocks it.
+    #[test]
+    fn cross_process_flock_serializes_two_holders() {
+        let dir = std::env::temp_dir().join(format!("ag-flock-928-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.as_path();
+        let repo = "repo-928";
+
+        let first = RepoFlock::acquire(root, repo, std::time::Duration::from_secs(1)).unwrap();
+        // A second acquisition (simulating the sibling daemon) must block:
+        // with a 300ms timeout it must NOT acquire while the first holds.
+        let started = std::time::Instant::now();
+        let contended = RepoFlock::acquire(root, repo, std::time::Duration::from_millis(300));
+        let waited = started.elapsed();
+        assert!(
+            contended.is_err(),
+            "contender must time out while the first holder holds the flock"
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(280),
+            "contender must actually wait on the flock, not fail fast (waited {waited:?})"
+        );
+
+        // Release the holder: the contender now acquires immediately.
+        drop(first);
+        let acquired = RepoFlock::acquire(root, repo, std::time::Duration::from_secs(1));
+        assert!(acquired.is_ok(), "flock is released by Drop; kernel auto-release");
+        drop(acquired.unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

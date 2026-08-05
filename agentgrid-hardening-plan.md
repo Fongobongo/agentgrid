@@ -925,7 +925,7 @@
 ## Git/workspaces
 
 - [x] Parallel attempts одного repo. (git.rs repo_lock per repo root; mutex serializes clone/fetch/worktree-add)
-- [ ] Два daemon process с одним repo root.
+- [x] Два daemon process с одним repo root. (RepoFlock cross-process flock уже был; добавлен тест `cross_process_flock_serializes_two_holders`: второй holder блокируется пока первый держит flock, после drop — acquire мгновенный; kernel auto-release)
 - [x] Base SHA pinning. (`base_commit_pins_worktree_to_commit`)
 - [x] Missing upstream fail-closed. (adapter contract: missing tool results in error; daemon treats adapter crash as attempt failure)
 - [x] Conflicting upstream patch. (git.rs apply_upstream_patches uses git apply; conflicts skip upstream with warning; integrator runs with remaining patches)
