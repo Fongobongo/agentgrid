@@ -4,8 +4,14 @@
 //! is SQLite (see [`store`]). Stage 1 used an in-memory map — swapped for
 //! persistence in Stage 2.1.
 
+mod auth;
+use auth::{
+    check_attempt_owner, check_fencing_token, fencing_token_header, AuthedNode, AuthedUser, Claims,
+};
 mod config;
+mod middleware;
 pub mod store;
+mod tls;
 pub mod workflow;
 
 // OpenTelemetry metrics (optional feature)
@@ -13,103 +19,52 @@ pub mod otel;
 
 use crate::config::{env_usize, EventRate, Limits, LoginRate, SetupToken, SETUP_TOKEN_TTL};
 use crate::store::is_safe_opaque_id;
-use anyhow::Context;
 use std::sync::Arc;
 use std::time::Instant;
-
-#[cfg(feature = "opentelemetry")]
-use crate::otel::init_otel;
 
 use agentgrid_common::{
     AppendMessageRequest, ApprovalEvent, ApprovalView, CancelState, CompleteAttemptRequest,
     CreateAgentSessionRequest, CreateConversationRequest, CreateRepositoryRequest,
     CreateTaskRequest, CreateWorkflowRequest, CreateWorkflowRunRequest, EnrollRequest,
     EnrollResponse, EnrollTokenResponse, EventsQuery, HeartbeatRequest, IngestEventsRequest,
-    LoginRequest, LoginResponse, McpServer, McpServerCreate, PollRequest, PollResponse,
-    RepositoryView, SetupRequest, TaskEligibility, TaskView, UploadArtifactRequest,
-    WorkflowProjection, WorkflowRun, WorkflowRunWithSteps, WorkflowSchedule,
-    WorkflowScheduleCreate, WorkflowTemplate,
+    ListResponse, McpServer, McpServerCreate, PollRequest, PollResponse, RepositoryView,
+    TaskEligibility, TaskView, UploadArtifactRequest, WorkflowProjection, WorkflowRun,
+    WorkflowRunWithSteps, WorkflowSchedule, WorkflowScheduleCreate, WorkflowTemplate,
 };
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
-    http::{header, HeaderMap, Request, StatusCode},
-    middleware::{self, Next},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use futures_core::Stream;
-use http_body_util::BodyExt;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use store::Store;
 use tokio::sync::Notify;
-use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
-
-/// JWT claims for user sessions (Stage 4.1).
-/// Includes `jti` (JWT ID) for session revocation (Stage 4.2).
-#[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    exp: usize,
-    jti: String,
-}
 
 /// Stage 2.5: the cookie name carrying the session JWT, set HttpOnly so the
 /// browser cannot read it (no XSS token theft) with SameSite=Strict (CSRF
 /// guard). `Secure` is added only when `AGENTGRID_COOKIE_SECURE=1` so local
 /// plaintext dev keeps working.
-const AUTH_COOKIE: &str = "agentgrid_token";
-
-/// Extract a session JWT from a request: an `Authorization: Bearer` header
-/// (non-browser clients: CLI, gateway, node) or the `agentgrid_token` cookie
-/// (browser fetch with `credentials: include`).
-fn auth_token_from_headers(headers: &HeaderMap) -> Option<String> {
-    if let Some(h) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-    {
-        return Some(h.to_string());
-    }
-    headers
-        .get(header::COOKIE)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|c| {
-            c.split(';')
-                .map(|p| p.trim())
-                .find_map(|p| p.strip_prefix(&format!("{AUTH_COOKIE}=")))
-        })
-        .map(|s| s.to_string())
-}
-
-/// Build a `Set-Cookie` header value for a freshly-issued session JWT.
-fn auth_cookie_header(token: &str) -> String {
-    let secure = std::env::var("AGENTGRID_COOKIE_SECURE").as_deref() == Ok("1");
-    let mut v = format!("{AUTH_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200");
-    if secure {
-        v.push_str("; Secure");
-    }
-    v
-}
-
 pub struct AppState {
     pub store: Store,
     assignment_notify: Arc<Notify>,
-    jwt_secret: Vec<u8>,
+    pub(crate) jwt_secret: Vec<u8>,
     /// Directory with the built web UI (Stage 4.3). Served as static files;
     /// `None` disables the UI.
-    web_root: Option<std::path::PathBuf>,
+    pub(crate) web_root: Option<std::path::PathBuf>,
     /// Request size ceilings (Stage 5.1).
     limits: Limits,
     /// Database file path (for SQLite size metrics, Stage 5.2).
     db_path: String,
     /// Brute-force protection on `/v1/auth/login` (Stage 2.5).
-    login_rate: Arc<tokio::sync::Mutex<LoginRate>>,
+    pub(crate) login_rate: Arc<tokio::sync::Mutex<LoginRate>>,
     /// Hardening P1 item 14: per-node event-ingest rate limit (requests per
     /// window). A node that floods the control plane with event batches beyond
     /// `event_rate_max` / `event_rate_window_secs` gets 429 instead of more
@@ -119,7 +74,7 @@ pub struct AppState {
     /// when no users exist; required to create the first user; consumed on
     /// first use. `None` once bootstrap is complete or the token has been used
     /// / has expired (15 min TTL).
-    setup_token: Arc<tokio::sync::Mutex<Option<SetupToken>>>,
+    pub(crate) setup_token: Arc<tokio::sync::Mutex<Option<SetupToken>>>,
     /// Hardening P2 item 35: security observability counters, surfaced in
     /// /metrics so an operator can alert on rising cross-node rejections, stale
     /// fencing tokens, or event-batch rejection.
@@ -130,12 +85,6 @@ pub struct AppState {
     /// introduced (a sequence > current contiguous-prefix+1). Out-of-order /
     /// skipped-sequence redelivery bumps this monotonically.
     pub event_gaps: std::sync::Arc<std::sync::atomic::AtomicU64>,
-}
-
-/// User identity established by [`require_user_auth`]; read by user handlers.
-#[derive(Clone)]
-struct AuthedUser {
-    username: String,
 }
 
 impl AppState {
@@ -275,7 +224,7 @@ impl AppState {
 
     /// Issue a 12h JWT for `username` (Stage 4.1).
     /// Includes `jti` for session revocation (Stage 4.2).
-    fn issue_token(&self, username: &str) -> anyhow::Result<String> {
+    pub(crate) fn issue_token(&self, username: &str) -> anyhow::Result<String> {
         let exp = (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp() as usize;
         let jti = Uuid::new_v4().to_string();
         let claims = Claims {
@@ -292,7 +241,7 @@ impl AppState {
 
     /// Validate a JWT and return the username, or None if revoked/invalid.
     /// Checks revoked_sessions blocklist (Stage 4.2).
-    async fn verify_token(&self, token: &str) -> Option<String> {
+    pub(crate) async fn verify_token(&self, token: &str) -> Option<String> {
         let claims = decode::<Claims>(
             token,
             &DecodingKey::from_secret(&self.jwt_secret),
@@ -325,8 +274,8 @@ impl AppState {
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/health/live", get(health_live))
-        .route("/health/ready", get(health_ready))
+        .route("/health/live", get(auth::health_live))
+        .route("/health/ready", get(auth::health_ready))
         .route("/metrics", get(metrics))
         .route("/v1/tasks", post(create_task).get(list_tasks))
         .route("/v1/tasks/{id}", get(show_task))
@@ -343,9 +292,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{id}/approvals",
             post(create_approval_for_task_handler),
         )
-        .route("/v1/auth/setup", post(auth_setup))
-        .route("/v1/auth/login", post(auth_login))
-        .route("/v1/auth/logout", post(auth_logout))
+        .route("/v1/auth/setup", post(auth::auth_setup))
+        .route("/v1/auth/login", post(auth::auth_login))
+        .route("/v1/auth/logout", post(auth::auth_logout))
         .route("/v1/policy/evaluate", post(evaluate_policy))
         .route("/v1/skills", get(list_skills_trust_handler))
         .route("/v1/skills/{name}", get(get_skill_trust_handler))
@@ -429,486 +378,29 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(cancel_workflow_run_handler),
         )
         .layer(DefaultBodyLimit::max(state.limits.artifact))
-        .layer(middleware::from_fn_with_state(
+        .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            require_user_auth,
+            auth::require_user_auth,
         ))
-        .layer(middleware::from_fn_with_state(
+        .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            require_node_auth,
+            auth::require_node_auth,
         ))
         // Hardening P2 item 36: default security headers on every response
         // (Referrer-Policy + a restrictive Permissions-Policy). HSTS is opt-in
         // via AGENTGRID_HSTS=1 so a plain-HTTP-control-plane-terminated TLS at
         // a reverse proxy does not pin a self-signed cert. The per-route CSP
         // (set on the SPA shell + artifact responses) stays untouched.
-        .layer(middleware::from_fn(security_headers_middleware))
+        .layer(axum::middleware::from_fn(
+            middleware::security_headers_middleware,
+        ))
         // Hardening P2 item 19/35: outermost layer so every log line inside a
         // request (auth, handler, store) carries a stable `request_id`. The
         // JSON formatter attaches the current span to each event, so the id is
         // correlatable across the whole request without per-handler plumbing.
-        .layer(middleware::from_fn(request_id_middleware))
-        .fallback(spa_fallback)
+        .layer(axum::middleware::from_fn(middleware::request_id_middleware))
+        .fallback(middleware::spa_fallback)
         .with_state(state)
-}
-
-/// Hardening P2 item 19/35: assign a request id per request. Accept a client
-/// `X-Request-Id` only if it is a safe opaque id (≤64 `[A-Za-z0-9_-]`, no
-/// separators — same guard as attempt ids, so a client cannot inject log
-/// control chars or forge another request's id); otherwise mint a UUIDv4.
-/// Hardening P2 item 36: apply a small set of default security headers to
-/// every response. Referrer-Policy + a restrictive Permissions-Policy
-/// (no camera/mic/geolocation/USB/etc.) keep the API/UI safe even when a
-/// browser somehow loads a response context. HSTS is opt-in behind
-/// AGENTGRID_HSTS=1 so a loopback / reverse-proxied TLS control plane does
-/// not pin the wrong cert; the per-route CSP (SPA shell + artifacts) is set
-/// downstream and is left untouched here.
-async fn security_headers_middleware(req: Request<Body>, next: Next) -> Response {
-    let mut res = next.run(req).await;
-    let headers = res.headers_mut();
-    let _ = headers.try_insert(
-        header::REFERRER_POLICY,
-        header::HeaderValue::from_static("no-referrer"),
-    );
-    let _ = headers.try_insert(
-        header::HeaderName::from_static("permissions-policy"),
-        header::HeaderValue::from_static(
-            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
-        ),
-    );
-    if std::env::var("AGENTGRID_HSTS").as_deref() == Ok("1") {
-        let _ = headers.try_insert(
-            header::HeaderName::from_static("strict-transport-security"),
-            header::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-        );
-    }
-    res
-}
-
-/// The id rides in a tracing span (so every event logs it) and is echoed back
-/// on the response.
-async fn request_id_middleware(headers: HeaderMap, mut req: Request<Body>, next: Next) -> Response {
-    let id = headers
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| is_safe_opaque_id(s))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    req.extensions_mut().insert(RequestId(id.clone()));
-    let span = tracing::info_span!("request", request_id = %id);
-    let mut resp = span.in_scope(|| async move { next.run(req).await }).await;
-    resp.headers_mut()
-        .insert("x-request-id", id.as_str().try_into().unwrap());
-    resp
-}
-
-/// Hardening P2 item 19: a single, machine-readable JSON error envelope used
-/// by handlers that already surface a typed status. `code` is a stable
-/// snake_case string clients can switch on; the human message is short and
-/// never includes internal error chains (those stay in structured logs).
-/// The `X-Request-Id` header (added by the middleware) stays the correlation
-/// key; it is also embedded in the body for clients that only read the body.
-pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    let req_id = uuid::Uuid::new_v4().to_string();
-    let body = serde_json::json!({
-        "error": {
-            "code": code,
-            "message": message.into(),
-            "request_id": req_id,
-        }
-    });
-    (status, Json(body)).into_response()
-}
-
-/// Request id available to handlers via extensions (for explicit logging /
-/// future audit). The span already carries it for every log line.
-#[derive(Clone, Debug)]
-pub struct RequestId(pub String);
-
-/// Serve the built web UI (Stage 4.3). Unknown non-API paths fall back to
-/// SPA static file serving using tower-http's ServeDir.
-/// Serves files from the web root with proper security headers.
-/// Falls back to index.html for non-/v1/ routes (SPA routing).
-async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
-    let web_root = match &state.web_root {
-        Some(r) => r.clone(),
-        None => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let path = req.uri().path();
-    // Don't serve SPA fallback for /v1/ API routes - return 404
-    if path.starts_with("/v1/") {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    // Hardening P0: validate path components to prevent traversal.
-    // Only Normal segments allowed; ParentDir (..), RootDir (/), and
-    // any prefix components are rejected.
-    let rel = path.trim_start_matches('/');
-    // Inline is_safe_static_path check
-    let is_safe = {
-        use std::path::Component;
-        let mut safe = true;
-        for comp in std::path::Path::new(rel).components() {
-            match comp {
-                Component::Normal(_) => {}
-                Component::CurDir => {}
-                _ => {
-                    safe = false;
-                    break;
-                }
-            }
-        }
-        safe
-    };
-    if !is_safe {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    // Hardening P0: reject symlinks that escape the web root.
-    // Check each path component for symlinks pointing outside root.
-    let fs_path = web_root.join(rel);
-    if let Ok(canon_file) = fs_path.canonicalize() {
-        if !canon_file.starts_with(web_root.canonicalize().unwrap_or_default()) {
-            return StatusCode::FORBIDDEN.into_response();
-        }
-    }
-    // Serve index.html for root path explicitly
-    if rel.is_empty() {
-        let idx = web_root.join("index.html");
-        if let Ok(bytes) = tokio::fs::read(&idx).await {
-            return (
-                [
-                    (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                    (axum::http::header::CACHE_CONTROL, "no-cache"),
-                    (axum::http::header::HeaderName::from_static("content-security-policy"),
-                        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';                          img-src 'self' data:; connect-src 'self'; font-src 'self';                          object-src 'none'; base-uri 'self'; frame-ancestors 'none';                          form-action 'self'"),
-                    (axum::http::header::HeaderName::from_static("x-content-type-options"), "nosniff"),
-                    (axum::http::header::HeaderName::from_static("x-frame-options"), "DENY"),
-                ],
-                bytes,
-            ).into_response();
-        }
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let serve_dir = ServeDir::new(&web_root)
-        .not_found_service(ServeFile::new(web_root.join("index.html")))
-        .append_index_html_on_directories(false);
-    // Convert ServeDir response to axum Response<Body>
-    match tower::util::ServiceExt::oneshot(serve_dir, req).await {
-        Ok(res) => {
-            let (parts, body) = res.into_parts();
-            Response::from_parts(parts, Body::new(body.into_stream()))
-        }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-/// Check if a relative path is safe for static file serving.
-/// Only Normal path components are allowed; ParentDir (..), RootDir (/),
-/// and any prefix components are rejected.
-/// Node identity established by [`require_node_auth`]; read by node handlers.
-#[derive(Clone)]
-struct AuthedNode {
-    node_id: String,
-}
-
-/// Enforce Bearer node-credential auth on all `/v1/node/` routes except enroll.
-async fn require_node_auth(
-    State(state): State<Arc<AppState>>,
-    mut req: Request<Body>,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let path = req.uri().path().to_string();
-    if path.starts_with("/v1/node/") && path != "/v1/node/enroll" {
-        let cred = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "));
-        match cred {
-            Some(c) => match state.store.node_id_for_credential(c).await {
-                Ok(Some(node_id)) => {
-                    req.extensions_mut().insert(AuthedNode { node_id });
-                    Ok(next.run(req).await)
-                }
-                _ => Err(StatusCode::UNAUTHORIZED),
-            },
-            None => Err(StatusCode::UNAUTHORIZED),
-        }
-    } else {
-        Ok(next.run(req).await)
-    }
-}
-
-/// Reject a node request whose attempt is not owned by the authenticated
-/// node. Hardening P0: cross-node isolation. Returns `Ok(())` if the attempt
-/// exists and belongs to `auth.node_id`; `Err(FORBIDDEN)` if it exists but
-/// belongs to another node; `Err(NOT_FOUND)` if no such attempt (avoid
-/// disclosing existence). Optionally allow a revoked caller to also hit 403 —
-/// but revoked nodes already fail at `require_node_auth` (no credential match).
-async fn check_attempt_owner(
-    state: &AppState,
-    auth: &AuthedNode,
-    attempt_id: &str,
-) -> Result<(), StatusCode> {
-    match state.store.attempt_owner(attempt_id).await {
-        Ok(Some(node_id)) if node_id == auth.node_id => Ok(()),
-        Ok(Some(_)) => {
-            state
-                .cross_node_rejects
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(StatusCode::FORBIDDEN)
-        }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("attempt_owner failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-/// Hardening P0 item 8: verify the fencing token presented by this node still
-/// matches the current attempt's stored token. Returns Ok(()) if it matches
-/// (or the attempt has no token, N-1 backcompat); Err(StatusCode) otherwise:
-/// `409 Conflict` for a stale token (the node is reporting for an attempt
-/// that was reassigned or lost), `404/500` for missing/DB error.
-async fn check_fencing_token(
-    state: &AppState,
-    attempt_id: &str,
-    presented: Option<&str>,
-) -> Result<(), StatusCode> {
-    let stored = sqlx::query_scalar::<_, String>("SELECT fencing_token FROM attempts WHERE id = ?")
-        .bind(attempt_id)
-        .fetch_optional(&state.store.pool)
-        .await;
-    match stored {
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        // N-1 backcompat: a legacy attempt (or legacy node on a freshly
-        // migrated CP) has a blank token; accept any presenter to avoid
-        // breaking in-flight nodes before they roll the token.
-        Ok(Some(s)) if s.is_empty() => Ok(()),
-        Ok(Some(s)) if Some(s.as_str()) == presented => Ok(()),
-        Ok(Some(_)) => {
-            state
-                .stale_fencing_tokens
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(StatusCode::CONFLICT)
-        }
-        Err(e) => {
-            tracing::error!("fencing_token check failed: {e}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-/// Extract the node-presented fencing token from the request headers
-/// (`X-AgentGrid-Fencing-Token`). None when absent (N-1 nodes).
-fn fencing_token_header(h: &HeaderMap) -> Option<String> {
-    h.get("x-agentgrid-fencing-token")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-}
-
-async fn health_live() -> StatusCode {
-    StatusCode::OK
-}
-
-/// Whether a path requires a user JWT (Stage 4.1). Node auth (`/v1/node/*`)
-/// and the auth endpoints themselves are exempt; health/metrics are public.
-fn user_protected(path: &str) -> bool {
-    if path.starts_with("/health") || path == "/metrics" {
-        return false;
-    }
-    if path.starts_with("/v1/node/") {
-        return false;
-    }
-    if path == "/v1/auth/login" || path == "/v1/auth/setup" || path == "/v1/auth/logout" {
-        return false;
-    }
-    true
-}
-
-/// Require a valid user JWT on user-facing routes. Hardening P0:
-/// - DB error in `user_count` fails closed (503), never opens the API.
-/// - Before the first user exists (bootstrap not complete), all `/v1/` user
-///   routes are closed (503) except `/v1/auth/setup`; static UI (non-`/v1/`
-///   paths) stays served so the setup page loads. Node routes are handled
-///   by [`require_node_auth`] and are skipped here.
-async fn require_user_auth(
-    State(state): State<Arc<AppState>>,
-    mut req: Request<Body>,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let path = req.uri().path().to_string();
-    if user_protected(&path) {
-        match state.store.user_count().await {
-            Ok(0) => {
-                // Bootstrap not complete: only setup (exempt above) and static
-                // UI (non-/v1/ paths) are served; everything else is closed.
-                if path.starts_with("/v1/") {
-                    return Err(StatusCode::SERVICE_UNAVAILABLE);
-                }
-            }
-            Ok(_) => {
-                if let Some(token) = auth_token_from_headers(req.headers()) {
-                    match state.verify_token(&token).await {
-                        Some(u) => {
-                            req.extensions_mut().insert(AuthedUser { username: u });
-                        }
-                        None => return Err(StatusCode::UNAUTHORIZED),
-                    }
-                } else {
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
-            }
-            // Fail closed: a DB outage never opens the API.
-            Err(e) => {
-                tracing::error!("user_count failed in auth middleware: {e}");
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
-            }
-        }
-    }
-    Ok(next.run(req).await)
-}
-
-async fn auth_setup(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<SetupRequest>,
-) -> Result<(StatusCode, HeaderMap, Json<LoginResponse>), StatusCode> {
-    if req.username.is_empty() || req.password.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    // Only allowed while no users exist (closes the open bootstrap window).
-    match state.store.user_count().await {
-        Ok(0) => {}
-        Ok(_) => return Err(StatusCode::CONFLICT),
-        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-    // Hardening P0: require the one-time setup token minted at first start.
-    // Rejects missing/expired/already-consumed tokens; the comparison is
-    // constant-time-ish via a simple byte eq (token is high-entropy and
-    // short-lived, so timing leakage is not a practical concern).
-    {
-        let mut guard = state.setup_token.lock().await;
-        let valid = match guard.as_ref() {
-            Some(t) if t.is_live() => t.token == req.setup_token.as_deref().unwrap_or(""),
-            _ => false,
-        };
-        if !valid {
-            return Err(StatusCode::FORBIDDEN);
-        }
-        // Consume: the token is single-use.
-        *guard = None;
-    }
-    match state.store.create_user(&req.username, &req.password).await {
-        Ok(true) => {}
-        Ok(false) => return Err(StatusCode::CONFLICT),
-        Err(e) => {
-            tracing::error!("create_user failed: {e}");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    }
-    let token = state.issue_token(&req.username).map_err(|e| {
-        tracing::error!("issue_token failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let _ = state
-        .store
-        .audit("user", Some(&req.username), "user.create", None, None)
-        .await;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::SET_COOKIE,
-        header::HeaderValue::from_str(&auth_cookie_header(&token))
-            .unwrap_or_else(|_| header::HeaderValue::from_static("")),
-    );
-    Ok((StatusCode::CREATED, headers, Json(LoginResponse { token })))
-}
-
-async fn auth_login(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<LoginRequest>,
-) -> Result<(HeaderMap, Json<LoginResponse>), StatusCode> {
-    // Stage 2.5: brute-force protection. Fail closed to 429 on budget
-    // exhaustion; the generic error avoids user enumeration.
-    {
-        let mut rate = state.login_rate.lock().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        if !rate.check_and_record(now) {
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
-    }
-    let user = state
-        .store
-        .verify_user(&req.username, &req.password)
-        .await
-        .map_err(|e| {
-            tracing::error!("verify_user failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    let Some(_) = user else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-    let token = state.issue_token(&req.username).map_err(|e| {
-        tracing::error!("issue_token failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let _ = state
-        .store
-        .audit("user", Some(&req.username), "login", None, None)
-        .await;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::SET_COOKIE,
-        header::HeaderValue::from_str(&auth_cookie_header(&token))
-            .unwrap_or_else(|_| header::HeaderValue::from_static("")),
-    );
-    Ok((headers, Json(LoginResponse { token })))
-}
-
-async fn auth_logout(
-    State(state): State<Arc<AppState>>,
-    req: Request<Body>,
-) -> (HeaderMap, StatusCode) {
-    // Clear the session cookie and revoke the JWT jti (Stage 4.2).
-    if let Some(token) = auth_token_from_headers(req.headers()) {
-        if let Ok(claims) = decode::<Claims>(
-            &token,
-            &DecodingKey::from_secret(&state.jwt_secret),
-            &Validation::default(),
-        ) {
-            let _ = state
-                .store
-                .revoke_session(&claims.claims.jti, &claims.claims.sub)
-                .await;
-        }
-    }
-    // Clear the session cookie regardless of auth state (idempotent logout).
-    let mut v = format!("{AUTH_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
-    if std::env::var("AGENTGRID_COOKIE_SECURE").as_deref() == Ok("1") {
-        v.push_str("; Secure");
-    }
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::SET_COOKIE,
-        header::HeaderValue::from_str(&v).unwrap_or_else(|_| header::HeaderValue::from_static("")),
-    );
-    (headers, StatusCode::OK)
-}
-
-async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
-    let dir = std::path::Path::new(&state.db_path)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let probe = dir.join(".agentgrid-health-probe");
-    let writable = std::fs::write(&probe, b"ok").is_ok();
-    let _ = std::fs::remove_file(&probe);
-    if state.store.health_check().await && writable {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    }
 }
 
 async fn workflow_run_plan(
@@ -1304,7 +796,7 @@ struct EvaluatePolicyRequest {
 
 async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::response::Response) {
     use axum::response::IntoResponse;
-    let nodes = match state.store.list_nodes().await {
+    let nodes = match state.store.list_nodes(None, None).await {
         Ok(n) => n,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".into_response()),
     };
@@ -1690,6 +1182,28 @@ async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::respo
                 if n.enforced_limits { 1 } else { 0 }
             ));
         }
+        // Hardening P2 item 659: node network mode
+        s.push_str(
+            "# HELP agentgrid_node_network_mode Network mode per node.
+",
+        );
+        s.push_str(
+            "# TYPE agentgrid_node_network_mode gauge
+",
+        );
+        for n in &nodes {
+            let mode = match n.network_mode.as_str() {
+                "none" => 0,
+                "restricted" => 1,
+                "unrestricted" => 2,
+                _ => 0,
+            };
+            let labels = format!("node=\"{}\",mode=\"{}\"", n.name, n.network_mode);
+            s.push_str(&format!(
+                "agentgrid_node_network_mode{{{}}} {}",
+                labels, mode
+            ));
+        }
     }
 
     (
@@ -1738,7 +1252,7 @@ async fn create_task(
 async fn list_tasks(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TaskListQuery>,
-) -> Result<Json<Vec<TaskView>>, StatusCode> {
+) -> Result<Json<ListResponse<TaskView>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — that
     // would read as "no tasks" to the client. Surface storage outage as 503.
     match state
@@ -1752,7 +1266,14 @@ async fn list_tasks(
         )
         .await
     {
-        Ok(t) => Ok(Json(t)),
+        Ok(items) => {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+                items.last().map(|t| format!("{},{}", t.created_at, t.id))
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
         Err(e) => {
             tracing::error!("list_tasks failed: {e}");
             Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -1882,11 +1403,23 @@ async fn create_workflow(
 
 async fn list_workflows(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<WorkflowTemplate>>, StatusCode> {
+    Query(q): Query<WorkflowRunsQuery>,
+) -> Result<Json<ListResponse<WorkflowTemplate>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — surface
     // storage outage as 503 so the client does not read it as "no workflows".
-    match state.store.list_workflow_templates().await {
-        Ok(t) => Ok(Json(t)),
+    let after = match (&q.after_created_at, &q.after_id) {
+        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
+        _ => None,
+    };
+    match state.store.list_workflow_templates(after, q.limit).await {
+        Ok(items) => {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+                items.last().map(|t| format!("{},{}", t.created_at, t.id))
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
         Err(e) => {
             tracing::error!("list_workflows failed: {e}");
             Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -1949,11 +1482,27 @@ async fn create_workflow_schedule(
 async fn list_workflow_schedules(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<WorkflowSchedule>>, StatusCode> {
+    Query(q): Query<WorkflowRunsQuery>,
+) -> Result<Json<ListResponse<WorkflowSchedule>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — surface
     // storage outage as 503 so the client does not read it as "no schedules".
-    match state.store.list_workflow_schedules(Some(&id)).await {
-        Ok(s) => Ok(Json(s)),
+    let after = match (&q.after_created_at, &q.after_id) {
+        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
+        _ => None,
+    };
+    match state
+        .store
+        .list_workflow_schedules(Some(&id), after, q.limit)
+        .await
+    {
+        Ok(items) => {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+                items.last().map(|s| format!("{},{}", s.created_at, s.id))
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
         Err(e) => {
             tracing::error!("list_workflow_schedules failed: {e}");
             Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -1990,7 +1539,7 @@ struct WorkflowRunsQuery {
 async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
     Query(q): Query<WorkflowRunsQuery>,
-) -> Result<Json<Vec<WorkflowRun>>, StatusCode> {
+) -> Result<Json<ListResponse<WorkflowRun>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — surface
     // storage outage as 503 so the client does not read it as "no runs".
     let after = match (&q.after_created_at, &q.after_id) {
@@ -1998,7 +1547,14 @@ async fn list_workflow_runs(
         _ => None,
     };
     match state.store.list_workflow_runs(after, q.limit).await {
-        Ok(r) => Ok(Json(r)),
+        Ok(items) => {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+                items.last().map(|r| format!("{},{}", r.created_at, r.id))
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
         Err(e) => {
             tracing::error!("list_workflow_runs failed: {e}");
             Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -2062,11 +1618,25 @@ async fn tick_workflow_run(
 
 async fn list_nodes(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<agentgrid_common::NodeView>>, StatusCode> {
+    Query(q): Query<WorkflowRunsQuery>,
+) -> Result<Json<ListResponse<agentgrid_common::NodeView>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — that
     // would read as "no nodes" to the client. Surface storage outage as 503.
-    match state.store.list_nodes().await {
-        Ok(n) => Ok(Json(n)),
+    let after = match (&q.after_created_at, &q.after_id) {
+        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
+        _ => None,
+    };
+    match state.store.list_nodes(after, q.limit).await {
+        Ok(items) => {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+                items
+                    .last()
+                    .map(|n| format!("{},{}", n.last_heartbeat_at, n.id))
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
         Err(e) => {
             tracing::error!("list_nodes failed: {e}");
             Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -2277,11 +1847,23 @@ fn validate_git_url(url: &str) -> Result<(), &'static str> {
 
 async fn list_repositories(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<RepositoryView>>, StatusCode> {
+    Query(q): Query<WorkflowRunsQuery>,
+) -> Result<Json<ListResponse<RepositoryView>>, StatusCode> {
     // Hardening P2 item 19: never return an empty list on a DB error — surface
     // storage outage as 503 so the client does not read it as "no repos".
-    match state.store.list_repositories().await {
-        Ok(r) => Ok(Json(r)),
+    let after = match (&q.after_created_at, &q.after_id) {
+        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
+        _ => None,
+    };
+    match state.store.list_repositories(after, q.limit).await {
+        Ok(items) => {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+                items.last().map(|r| format!("{},{}", r.created_at, r.id))
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
         Err(e) => {
             tracing::error!("list_repositories failed: {e}");
             Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -2397,6 +1979,8 @@ async fn append_conversation_message(
         validation_command: None,
         base_commit: None,
         parent_acp_session_id,
+        security_profile: None,
+        network_mode: None,
     };
     let task = state.store.create_task(&task_req).await.map_err(|e| {
         tracing::error!("create_task for conversation failed: {e}");
@@ -2420,7 +2004,7 @@ async fn list_conversation_messages(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<Vec<agentgrid_common::ConversationMessage>>, StatusCode> {
+) -> Result<Json<ListResponse<agentgrid_common::ConversationMessage>>, StatusCode> {
     let after_seq = params
         .get("after_seq")
         .and_then(|v| v.parse().ok())
@@ -2429,15 +2013,24 @@ async fn list_conversation_messages(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000);
-    state
+    match state
         .store
         .list_conversation_messages(&id, after_seq, limit)
         .await
-        .map(Json)
-        .map_err(|e| {
+    {
+        Ok(items) => {
+            let next_cursor = if items.len() == limit as usize {
+                items.last().map(|m| m.seq.to_string())
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
+        Err(e) => {
             tracing::error!("list_conversation_messages failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 async fn get_artifact(
@@ -2999,7 +2592,7 @@ struct ApprovalListQuery {
 async fn list_approvals_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ApprovalListQuery>,
-) -> Result<Json<Vec<ApprovalView>>, StatusCode> {
+) -> Result<Json<ListResponse<ApprovalView>>, StatusCode> {
     let status = q
         .status
         .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok());
@@ -3008,15 +2601,20 @@ async fn list_approvals_handler(
         (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
         _ => None,
     };
-    state
-        .store
-        .list_approvals(status, after, q.limit)
-        .await
-        .map(Json)
-        .map_err(|e| {
+    match state.store.list_approvals(status, after, q.limit).await {
+        Ok(items) => {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+                items.last().map(|a| format!("{},{}", a.created_at, a.id))
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
+        Err(e) => {
             tracing::error!("list_approvals failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 async fn allow_approval_handler(
@@ -3279,7 +2877,7 @@ async fn complete_attempt(
                 || e.downcast_ref::<agentgrid_common::InvalidTransition>()
                     .is_some()
             {
-                return api_error(
+                return middleware::api_error(
                     StatusCode::CONFLICT,
                     "invalid_state_transition",
                     "attempt cannot transition from its current state",
@@ -3413,110 +3011,26 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
     ) {
         (Ok(cert), Ok(key)) => {
             let _ = rustls::crypto::ring::default_provider().install_default();
-            let acceptor = load_tls_acceptor(&cert, &key)?;
+            let acceptor = tls::load_tls_acceptor(&cert, &key)?;
             tracing::info!("control plane listening with TLS on {addr}");
             axum::serve(
-                TlsListener {
+                tls::TlsListener {
                     tcp: listener,
                     acceptor,
                 },
                 app,
             )
-            .with_graceful_shutdown(shutdown_signal(state.clone()))
+            .with_graceful_shutdown(tls::shutdown_signal(state.clone()))
             .await?;
         }
         _ => {
             tracing::info!("control plane listening on {addr} (plaintext)");
             axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal(state.clone()))
+                .with_graceful_shutdown(tls::shutdown_signal(state.clone()))
                 .await?;
         }
     }
     Ok(())
-}
-
-/// TLS-wrapped listener implementing axum 0.8's `Listener` trait, so it drops
-/// straight into `axum::serve`. Performs the TLS handshake per accepted TCP
-/// stream; a failed handshake is logged and the accept loop continues.
-struct TlsListener {
-    tcp: tokio::net::TcpListener,
-    acceptor: tokio_rustls::TlsAcceptor,
-}
-
-impl axum::serve::Listener for TlsListener {
-    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
-    type Addr = std::net::SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            match self.tcp.accept().await {
-                Ok((stream, addr)) => match self.acceptor.accept(stream).await {
-                    Ok(tls) => return (tls, addr),
-                    Err(e) => tracing::warn!("tls handshake failed: {e}"),
-                },
-                Err(e) => {
-                    tracing::error!("accept failed: {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            }
-        }
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        self.tcp.local_addr()
-    }
-}
-
-/// Build a rustls acceptor from a PEM cert chain + private key (no system OpenSSL).
-fn load_tls_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
-    let cert_pem =
-        std::fs::read(cert_path).with_context(|| format!("read TLS cert {cert_path}"))?;
-    let key_pem = std::fs::read(key_path).with_context(|| format!("read TLS key {key_path}"))?;
-    let mut cert_reader = std::io::Cursor::new(&cert_pem[..]);
-    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_reader).collect::<Result<_, _>>()?;
-    let mut key_reader = std::io::Cursor::new(&key_pem[..]);
-    let key = rustls_pemfile::private_key(&mut key_reader)?
-        .context("no private key found in TLS key PEM")?;
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .context("build rustls server config")?;
-    Ok(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)))
-}
-
-/// Await Ctrl-C / SIGTERM, then truncate the WAL so a restart replays nothing
-/// stale (Stage 2.5 ops).
-async fn shutdown_signal(state: Arc<AppState>) {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                let _ = sig.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-    }
-    let _ = state.store.wal_checkpoint().await;
-}
-
-#[cfg(test)]
-mod tls_tests {
-    use super::*;
-
-    #[test]
-    fn load_tls_acceptor_missing_file_errors() {
-        assert!(load_tls_acceptor("/no/such/cert.pem", "/no/such/key.pem").is_err());
-    }
 }
 
 #[cfg(test)]
