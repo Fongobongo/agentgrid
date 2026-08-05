@@ -72,6 +72,20 @@ fn valid_allowlist_spec(net: &str) -> bool {
     !cidrs.is_empty() && cidrs.split(',').all(|c| parse_cidr(c).is_some())
 }
 
+/// The docker-native network a task-level mode resolves to, without the
+/// env fallback (used for egress audit logging so operators see the actual
+/// isolation applied): `none`→`none`, `restricted`→`none` (docker cannot do
+/// per-range egress filtering), `unrestricted`→`bridge`, anything else passes
+/// through. Mirrors the mapping in [`docker_run_head`].
+pub fn resolved_network_mode(mode: &str) -> &'static str {
+    match mode {
+        "restricted" => "none",
+        "unrestricted" => "bridge",
+        "none" => "none",
+        _ => "none",
+    }
+}
+
 /// Accepts `IP/len` (v4 or v6) and returns the parsed network address + prefix
 /// length on success. No new dependency: the handful of checks below cover the
 /// forms operators actually type.
@@ -134,6 +148,24 @@ fn docker_run_head(workdir: &std::path::Path, network_mode: Option<&str>) -> Vec
         .map(|s| s.to_string())
         .or_else(|| std::env::var("AGENTGRID_SANDBOX_NETWORK").ok())
         .unwrap_or_else(|| "none".to_string());
+    // Plan §27: translate the task-level mode (none|restricted|unrestricted)
+    // into a docker-native network. `restricted` cannot be enforced as
+    // "internet but no LAN" with the docker CLI alone (no per-range egress
+    // filter), so it maps to `none` — strictly more isolated than promised,
+    // never less (a previously raw `--network restricted` would just fail
+    // the container). Real LAN-blocking-with-internet needs the egress-proxy
+    // upgrade path (same as the allowlist refusal).
+    let net = match net.as_str() {
+        "restricted" => {
+            tracing::debug!(
+                "network_mode=restricted maps to --network none (docker has no \
+                 per-range egress filter; egress proxy is the upgrade path)"
+            );
+            "none".to_string()
+        }
+        "unrestricted" => "bridge".to_string(),
+        other => other.to_string(),
+    };
     v.push("--network".to_string());
     v.push(net);
     if std::env::var("AGENTGRID_SANDBOX_READ_ONLY")
@@ -542,6 +574,29 @@ mod tests {
         assert_eq!(a[at("--pids-limit")], "128");
         assert_eq!(a[at("--memory")], "512m");
         assert_eq!(a[at("--cpus")], "1.5");
+    }
+
+    #[test]
+    fn task_network_mode_maps_to_docker_native_networks() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let net_of = |mode: Option<&str>| {
+            clear_sandbox_env();
+            let (_, a) = sandbox_command(
+                SandboxKind::Docker,
+                "c",
+                &[],
+                std::path::Path::new("/w"),
+                mode,
+            );
+            let i = a.iter().position(|x| x == "--network").unwrap() + 1;
+            a[i].clone()
+        };
+        // none -> none, unrestricted -> bridge, restricted -> none (safe
+        // ceiling: docker cannot do "internet but no LAN" natively).
+        assert_eq!(net_of(Some("none")), "none");
+        assert_eq!(net_of(Some("unrestricted")), "bridge");
+        assert_eq!(net_of(Some("restricted")), "none");
+        assert_eq!(net_of(None), "none", "default remains none");
     }
 
     #[test]

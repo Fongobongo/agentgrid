@@ -372,6 +372,18 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         &bin,
         assignment.network_mode.as_deref(),
     );
+    // Plan §27: egress audit — log the effective isolation applied to this
+    // attempt (task mode + resolved docker network) so operators can verify
+    // the deployed network policy from the daemon logs.
+    tracing::info!(
+        attempt_id = %assignment.attempt_id,
+        task_network_mode = ?assignment.network_mode,
+        resolved_network = sandbox::resolved_network_mode(
+            assignment.network_mode.as_deref().unwrap_or("none")
+        ),
+        sandbox = ?cfg.sandbox,
+        "attempt egress policy"
+    );
     // Hardening P0/P1 item 5: never let the agent run unsafe-unattended in an
     // unsandboxed environment unless the operator explicitly opted in.
     let env_remove = sandbox::unsafe_env_guard(cfg.sandbox);

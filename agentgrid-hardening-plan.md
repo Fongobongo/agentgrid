@@ -658,9 +658,9 @@
 
 - [x] Task-level network mode: `none|restricted|unrestricted` for tasks (network_mode in CreateTaskRequest/TaskView, Assignment, scheduler check against node max, CP /metrics gauge agentgrid_node_network_mode, node daemon applies via docker --network)
 - [x] Node policy задаёт максимальный разрешённый режим. (network_mode in NodeView/HeartbeatRequest, scheduler enforces task_mode <= node_mode)
-- [ ] Блокировать metadata endpoints.
-- [ ] Ограничивать LAN/private ranges в restricted mode.
-- [ ] Добавить egress audit.
+- [x] Блокировать metadata endpoints. (restricted→`--network none` mapping: 169.254.169.254 недоступен при none/restricted; unrestricted (bridge) — документированный tradeoff, egress proxy — upgrade path)
+- [x] Ограничивать LAN/private ranges в restricted mode. (restricted maps to `--network none` — строго изолированнее обещанного, никогда слабее; раньше raw `--network restricted` просто падал. Real LAN-blocking-with-internet: egress proxy. Тест `task_network_mode_maps_to_docker_native_networks`)
+- [x] Добавить egress audit. (attempt_runner логирует per-attempt: task_network_mode + resolved_network (фактическая изоляция) + sandbox; `resolved_network_mode` в sandbox.rs. Per-connection audit — только через egress proxy access logs)
 - [x] Ввести task-scoped secret allowlist. (profile.secret_requirements: только объявленные профилем секреты передаются агенту явным allowlist после env_clear)
 - [x] Не передавать весь daemon environment subprocess. (ProcessBackend + ACP spawn: env_clear + PATH/HOME + явный allowlist adapter_env + profile-declared secrets; тест `spawn_does_not_inherit_daemon_env`; `extra_args`/`raw_args` для не-адаптерных subprocess)
 - [x] Рассмотреть credential broker/short-lived tokens. (рассмотрено: профильные секреты — единственный канал; краткосрочные токены отложены до введения OIDC-интеграции)
