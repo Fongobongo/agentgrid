@@ -48,6 +48,7 @@ async fn migrations_serve_legacy_happy_path() {
         max_concurrency: 1,
         agent_version: "test".into(),
         protocol_version: None,
+        permission_interception: "wrapper".into(),
     };
     let resp = s.enroll_node(&enroll).await.unwrap().expect("enroll");
     let node_id = resp.node_id;
@@ -77,6 +78,9 @@ async fn migrations_serve_legacy_happy_path() {
         repo_lock_wait_ms: 0,
         sandbox_backend: "none".into(),
         enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
     };
     assert!(s.heartbeat(&node_id, &hb).await.unwrap());
 
@@ -91,6 +95,8 @@ async fn migrations_serve_legacy_happy_path() {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
         })
         .await
         .unwrap();
@@ -173,6 +179,7 @@ async fn foreign_keys_enforced_after_migration_0040() {
         max_concurrency: 2,
         agent_version: "test".into(),
         protocol_version: None,
+        permission_interception: "wrapper".into(),
     };
     let resp = s.enroll_node(&enroll).await.unwrap().expect("enroll");
     let node_id = resp.node_id;
@@ -186,6 +193,8 @@ async fn foreign_keys_enforced_after_migration_0040() {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
         })
         .await
         .unwrap();

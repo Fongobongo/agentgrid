@@ -3,6 +3,8 @@
 //! This module provides OpenTelemetry metrics setup when the `opentelemetry`
 //! feature is enabled. When the feature is disabled, `init_otel` is a no-op.
 
+#[cfg(feature = "opentelemetry")]
+use anyhow::Context;
 use anyhow::Result;
 
 /// Initialize OpenTelemetry metrics pipeline with Prometheus exporter.

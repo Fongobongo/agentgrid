@@ -70,12 +70,25 @@ impl Store {
         }))
     }
 
-    pub async fn list_workflow_templates(&self) -> Result<Vec<WorkflowTemplate>> {
-        let rows = sqlx::query(
-            "SELECT id, name, steps_json, budget_json, created_at FROM workflow_templates ORDER BY created_at ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    pub async fn list_workflow_templates(
+        &self,
+        after: Option<(String, String)>,
+        limit: Option<u64>,
+    ) -> Result<Vec<WorkflowTemplate>> {
+        const MAX_TEMPLATES: i64 = 1000;
+        let limit = limit.unwrap_or(100).min(MAX_TEMPLATES as u64) as i64;
+        let mut sql = String::from(
+            "SELECT id, name, steps_json, budget_json, created_at FROM workflow_templates WHERE 1=1",
+        );
+        if after.is_some() {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+        }
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        let mut q = sqlx::query(&sql);
+        if let Some((created_at, id)) = &after {
+            q = q.bind(created_at).bind(created_at).bind(id);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows
             .iter()
             .map(|r| WorkflowTemplate {
@@ -312,23 +325,30 @@ impl Store {
     pub async fn list_workflow_schedules(
         &self,
         template_id: Option<&str>,
+        after: Option<(String, String)>,
+        limit: Option<u64>,
     ) -> Result<Vec<WorkflowSchedule>> {
-        let rows = if let Some(tid) = template_id {
-            sqlx::query(
-                "SELECT id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at \
-                 FROM workflow_schedules WHERE template_id = ? ORDER BY created_at ASC",
-            )
-            .bind(tid)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                "SELECT id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at \
-                 FROM workflow_schedules ORDER BY created_at ASC",
-            )
-            .fetch_all(&self.pool)
-            .await?
-        };
+        const MAX_SCHEDULES: i64 = 1000;
+        let limit = limit.unwrap_or(100).min(MAX_SCHEDULES as u64) as i64;
+        let mut sql = String::from(
+            "SELECT id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at \
+                 FROM workflow_schedules WHERE 1=1",
+        );
+        if template_id.is_some() {
+            sql.push_str(" AND template_id = ?");
+        }
+        if after.is_some() {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+        }
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        let mut q = sqlx::query(&sql);
+        if let Some(tid) = template_id {
+            q = q.bind(tid);
+        }
+        if let Some((created_at, id)) = &after {
+            q = q.bind(created_at).bind(created_at).bind(id);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(schedule_from_row).collect())
     }
 
@@ -346,7 +366,7 @@ impl Store {
     /// `last_run_at`, create a new `WorkflowRun` and stamp `last_run_at`.
     /// Returns the created run ids (mostly for tests).
     pub async fn tick_workflow_schedules(&self, now_unix: i64) -> Result<Vec<String>> {
-        let schedules = self.list_workflow_schedules(None).await?;
+        let schedules = self.list_workflow_schedules(None, None, None).await?;
         let mut created = Vec::new();
         for s in schedules {
             if !s.enabled {
@@ -1255,6 +1275,8 @@ impl Store {
                                                 .clone()
                                                 .or_else(|| run.base_commit.clone()),
                                             parent_acp_session_id: None,
+                                            security_profile: None,
+                                            network_mode: None,
                                         };
                                         let tv = self.create_task(&req).await?;
                                         self.set_role_run_task(&step.id, &tv.id).await?;
@@ -1338,6 +1360,8 @@ impl Store {
                                 .clone()
                                 .or_else(|| run.base_commit.clone()),
                             parent_acp_session_id: None,
+                            security_profile: None,
+                            network_mode: None,
                         };
                         let tv = self.create_task(&req).await?;
                         self.set_role_run_task(&step.id, &tv.id).await?;

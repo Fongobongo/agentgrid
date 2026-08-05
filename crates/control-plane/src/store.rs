@@ -690,8 +690,8 @@ impl Store {
         let adapters = serde_json::to_string(&req.adapters)?;
         let repos = serde_json::to_string(&req.repositories)?;
         sqlx::query(
-            "INSERT INTO nodes (id, name, status, agent_version, max_concurrency, adapters, repositories, active_attempts, last_heartbeat_at, credential_hash, created_at) \
-             VALUES (?, ?, 'online', ?, ?, ?, ?, 0, ?, ?, ?)",
+            "INSERT INTO nodes (id, name, status, agent_version, max_concurrency, adapters, repositories, active_attempts, last_heartbeat_at, credential_hash, created_at, repo_cache_bytes, workspace_bytes) \
+             VALUES (?, ?, 'online', ?, ?, ?, ?, 0, ?, ?, ?, 0, 0)",
         )
         .bind(&node_id)
         .bind(&req.name)
@@ -762,7 +762,7 @@ impl Store {
                active_attempts = ?, load_avg = ?, free_disk_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
                outbox_bytes = ?, artifact_spool_bytes = ?, \
-               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ? \
+               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ? \
              WHERE id = ?",
         )
         .bind(&req.name)
@@ -786,6 +786,9 @@ impl Store {
         .bind(req.repo_lock_wait_ms as i64)
         .bind(&req.sandbox_backend)
         .bind(req.enforced_limits as i64)
+        .bind(req.repo_cache_bytes as i64)
+        .bind(req.workspace_bytes as i64)
+        .bind(&req.network_mode)
         .bind(node_id)
         .execute(&self.pool)
         .await?
@@ -980,8 +983,8 @@ impl Store {
         let now = now_iso();
         let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
         sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, status, created_at, timeout_secs, validation_command) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&req.repository)
@@ -990,9 +993,11 @@ impl Store {
         .bind(&req.requested_node_id)
         .bind(&req.base_commit)
         .bind(&req.parent_acp_session_id)
+        .bind(&req.network_mode)
         .bind(&now)
         .bind(timeout_secs)
         .bind(&req.validation_command)
+        .bind(&req.security_profile)
         .execute(&self.pool)
         .await?;
         Ok(TaskView {
@@ -1009,7 +1014,8 @@ impl Store {
             requested_node_id: req.requested_node_id.clone(),
             base_commit: req.base_commit.clone(),
             parent_acp_session_id: req.parent_acp_session_id.clone(),
-            security_profile: None,
+            network_mode: req.network_mode.clone(),
+            security_profile: req.security_profile.clone(),
         })
     }
 
@@ -1018,7 +1024,7 @@ impl Store {
         // DB) cannot pull an unbounded row set in one request.
         const MAX_TASKS: i64 = 1000;
         let rows = sqlx::query(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, network_mode, \
                     (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
              FROM tasks ORDER BY created_at ASC LIMIT ?",
         )
@@ -1051,7 +1057,7 @@ impl Store {
         // `node_id` filter joins the latest attempt's node via a correlated
         // subquery on `assigned_attempt_id`.
         let mut sql = String::from(
-            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, \
+            "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, network_mode, \
                     (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
              FROM tasks WHERE 1=1",
         );
@@ -1190,12 +1196,25 @@ impl Store {
         Ok(row.try_get::<i64, _>("c")?)
     }
 
-    pub async fn list_repositories(&self) -> Result<Vec<RepositoryView>> {
-        let rows = sqlx::query(
-            "SELECT id, name, git_url, default_branch, validation_command, created_at FROM repositories",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    pub async fn list_repositories(
+        &self,
+        after: Option<(String, String)>,
+        limit: Option<u64>,
+    ) -> Result<Vec<RepositoryView>> {
+        const MAX_REPOS: i64 = 1000;
+        let limit = limit.unwrap_or(100).min(MAX_REPOS as u64) as i64;
+        let mut sql = String::from(
+            "SELECT id, name, git_url, default_branch, validation_command, created_at FROM repositories WHERE 1=1",
+        );
+        if after.is_some() {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+        }
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        let mut q = sqlx::query(&sql);
+        if let Some((created_at, id)) = &after {
+            q = q.bind(created_at).bind(created_at).bind(id);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows
             .iter()
             .map(|r| RepositoryView {
@@ -1333,17 +1352,26 @@ impl Store {
         Ok(row.and_then(|r| r.try_get::<Option<String>, _>("sid").ok().flatten()))
     }
 
-    pub async fn list_nodes(&self) -> Result<Vec<NodeView>> {
-        // Hardening P2 item 20: server-side maximum limit so a client cannot
-        // pull an unbounded node row set.
+    pub async fn list_nodes(
+        &self,
+        after: Option<(String, String)>,
+        limit: Option<u64>,
+    ) -> Result<Vec<NodeView>> {
         const MAX_NODES: i64 = 1000;
-        let rows = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained \
-             FROM nodes ORDER BY created_at ASC LIMIT ?",
-        )
-        .bind(MAX_NODES)
-        .fetch_all(&self.pool)
-        .await?;
+        let limit = limit.unwrap_or(100).min(MAX_NODES as u64) as i64;
+        let mut sql = String::from(
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at \
+             FROM nodes WHERE 1=1",
+        );
+        if after.is_some() {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+        }
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        let mut q = sqlx::query(&sql);
+        if let Some((created_at, id)) = &after {
+            q = q.bind(created_at).bind(created_at).bind(id);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(row_to_node_view).collect())
     }
 
@@ -1413,7 +1441,7 @@ impl Store {
         }
         let mut tx = self.pool.begin().await?;
         let cands = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC",
         )
@@ -1431,6 +1459,8 @@ impl Store {
             let parent_acp_session_id: Option<String> =
                 c.try_get("parent_acp_session_id").ok().flatten();
             let created_at: String = c.try_get("created_at")?;
+            let security_profile: Option<String> = c.try_get("security_profile").ok().flatten();
+            let network_mode: Option<String> = c.try_get("network_mode").ok().flatten();
 
             // Resolve repository git info (absent for plain-dir tasks).
             let repo = sqlx::query(
@@ -1460,7 +1490,13 @@ impl Store {
                 return Ok(None);
             };
             let nv = row_to_node_view(&node);
-            let inelig = node_ineligibility(&nv, &repository, &adapter);
+            let inelig = node_ineligibility(
+                &nv,
+                &repository,
+                &adapter,
+                security_profile.as_deref(),
+                network_mode.as_deref(),
+            );
             if !inelig.is_empty() {
                 continue;
             }
@@ -1534,6 +1570,7 @@ impl Store {
                 validation_timeout_secs: None,
                 base_commit,
                 parent_acp_session_id,
+                network_mode: network_mode.clone(),
                 provenance: None,
                 upstream_commits,
                 upstream_task_ids,
@@ -1561,7 +1598,7 @@ impl Store {
     /// summary (why it stays queued). Returns None if the task does not exist.
     pub async fn task_eligibility(&self, task_id: &str) -> Result<Option<TaskEligibility>> {
         let row =
-            sqlx::query("SELECT repository, adapter, requested_node_id FROM tasks WHERE id = ?")
+            sqlx::query("SELECT repository, adapter, requested_node_id, security_profile, network_mode FROM tasks WHERE id = ?")
                 .bind(task_id)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -1571,8 +1608,10 @@ impl Store {
         let repository: String = row.try_get("repository")?;
         let adapter: String = row.try_get("adapter")?;
         let requested: Option<String> = row.try_get("requested_node_id")?;
+        let security_profile: Option<String> = row.try_get("security_profile").ok().flatten();
+        let network_mode: Option<String> = row.try_get("network_mode").ok().flatten();
 
-        let all = self.list_nodes().await?;
+        let all = self.list_nodes(None, None).await?;
         let considered: Vec<NodeView> = match &requested {
             Some(id) => all.into_iter().filter(|n| &n.id == id).collect(),
             None => all,
@@ -1580,7 +1619,13 @@ impl Store {
 
         let mut nodes = Vec::new();
         for n in &considered {
-            let reasons = node_ineligibility(n, &repository, &adapter);
+            let reasons = node_ineligibility(
+                n,
+                &repository,
+                &adapter,
+                security_profile.as_deref(),
+                network_mode.as_deref(),
+            );
             nodes.push(NodeEligibility {
                 node_id: n.id.clone(),
                 status: n.status,
@@ -2919,6 +2964,7 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         requested_node_id: r.try_get("requested_node_id").unwrap_or_default(),
         base_commit: r.try_get("base_commit").unwrap_or_default(),
         parent_acp_session_id: r.try_get("parent_acp_session_id").unwrap_or_default(),
+        network_mode: r.try_get("network_mode").unwrap_or_default(),
         security_profile,
     }
 }
@@ -2926,7 +2972,13 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
 /// Stage 2.4 scheduler filter. Returns every reason `node` cannot run a task
 /// for `(repository, adapter)`; empty => eligible. Shared by [`Store::try_assign`]
 /// (per-node assignment) and [`Store::task_eligibility`] (visibility).
-fn node_ineligibility(node: &NodeView, repository: &str, adapter: &str) -> Vec<String> {
+fn node_ineligibility(
+    node: &NodeView,
+    repository: &str,
+    adapter: &str,
+    security_profile: Option<&str>,
+    task_network_mode: Option<&str>,
+) -> Vec<String> {
     let mut reasons = Vec::new();
     if node.status != NodeStatus::Online {
         reasons.push(format!("node {} is {}", node.id, node.status));
@@ -2945,6 +2997,28 @@ fn node_ineligibility(node: &NodeView, repository: &str, adapter: &str) -> Vec<S
         reasons.push(format!(
             "at capacity ({} >= {})",
             node.active_attempts, node.max_concurrency
+        ));
+    }
+    // Hardening P0 item 5: strict security profile (ending in -strict) requires
+    // structured permission interception (not wrapper).
+    if let Some(profile) = security_profile {
+        if profile.ends_with("-strict") && node.permission_interception == "wrapper" {
+            reasons.push("requires structured permission interception".to_string());
+        }
+    }
+    // Hardening P2 item 659: task network mode must not exceed node network mode.
+    // Order: none < restricted < unrestricted
+    let task_mode = task_network_mode.unwrap_or("none");
+    let node_mode = node.network_mode.as_str();
+    let mode_rank = |m: &str| match m {
+        "none" => 0,
+        "restricted" => 1,
+        "unrestricted" => 2,
+        _ => 0,
+    };
+    if mode_rank(task_mode) > mode_rank(node_mode) {
+        reasons.push(format!(
+            "task network_mode '{task_mode}' exceeds node max '{node_mode}'"
         ));
     }
     reasons
@@ -2982,6 +3056,11 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
             .unwrap_or_else(|_| "none".to_string()),
         enforced_limits: r.try_get::<i64, _>("enforced_limits").unwrap_or(0) != 0,
         drained: r.try_get::<i64, _>("drained").unwrap_or(0) != 0,
+        repo_cache_bytes: r.try_get::<i64, _>("repo_cache_bytes").unwrap_or(0) as u64,
+        workspace_bytes: r.try_get::<i64, _>("workspace_bytes").unwrap_or(0) as u64,
+        network_mode: r
+            .try_get::<String, _>("network_mode")
+            .unwrap_or_else(|_| "none".to_string()),
     }
 }
 
@@ -3153,6 +3232,7 @@ mod workflow_tests {
                 max_concurrency: 2,
                 agent_version: "test".into(),
                 protocol_version: None,
+                permission_interception: "wrapper".into(),
             })
             .await
             .unwrap()
@@ -3243,7 +3323,10 @@ mod workflow_tests {
 
         let all = s.list_workflow_runs(None, None).await.unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(s.list_workflow_templates().await.unwrap().len(), 1);
+        assert_eq!(
+            s.list_workflow_templates(None, None).await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -3330,6 +3413,7 @@ mod workflow_tests {
             max_concurrency: 2,
             agent_version: "test".into(),
             protocol_version: None,
+            permission_interception: "wrapper".into(),
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
         let a = s.try_assign(&node_id).await.unwrap().expect("assign");
@@ -4193,6 +4277,7 @@ mod workflow_tests {
             max_concurrency: 2,
             agent_version: "test".into(),
             protocol_version: None,
+            permission_interception: "wrapper".into(),
         };
         let resp = s.enroll_node(&node).await.unwrap().expect("node enroll");
         let node_id = resp.node_id;
@@ -4205,6 +4290,8 @@ mod workflow_tests {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -4319,6 +4406,7 @@ mod workflow_tests {
             max_concurrency: 2,
             agent_version: "test".into(),
             protocol_version: None,
+            permission_interception: "wrapper".into(),
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
 
@@ -4335,6 +4423,8 @@ mod workflow_tests {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
             })
             .await
             .unwrap();
@@ -4384,6 +4474,8 @@ mod workflow_tests {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: parent,
+                security_profile: None,
+                network_mode: None,
             })
             .await
             .unwrap();
@@ -4496,6 +4588,7 @@ mod workflow_tests {
                 max_concurrency: 2,
                 agent_version: "test".into(),
                 protocol_version: None,
+                permission_interception: "wrapper".into(),
             })
             .await
             .unwrap()
@@ -4511,6 +4604,8 @@ mod workflow_tests {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
             })
             .await
             .unwrap();
@@ -5061,6 +5156,7 @@ mod workflow_tests {
                 max_concurrency: 2,
                 agent_version: "test".into(),
                 protocol_version: None,
+                permission_interception: "wrapper".into(),
             })
             .await
             .unwrap()
@@ -5076,6 +5172,8 @@ mod workflow_tests {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
             })
             .await
             .unwrap();
@@ -5117,6 +5215,8 @@ mod workflow_tests {
                 validation_command: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
             })
             .await
             .unwrap();

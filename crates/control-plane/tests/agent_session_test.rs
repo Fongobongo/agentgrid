@@ -84,6 +84,7 @@ async fn enroll(
         max_concurrency: 2,
         agent_version: "test".into(),
         protocol_version: None,
+        permission_interception: "wrapper".into(),
     };
     let resp = app
         .clone()
@@ -117,6 +118,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         validation_command: None,
         base_commit: None,
         parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
     };
     let resp = app
         .clone()
