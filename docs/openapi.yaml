@@ -1,4 +1,4 @@
-openapi: 3.0.3
+openapi: 3.1.0
 info:
   title: AgentGrid Control Plane API
   version: 0.1.0
@@ -34,6 +34,15 @@ info:
     freshly minted id for clients that only read the body.
 
 paths:
+  /health/live:
+    get:
+      summary: Liveness probe (always 200)
+  /health/ready:
+    get:
+      summary: Readiness probe (DB + disk-writable check)
+  /metrics:
+    get:
+      summary: Prometheus metrics endpoint
   /v1/auth/setup:
     post:
       summary: Create the first admin user (one-time)
@@ -280,6 +289,8 @@ paths:
   /v1/profiles/{id}:
     get:
       summary: Fetch a profile
+    post:
+      summary: Create a new profile revision
   /v1/profiles/{id}/activate:
     post:
       summary: Mark a profile revision active
@@ -289,14 +300,17 @@ paths:
     post:
       summary: Create an MCP server registry entry
   /v1/mcp-servers/{id}:
-    get:
-      summary: Fetch an MCP server registry entry
+    delete:
+      summary: Delete an MCP server registry entry
   /v1/policy/evaluate:
     post:
       summary: Evaluate an autonomy policy decision
   /v1/skills:
     get:
       summary: List discovered skills (operator-trusted)
+  /v1/skills/{name}:
+    get:
+      summary: Fetch a single skill's trust state
   /v1/skills/{name}/trust:
     post:
       summary: Trust a skill

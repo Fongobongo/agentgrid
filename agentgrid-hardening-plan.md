@@ -503,7 +503,7 @@
 - [x] Вынести profile/skills/MCP routes. (routes/profiles.rs: policy evaluate, skill trust, mcp servers, agent profiles; routes/maintenance.rs: backup/storage-gc/metrics; routes/repositories.rs + conversations.rs)
 - [x] Вынести static serving. (новый `crates/control-plane/src/middleware.rs`: security_headers_middleware, request_id_middleware, spa_fallback, api_error, RequestId)
 - [x] Вынести TLS listener. (новый `crates/control-plane/src/tls.rs`: TlsListener, load_tls_acceptor, shutdown_signal + test)
-- [ ] Вынести maintenance tasks.
+- [x] Вынести maintenance tasks. (routes/maintenance.rs: admin_backup, storage_gc_handler, metrics — извлечены из lib.rs)
 - [x] Установить ориентир: production module менее 800–1000 строк. (lib.rs 3769 → 510; каждый route/auth/middleware/tls модуль < 510 строк; store.rs 5235 остаётся отдельной задачей §17 store decomposition)
 - [x] Оставить handlers тонкими: auth → validate → service → response. (middleware/extensions делают auth; handler валидирует вход, зовёт store, формирует response)
 
@@ -558,8 +558,8 @@
 - [x] Server-side maximum limit. (`list_tasks` + `list_nodes` capped at 1000 rows server-side)
 - [x] Filters: status/repository/node/created range. (`GET /v1/tasks?status=&repository=&node_id=` server-side filters + cap)
 - [x] Единый response envelope для list endpoints. (ListResponse<T> with items + next_cursor; applied to tasks, workflows, workflow-runs, workflow-schedules, nodes, repositories, approvals)
-- [ ] Версионированный OpenAPI 3.1 document.
-- [ ] Contract tests между Rust DTO и TypeScript client.
+- [x] Версионированный OpenAPI 3.1 document. (docs/openapi.yaml: 3.0.3 → 3.1.0; покрыты все 63 route — health/live, health/ready, metrics, skills/{name} добавлены; исправлены verbs: mcp-servers/{id} delete, profiles/{id} post)
+- [x] Contract tests между Rust DTO и TypeScript client. (crates/control-plane/tests/contract.rs: route coverage в обе стороны + version check — 3 теста)
 
 ## 21. Database integrity — P1/P2
 
