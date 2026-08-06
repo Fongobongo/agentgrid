@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -14,6 +14,10 @@ use serde_json::Value;
 
 use crate::codec::{CodecError, Id, Message, RpcError};
 use crate::methods::*;
+
+/// Hard cap on one inbound line: a runaway or malicious agent streaming an
+/// unterminated line must not grow the reader's buffer without bound.
+const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AcpError {
@@ -57,14 +61,24 @@ where
         let notif_tx = notif_tx.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
-            let mut buf = String::new();
+            let mut buf: Vec<u8> = Vec::new();
             loop {
                 buf.clear();
-                match reader.read_line(&mut buf).await {
+                match (&mut reader)
+                    .take(MAX_LINE_BYTES as u64)
+                    .read_until(b'\n', &mut buf)
+                    .await
+                {
                     Ok(n) if n > 0 => {}
                     _ => break, // EOF or read error: transport closed
                 };
-                let line = buf.trim_end_matches(['\n', '\r']);
+                // Filled the cap without a newline: oversized line. Fail the
+                // transport; in-flight requests are failed below.
+                if buf.len() >= MAX_LINE_BYTES && !buf.ends_with(b"\n") {
+                    break;
+                }
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches(['\n', '\r']);
                 let msg = match crate::codec::decode_line(line) {
                     Ok(m) => m,
                     Err(_) => continue, // skip malformed frames
@@ -437,5 +451,34 @@ mod tests {
         let (client, _notif) = new(c_read, c2a);
         let err = client.request("bogus/method", serde_json::json!({})).await;
         assert!(matches!(err, Err(AcpError::Rpc(_))));
+    }
+
+    // A runaway agent streaming an unterminated oversized line must trip the
+    // line cap and fail the transport, not grow the reader without bound.
+    #[tokio::test]
+    async fn oversized_line_fails_transport() {
+        let (client_tx, agent_rx) = tokio::io::duplex(4096);
+        let (agent_tx, client_rx) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let _rx = agent_rx; // ignore anything the client sends
+            let mut w = agent_tx;
+            let chunk = vec![b'x'; 65536];
+            // No newline ever arrives: total exceeds MAX_LINE_BYTES.
+            while w.write_all(&chunk).await.is_ok() {}
+        });
+        let (client, _notif) = new(client_rx, client_tx);
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.request(METHOD_INITIALIZE, serde_json::json!({})),
+        )
+        .await
+        .expect("request must not hang after transport failure");
+        match res {
+            Err(AcpError::Rpc(e)) => {
+                assert_eq!(e.code, -32000);
+                assert!(e.message.contains("transport closed"));
+            }
+            other => panic!("expected transport-closed RpcError, got {other:?}"),
+        }
     }
 }

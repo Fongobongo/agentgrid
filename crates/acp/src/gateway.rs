@@ -4,7 +4,7 @@
 //! the task's events and streams them back as `session/update` until the task
 //! reaches a terminal state; `session/cancel` cancels the underlying task.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -21,12 +21,12 @@ use crate::server::{notify_update, AcpAgent, AcpCtx};
 #[derive(Clone)]
 struct SessionMeta {
     agent: String,
-    #[allow(dead_code)]
-    model: Option<String>,
-    #[allow(dead_code)]
-    cwd: String,
     task_id: Option<String>,
 }
+
+/// Approval ids stay in `asked` at most this long; decided approvals never
+/// reappear as pending, so the TTL is only a memory bound.
+const ASKED_TTL: Duration = Duration::from_secs(3600);
 
 /// ACP agent that bridges external ACP clients to the Agentgrid control plane.
 pub struct GatewayAgent {
@@ -34,8 +34,9 @@ pub struct GatewayAgent {
     server: String,
     token: Option<String>,
     sessions: Mutex<HashMap<String, SessionMeta>>,
-    /// Approval ids already surfaced to the ACP client (each asked exactly once).
-    asked: Mutex<HashSet<String>>,
+    /// Approval ids already surfaced to the ACP client (each asked exactly
+    /// once), with the first-ask time for TTL pruning.
+    asked: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 impl GatewayAgent {
@@ -45,7 +46,7 @@ impl GatewayAgent {
             server,
             token,
             sessions: Mutex::new(HashMap::new()),
-            asked: Mutex::new(HashSet::new()),
+            asked: Mutex::new(HashMap::new()),
         }
     }
 
@@ -234,8 +235,6 @@ impl AcpAgent for GatewayAgent {
             sid.clone(),
             SessionMeta {
                 agent: p.agent,
-                model: p.model,
-                cwd: p.cwd,
                 task_id: None,
             },
         );
@@ -285,7 +284,14 @@ impl AcpAgent for GatewayAgent {
                     if a.task_id != task_id {
                         continue;
                     }
-                    if !self.asked.lock().unwrap().insert(a.id.clone()) {
+                    let first_ask = {
+                        let mut asked = self.asked.lock().unwrap();
+                        asked.retain(|_, at| at.elapsed() < ASKED_TTL);
+                        asked
+                            .insert(a.id.clone(), std::time::Instant::now())
+                            .is_none()
+                    };
+                    if !first_ask {
                         continue;
                     }
                     let permission: Value = serde_json::from_str(&a.permission)
@@ -318,12 +324,13 @@ impl AcpAgent for GatewayAgent {
     }
 
     async fn session_cancel(&self, p: SessionCancelParams) -> Result<Value, RpcError> {
+        // Cancel closes the session: drop its meta so the map stays bounded.
         let task_id = self
             .sessions
             .lock()
             .unwrap()
-            .get(&p.session_id)
-            .and_then(|m| m.task_id.clone());
+            .remove(&p.session_id)
+            .and_then(|m| m.task_id);
         match task_id {
             Some(t) => {
                 self.cancel_task(&t).await?;
