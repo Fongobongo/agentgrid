@@ -144,7 +144,9 @@ pub async fn complete_attempt(
     {
         return code.into_response();
     }
-    match state.store.complete_attempt(&attempt_id, &req).await {
+    // Plan 534: completing an attempt also advances the owning workflow run
+    // (if any) and wakes the scheduler for spawned step tasks.
+    match state.lifecycle.complete_attempt(&attempt_id, &req).await {
         Ok(true) => StatusCode::OK.into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {

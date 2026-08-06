@@ -9,6 +9,7 @@ use auth::Claims;
 mod config;
 mod middleware;
 mod routes;
+mod services;
 pub mod store;
 mod tls;
 pub mod workflow;
@@ -38,6 +39,10 @@ pub(crate) const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// plaintext dev keeps working.
 pub struct AppState {
     pub store: Store,
+    /// Plan 534: cross-aggregate workflow orchestration (attempt completion →
+    /// workflow run advance). Handlers call the service instead of the store
+    /// when the operation spans aggregates.
+    pub lifecycle: services::TaskLifecycleService,
     pub(crate) assignment_notify: Arc<Notify>,
     pub(crate) jwt_secret: Vec<u8>,
     /// Directory with the built web UI (Stage 4.3). Served as static files;
@@ -169,9 +174,13 @@ impl AppState {
             event_batch_count: env_usize("AGENTGRID_MAX_EVENT_BATCH", 500),
             event_batch_bytes: env_usize("AGENTGRID_MAX_EVENT_BATCH_KB", 4096) * 1024,
         };
+        let assignment_notify = Arc::new(Notify::new());
+        let lifecycle =
+            services::TaskLifecycleService::new(store.clone(), assignment_notify.clone());
         Ok(Arc::new(Self {
             store,
-            assignment_notify: Arc::new(Notify::new()),
+            lifecycle,
+            assignment_notify,
             jwt_secret,
             web_root,
             limits,

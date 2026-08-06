@@ -1101,6 +1101,20 @@ impl Store {
     }
 
     /// Current status of a task, if it exists.
+    /// Plan 534: the workflow run that owns `task_id`, if any. Service layer
+    /// calls this after a task's attempt completes so the run's DAG can
+    /// advance without a manual `/tick` (previously the run stalled until an
+    /// operator ticked it). `None` for plain (non-workflow) tasks.
+    pub async fn workflow_run_id_for_task(&self, task_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT ws.run_id FROM role_runs rr JOIN workflow_steps ws ON ws.id = rr.step_run_id              WHERE rr.task_id = ? LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| r.try_get::<Option<String>, _>("run_id").ok().flatten()))
+    }
+
     pub async fn get_task_status(&self, id: &str) -> Result<Option<TaskStatus>> {
         Ok(self.show_task(id).await?.map(|t| t.status))
     }
@@ -1181,7 +1195,11 @@ impl Store {
             }
         }
         let steps = self.get_workflow_run_steps(run_id).await?;
-        let status_by_id: std::collections::HashMap<&str, WorkflowStepStatus> = steps
+        // `mut`: a step's status changes *during* this loop (a dependency
+        // flips to Succeeded inside the iteration), so later Pending steps
+        // must see the fresh status, not the pre-loop snapshot — otherwise a
+        // chain a→b activates only on a *second* tick.
+        let mut status_by_id: std::collections::HashMap<&str, WorkflowStepStatus> = steps
             .iter()
             .map(|s| (s.step_id.as_str(), s.status))
             .collect();
@@ -1201,6 +1219,8 @@ impl Store {
                                 TaskStatus::Succeeded => {
                                     self.set_step_status(&step.id, WorkflowStepStatus::Succeeded)
                                         .await?;
+                                    status_by_id
+                                        .insert(&step.step_id, WorkflowStepStatus::Succeeded);
                                     self.set_role_run_status_by_step(
                                         &step.id,
                                         WorkflowStepStatus::Succeeded,
@@ -1381,6 +1401,7 @@ impl Store {
                         self.set_role_run_task(&step.id, &tv.id).await?;
                         self.set_step_status(&step.id, WorkflowStepStatus::Running)
                             .await?;
+                        status_by_id.insert(&step.step_id, WorkflowStepStatus::Running);
                         self.set_role_run_status_by_step(&step.id, WorkflowStepStatus::Running)
                             .await?;
                         created.push(tv.id);

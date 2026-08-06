@@ -343,6 +343,19 @@ impl Store {
         }))
     }
 
+    /// Plan 534: the task id an attempt belongs to (service layer uses it to
+    /// advance the owning workflow run when the attempt completes).
+    pub async fn attempt_task_id(&self, attempt_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT task_id FROM attempts WHERE id = ?")
+            .bind(attempt_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some(r) => r.try_get::<Option<String>, _>("task_id").ok().flatten(),
+            None => None,
+        })
+    }
+
     pub async fn ack_attempt(&self, attempt_id: &str) -> Result<bool> {
         let mut tx = begin_immediate(&self.pool).await?;
         let row = sqlx::query("SELECT status FROM attempts WHERE id = ?")

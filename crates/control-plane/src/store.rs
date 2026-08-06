@@ -1333,11 +1333,9 @@ mod workflow_tests {
         .await
         .unwrap();
 
-        // Workers done. Each tick advances its own steps; deps only become
-        // visible to a pending integrator on the next tick (status_by_id is a
-        // snapshot at the top of the loop), so tick twice: first tick transitions
-        // workers `Running` -> `Succeeded`, second tick activates the integrator.
-        s.tick_workflow_run(&run.id).await.unwrap();
+        // Workers done. status_by_id is updated as steps transition inside the
+        // loop (plan 534 fix), so ONE tick both advances the workers to
+        // Succeeded and activates the pending integrator whose deps are now met.
         let act = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(act.len(), 1, "integrator activates after workers succeeded");
 
@@ -1416,9 +1414,8 @@ mod workflow_tests {
         )
         .await
         .unwrap();
-        // Two ticks to transition worker -> Succeeded and then activate verifier
-        // (deps are resolved from a snapshot taken at the top of each tick).
-        s.tick_workflow_run(&run.id).await.unwrap();
+        // One tick: worker -> Succeeded and verifier activates in the same pass
+        // (status_by_id updates in-loop, plan 534 fix).
         let act = s.tick_workflow_run(&run.id).await.unwrap();
         assert_eq!(act.len(), 1, "verifier activates after worker succeeded");
 
