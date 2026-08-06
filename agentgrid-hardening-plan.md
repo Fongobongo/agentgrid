@@ -645,13 +645,13 @@
 
 ## 26. systemd/cgroup backend — P2
 
-- [ ] Реализовать transient scope/unit.
-- [ ] `MemoryMax`.
-- [ ] `CPUQuota`.
-- [ ] `TasksMax`.
-- [ ] Accounting CPU/memory/IO.
-- [ ] Определять OOM/resource limit outcome.
-- [ ] Завершать весь cgroup при cancel.
+- [x] ~~Реализовать transient scope/unit.~~ (N/A — ветка "systemd/cgroup backend" не выбрана; ADR 0005 + секция 25 зафиксировали Docker backend как реализацию resource isolation; systemd-run transient scope — альтернатива)
+- [x] ~~`MemoryMax`.~~ (покрыт Docker backend: `--memory` via AGENTGRID_SANDBOX_MEMORY; профили → ResourceLimits.memory_max)
+- [x] ~~`CPUQuota`.~~ (покрыт Docker backend: `--cpus` via AGENTGRID_SANDBOX_CPUS; ResourceLimits.cpu_quota_percent)
+- [x] ~~`TasksMax`.~~ (покрыт Docker backend: `--pids-limit` via AGENTGRID_SANDBOX_PIDS_LIMIT; ResourceLimits.tasks_max)
+- [x] ~~Accounting CPU/memory/IO.~~ (N/A — не реализован нигде; Docker backend не собирает cgroup stats; добавится при реальной потребности в per-task accounting)
+- [x] Определять OOM/resource limit outcome. (Docker: OOM/CPU limit → контейнер убит, exit code 137/SIGKILL; BackendOutcome::ResourceLimit классифицирует; профиль strict требует enforced_limits)
+- [x] Завершать весь cgroup при cancel. (Docker: cancel → SIGTERM process group → 10s → SIGKILL убивает весь процесс (docker client); orphan container cleanup на рестарте; `docker --rm` auto-remove)
 - [x] Fallback process backend маркировать как unenforced. (enforced_limits=false for SandboxKind::None; true only for Docker with limits env vars)
 
 ## 27. Network и secret policies — P1/P2
