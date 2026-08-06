@@ -7152,3 +7152,77 @@ async fn strict_profile_refuses_wrapper_adapter() {
     assert_eq!(task_view.status, TaskStatus::Assigned);
     assert!(task_view.assigned_attempt_id.is_some());
 }
+
+#[tokio::test]
+async fn audit_route_lists_and_filters_decisions() {
+    // Plan 3.4 backend: task creation writes a `task.create` audit row that
+    // the new route returns, and the action filter narrows to it.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            json!({"prompt":"hi","repository":"demo","adapter":"mock"}).to_string(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/audit?limit=50", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let lr: ListResponse<serde_json::Value> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(lr.items.iter().any(|i| i["action"] == "task.create"));
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/audit?action=task.create&limit=500", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let lr: ListResponse<serde_json::Value> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(!lr.items.is_empty());
+    assert!(lr.items.iter().all(|i| i["action"] == "task.create"));
+}
+
+#[tokio::test]
+async fn change_stream_sends_hello_fingerprint() {
+    // Plan 3.2 backend: connecting to /v1/stream yields a `hello` event whose
+    // data carries the status fingerprint the UI diffs against.
+    use futures_util::StreamExt;
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/stream", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body().into_data_stream();
+    let mut buf = Vec::new();
+    while buf.len() < 512 {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(3), body.next()).await;
+        match chunk {
+            Ok(Some(Ok(c))) => buf.extend_from_slice(&c),
+            _ => break,
+        }
+        if buf.windows(12).any(|w| w == b"event: hello") && buf.windows(2).any(|w| w == b"\n\n") {
+            break;
+        }
+    }
+    let s = String::from_utf8_lossy(&buf);
+    assert!(s.contains("event: hello"), "got: {s}");
+    assert!(
+        s.contains("tasks"),
+        "fingerprint must carry task counts: {s}"
+    );
+}

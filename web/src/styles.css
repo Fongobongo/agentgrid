@@ -279,6 +279,11 @@ button.link, a.link {
 .wf-meta { display: flex; gap: 10px; font-size: 0.8rem; color: var(--muted); }
 .wf-line { font-size: 0.8rem; color: var(--muted); }
 .wf-line.err { color: var(--bad); }
+.wf-line.wf-prompt, .wf-line.wf-result {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px;
+}
+.filters { display: flex; gap: 8px; margin-bottom: 12px; }
+.filters input { min-width: 280px; }
 .wf-budget { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .wf-budget h3 { margin: 0 0 8px; font-size: 1rem; }
 .wf-budget.err { border-left: 3px solid var(--bad); }

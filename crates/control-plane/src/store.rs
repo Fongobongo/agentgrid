@@ -695,6 +695,7 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
 
 // ---- Approvals (Stage 5 durable approval flow) ----
 
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AuditEvent {
     pub id: String,
     pub actor_type: String,

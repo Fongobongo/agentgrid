@@ -139,6 +139,13 @@ paths:
         The SSE `id:` field carries the global `ingest_id`; a reconnect sends it
         back as `Last-Event-ID` and resumes exactly where it stopped, across
         attempts.
+  /v1/stream:
+    get:
+      summary: SSE change-notification stream for UI lists
+      description: |
+        Emits `hello` on connect and `change` whenever the status fingerprint
+        (task/node/workflow-run counts by status) moves. Clients refetch their
+        lists on those events; an idle client receives only 15 s keep-alives.
   /v1/tasks/{id}/approvals:
     get:
       summary: List pending approvals for a task
@@ -263,6 +270,12 @@ paths:
   /v1/approvals:
     get:
       summary: List pending approvals
+  /v1/audit:
+    get:
+      summary: Newest-first audit trail of control-plane decisions
+      description: |
+        Query: `action` (exact-match filter, optional), `limit` (1..500,
+        default 100). Returns `{items: AuditEvent[]}`; 503 on storage outage.
   /v1/approvals/{id}/allow:
     post:
       summary: Allow a pending approval

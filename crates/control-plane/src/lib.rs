@@ -297,6 +297,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{id}/events/stream",
             get(routes::events::events_stream),
         )
+        .route("/v1/stream", get(routes::events::changes_stream))
         .route(
             "/v1/tasks/{id}/cancel",
             post(routes::tasks::cancel_task_handler),
@@ -313,6 +314,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/approvals",
             get(routes::approvals::list_approvals_handler),
         )
+        .route("/v1/audit", get(routes::nodes::list_audit_handler))
         .route(
             "/v1/approvals/{id}",
             get(routes::approvals::get_approval_handler),

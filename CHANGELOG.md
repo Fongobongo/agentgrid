@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added (0.2-completion pass, web/UI)
+
+- **Change stream (plan 3.2):** `GET /v1/stream` — SSE endpoint that emits
+  `hello` on connect and `change` whenever the task/node/workflow-run status
+  fingerprint moves (server-side 500 ms poll of three aggregate count
+  queries). Dashboard, Nodes and Workflows pages now refresh from this
+  stream instead of fixed-interval polling: status changes land in the UI in
+  under a second, and an idle page makes zero requests.
+- **Workflow step outcomes (plan 3.3):** the workflow projection now carries
+  each step's `prompt`, latest-attempt `commit_sha` (rendered as a diff link
+  when the repo URL is https, plus a link to the step's task) and the latest
+  adapter `result` text (capped at 2000 chars); the budget table shows usage
+  as a percentage of each ceiling.
+- **Audit view (plan 3.4):** `GET /v1/audit?action=&limit=` (limit 1..500,
+  default 100, 503 on storage outage like other lists) and a web Audit page
+  with an action filter showing the newest 100 decisions (actor, action,
+  subject, payload).
+
 ## [0.4.0] — 2026-08-06
 
 Closes the former `[Unreleased]` section below (everything between this header

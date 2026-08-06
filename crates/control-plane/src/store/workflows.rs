@@ -505,14 +505,15 @@ impl Store {
                 .await?;
             let task_id: Option<String> =
                 task_row.and_then(|r| r.try_get::<Option<String>, _>("task_id").ok().flatten());
-            let (node_id, verdict, error_code) = match &task_id {
+            let (node_id, verdict, error_code, commit_sha, result) = match &task_id {
                 Some(tid) => {
                     let ts = self
                         .get_task_status(tid)
                         .await?
                         .unwrap_or(agentgrid_common::TaskStatus::Queued);
                     let att = sqlx::query(
-                        "SELECT node_id, error_code FROM attempts WHERE task_id = ? ORDER BY number DESC LIMIT 1",
+                        "SELECT id, node_id, error_code, commit_sha FROM attempts \
+                         WHERE task_id = ? ORDER BY number DESC LIMIT 1",
                     )
                     .bind(tid)
                     .fetch_optional(&self.pool)
@@ -523,6 +524,17 @@ impl Store {
                     let error_code = att
                         .as_ref()
                         .and_then(|r| r.try_get::<Option<String>, _>("error_code").ok().flatten());
+                    let commit_sha = att
+                        .as_ref()
+                        .and_then(|r| r.try_get::<Option<String>, _>("commit_sha").ok().flatten());
+                    // Latest adapter `result` event of the newest attempt =
+                    // the step's outcome text (plan 3.3). Capped inside the
+                    // helper so a verbose agent cannot bloat the projection.
+                    let attempt_id = att.as_ref().and_then(|r| r.try_get::<String, _>("id").ok());
+                    let mut result: Option<String> = None;
+                    if let Some(aid) = attempt_id {
+                        result = latest_result_text(&self.pool, &aid).await?;
+                    }
                     let verdict = match ts {
                         agentgrid_common::TaskStatus::Succeeded => "succeeded",
                         agentgrid_common::TaskStatus::Failed => "failed",
@@ -531,9 +543,9 @@ impl Store {
                         | agentgrid_common::TaskStatus::Assigned => "running",
                         _ => "pending",
                     };
-                    (node_id, verdict.to_string(), error_code)
+                    (node_id, verdict.to_string(), error_code, commit_sha, result)
                 }
-                None => (None, "pending".to_string(), None),
+                None => (None, "pending".to_string(), None, None, None),
             };
             out.push(agentgrid_common::StepProjection {
                 step_id: s.step_id.clone(),
@@ -548,6 +560,9 @@ impl Store {
                 error_code,
                 started_at: s.started_at.clone(),
                 finished_at: s.finished_at.clone(),
+                prompt: Some(s.prompt.clone()),
+                commit_sha,
+                result,
             });
         }
         Ok(Some(agentgrid_common::WorkflowProjection {
@@ -1548,4 +1563,28 @@ impl Store {
         }
         Ok(created)
     }
+}
+
+/// Newest `result` event text of an attempt, truncated to 2000 chars
+/// (plan 3.3 step outcome). Adapter result payloads are JSON with a `text`
+/// field; fall back to the raw payload if that shape changes.
+async fn latest_result_text(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    attempt_id: &str,
+) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT payload FROM task_events WHERE attempt_id = ? AND type = 'result' \
+         ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(attempt_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let payload: String = row.try_get("payload").unwrap_or_default();
+    let text = serde_json::from_str::<serde_json::Value>(&payload)
+        .ok()
+        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
+        .unwrap_or(payload);
+    let trimmed: String = text.chars().take(2000).collect();
+    Ok(Some(trimmed))
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   WorkflowRun,
@@ -9,7 +9,9 @@ import {
   getWorkflowProjection,
   cancelWorkflowRun,
   approveWorkflowPlan,
+  listRepos,
 } from '../api';
+import { useLiveRefresh } from './util';
 
 // Stage 11.6: workflow run viewer with a DAG. Layers are computed by
 // dependency depth from `depends_on`. Leaves render rightmost; the run id,
@@ -49,7 +51,13 @@ function layers(steps: StepProjection[]): StepProjection[][] {
   return [...cols.keys()].sort((a, b) => a - b).map((k) => cols.get(k)!);
 }
 
-function StepCard({ s }: { s: StepProjection }) {
+function StepCard({ s, repoUrl }: { s: StepProjection; repoUrl?: string | null }) {
+  // Plan 3.3: diff link — https repo URLs get a /commit/<sha> page; anything
+  // else (ssh/local remotes) falls back to showing the bare SHA.
+  const commitHref =
+    s.commit_sha && repoUrl && /^https?:\/\//.test(repoUrl)
+      ? `${repoUrl.replace(/\.git$/, '').replace(/\/$/, '')}/commit/${s.commit_sha}`
+      : null;
   return (
     <div className={`wf-step ${statusClass(s.status)}`}>
       <div className="wf-head">
@@ -63,11 +71,40 @@ function StepCard({ s }: { s: StepProjection }) {
       </div>
       {s.node_id && <div className="wf-line">node: {s.node_id}</div>}
       {s.error_code && <div className="wf-line err">err: {s.error_code}</div>}
+      {s.prompt && (
+        <div className="wf-line wf-prompt" title={s.prompt}>
+          prompt: {s.prompt.length > 80 ? `${s.prompt.slice(0, 80)}…` : s.prompt}
+        </div>
+      )}
+      {s.result && (
+        <div className="wf-line wf-result" title={s.result}>
+          result: {s.result.length > 120 ? `${s.result.slice(0, 120)}…` : s.result}
+        </div>
+      )}
+      {s.commit_sha && (
+        <div className="wf-line">
+          {commitHref ? (
+            <a className="mono" href={commitHref} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+              commit {s.commit_sha.slice(0, 8)} ↗
+            </a>
+          ) : (
+            <span className="mono">commit {s.commit_sha.slice(0, 8)}</span>
+          )}
+          {s.task_id && (
+            <>
+              {' · '}
+              <a className="mono" href={`#/task/${s.task_id}`} onClick={(e) => e.stopPropagation()}>
+                task ↗
+              </a>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function Dag({ proj }: { proj: WorkflowProjection }) {
+function Dag({ proj, repoUrl }: { proj: WorkflowProjection; repoUrl?: string | null }) {
   const cols = layers(proj.steps);
   if (cols.length === 0) return <div className="wf-empty">no steps</div>;
   return (
@@ -75,7 +112,7 @@ function Dag({ proj }: { proj: WorkflowProjection }) {
       {cols.map((col, i) => (
         <div className="wf-col" key={i}>
           {col.map((s) => (
-            <StepCard key={s.step_id} s={s} />
+            <StepCard key={s.step_id} s={s} repoUrl={repoUrl} />
           ))}
         </div>
       ))}
@@ -161,11 +198,8 @@ export function WorkflowsList({ onOpen }: { onOpen: (id: string) => void }) {
       .catch((e) => setErr(e instanceof ApiError ? `load failed (${e.status})` : String(e)));
   };
 
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 3000);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(load, []);
+  useLiveRefresh(load);
 
   if (err && !runs) return <div className="error">{err}</div>;
   if (!runs) return <div className="loading">loading…</div>;
@@ -205,12 +239,22 @@ export function WorkflowDetails({ runId }: { runId: string }) {
   const [proj, setProj] = useState<WorkflowProjection | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [view, setView] = useState<'dag' | 'waterfall'>('dag');
+  const [repoUrl, setRepoUrl] = useState<string | null>(null);
+  const repoResolved = useRef(false);
 
   const load = () => {
     getWorkflowProjection(runId)
       .then((p) => {
         setProj(p);
         setErr(null);
+        // Plan 3.3: resolve the repo's git_url once for commit diff links.
+        if (p.run.repository && !repoResolved.current) {
+          repoResolved.current = true;
+          const want = p.run.repository;
+          listRepos()
+            .then((repos) => setRepoUrl(repos.find((r) => r.name === want)?.git_url ?? ''))
+            .catch(() => setRepoUrl(''));
+        }
       })
       .catch((e) => setErr(e instanceof ApiError ? `load failed (${e.status})` : String(e)));
   };
@@ -219,12 +263,8 @@ export function WorkflowDetails({ runId }: { runId: string }) {
     (proj?.run.status ?? '').toLowerCase(),
   );
 
-  useEffect(() => {
-    load();
-    const t = setInterval(load, terminal ? 10_000 : 2000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, terminal]);
+  useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useLiveRefresh(load);
 
   const cancel = () => {
     cancelWorkflowRun(runId).then(load).catch((e) => setErr(String(e)));
@@ -260,7 +300,7 @@ export function WorkflowDetails({ runId }: { runId: string }) {
         <button className={view === 'dag' ? 'navbtn active' : 'navbtn'} onClick={() => setView('dag')}>DAG</button>
         <button className={view === 'waterfall' ? 'navbtn active' : 'navbtn'} onClick={() => setView('waterfall')}>Timeline</button>
       </div>
-      {view === 'dag' ? <Dag proj={proj} /> : <Waterfall proj={proj} />}
+      {view === 'dag' ? <Dag proj={proj} repoUrl={repoUrl} /> : <Waterfall proj={proj} />}
     </div>
   );
 }
@@ -288,7 +328,7 @@ function BudgetBlock({ snap }: { snap: BudgetSnapshot }) {
         <div className="wf-breach">BREACH: {snap.breach.field} = {snap.breach.observed} {'>'} {snap.breach.limit}</div>
       )}
       <table className="budget-table">
-        <thead><tr><th>limit</th><th>used</th></tr></thead>
+        <thead><tr><th>limit</th><th>used</th><th>%</th></tr></thead>
         <tbody>
           {rows.map((r) => {
             const ratio = r.lim > 0 ? r.used / r.lim : 0;
@@ -297,6 +337,7 @@ function BudgetBlock({ snap }: { snap: BudgetSnapshot }) {
               <tr key={r.name} className={over ? 'err' : ratio > 0.8 ? 'warn' : ''}>
                 <td className="mono">{r.name}</td>
                 <td className="mono">{r.used} {'/'} {r.lim}</td>
+                <td className="mono">{Math.round(ratio * 100)}%</td>
               </tr>
             );
           })}

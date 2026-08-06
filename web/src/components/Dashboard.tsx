@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listNodes, listTasks, NodeView, TaskView } from '../api';
-import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
+import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
 
 export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
@@ -18,6 +18,7 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
   };
 
   useEffect(load, []);
+  useLiveRefresh(load);
 
   if (!tasks || !nodes) {
     if (error) return <ErrorBox err={error} />;

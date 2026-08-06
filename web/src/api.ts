@@ -221,6 +221,10 @@ export interface StepProjection {
   error_code?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
+  // Plan 3.3: step outcome surfaced without the CLI.
+  prompt?: string | null;
+  commit_sha?: string | null;
+  result?: string | null;
 }
 
 export interface BudgetUsage {
@@ -389,6 +393,80 @@ export function streamTask(
       return;
     }
     // Stream closed by server: resume from lastIngest to stay live.
+    if (!closed) schedule(run);
+  };
+
+  run();
+  return {
+    close() {
+      closed = true;
+      if (timer) clearTimeout(timer);
+    },
+  };
+}
+
+// Plan 3.4: audit trail (who decided what) with an action filter.
+export interface AuditEvent {
+  id: string;
+  actor_type: string;
+  actor_id: string | null;
+  action: string;
+  subject: string | null;
+  payload: string | null;
+  created_at: string;
+}
+
+export function listAudit(action?: string, limit = 100): Promise<AuditEvent[]> {
+  const q = new URLSearchParams();
+  if (action) q.set('action', action);
+  q.set('limit', String(limit));
+  return listGet<AuditEvent>(`/v1/audit?${q.toString()}`);
+}
+
+// Plan 3.2: change-notification stream. The server emits `hello` on connect
+// and `change` whenever the task/node/workflow-run status fingerprint moves;
+// lists refetch only on those events, so an idle UI makes zero requests.
+export function streamChanges(onChange: () => void): StreamHandle {
+  let closed = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let backoff = 500;
+
+  const schedule = (fn: () => void) => {
+    timer = setTimeout(fn, backoff);
+    backoff = Math.min(backoff * 2, 5000);
+  };
+
+  const run = async () => {
+    if (closed) return;
+    try {
+      const r = await fetch('/v1/stream', { credentials: 'include' });
+      if (r.status === 401) {
+        markUnauthed();
+        if (typeof window !== 'undefined') window.location.reload();
+        return;
+      }
+      if (!r.ok || !r.body) throw new ApiError(r.status, `stream -> ${r.status}`);
+      backoff = 500;
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (!closed) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          // hello/change frames both mean "lists may have moved".
+          if (line.startsWith('event:') && /hello|change/.test(line)) onChange();
+        }
+      }
+    } catch (err) {
+      if (closed) return;
+      schedule(run);
+      return;
+    }
     if (!closed) schedule(run);
   };
 

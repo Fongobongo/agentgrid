@@ -1017,6 +1017,15 @@ pub struct StepProjection {
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
+    /// The step's prompt (plan 3.3), from the step run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Commit SHA of the latest attempt, if any — the diff target (plan 3.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+    /// Latest `result` event text of the step's task, truncated (plan 3.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
 }
 
 /// Live projection of a workflow run's Loop Engineering budget state: the

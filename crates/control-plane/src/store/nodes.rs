@@ -337,4 +337,37 @@ impl Store {
         };
         Ok(rows.iter().map(audit_from_row).collect())
     }
+
+    /// Change-detection fingerprint for the UI SSE change stream (plan 3.2):
+    /// status counts for tasks, nodes and workflow runs. Cheap aggregate
+    /// queries; the UI refetches full lists only when this value changes.
+    pub async fn status_fingerprint(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>> {
+        async fn counts(
+            pool: &sqlx::Pool<Sqlite>,
+            table: &'static str,
+        ) -> Result<std::collections::BTreeMap<String, i64>> {
+            let rows = sqlx::query(&format!(
+                "SELECT status, COUNT(*) AS n FROM {table} GROUP BY status"
+            ))
+            .fetch_all(pool)
+            .await?;
+            let mut m = std::collections::BTreeMap::new();
+            for r in rows {
+                let status: String = r.try_get("status").unwrap_or_default();
+                let n: i64 = r.try_get("n").unwrap_or(0);
+                m.insert(status, n);
+            }
+            Ok(m)
+        }
+        let mut fp = std::collections::BTreeMap::new();
+        fp.insert("tasks".to_string(), counts(&self.pool, "tasks").await?);
+        fp.insert("nodes".to_string(), counts(&self.pool, "nodes").await?);
+        fp.insert(
+            "workflow_runs".to_string(),
+            counts(&self.pool, "workflow_runs").await?,
+        );
+        Ok(fp)
+    }
 }

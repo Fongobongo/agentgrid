@@ -41,6 +41,32 @@ pub async fn list_nodes(
     }
 }
 
+/// Query for `GET /v1/audit` (plan 3.4): optional action filter + row cap.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AuditQuery {
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Newest-first audit trail (plan 3.4): who decided what, with an optional
+/// action filter. Storage outage surfaces as 503, never an empty list.
+pub async fn list_audit_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<ListResponse<crate::store::AuditEvent>>, StatusCode> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let action = q.action.as_deref().filter(|a| !a.is_empty());
+    match state.store.list_audit(action, limit).await {
+        Ok(items) => Ok(Json(ListResponse::new(items, None))),
+        Err(e) => {
+            tracing::error!("list_audit failed: {e}");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+}
+
 pub async fn create_enrollment_token(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<EnrollTokenResponse>, StatusCode> {

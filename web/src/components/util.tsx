@@ -1,4 +1,18 @@
-import { ReactNode } from 'react';
+import { ReactNode, useEffect, useRef } from 'react';
+import { streamChanges } from '../api';
+
+// Plan 3.2: re-run `load` whenever the control plane reports that the
+// task/node/workflow-run status fingerprint changed. Idle pages make no
+// requests; a status change shows up in well under a second. The loader is
+// read through a ref so prop/state changes (e.g. filters) never go stale.
+export function useLiveRefresh(load: () => void) {
+  const latest = useRef(load);
+  latest.current = load;
+  useEffect(() => {
+    const h = streamChanges(() => latest.current());
+    return () => h.close();
+  }, []);
+}
 
 export function StatusBadge({ status }: { status: string }) {
   return <span className={`badge ${statusClass(status)}`}>{status}</span>;

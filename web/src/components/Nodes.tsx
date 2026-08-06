@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { drainNode, listNodes, NodeView, revokeNode } from '../api';
 import { ConfirmModal } from './Modal';
-import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
+import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
 
 export default function Nodes() {
   const [nodes, setNodes] = useState<NodeView[] | null>(null);
@@ -19,6 +19,7 @@ export default function Nodes() {
   };
 
   useEffect(load, []);
+  useLiveRefresh(load);
 
   const revoke = async (n: NodeView) => {
     setBusy(n.id);

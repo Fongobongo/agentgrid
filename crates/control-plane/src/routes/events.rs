@@ -104,6 +104,52 @@ pub async fn events_stream(
     )
 }
 
+/// UI change stream (plan 3.2): emits `hello` on connect and `change` when
+/// the task/node/workflow-run status fingerprint differs from the last one
+/// seen. Clients refetch their lists on `change`; idle clients get no
+/// traffic. The fingerprint is polled server-side every 500 ms, so a status
+/// change reaches the UI in well under a second.
+pub async fn changes_stream(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use axum::response::sse::{Event, Sse};
+    use std::time::Duration;
+    let stream = async_stream::stream! {
+        let mut last: Option<String> = None;
+        let mut consecutive_errors = 0u32;
+        loop {
+            match state.store.status_fingerprint().await {
+                Ok(fp) => {
+                    consecutive_errors = 0;
+                    if let Ok(data) = serde_json::to_string(&fp) {
+                        if last.as_deref() != Some(data.as_str()) {
+                            let kind = if last.is_some() { "change" } else { "hello" };
+                            last = Some(data.clone());
+                            yield Ok(Event::default().event(kind).data(data));
+                        }
+                    }
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    tracing::warn!("changes_stream fingerprint failed ({consecutive_errors}): {e}");
+                    if consecutive_errors >= 20 {
+                        yield Ok(Event::default()
+                            .event("error")
+                            .data("change stream unavailable; reconnecting required"));
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
 pub async fn get_events(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
