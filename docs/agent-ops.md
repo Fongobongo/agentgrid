@@ -87,6 +87,9 @@ as root.
 | opencode `Unexpected error`, no detail | auth missing — run `opencode auth login` on that host or inject the key via `AGENTGRID_ADAPTER_ENV` |
 | `pkill -f agentgrid-node-daemon` kills your own shell | the pattern matches the invoking `bash -c` cmdline; kill by PID or use `pkill -f 'daemo[n]'` |
 | Remote daemon dies when SSH session closes | launch with `setsid nohup … </dev/null &` |
+| Mirror clone fails: `destination path '<repo>' already exists` | the source git repo lives inside the node's repository root, so `git clone --mirror` collides with it; keep source repos outside `REPOSITORY_ROOT` |
+| Adapter runs without `AGENTGRID_UNSAFE_UNATTENDED` despite setting it | on git tasks with `AGENTGRID_SANDBOX=none` the daemon strips the unsafe flag; opt back in with `AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX=1` |
+| Fresh workflow run stays `pending` for minutes | the background ticker only resumes runs already `running`; a new run needs an explicit first `POST /v1/workflow-runs/{id}/tick` (run-workflow.sh does this in a loop) |
 
 ## Two-host smoke test
 
