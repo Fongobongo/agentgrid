@@ -378,7 +378,7 @@ async fn dispatch(ctl: &ControlPlane<'_>, text: &str, chat_id: i64, conv: &ConvS
             match adapter {
                 Some(adapter) => match ctl.create_conversation(&adapter, &repository).await {
                     Ok(id) => {
-                        conv.lock().unwrap().insert(chat_id, id.clone());
+                        conv.lock().unwrap_or_else(|e| e.into_inner()).insert(chat_id, id.clone());
                         format!("conversation {id} created (adapter={adapter}, repo='{repository}')\nsend messages, I'll route them to an agent on a node and reply.")
                     }
                     Err(e) => format!("create conversation failed: {e}"),
@@ -417,7 +417,7 @@ async fn dispatch(ctl: &ControlPlane<'_>, text: &str, chat_id: i64, conv: &ConvS
             // conversation. If no conversation is bound for this chat, nudge the
             // operator to create one (offering to set up a repo too).
             let content = text.trim().to_string();
-            let cid = conv.lock().unwrap().get(&chat_id).cloned();
+            let cid = conv.lock().unwrap_or_else(|e| e.into_inner()).get(&chat_id).cloned();
             match cid {
                 None => {
                     let adapters = std::env::var("AGENTGRID_GATEWAY_CHAT_ADAPTER")
