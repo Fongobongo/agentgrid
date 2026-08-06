@@ -76,6 +76,9 @@ pub async fn poll_loop(cfg: Config, cred: crate::config::SavedCredential) -> Res
                         }
                         drop(permit);
                     });
+                } else {
+                    // No assignment: pace the loop instead of hammering the CP.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
             Ok(r) => {

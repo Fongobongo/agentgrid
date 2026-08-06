@@ -15,7 +15,7 @@ use crate::completion::{terminate_group, wait_for_cancel};
 use crate::event_sink::{read_stream, EventSink};
 
 /// Outcome of a supervised adapter run: the process exit code plus why it was
-/// cut short (`timeout` / `cancel` / `None` = natural exit).
+/// cut short (`timeout` / `cancelled` / `None` = natural exit).
 #[derive(Debug, Clone, Copy)]
 pub struct SupervisedRun {
     pub code: i32,
@@ -92,7 +92,7 @@ pub async fn supervise_adapter(
                 .await;
                 terminate_group(pid);
                 let status = child.wait().await?;
-                (status.code().unwrap_or(-1), None)
+                (status.code().unwrap_or(-1), Some("cancelled"))
             }
         }
     };

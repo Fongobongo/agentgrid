@@ -79,13 +79,12 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         &cfg.outbox_root,
         &assignment.attempt_id,
     )?);
-    // If a prior run left undelivered events for this attempt, re-queue them so
-    // they go out before new ones (sequence order preserved by pending()).
-    {
-        let pending = outbox.pending().unwrap_or_default();
-        if !pending.is_empty() {
-            tracing::info!(attempt_id = %assignment.attempt_id, count = pending.len(), "requeueing undelivered outbox events");
-        }
+    // If a prior run left undelivered events for this attempt, re-queue them
+    // into the sink once it exists so they go out before new ones (sequence
+    // order preserved by pending()).
+    let pending = outbox.pending().unwrap_or_default();
+    if !pending.is_empty() {
+        tracing::info!(attempt_id = %assignment.attempt_id, count = pending.len(), "requeueing undelivered outbox events");
     }
 
     // Agent profile (idea 6): an optional system prompt for this adapter,
@@ -132,6 +131,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             assignment.fencing_token.clone(),
             outbox.clone(),
         );
+        sink.requeue(pending).await;
         ack_attempt(
             &client,
             &cfg.server,
@@ -314,6 +314,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         assignment.fencing_token.clone(),
         outbox.clone(),
     );
+    sink.requeue(pending).await;
     let workdir = ws.path.clone();
     let validation_log = workdir.join("validation.log");
     let mut prompt = assignment.prompt.clone();
@@ -558,7 +559,11 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // after prepare_workspace fetched origin). Best-effort — None on any git
     // failure; audit data must never block the attempt.
     let remote_head_at_start = if ws.is_git {
-        ws.repo_dir.as_deref().and_then(git::remote_head_at)
+        let repo_dir = ws.repo_dir.clone();
+        tokio::task::spawn_blocking(move || repo_dir.as_deref().and_then(git::remote_head_at))
+            .await
+            .ok()
+            .flatten()
     } else {
         None
     };
@@ -631,7 +636,13 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // Hardening P1 item 32: capture the remote HEAD at attempt *finish*
     // (after the agent ran). Best-effort — None on any git failure or when
     // not a git task; audit data must never block the completion.
-    let remote_head_at_finish = cleanup_repo.as_deref().and_then(git::remote_head_at);
+    let remote_head_at_finish = {
+        let repo_dir = cleanup_repo.clone();
+        tokio::task::spawn_blocking(move || repo_dir.as_deref().and_then(git::remote_head_at))
+            .await
+            .ok()
+            .flatten()
+    };
     // Hardening P1 item 11: report which artifacts are still owed (staged in
     // the durable spool but not yet acked by the CP) so operators can see the
     // outstanding set and the startup retry knows what to deliver.

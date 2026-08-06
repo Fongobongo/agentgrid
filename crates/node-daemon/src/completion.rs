@@ -34,8 +34,8 @@ pub fn terminate_group(pid: u32) {
         // SAFETY: pid is a valid process-group id from our spawned child; SIGTERM is safe.
         libc::killpg(pid as i32, libc::SIGTERM);
     }
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
         unsafe {
             // SAFETY: same process group; SIGKILL after grace period is safe.
             libc::killpg(pid as i32, libc::SIGKILL);

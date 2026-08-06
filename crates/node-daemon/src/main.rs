@@ -103,7 +103,10 @@ async fn drive_acp_session(
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
-        .kill_on_drop(true);
+        .kill_on_drop(true)
+        // Own process group so terminate_group's killpg reaches the whole
+        // agent tree on cancel/timeout (matches validation.rs).
+        .process_group(0);
     // Hardening P0/P1 item 5: never let an unsandboxed agent run unsafe-unattended
     // unless the operator opted in — strip the bypass env the adapter otherwise
     // inherits from the daemon's parent process.

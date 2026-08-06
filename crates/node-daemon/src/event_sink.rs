@@ -84,6 +84,32 @@ impl EventSink {
         self.adapter_events.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Re-enqueue undelivered outbox events left by a prior daemon run at the
+    /// buffer head (sequence order preserved) and advance the sequence
+    /// counter past them. Without the seed, fresh events restart at 1 and
+    /// collide with pending sequences — the CP's idempotent ingest
+    /// (`ON CONFLICT (attempt_id, sequence) DO NOTHING`) would then silently
+    /// drop the NEW events. Bytes are accounted in `buf_bytes` like `push`
+    /// so the ack-path `fetch_sub` stays balanced.
+    pub async fn requeue(&self, pending: std::collections::VecDeque<IncomingEvent>) {
+        if pending.is_empty() {
+            return;
+        }
+        if let Some(max_seq) = pending.iter().map(|e| e.sequence).max() {
+            self.next.fetch_max(max_seq + 1, Ordering::SeqCst);
+        }
+        let bytes: u64 = pending
+            .iter()
+            .map(|e| e.payload.to_string().len() as u64)
+            .sum();
+        self.buf_bytes.fetch_add(bytes, Ordering::Relaxed);
+        let mut buf = self.buf.lock().await;
+        for e in pending.into_iter().rev() {
+            buf.push_front(e);
+        }
+        self.notify.notify_one();
+    }
+
     pub fn adapter_event_count(&self) -> u64 {
         self.adapter_events.load(Ordering::SeqCst)
     }
@@ -170,6 +196,9 @@ impl EventSink {
         if let Err(e) = self.outbox.push(&ev) {
             tracing::warn!(attempt_id = %self.attempt_id, "outbox push (truncation) failed: {e}");
         }
+        // Account bytes like `push` so the ack-path fetch_sub stays balanced.
+        let approx_bytes = ev.payload.to_string().len() as u64;
+        self.buf_bytes.fetch_add(approx_bytes, Ordering::Relaxed);
         self.buf.lock().await.push_back(ev);
         self.notify.notify_one();
     }
@@ -189,6 +218,9 @@ impl EventSink {
         if let Err(e) = self.outbox.push(&ev) {
             tracing::warn!(attempt_id = %self.attempt_id, "outbox push (spool-full) failed: {e}");
         }
+        // Account bytes like `push` so the ack-path fetch_sub stays balanced.
+        let approx_bytes = ev.payload.to_string().len() as u64;
+        self.buf_bytes.fetch_add(approx_bytes, Ordering::Relaxed);
         self.buf.lock().await.push_back(ev);
         self.notify.notify_one();
     }
@@ -206,10 +238,19 @@ impl EventSink {
         if batch.is_empty() {
             return;
         }
-        for chunk in split_batch(batch) {
+        let mut chunks = split_batch(batch);
+        for i in 0..chunks.len() {
+            let chunk = std::mem::take(&mut chunks[i]);
             let (acked, chunk) = self.send_events(chunk, true).await;
             if !acked {
                 let mut buf = self.buf.lock().await;
+                // Push back the failed chunk AND every unsent chunk after it
+                // (front-order preserved), not just the failed one.
+                for rest in chunks.drain(i + 1..).rev() {
+                    for e in rest.into_iter().rev() {
+                        buf.push_front(e);
+                    }
+                }
                 for e in chunk.into_iter().rev() {
                     buf.push_front(e);
                 }
@@ -294,12 +335,20 @@ impl EventSink {
         }
         // Hardening P1 item 34: bounded chunks so a large post-adapter flush is
         // not rejected by the CP batch cap and RAM stays bounded.
-        for chunk in split_batch(batch) {
+        let mut chunks = split_batch(batch);
+        for i in 0..chunks.len() {
+            let chunk = std::mem::take(&mut chunks[i]);
             let (acked, chunk) = self.send_events(chunk, false).await;
             if !acked {
-                // Push back the failed chunk; the durable outbox still holds
-                // every line for restart redelivery.
+                // Push back the failed chunk AND every unsent chunk after it;
+                // the durable outbox still holds every line for restart
+                // redelivery.
                 let mut buf = self.buf.lock().await;
+                for rest in chunks.drain(i + 1..).rev() {
+                    for e in rest.into_iter().rev() {
+                        buf.push_front(e);
+                    }
+                }
                 for e in chunk.into_iter().rev() {
                     buf.push_front(e);
                 }
@@ -352,7 +401,11 @@ impl EventSink {
             for chunk in split_batch(pending.into_iter().collect()) {
                 let seqs: Vec<u64> = chunk.iter().map(|e| e.sequence).collect();
                 let req = IngestEventsRequest { events: chunk };
-                match send_with_retry(self.client.post(&url).json(&req), 10).await {
+                let mut post = self.client.post(&url).json(&req);
+                if !self.fence.is_empty() {
+                    post = post.header("x-agentgrid-fencing-token", &self.fence);
+                }
+                match send_with_retry(post, 10).await {
                     Ok(s) if s.is_success() => {
                         if let Err(e) = self.outbox.ack(&seqs) {
                             tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
