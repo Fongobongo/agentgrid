@@ -142,13 +142,43 @@ pub async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>
     if !is_safe {
         return StatusCode::FORBIDDEN.into_response();
     }
-    // Hardening P0: reject symlinks that escape the web root.
-    // Check each path component for symlinks pointing outside root.
-    let fs_path = web_root.join(rel);
-    if let Ok(canon_file) = fs_path.canonicalize() {
-        if !canon_file.starts_with(&web_root) {
-            return StatusCode::FORBIDDEN.into_response();
+    // Hardening P0: reject symlinks that escape the web root. Walk each
+    // prefix component for a symlink and canonical-check the file (or its
+    // parent when the leaf does not exist) — a symlink dir would otherwise
+    // escape even though the final canonicalize fails. Off the blocking pool.
+    let web_root_c = web_root.clone();
+    let rel_owned = rel.to_string();
+    let forbidden = tokio::task::spawn_blocking(move || {
+        let fs_path = web_root_c.join(&rel_owned);
+        let mut cur = web_root_c.clone();
+        for comp in std::path::Path::new(&rel_owned).components() {
+            if let std::path::Component::Normal(os) = comp {
+                cur = cur.join(os);
+                if std::fs::symlink_metadata(&cur)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
         }
+        if let Ok(canon) = fs_path.canonicalize() {
+            if !canon.starts_with(&web_root_c) {
+                return true;
+            }
+        } else if let Some(parent) = fs_path.parent() {
+            if let Ok(canon_parent) = parent.canonicalize() {
+                if !canon_parent.starts_with(&web_root_c) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    if forbidden {
+        return StatusCode::FORBIDDEN.into_response();
     }
     // Serve index.html for root path explicitly
     if rel.is_empty() {
