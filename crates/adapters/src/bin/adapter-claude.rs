@@ -85,6 +85,30 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
             }
             let text = v.get("result").and_then(|x| x.as_str()).unwrap_or("");
             out.push(json!({ "type": "result", "payload": { "text": text } }));
+            // `claude -p` result lines carry usage + cost; surface them as
+            // `progress` (stored as `metric`) so workflow token budgets fire.
+            let mut tokens = 0u64;
+            if let Some(usage) = v.get("usage") {
+                for k in [
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ] {
+                    tokens += usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                }
+            }
+            let cost_cents = v
+                .get("total_cost_usd")
+                .and_then(|x| x.as_f64())
+                .map(|c| (c * 100.0).round() as u64)
+                .unwrap_or(0);
+            if tokens > 0 || cost_cents > 0 {
+                out.push(json!({
+                    "type": "progress",
+                    "payload": { "tokens": tokens, "cost_cents": cost_cents }
+                }));
+            }
         }
         // `system` and anything else: keep as a raw log line.
         _ => out.push(json!({ "type": "log", "payload": { "text": line } })),
@@ -192,6 +216,23 @@ mod tests {
         let evs = translate(&line, &mut err);
         assert_eq!(types(&evs), vec!["result"]);
         assert!(err);
+    }
+
+    #[test]
+    fn translate_result_emits_token_metric() {
+        let mut err = false;
+        let line = json!({
+            "type": "result",
+            "result": "done",
+            "usage": { "input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 5 },
+            "total_cost_usd": 0.0123
+        })
+        .to_string();
+        let evs = translate(&line, &mut err);
+        assert_eq!(types(&evs), vec!["result", "progress"]);
+        assert_eq!(evs[1]["payload"]["tokens"], 125);
+        assert_eq!(evs[1]["payload"]["cost_cents"], 1);
+        assert!(!err);
     }
 
     // Real-adapter smoke test: requires the `claude` CLI and ANTHROPIC_API_KEY.

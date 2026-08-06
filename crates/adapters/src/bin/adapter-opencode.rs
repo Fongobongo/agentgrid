@@ -77,6 +77,23 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
             }
             out
         }
+        "step_finish" => {
+            // opencode reports per-step usage here; surface it as `progress`
+            // (stored as a `metric` event) so workflow token budgets can fire.
+            if let Some(tokens) = part.and_then(|p| p.get("tokens")) {
+                let total = tokens.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
+                let cost_cents = part
+                    .and_then(|p| p.get("cost"))
+                    .and_then(|x| x.as_f64())
+                    .map(|c| (c * 100.0).round() as u64)
+                    .unwrap_or(0);
+                return vec![json!({
+                    "type": "progress",
+                    "payload": { "tokens": total, "cost_cents": cost_cents }
+                })];
+            }
+            Vec::new()
+        }
         "error" => {
             *saw_error = true;
             let msg = v
@@ -217,6 +234,17 @@ mod tests {
         let evs = translate(line, &mut err);
         assert_eq!(types(&evs), vec!["error"]);
         assert!(err);
+    }
+
+    #[test]
+    fn translate_step_finish_emits_token_metric() {
+        let mut err = false;
+        let line = r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop","tokens":{"total":33739,"input":33609,"output":2,"reasoning":0,"cache":{"write":0,"read":128}},"cost":0.0123}}"#;
+        let evs = translate(line, &mut err);
+        assert_eq!(types(&evs), vec!["progress"]);
+        assert_eq!(evs[0]["payload"]["tokens"], 33739);
+        assert_eq!(evs[0]["payload"]["cost_cents"], 1);
+        assert!(!err);
     }
 
     // Real-adapter smoke test: requires the `opencode` CLI and a configured

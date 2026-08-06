@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (0.2-completion pass, budgets)
+
+- **Token/cost budgets actually fire (plan 1.4):** real adapters now report
+  usage — `adapter-opencode` translates `step_finish` and `adapter-claude`
+  the final `result` line into `progress` events with `tokens` / `cost_cents`
+  (stored as `metric`). The workflow budget check sums them per run and, on a
+  breach, parks the run `Blocked` **and cancels the in-flight step tasks**,
+  so an over-budget run stops consuming agents instead of just pausing the
+  scheduler. The run projection's budget snapshot shows the same usage.
+
 ### Added (0.2-completion pass, web/UI)
 
 - **Change stream (plan 3.2):** `GET /v1/stream` — SSE endpoint that emits

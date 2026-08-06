@@ -2512,6 +2512,96 @@ mod workflow_tests {
     }
 
     #[tokio::test]
+    async fn budget_max_tokens_breach_cancels_running_step_task() {
+        // 1.4: adapters report tokens via `progress` (stored `metric`) events;
+        // a `max_tokens` breach must park the run Blocked AND cancel the
+        // in-flight step task, not merely stop scheduling new steps.
+        let s = temp_store().await;
+        let steps = vec![step("a", &[], WorkflowRole::Worker)];
+        let budget = WorkflowBudget {
+            max_tokens: Some(10),
+            ..Default::default()
+        };
+        let tpl = s
+            .create_workflow_template("tokened", &steps, &Some(budget))
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, None, None)
+            .await
+            .unwrap();
+        // First tick starts the step; tokens are 0 so no breach yet.
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 1, "step task created on first tick");
+        let task_id = created[0].clone();
+
+        // Enroll a node and attach a running attempt to the step task, then
+        // ingest a metric event that blows past max_tokens.
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 2,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        sqlx::query(
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
+             VALUES ('att-tok', ?, 1, ?, 'running', ?, ?, ?)",
+        )
+        .bind(&task_id)
+        .bind(&node_id)
+        .bind(now_iso())
+        .bind(now_iso())
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        s.ingest_events(
+            "att-tok",
+            &IngestEventsRequest {
+                events: vec![IncomingEvent {
+                    sequence: 1,
+                    r#type: EventType::Metric,
+                    payload: serde_json::json!({"tokens": 100, "cost_cents": 5}),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        // Next tick sees tokens 100 > 10: breach → Blocked + task cancelled.
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let r = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(r.status, WorkflowRunStatus::Blocked, "breach parks Blocked");
+        let status = s.get_task_status(&task_id).await.unwrap().unwrap();
+        assert_eq!(
+            status,
+            TaskStatus::Cancelled,
+            "over-budget step task is cancelled, not left running"
+        );
+        // Snapshot reflects the adapter-reported usage + the fired ceiling.
+        let snap = s
+            .get_workflow_run_projection(&run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .budget
+            .expect("budget snapshot present");
+        assert_eq!(snap.usage.tokens, 100);
+        assert_eq!(snap.usage.cost_cents, 5);
+        assert_eq!(snap.breach.unwrap().field, "max_tokens");
+    }
+
+    #[tokio::test]
     async fn budget_bytes_enforced_from_message_payload_size() {
         // Stage 13: `max_bytes` counts orchestrator-emitted payload bytes, so a
         // handoff streak that pounds long payloads parks the run `Blocked`, and

@@ -602,9 +602,11 @@ impl Store {
         let mut usage = agentgrid_common::compute_budget_usage(created_unix, task_count, now);
         usage.messages = self.workflow_message_count(run_id).await.unwrap_or(0);
         // Stage 13: observe bytes + circuit breaker so the snapshot ceiling
-        // syncs with the tick enforcement path.
+        // syncs with the tick enforcement path; 1.4 adds tokens/cost.
         usage.bytes = self.workflow_message_bytes(run_id).await.unwrap_or(0);
         usage.repeated_handoffs = self.workflow_repeated_handoffs(run_id).await.unwrap_or(0);
+        (usage.tokens, usage.cost_cents) =
+            self.workflow_tokens_cost(run_id).await.unwrap_or((0, 0));
         let breach = bud.check(&usage);
         Ok(Some(agentgrid_common::BudgetSnapshot {
             limits: bud,
@@ -1129,6 +1131,31 @@ impl Store {
         Ok(longest)
     }
 
+    /// 1.4: sum tokens / cost reported by adapters (`progress` events stored
+    /// as `metric`) across every attempt of this run's step tasks. Payloads
+    /// without the fields contribute 0, so older adapters stay compatible.
+    pub async fn workflow_tokens_cost(&self, run_id: &str) -> Result<(u64, u64)> {
+        let rows = sqlx::query(
+            "SELECT te.payload FROM task_events te \
+             JOIN attempts a ON a.id = te.attempt_id \
+             JOIN role_runs rr ON rr.task_id = a.task_id \
+             JOIN workflow_steps ws ON ws.id = rr.step_run_id \
+             WHERE ws.run_id = ? AND te.type = 'metric'",
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let (mut tokens, mut cost) = (0u64, 0u64);
+        for r in rows {
+            let payload: String = r.try_get("payload")?;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                tokens += v.get("tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                cost += v.get("cost_cents").and_then(|x| x.as_u64()).unwrap_or(0);
+            }
+        }
+        Ok((tokens, cost))
+    }
+
     /// Current status of a task, if it exists.
     /// Plan 534: the workflow run that owns `task_id`, if any. Service layer
     /// calls this after a task's attempt completes so the run's DAG can
@@ -1179,12 +1206,11 @@ impl Store {
                 .await?;
         }
         // Stage 13 Loop Engineering: budget enforcement. Fetch the template's
-        // budget (if any), compute a coarse usage snapshot from observable
-        // state (wall = now - created_at, rounds = sum of step attempts = task
-        // starts), and park the run `Blocked` on the first ceiling breach.
-        // `Blocked` is terminal-until-human-approval (the loop stops starting
-        // new steps); cost/messages/tokens/handoffs stay 0 until the adapter
-        // reports per-attempt counts (a follow-up).
+        // budget (if any), compute a usage snapshot from observable state
+        // (wall = now - created_at, rounds = started steps, messages/bytes,
+        // and 1.4: adapter-reported tokens/cost from stored metric events),
+        // and park the run `Blocked` on the first ceiling breach — cancelling
+        // the in-flight step tasks so the breach actually stops work.
         if let Ok(Some(tpl)) = self.get_workflow_template(&run.template_id).await {
             if let Some(bud) = &tpl.budget {
                 let steps_pre = self.get_workflow_run_steps(run_id).await?;
@@ -1206,6 +1232,8 @@ impl Store {
                     u.bytes = self.workflow_message_bytes(run_id).await.unwrap_or(0);
                     u.repeated_handoffs =
                         self.workflow_repeated_handoffs(run_id).await.unwrap_or(0);
+                    (u.tokens, u.cost_cents) =
+                        self.workflow_tokens_cost(run_id).await.unwrap_or((0, 0));
                     u
                 };
                 if let Some(breach) = bud.check(&usage) {
@@ -1213,6 +1241,24 @@ impl Store {
                         "workflow run {run_id} budget breach: {} (limit {}, observed {}); parking Blocked",
                         breach.field, breach.limit, breach.observed
                     );
+                    // 1.4: abort the in-flight step tasks so an over-budget run
+                    // stops consuming agents, not just scheduling them.
+                    for s in &steps_pre {
+                        if s.status != WorkflowStepStatus::Running {
+                            continue;
+                        }
+                        let task_id: Option<String> =
+                            sqlx::query("SELECT task_id FROM role_runs WHERE step_run_id = ?")
+                                .bind(&s.id)
+                                .fetch_optional(&self.pool)
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|r| r.try_get("task_id").ok());
+                        if let Some(tid) = task_id {
+                            let _ = self.cancel_task(&tid).await;
+                        }
+                    }
                     self.set_workflow_run_status(
                         run_id,
                         WorkflowRunStatus::Blocked,
