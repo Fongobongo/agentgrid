@@ -1,6 +1,9 @@
 //! Artifact storage (bytes + metadata, path-safe). Extracted from `store.rs`.
 
-use super::{is_safe_opaque_id, now_iso, sha256_bytes_hex, Store, StoreArtifactError};
+use super::{
+    is_safe_artifact_name, is_safe_opaque_id, now_iso, sha256_bytes_hex, Store,
+    StoreArtifactError,
+};
 use agentgrid_common::{ArtifactMeta, ArtifactUploadResponse, UploadArtifactRequest};
 use anyhow::Result;
 use sqlx::Row;
@@ -24,38 +27,37 @@ impl Store {
         if !is_safe_opaque_id(attempt_id) {
             anyhow::bail!("invalid attempt_id");
         }
-        let dir = self.artifact_root.join(attempt_id);
-        // Canonicalize the existing artifact dir; if it does not exist yet the
-        // caller (save_artifact) creates it first, so this is mainly read-side.
-        let canon_root = self
-            .artifact_root
-            .canonicalize()
-            .unwrap_or_else(|_| self.artifact_root.clone());
-        let canon_dir = dir.canonicalize().unwrap_or(dir.clone());
-        if !canon_dir.starts_with(&canon_root) {
-            anyhow::bail!("artifact dir escapes root");
+        if !is_safe_artifact_name(name) {
+            anyhow::bail!("invalid artifact name");
         }
-        // Hardening P0: reject symlinked artifact directories / files. A symlink
-        // inside artifact_root pointing outside (or to a sensitive file) would
-        // let a read/write escape the root even though the *name* was safe.
+        let dir = self.artifact_root.join(attempt_id);
+        // Reject a symlinked attempt dir before any canonical check — a
+        // symlink pointing outside the root would otherwise escape even with
+        // a safe name.
         if let Ok(md) = std::fs::symlink_metadata(&dir) {
             if md.file_type().is_symlink() {
                 anyhow::bail!("artifact dir is a symlink");
             }
         }
-        // Single safe segment: no separators / traversal / NUL / control chars.
-        if name.is_empty()
-            || name.len() > 255
-            || name.contains('/')
-            || name.contains('\\')
-            || name.contains('\0')
-            || name == "."
-            || name == ".."
-            || name.chars().any(|c| c.is_control())
-        {
-            anyhow::bail!("invalid artifact name");
-        }
-        let file_path = canon_dir.join(name);
+        // If the dir already exists, verify it is still inside the (canonical)
+        // artifact root; if it does not exist yet (write path just created it
+        // via create_dir_all, read path will 404 anyway) skip the canonical
+        // dance — is_safe_opaque_id already guarantees `dir` is lexically
+        // inside the root, so there is nothing to escape.
+        let file_path = if let Ok(canon_dir) = dir.canonicalize() {
+            let canon_root = self
+                .artifact_root
+                .canonicalize()
+                .unwrap_or_else(|_| self.artifact_root.clone());
+            if !canon_dir.starts_with(&canon_root) {
+                anyhow::bail!("artifact dir escapes root");
+            }
+            canon_dir.join(name)
+        } else {
+            // dir does not exist yet — lexical join is safe (opaque id + safe
+            // name cannot contain separators).
+            dir.join(name)
+        };
         // Hardening P0: the resolved file itself must not be a symlink.
         if let Ok(md) = std::fs::symlink_metadata(&file_path) {
             if md.file_type().is_symlink() {
