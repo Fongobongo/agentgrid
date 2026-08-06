@@ -50,7 +50,7 @@ async fn enroll_node(cfg: &Config) -> Result<SavedCredential> {
             .unwrap_or_else(|| "wrapper".into()),
     };
     let resp = client
-        .post(format!("{}/v1/nodes/enroll", cfg.server))
+        .post(format!("{}/v1/node/enroll", cfg.server))
         .json(&body)
         .send()
         .await?;
