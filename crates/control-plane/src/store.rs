@@ -53,6 +53,10 @@ pub struct Store {
     pub(crate) checkpoint_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Stage 2.5 ops: cumulative count of `SQLITE_BUSY`-class failures.
     pub(crate) sqlite_busy: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Unix timestamp of the last successful automatic backup (0 = never).
+    pub(crate) last_backup_at: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// Cumulative count of failed automatic backups.
+    pub(crate) backup_errors: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Hardening P2 item 35: cumulative count of expired-lease reverts
     /// (the lease/ACK race path that re-queues an unconfirmed assignment).
     pub(crate) lease_reverts: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -351,6 +355,8 @@ impl Store {
             scheduler_assignments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             checkpoint_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sqlite_busy: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_backup_at: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            backup_errors: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             lease_reverts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             active_attempt_drift: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             artifact_cleanup_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),

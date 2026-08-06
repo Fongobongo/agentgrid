@@ -43,6 +43,17 @@ impl Store {
 
     pub fn start_maintenance(&self) {
         let store = self.clone();
+        // Plan 0.2 item 4.2: periodic automatic backup with rotation.
+        let backup_every = std::env::var("AGENTGRID_BACKUP_EVERY_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(86400);
+        let backup_keep = std::env::var("AGENTGRID_BACKUP_KEEP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5)
+            .max(1);
         tokio::spawn(async move {
             // Tick every 15s: node-staleness is 30s, so a 15s cadence still
             // marks a dead node offline within ~45s of its last heartbeat.
@@ -51,6 +62,7 @@ impl Store {
             // BEGIN IMMEDIATE writes — running it every tick caused
             // `database is locked` (SQLITE_BUSY) on retry_task under load.
             let mut tick = 0u32;
+            let mut last_backup = std::time::Instant::now();
             loop {
                 tokio::time::sleep(Duration::from_secs(15)).await;
                 let now = now_iso();
@@ -84,8 +96,57 @@ impl Store {
                 if tick % 4 == 0 {
                     let _ = store.wal_checkpoint().await;
                 }
+                // Plan 0.2 item 4.2: automatic backup + rotation. A failed
+                // backup is counted and retried on the next interval; the
+                // timestamp only advances on success.
+                if last_backup.elapsed() >= Duration::from_secs(backup_every) {
+                    let ts = chrono::Utc::now().timestamp();
+                    let name = format!("auto-backup-{ts}.db");
+                    match store.backup_to(&name).await {
+                        Ok(()) => {
+                            store
+                                .last_backup_at
+                                .store(ts, std::sync::atomic::Ordering::Relaxed);
+                            if let Err(e) = store.rotate_backups(backup_keep).await {
+                                tracing::warn!("backup rotation failed: {e}");
+                            }
+                            tracing::info!(file = %name, "automatic backup complete");
+                        }
+                        Err(e) => {
+                            store
+                                .backup_errors
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::warn!("automatic backup failed: {e}");
+                        }
+                    }
+                    last_backup = std::time::Instant::now();
+                }
             }
         });
+    }
+
+    /// Plan 0.2 item 4.2: keep only the newest `keep` automatic backup files
+    /// (`auto-backup-<unix-ts>.db`) in the data directory; unlink the rest.
+    /// Timestamps in the name make lexicographic order == newest first.
+    async fn rotate_backups(&self, keep: usize) -> Result<()> {
+        let dir = self
+            .artifact_root
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let mut names: Vec<String> = Vec::new();
+        let mut rd = tokio::fs::read_dir(&dir).await?;
+        while let Some(ent) = rd.next_entry().await? {
+            let name = ent.file_name().to_string_lossy().to_string();
+            if name.starts_with("auto-backup-") && name.ends_with(".db") {
+                names.push(name);
+            }
+        }
+        names.sort_unstable_by(|a, b| b.cmp(a));
+        for old in names.iter().skip(keep) {
+            let _ = tokio::fs::remove_file(dir.join(old)).await;
+        }
+        Ok(())
     }
 
     /// Stage 13 / line 487: background workflow ticker — re-advance every

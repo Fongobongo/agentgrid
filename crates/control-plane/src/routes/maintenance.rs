@@ -255,6 +255,34 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
 
+    // Plan 0.2 item 4.2: automatic-backup observability.
+    let last_backup_at = state
+        .store
+        .last_backup_at
+        .load(std::sync::atomic::Ordering::Relaxed);
+    s.push_str("# HELP agentgrid_last_backup_at_unix Unix timestamp of the last successful automatic backup (0 = never).\n");
+    s.push_str("# TYPE agentgrid_last_backup_at_unix gauge\n");
+    s.push_str(&format!("agentgrid_last_backup_at_unix {last_backup_at}\n"));
+    let backup_age = if last_backup_at > 0 {
+        chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(last_backup_at)
+    } else {
+        0
+    };
+    s.push_str("# HELP agentgrid_last_backup_age_seconds Seconds since the last successful automatic backup (0 = never).\n");
+    s.push_str("# TYPE agentgrid_last_backup_age_seconds gauge\n");
+    s.push_str(&format!("agentgrid_last_backup_age_seconds {backup_age}\n"));
+    s.push_str("# HELP agentgrid_backup_errors_total Cumulative failed automatic backups.\n");
+    s.push_str("# TYPE agentgrid_backup_errors_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_backup_errors_total {}\n",
+        state
+            .store
+            .backup_errors
+            .load(std::sync::atomic::Ordering::Relaxed)
+    ));
+
     // Hardening P2 item 35: security-observability counters.
     s.push_str(
         "# HELP agentgrid_cross_node_rejects_total Cross-node mutation/read attempts rejected (wrong owner).
