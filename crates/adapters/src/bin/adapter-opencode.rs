@@ -69,7 +69,7 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
                         out.push(json!({
-                            "type": "tool",
+                            "type": "tool_call",
                             "payload": { "name": name, "callID": call_id, "result": result }
                         }));
                     }
@@ -157,7 +157,13 @@ fn main() {
         }
     }
 
-    let status = child.wait().unwrap();
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("adapter-opencode: wait for {bin} failed: {e}");
+            std::process::exit(1);
+        }
+    };
     let _ = err_thread.join();
     let code = status.code().unwrap_or(1);
     std::process::exit(if saw_error && code == 0 { 1 } else { code });
@@ -197,7 +203,7 @@ mod tests {
         let mut err = false;
         let line = r#"{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"abc","state":{"status":"completed","input":{"command":"echo hi"},"output":"hi\n"}}}"#;
         let evs = translate(line, &mut err);
-        assert_eq!(types(&evs), vec!["tool_call", "tool"]);
+        assert_eq!(types(&evs), vec!["tool_call", "tool_call"]);
         assert_eq!(evs[0]["payload"]["name"], "bash");
         assert_eq!(evs[0]["payload"]["callID"], "abc");
         assert_eq!(evs[1]["payload"]["result"], "hi\n");
@@ -254,9 +260,9 @@ mod tests {
         assert!(!all.is_empty(), "opencode produced no translatable events");
         assert!(
             all.iter()
-                .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("text")
+                .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("log")
                     || e.get("type").and_then(|t| t.as_str()) == Some("error")),
-            "opencode stream should yield text or an error event"
+            "opencode stream should yield log or an error event"
         );
     }
 }

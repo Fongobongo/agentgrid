@@ -69,7 +69,7 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
                                 .get("content")
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Null);
-                            out.push(json!({ "type": "tool", "payload": { "result": res } }));
+                            out.push(json!({ "type": "tool_call", "payload": { "result": res } }));
                         }
                     }
                 } else if let Some(s) = content.as_str() {
@@ -135,7 +135,13 @@ fn main() {
         }
     }
 
-    let status = child.wait().unwrap();
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("adapter-claude: wait for {bin} failed: {e}");
+            std::process::exit(1);
+        }
+    };
     let _ = err_thread.join();
     let code = status.code().unwrap_or(1);
     std::process::exit(if saw_error && code == 0 { 1 } else { code });

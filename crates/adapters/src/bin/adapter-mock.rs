@@ -56,6 +56,22 @@ fn main() {
             let mut parts = rest.splitn(2, ':');
             let file = parts.next().unwrap_or("").to_string();
             let content = parts.next().unwrap_or("").to_string();
+            // Confine writes to the attempt worktree (cwd): the path comes
+            // from the prompt, so refuse absolute paths and `..` components
+            // that would escape it.
+            let path = std::path::Path::new(&file);
+            if file.is_empty()
+                || path.is_absolute()
+                || path
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+            {
+                emit(
+                    "error",
+                    json!({ "text": format!("write {file} refused: path must stay inside the worktree") }),
+                );
+                continue;
+            }
             match fs::write(&file, &content) {
                 Ok(()) => emit(
                     "file_change",
