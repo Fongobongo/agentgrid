@@ -1607,6 +1607,52 @@ mod tests {
         // Just verify no panic occurred.
     }
 
+    /// Plan 0.2 item 5.3: secret-leak regulator. A configured secret must
+    /// never appear in emitted events or in the raw-output artifact — not as
+    /// plain text in raw stdout lines, not inside adapter JSON event
+    /// payloads, not in a trailing partial line — anywhere the redacted
+    /// stream flows. If this test starts failing, some output path bypasses
+    /// the redactor: fix the path, do not weaken the test.
+    #[tokio::test]
+    async fn read_stream_never_leaks_secrets_regulator() {
+        let secret = "sk-live-abc123XYZ".to_string();
+        let sink = EventSink::new(
+            "a-secrets".into(),
+            reqwest::Client::new(),
+            "http://x".into(),
+            String::new(),
+            test_outbox("a-secrets"),
+        );
+        let raw_path =
+            std::env::temp_dir().join(format!("ag-secret-regulator-{}.log", uuid::Uuid::new_v4()));
+        let raw = Some(Arc::new(Mutex::new(
+            tokio::fs::File::create(&raw_path).await.unwrap(),
+        )));
+        // Mix of: raw line with the secret, adapter JSON event whose payload
+        // embeds the secret, the secret split across a chunk boundary (fed in
+        // one buffer here; boundary coverage lives in secret_redactor tests),
+        // and a trailing partial line containing the secret (no newline).
+        let adapter_line = json!({"type": "log", "payload": {"text": format!("key={secret}")}})
+            .to_string();
+        let input = format!("token={secret}\n{adapter_line}\nfinal line key={secret}");
+        let reader = tokio::io::BufReader::new(std::io::Cursor::new(input.into_bytes()));
+        read_stream(reader, sink.clone(), "stdout", vec![secret.clone()], raw).await;
+
+        for e in sink.buffered_events().await {
+            let s = e.payload.to_string();
+            assert!(
+                !s.contains(&secret),
+                "secret leaked into event payload: {s}"
+            );
+        }
+        let raw_content = tokio::fs::read_to_string(&raw_path).await.unwrap();
+        assert!(
+            !raw_content.contains(&secret),
+            "secret leaked into raw artifact: {raw_content}"
+        );
+        let _ = tokio::fs::remove_file(&raw_path).await;
+    }
+
     /// Hardening P1 item 34: `split_batch` bounds chunk size to the CP ingest
     /// caps (event count + bytes) so a huge flush is never one oversized POST.
     #[test]
