@@ -18,6 +18,7 @@ jobs:
   rust:
     name: fmt / clippy / test / build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
@@ -28,8 +29,10 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+        # Plan 0.2 item 0.6: --report-time surfaces the slowest tests in the
+        # CI log so regressions in suite runtime are visible per-PR.
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace -- --report-time
       - name: build
         run: cargo build --workspace
 
