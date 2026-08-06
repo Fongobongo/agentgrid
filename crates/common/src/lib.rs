@@ -287,6 +287,15 @@ pub struct CreateTaskRequest {
     /// Optional ACP session id to resume (Stage 11.5). `None` => fresh session.
     #[serde(default)]
     pub parent_acp_session_id: Option<String>,
+    /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
+    /// Node policy sets max allowed mode; task requests a mode <= node max.
+    #[serde(default)]
+    pub network_mode: Option<String>,
+    /// Optional security profile (e.g. "strict", "default-strict").
+    /// When set to a profile ending in "-strict", the task will only be
+    /// assigned to nodes with structured permission interception (not wrapper).
+    #[serde(default)]
+    pub security_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -318,6 +327,9 @@ pub struct TaskView {
     /// prior ACP session. `None` => a fresh session.
     #[serde(default)]
     pub parent_acp_session_id: Option<String>,
+    /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_mode: Option<String>,
     /// Hardening P2 item 36: the security profile of the LATEST attempt
     /// (from `attempts.provenance.security_profile`). Surfaced so operators can
     /// see which policy the agent ran under.
@@ -384,6 +396,19 @@ pub struct NodeView {
     /// receives no NEW assignments (maintenance mode).
     #[serde(default)]
     pub drained: bool,
+    /// Hardening P2 item 35: repository cache size in bytes.
+    #[serde(default)]
+    pub repo_cache_bytes: u64,
+    /// Hardening P2 item 35: workspace size in bytes.
+    #[serde(default)]
+    pub workspace_bytes: u64,
+    /// Hardening P2 item 659: node-level network mode (`none` | `restricted` | `unrestricted`).
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
+}
+
+fn default_network_mode() -> String {
+    "none".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -438,6 +463,9 @@ pub struct Assignment {
     /// `parent_session_id` (Stage 11.5). `None` => a fresh session.
     #[serde(default)]
     pub parent_acp_session_id: Option<String>,
+    /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_mode: Option<String>,
     /// Stage 13: optional external-origin provenance for this attempt, echoed
     /// by the node back on the completion call so the CP persists it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -526,6 +554,10 @@ pub struct EnrollRequest {
     /// nodes; a major mismatch marks the node `degraded`.
     #[serde(default)]
     pub protocol_version: Option<String>,
+    /// Permission interception mode for this node's adapters. One of:
+    /// "wrapper" (legacy stdout parsing) or "structured" (ACP-style).
+    #[serde(default = "default_permission_interception")]
+    pub permission_interception: String,
 }
 
 /// Node identity + secret credential returned once at enroll (never stored plaintext).
@@ -617,6 +649,15 @@ pub struct HeartbeatRequest {
     /// "docker" only when limits are actually configured. 0 on legacy nodes.
     #[serde(default)]
     pub enforced_limits: bool,
+    /// Hardening P2 item 35: repository cache size in bytes. 0 on legacy nodes.
+    #[serde(default)]
+    pub repo_cache_bytes: u64,
+    /// Hardening P2 item 35: workspace size in bytes. 0 on legacy nodes.
+    #[serde(default)]
+    pub workspace_bytes: u64,
+    /// Hardening P2 item 659: node-level network mode (`none` | `restricted` | `unrestricted`).
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
 }
 
 /// A skill name + source ("project" | "user" | "managed") advertised in a
@@ -859,6 +900,21 @@ pub struct EventsQuery {
     pub limit: Option<u64>,
 }
 
+/// Unified response envelope for list endpoints with keyset cursor pagination.
+/// Returns `items` and optional `next_cursor` for the next page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListResponse<T> {
+    pub items: Vec<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+impl<T> ListResponse<T> {
+    pub fn new(items: Vec<T>, next_cursor: Option<String>) -> Self {
+        Self { items, next_cursor }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,6 +1001,8 @@ mod tests {
             validation_command: None,
             base_commit: None,
             parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
         };
         assert_eq!(round_trip(&req), req);
 
@@ -979,6 +1037,7 @@ mod tests {
                 validation_timeout_secs: None,
                 base_commit: None,
                 parent_acp_session_id: None,
+                network_mode: None,
                 provenance: None,
                 upstream_commits: vec![],
                 upstream_task_ids: vec![],
@@ -997,6 +1056,7 @@ mod tests {
             max_concurrency: 2,
             agent_version: "0.1".into(),
             protocol_version: None,
+            permission_interception: "wrapper".into(),
         };
         assert_eq!(round_trip(&er), er);
         let hb = HeartbeatRequest {
@@ -1023,6 +1083,9 @@ mod tests {
             repo_lock_wait_ms: 0,
             sandbox_backend: "none".into(),
             enforced_limits: false,
+            repo_cache_bytes: 0,
+            workspace_bytes: 0,
+            network_mode: "none".into(),
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

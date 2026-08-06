@@ -507,8 +507,7 @@ async fn main() -> Result<()> {
     if matches!(cfg.sandbox, sandbox::SandboxKind::Docker) {
         // Fail-closed: an unenforceable/malformed egress allowlist must stop
         // the daemon, never silently run with full egress.
-        let net = std::env::var("AGENTGRID_SANDBOX_NETWORK")
-            .unwrap_or_else(|_| "none".to_string());
+        let net = std::env::var("AGENTGRID_SANDBOX_NETWORK").unwrap_or_else(|_| "none".to_string());
         sandbox::validate_network_mode(&net)?;
         match sandbox::probe_runtime_version().await {
             Ok(Some(v)) => tracing::info!(runtime = %v, "container runtime ready"),

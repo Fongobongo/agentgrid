@@ -1,9 +1,7 @@
 //! Artifact storage (bytes + metadata, path-safe). Extracted from `store.rs`.
 
 use super::{is_safe_opaque_id, now_iso, sha256_bytes_hex, Store, StoreArtifactError};
-use agentgrid_common::{
-    ArtifactMeta, ArtifactUploadResponse, UploadArtifactRequest,
-};
+use agentgrid_common::{ArtifactMeta, ArtifactUploadResponse, UploadArtifactRequest};
 use anyhow::Result;
 use sqlx::Row;
 use uuid::Uuid;
@@ -213,5 +211,4 @@ impl Store {
             Err(e) => Err(e.into()),
         }
     }
-
 }

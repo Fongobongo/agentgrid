@@ -37,7 +37,6 @@ fn compact_threshold() -> u64 {
         .unwrap_or(1024 * 1024)
 }
 
-
 #[derive(Serialize, Deserialize)]
 struct EventLine {
     seq: u64,
@@ -432,7 +431,11 @@ impl CompletionOutbox {
         let _g = self.file.lock().unwrap();
         let marker = format!("{{\"drop\":\"{attempt_id}\"}}\n");
         use std::io::Write;
-        let mut f = match std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+        let mut f = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
@@ -467,7 +470,10 @@ impl CompletionOutbox {
             }
             if serde_json::from_str::<serde_json::Value>(line)
                 .ok()
-                .and_then(|v| v.get("drop").map(|d| d.as_str().unwrap_or_default().to_string()))
+                .and_then(|v| {
+                    v.get("drop")
+                        .map(|d| d.as_str().unwrap_or_default().to_string())
+                })
                 .is_some()
             {
                 continue; // drop markers never survive compaction

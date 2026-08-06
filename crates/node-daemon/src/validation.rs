@@ -81,9 +81,7 @@ pub async fn run_validation(
     // none, read-only + tmpfs, resource limits), not as a bare host `sh -c`.
     let kind = sandbox_kind();
     let (program, prefix_args) = crate::sandbox::sandbox_prefix(
-        kind,
-        workdir,
-        "sh",
+        kind, workdir, "sh",
         None, // validation has no task network_mode; sandbox env default applies
     );
     let mut cmd = tokio::process::Command::new(&program);

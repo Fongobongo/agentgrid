@@ -3,9 +3,9 @@
 //! Extracted from `store.rs`.
 
 use super::{iso_plus_secs, mark_offline_nodes, now_iso, revert_expired_leases, Store};
-use std::time::Duration;
 use anyhow::Result;
 use sqlx::Row;
+use std::time::Duration;
 
 impl Store {
     /// Background maintenance: revert unconfirmed assignments (lease expired)

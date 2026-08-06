@@ -1552,7 +1552,10 @@ mod tests {
         // Release the holder: the contender now acquires immediately.
         drop(first);
         let acquired = RepoFlock::acquire(root, repo, std::time::Duration::from_secs(1));
-        assert!(acquired.is_ok(), "flock is released by Drop; kernel auto-release");
+        assert!(
+            acquired.is_ok(),
+            "flock is released by Drop; kernel auto-release"
+        );
         drop(acquired.unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }

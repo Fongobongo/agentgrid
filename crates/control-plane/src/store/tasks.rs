@@ -1,6 +1,6 @@
 //! Task CRUD + events. Extracted from `store.rs`.
 
-use super::{event_type_of, now_iso, row_to_task_view, DEFAULT_EVENT_PAGE, Store};
+use super::{event_type_of, now_iso, row_to_task_view, Store, DEFAULT_EVENT_PAGE};
 use agentgrid_common::{CreateTaskRequest, TaskEvent, TaskStatus, TaskView};
 use anyhow::Result;
 use sqlx::Row;
@@ -190,5 +190,4 @@ impl Store {
         }
         Ok(events)
     }
-
 }

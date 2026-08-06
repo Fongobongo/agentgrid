@@ -24,7 +24,11 @@ async fn health_endpoints_respond_over_real_http() {
     let base = spawn_server().await;
     let client = Client::new();
 
-    let live = client.get(format!("{base}/health/live")).send().await.unwrap();
+    let live = client
+        .get(format!("{base}/health/live"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(live.status(), 200);
 
     let ready = client
@@ -34,14 +38,13 @@ async fn health_endpoints_respond_over_real_http() {
         .unwrap();
     assert_eq!(ready.status(), 200);
 
-    let metrics = client
-        .get(format!("{base}/metrics"))
-        .send()
-        .await
-        .unwrap();
+    let metrics = client.get(format!("{base}/metrics")).send().await.unwrap();
     assert_eq!(metrics.status(), 200);
     let body = metrics.text().await.unwrap();
-    assert!(body.contains("agentgrid_"), "metrics body must have agentgrid metrics");
+    assert!(
+        body.contains("agentgrid_"),
+        "metrics body must have agentgrid metrics"
+    );
 }
 
 #[tokio::test]

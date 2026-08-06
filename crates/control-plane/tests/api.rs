@@ -6276,7 +6276,11 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         .unwrap();
     let nodes: ListResponse<NodeView> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    let mine = nodes.items.iter().find(|n| n.id == node_id).expect("node listed");
+    let mine = nodes
+        .items
+        .iter()
+        .find(|n| n.id == node_id)
+        .expect("node listed");
     assert!(mine.unsafe_active, "unsafe flag surfaced on node view");
     assert_eq!(mine.permission_interception, "wrapper");
     // Hardening P2 item 35: storage pressure surfaced on the node view.

@@ -530,11 +530,11 @@
 
 - [x] Разделить store на users/nodes/tasks/attempts/events/artifacts/conversations/maintenance. (store.rs 5235→2854: 15 submodules — users, nodes, conversations, artifacts, tasks, repositories, scheduler, events, attempts, maintenance + существующие approvals/profiles/skills/workflows; 104 api + 60 lib tests green)
 - [x] Оставить SQL-only обязанности в repository layer. (row mappers + SQL helpers остались в store.rs как pub(super); каждый submodule — impl Store с SQL-only методами)
-- [ ] Вынести scheduler в service layer.
-- [ ] Вынести attempt lifecycle в service layer.
-- [ ] Вынести artifact authorization/storage в service layer.
-- [ ] Запретить handler напрямую координировать несколько store calls без transaction boundary.
-- [ ] Добавить transaction helper для multi-aggregate operations.
+- [ ] Вынести scheduler в service layer. (отложено — P2: scheduler уже в `store/scheduler.rs` с чистыми функциями `try_assign`/`task_eligibility`; после 536 handlers по одному store call; отдельный service layer — абстракция без потребителя, добавится вместе с первым multi-store сценарием)
+- [ ] Вынести attempt lifecycle в service layer. (отложено — P2: lifecycle в `store/attempts.rs` с атомарными CAS-переходами; handlers тонкие после 536; service слой добавится при первом multi-store сценарии)
+- [ ] Вынести artifact authorization/storage в service layer. (отложено — P2: authorization в `auth.rs` (check_attempt_owner) + `routes/artifacts.rs` (is_safe_artifact_name); storage в `store/artifacts.rs`; после 536 handlers по одному store call)
+- [x] Запретить handler напрямую координировать несколько store calls без transaction boundary. (workflows.rs: пары run+steps объединены в один store-метод `get_workflow_run_with_steps` в show_workflow_run / tick_workflow_run / approve_workflow_plan_handler; аудит всех routes — каждый handler теперь один store call; workflow тесты 10 green)
+- [x] ~~Добавить transaction helper для multi-aggregate operations.~~ (N/A — после 536 multi-aggregate coordination в handlers отсутствует: каждый handler один store call; helper не нужен до появления реального multi-write сценария)
 
 ## 19. Typed API errors — P2
 

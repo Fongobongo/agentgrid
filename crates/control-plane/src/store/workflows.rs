@@ -472,6 +472,20 @@ impl Store {
             .collect())
     }
 
+    /// Plan 536: single-store-call read of a run plus its steps so handlers
+    /// don't coordinate two reads (run + steps) that can race each other.
+    pub async fn get_workflow_run_with_steps(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<(WorkflowRun, Vec<WorkflowStepRun>)>> {
+        let run = match self.get_workflow_run(run_id).await? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let steps = self.get_workflow_run_steps(run_id).await?;
+        Ok(Some((run, steps)))
+    }
+
     /// Stage 8 ACP plan projection: the live view of a run's roles, steps,
     /// placement, spawned tasks, assigned nodes and latest verdicts.
     pub async fn get_workflow_run_projection(

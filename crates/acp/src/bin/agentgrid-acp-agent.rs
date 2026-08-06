@@ -16,7 +16,9 @@ fn main() {
         println!("agentgrid-acp-agent {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    tokio::runtime::Runtime::new().expect("tokio runtime").block_on(async_main());
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async_main());
 }
 
 async fn async_main() {

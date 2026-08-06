@@ -227,11 +227,11 @@ pub async fn show_workflow_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkflowRunWithSteps>, StatusCode> {
-    let run = state.store.get_workflow_run(&id).await;
-    let steps = state.store.get_workflow_run_steps(&id).await;
-    match (run, steps) {
-        (Ok(Some(r)), Ok(s)) => Ok(Json(WorkflowRunWithSteps { run: r, steps: s })),
-        (Ok(None), _) => Err(StatusCode::NOT_FOUND),
+    // Plan 536: single store call — run + steps read together, no handler
+    // coordination of two reads.
+    match state.store.get_workflow_run_with_steps(&id).await {
+        Ok(Some((r, s))) => Ok(Json(WorkflowRunWithSteps { run: r, steps: s })),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
         _ => {
             tracing::error!("show_workflow_run failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -263,15 +263,8 @@ pub async fn tick_workflow_run(
     }
     // Wake the scheduler so freshly-created step tasks get assigned promptly.
     state.assignment_notify.notify_waiters();
-    match state.store.get_workflow_run(&id).await {
-        Ok(Some(r)) => {
-            let steps = state
-                .store
-                .get_workflow_run_steps(&id)
-                .await
-                .unwrap_or_default();
-            Ok(Json(WorkflowRunWithSteps { run: r, steps }))
-        }
+    match state.store.get_workflow_run_with_steps(&id).await {
+        Ok(Some((r, steps))) => Ok(Json(WorkflowRunWithSteps { run: r, steps })),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -301,15 +294,9 @@ pub async fn approve_workflow_plan_handler(
         Ok(()) => {
             // Wake the scheduler so the freshly-expanded steps assign.
             state.assignment_notify.notify_waiters();
-            match state.store.get_workflow_run(&id).await {
-                Ok(Some(r)) => {
-                    let steps = state
-                        .store
-                        .get_workflow_run_steps(&id)
-                        .await
-                        .unwrap_or_default();
-                    Ok(Json(WorkflowRunWithSteps { run: r, steps }))
-                }
+            // Plan 536: single store call for the fresh run + steps.
+            match state.store.get_workflow_run_with_steps(&id).await {
+                Ok(Some((r, steps))) => Ok(Json(WorkflowRunWithSteps { run: r, steps })),
                 Ok(None) => Err(StatusCode::NOT_FOUND),
                 Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
             }

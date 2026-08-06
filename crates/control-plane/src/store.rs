@@ -8,12 +8,9 @@
 use std::time::Duration;
 
 use agentgrid_common::{
-    AgentProfile, ApprovalStatus,
-    ApprovalView, AttemptStatus,
-    EventType,
-    InvalidTransition, McpServer, NodeStatus, NodeView, PollRequest,
-    SkillTrustView, TaskStatus,
-    TaskView, WorkflowBudget, WorkflowRole, WorkflowSchedule,
+    AgentProfile, ApprovalStatus, ApprovalView, AttemptStatus, EventType, InvalidTransition,
+    McpServer, NodeStatus, NodeView, PollRequest, SkillTrustView, TaskStatus, TaskView,
+    WorkflowBudget, WorkflowRole, WorkflowSchedule,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -23,18 +20,18 @@ use sqlx::sqlite::{
 use sqlx::Row;
 
 mod approvals;
-mod users;
-mod nodes;
-mod conversations;
 mod artifacts;
-mod tasks;
+mod attempts;
+mod conversations;
+mod events;
+mod maintenance;
+mod nodes;
+mod profiles;
 mod repositories;
 mod scheduler;
-mod events;
-mod attempts;
-mod maintenance;
-mod profiles;
 mod skills;
+mod tasks;
+mod users;
 mod workflows;
 
 const ASSIGNMENT_LEASE_SECS: i64 = 30;
@@ -367,9 +364,6 @@ impl Store {
     }
 
     // ----- users + auth (Stage 4.1) -----
-
-
-
 
     pub async fn list_nodes(
         &self,
@@ -815,9 +809,9 @@ mod workflow_tests {
         IngestEventsRequest, UploadArtifactRequest, WorkflowRunStatus, WorkflowStep,
         WorkflowStepStatus,
     };
-    use uuid::Uuid;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use uuid::Uuid;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 

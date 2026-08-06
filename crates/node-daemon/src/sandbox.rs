@@ -102,9 +102,9 @@ fn parse_cidr(s: &str) -> Option<()> {
 fn parse_ipv4(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
     parts.len() == 4
-        && parts.iter().all(|p| {
-            p.parse::<u8>().is_ok() && !(p.len() > 1 && p.starts_with('0'))
-        })
+        && parts
+            .iter()
+            .all(|p| p.parse::<u8>().is_ok() && !(p.len() > 1 && p.starts_with('0')))
 }
 
 fn parse_ipv6(s: &str) -> bool {
@@ -317,8 +317,8 @@ pub fn validate_network_mode(net: &str) -> anyhow::Result<()> {
 /// is missing or the daemon is unreachable — the caller decides whether that
 /// is fatal.
 pub async fn probe_runtime_version() -> anyhow::Result<Option<String>> {
-    let runtime = std::env::var("AGENTGRID_SANDBOX_RUNTIME")
-        .unwrap_or_else(|_| "docker".to_string());
+    let runtime =
+        std::env::var("AGENTGRID_SANDBOX_RUNTIME").unwrap_or_else(|_| "docker".to_string());
     let out = tokio::process::Command::new(&runtime)
         .args(["version", "--format", "{{.Server.Version}}"])
         .output()
@@ -337,8 +337,8 @@ pub async fn probe_runtime_version() -> anyhow::Result<Option<String>> {
 /// or image — the caller logs and continues (node reports degraded, scheduler
 /// excludes it).
 pub async fn probe_adapter_in_sandbox(bin: &str) -> anyhow::Result<bool> {
-    let runtime = std::env::var("AGENTGRID_SANDBOX_RUNTIME")
-        .unwrap_or_else(|_| "docker".to_string());
+    let runtime =
+        std::env::var("AGENTGRID_SANDBOX_RUNTIME").unwrap_or_else(|_| "docker".to_string());
     let out = tokio::process::Command::new(&runtime)
         .args([
             "run",
@@ -373,8 +373,8 @@ pub async fn cleanup_orphan_containers() {
     let Some(node_id) = NODE_ID.get() else {
         return;
     };
-    let runtime = std::env::var("AGENTGRID_SANDBOX_RUNTIME")
-        .unwrap_or_else(|_| "docker".to_string());
+    let runtime =
+        std::env::var("AGENTGRID_SANDBOX_RUNTIME").unwrap_or_else(|_| "docker".to_string());
     let label = format!("agentgrid.node={node_id}");
     let out = match tokio::process::Command::new(&runtime)
         .args(["ps", "-aq", "--filter", &label])
@@ -605,9 +605,15 @@ mod tests {
         assert!(valid_allowlist_spec("allowlist:10.0.0.0/8,1.2.3.4/32"));
         assert!(valid_allowlist_spec("allowlist:2001:db8::/32"));
         assert!(!valid_allowlist_spec("allowlist:"), "empty allowlist");
-        assert!(!valid_allowlist_spec("allowlist:10.0.0.0/99"), "v4 len > 32");
+        assert!(
+            !valid_allowlist_spec("allowlist:10.0.0.0/99"),
+            "v4 len > 32"
+        );
         assert!(!valid_allowlist_spec("allowlist:not-an-ip/8"));
-        assert!(!valid_allowlist_spec("bridge"), "non-allowlist is not a spec");
+        assert!(
+            !valid_allowlist_spec("bridge"),
+            "non-allowlist is not a spec"
+        );
     }
 
     #[test]

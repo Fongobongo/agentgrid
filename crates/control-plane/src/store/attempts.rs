@@ -9,8 +9,8 @@ use agentgrid_common::{
     next_attempt_status, next_task_status, AgentSession, AttemptStatus, AttemptTransition,
     CompleteAttemptRequest, InvalidTransition, TaskStatus, TaskTransition,
 };
-use sqlx::sqlite::Sqlite;
 use anyhow::Result;
+use sqlx::sqlite::Sqlite;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -573,5 +573,4 @@ impl Store {
             .await;
         Ok(false)
     }
-
 }

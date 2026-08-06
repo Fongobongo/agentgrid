@@ -1,10 +1,13 @@
 //! Scheduler: atomic assignment + task eligibility. Extracted from `store.rs`.
 
-use super::{iso_plus_secs, node_ineligibility, now_iso, row_to_node_view, ACK_DEADLINE_SECS, ASSIGNMENT_LEASE_SECS, Store};
+use super::{
+    iso_plus_secs, node_ineligibility, now_iso, row_to_node_view, Store, ACK_DEADLINE_SECS,
+    ASSIGNMENT_LEASE_SECS,
+};
 use agentgrid_common::{Assignment, NodeEligibility, NodeView, TaskEligibility};
-use uuid::Uuid;
 use anyhow::Result;
 use sqlx::Row;
+use uuid::Uuid;
 
 impl Store {
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
@@ -264,5 +267,4 @@ impl Store {
             nodes,
         }))
     }
-
 }
