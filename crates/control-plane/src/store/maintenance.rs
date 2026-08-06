@@ -275,14 +275,22 @@ impl Store {
             }
         }
         // Hardening P1 item 15: drop now-empty attempt dirs so the artifact
-        // root does not accumulate stale directories.
+        // root does not accumulate stale directories. Also sweep orphan
+        // `.tmp.upload` crash leftovers per-dir (never counted as artifact).
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in &rows {
             let attempt_id: String = r.try_get("attempt_id")?;
             if seen.insert(attempt_id.clone()) {
                 let dir = self.artifact_root.join(&attempt_id);
-                // remove_dir_all only if empty-ish: use remove_dir which fails
-                // on non-empty, so we never delete a dir that still has files.
+                // Sweep tmp crash leftovers before testing emptiness.
+                if let Ok(mut rd) = tokio::fs::read_dir(&dir).await {
+                    while let Ok(Some(ent)) = rd.next_entry().await {
+                        let name = ent.file_name().to_string_lossy().to_string();
+                        if name.ends_with(".tmp.upload") || name.ends_with(".tmp") {
+                            let _ = tokio::fs::remove_file(ent.path()).await;
+                        }
+                    }
+                }
                 let _ = tokio::fs::remove_dir(&dir).await;
             }
         }
@@ -324,50 +332,65 @@ impl Store {
             live.insert((attempt_id, name));
         }
 
-        // Walk the artifact root, never following symlinks.
-        let mut orphans = 0u64;
-        let mut orphan_bytes = 0u64;
-        let mut metadata_without_file = 0u64;
-
-        if let Ok(entries) = std::fs::read_dir(&self.artifact_root) {
-            for entry in entries.flatten() {
-                let ft = match entry.file_type() {
-                    Ok(ft) => ft,
-                    Err(_) => continue,
-                };
-                let attempt_id = entry.file_name().to_string_lossy().to_string();
-                if !ft.is_dir() {
-                    continue;
-                }
-                // Defensive: never touch a symlinked attempt dir.
-                let dir_path = entry.path();
-                if std::fs::symlink_metadata(&dir_path)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if let Ok(files) = std::fs::read_dir(&dir_path) {
-                    for f in files.flatten() {
-                        if !f.file_type().map(|t| t.is_file()).unwrap_or(false) {
+        // Walk the artifact root, never following symlinks. Entire walk
+        // runs on the blocking pool so a large artifact tree does not stall
+        // the async executor.
+        let root_clone = self.artifact_root.clone();
+        let live_for_scan = live.clone();
+        let (orphans_scanned, orphan_bytes_scanned, orphan_paths) =
+            tokio::task::spawn_blocking(move || {
+                let mut orphans = 0u64;
+                let mut orphan_bytes = 0u64;
+                let mut paths: Vec<std::path::PathBuf> = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&root_clone) {
+                    for entry in entries.flatten() {
+                        let ft = match entry.file_type() {
+                            Ok(ft) => ft,
+                            Err(_) => continue,
+                        };
+                        let attempt_id = entry.file_name().to_string_lossy().to_string();
+                        if !ft.is_dir() {
                             continue;
                         }
-                        let name = f.file_name().to_string_lossy().to_string();
-                        let key = (attempt_id.clone(), name.clone());
-                        if live.contains(&key) {
-                            // Metadata exists; check the file actually there.
+                        let dir_path = entry.path();
+                        if std::fs::symlink_metadata(&dir_path)
+                            .map(|m| m.file_type().is_symlink())
+                            .unwrap_or(false)
+                        {
                             continue;
                         }
-                        // Orphan file (no metadata row).
-                        orphans += 1;
-                        if let Ok(meta) = f.metadata() {
-                            orphan_bytes += meta.len();
-                        }
-                        if !dry_run {
-                            let _ = std::fs::remove_file(f.path());
+                        if let Ok(files) = std::fs::read_dir(&dir_path) {
+                            for f in files.flatten() {
+                                if !f.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                                    continue;
+                                }
+                                let name = f.file_name().to_string_lossy().to_string();
+                                if name.ends_with(".tmp.upload") || name.ends_with(".tmp") {
+                                    continue;
+                                }
+                                let key = (attempt_id.clone(), name.clone());
+                                if live_for_scan.contains(&key) {
+                                    continue;
+                                }
+                                orphans += 1;
+                                if let Ok(meta) = f.metadata() {
+                                    orphan_bytes += meta.len();
+                                }
+                                paths.push(f.path());
+                            }
                         }
                     }
                 }
+                (orphans, orphan_bytes, paths)
+            })
+            .await
+            .unwrap_or((0, 0, Vec::new()));
+        let orphans = orphans_scanned;
+        let orphan_bytes = orphan_bytes_scanned;
+        let mut metadata_without_file = 0u64;
+        if !dry_run {
+            for p in orphan_paths {
+                let _ = tokio::fs::remove_file(&p).await;
             }
         }
 
