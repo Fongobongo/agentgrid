@@ -394,10 +394,11 @@ impl Store {
             }
         }
 
-        // Metadata rows whose backing file is missing.
+        // Metadata rows whose backing file is missing (async check to avoid
+        // blocking the executor on stat calls over many rows).
         for (attempt_id, name) in &live {
             if let Ok(path) = self.artifact_path(attempt_id, name) {
-                if std::fs::symlink_metadata(&path).is_err() {
+                if tokio::fs::symlink_metadata(&path).await.is_err() {
                     metadata_without_file += 1;
                     if !dry_run {
                         sqlx::query("DELETE FROM artifacts WHERE attempt_id = ? AND name = ?")
