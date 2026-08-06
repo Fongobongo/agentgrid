@@ -55,8 +55,11 @@ pub async fn request_id_middleware(
     req.extensions_mut().insert(RequestId(id.clone()));
     let span = tracing::info_span!("request", request_id = %id);
     let mut resp = span.in_scope(|| async move { next.run(req).await }).await;
-    resp.headers_mut()
-        .insert("x-request-id", id.as_str().try_into().unwrap());
+    // Do not overwrite if handler already set x-request-id (e.g. api_error_with_id).
+    if !resp.headers().contains_key("x-request-id") {
+        resp.headers_mut()
+            .insert("x-request-id", id.as_str().try_into().unwrap());
+    }
     resp
 }
 
@@ -66,16 +69,34 @@ pub async fn request_id_middleware(
 /// never includes internal error chains (those stay in structured logs).
 /// The `X-Request-Id` header (added by the middleware) stays the correlation
 /// key; it is also embedded in the body for clients that only read the body.
+#[allow(dead_code)]
 pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    let req_id = uuid::Uuid::new_v4().to_string();
+    api_error_with_id(status, code, message, None)
+}
+
+pub fn api_error_with_id(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+    request_id: Option<&RequestId>,
+) -> Response {
+    let req_id = request_id
+        .map(|r| r.0.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let body = serde_json::json!({
         "error": {
             "code": code,
             "message": message.into(),
-            "request_id": req_id,
+            "request_id": req_id.clone(),
         }
     });
-    (status, Json(body)).into_response()
+    let mut res = (status, Json(body)).into_response();
+    // So request_id_middleware does not overwrite with a different id.
+    let _ = res.headers_mut().try_insert(
+        header::HeaderName::from_static("x-request-id"),
+        header::HeaderValue::from_str(&req_id).unwrap_or_else(|_| header::HeaderValue::from_static("")),
+    );
+    res
 }
 
 /// Request id available to handlers via extensions (for explicit logging /

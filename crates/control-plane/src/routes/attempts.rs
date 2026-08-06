@@ -128,6 +128,7 @@ pub async fn ingest_events(
 pub async fn complete_attempt(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
+    Extension(req_id): Extension<crate::middleware::RequestId>,
     Path(attempt_id): Path<String>,
     headers: HeaderMap,
     Json(req): Json<CompleteAttemptRequest>,
@@ -160,10 +161,11 @@ pub async fn complete_attempt(
                 || e.downcast_ref::<agentgrid_common::InvalidTransition>()
                     .is_some()
             {
-                return middleware::api_error(
+                return middleware::api_error_with_id(
                     StatusCode::CONFLICT,
                     "invalid_state_transition",
                     "attempt cannot transition from its current state",
+                    Some(&req_id),
                 );
             }
             tracing::error!("complete_attempt failed: {e}");
