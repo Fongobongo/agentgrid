@@ -5,7 +5,7 @@ node daemons, each running an LLM agent adapter (Claude Code / Codex / OpenCode)
 in an isolated git worktree. SQLite WAL on local disk, single active
 control-plane instance.
 
-> Status: MVP 0.1 — see [CHANGELOG.md](CHANGELOG.md).
+> Status: MVP 0.4 — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Feature maturity
 
@@ -58,6 +58,41 @@ Tear down: `./deploy/compose/down.sh` (or `docker compose down`).
 > `--listen 0.0.0.0` only with TLS) and `deploy/install-node.sh` (creates an
 > unprivileged `agentgrid` user, installs a hardened systemd unit, and scrubs the
 > enrollment token after first connect). Both are idempotent.
+
+## Quickstart: first real task (~15 minutes)
+
+The mock quickstart proves the plumbing; this one runs a real coding agent.
+Only the `claude` adapter is wired end-to-end today (see
+[`docs/adapters.md`](docs/adapters.md) for the contract).
+
+1. Install the Claude Code CLI and export a key so the node can forward it:
+
+       npm install -g @anthropic-ai/claude-code
+       export ANTHROPIC_API_KEY=sk-ant-...
+
+2. On the node host, run the daemon with the `claude` adapter and forward the
+   key through `AGENTGRID_ADAPTER_ENV` (the daemon redacts it from streamed
+   output):
+
+       AGENTGRID_ADAPTER_ENV="ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
+       AGENTGRID_ADAPTERS="mock,claude" \
+       agentgrid-node-daemon
+
+3. Submit a real task against a repository the node can clone:
+
+       ag run https://github.com/you/repo.git "Create hello.py printing 'hi' and commit it" --adapter claude
+
+4. Watch it live and collect the diff artifact when it succeeds:
+
+       ag logs <task-id> --follow
+       ag task show <task-id>
+
+By default the adapter runs **without** permission bypass, so an unattended
+run will pause at the first interactive prompt. For unattended operation use a
+sandbox (`AGENTGRID_SANDBOX=docker`) plus the explicit opt-in
+`AGENTGRID_UNSAFE_UNATTENDED=1` **and** the acknowledgement
+`AGENTGRID_I_UNDERSTAND_UNSAFE=1` — the node refuses to start in unsafe mode
+without both. See the threat model note above.
 
 ## OpenCode node (optional)
 

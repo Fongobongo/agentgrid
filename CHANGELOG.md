@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] — 2026-08-06
+
+Closes the former `[Unreleased]` section below (everything between this header
+and `[0.1.1]` is the 0.4.0 feature surface) and adds the MVP-completion pass
+from `docs/plans/0.2-completion.md`:
+
+### Added (0.2-completion pass)
+
+- **Automatic backups:** the control-plane maintenance loop takes
+  `VACUUM INTO` snapshots (`auto-backup-<unix-ts>.db`) every
+  `AGENTGRID_BACKUP_EVERY_SECS` (default 24h) and keeps the newest
+  `AGENTGRID_BACKUP_KEEP` (default 5). Metrics:
+  `agentgrid_last_backup_at_unix`, `agentgrid_last_backup_age_seconds`,
+  `agentgrid_backup_errors_total`. Backup path validation confines writes to
+  the data directory (400 on traversal attempts).
+- **Unsafe-mode ack gate:** a node with `AGENTGRID_UNSAFE_UNATTENDED=1` now
+  refuses to start without the explicit operator acknowledgement
+  `AGENTGRID_I_UNDERSTAND_UNSAFE=1` (fail-closed).
+- **Backup/restore rehearsal:** `tests/e2e/run-restore.sh` — backup on one
+  instance, restore into a fresh CP, assert old state + run a new task.
+- **Docs:** `docs/adapters.md` (adapter contract), `docs/deploy/control-plane-failure.md`
+  (failure/recovery runbook), `docs/deploy/credential-rotation.md`,
+  ADR 0007 (gateway/ACP frozen at prototype until MVP 0.2 is done).
+- **Web UI:** native browser dialogs (`window.prompt`/`confirm`) replaced with
+  in-app Modal/ConfirmModal/PromptModal components (approval reasons included).
+- **CI:** `cargo test -- --report-time` + 30-min timeout on the rust job;
+  stress job runs the assignment race at 100 iterations
+  (`AGENTGRID_RACE_ITERS`, default 10 per-PR).
+
+### Fixed (0.2-completion pass)
+
+- Race test now configurable (`AGENTGRID_RACE_ITERS`); per-PR suite drops
+  from ~21 min to minutes while nightly keeps the 100-iteration grind.
+- `validation_timeout_kills_forked_child_tree` no longer matches unrelated
+  system processes (unique sleeper-script marker instead of `pgrep -f sleep`).
+- Test databases under `/var/tmp/ag-test-*` are removed on `AppState` drop
+  (no more thousands of leftover files per CI run).
+- e2e/`deploy/compose` scripts: setup-token extraction, `ListResponse`
+  envelope parsing, dead bootstrap envs removed (the scripts were silently
+  broken; they now run green).
+- Workflow ticker races: CAS-guarded step activation; a 20-way concurrent
+  tick test proves no duplicate step tasks.
+- Secret-leak regulator test asserts a configured secret never reaches
+  emitted events or the raw-output artifact.
+
 ## [Unreleased]
 
 ### Breaking
