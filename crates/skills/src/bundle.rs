@@ -57,23 +57,6 @@ pub struct SkillBundle {
     pub lock: Vec<LockEntry>,
 }
 
-impl SkillBundle {
-    /// Verify that every lock entry's expected hash matches the computed hash
-    /// of the supplied content. Returns the first mismatch, if any.
-    pub fn verify_locks(
-        &self,
-        contents: &HashMap<String, String>,
-    ) -> Option<(String, String, String)> {
-        for entry in &self.lock {
-            let actual = contents.get(&entry.name).map(String::as_str).unwrap_or("");
-            if actual != entry.hash {
-                return Some((entry.name.clone(), entry.hash.clone(), actual.to_string()));
-            }
-        }
-        None
-    }
-}
-
 /// Decides which skills may activate. Project skills are untrusted by default
 /// (malicious-repo protection); user/managed skills are trusted.
 #[derive(Debug, Clone, Default)]
