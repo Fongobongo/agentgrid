@@ -25,57 +25,21 @@ use ratatui::{
 };
 use reqwest::Client;
 
+use crate::phase::Phase;
+
 const POLL_TICK: Duration = Duration::from_secs(2);
 
 pub type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
 // ---------- app state (pure) ----------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Phase {
-    #[default]
-    Starting,
-    Working,
-    Blocked,
-    Done,
-}
-
 impl Phase {
-    fn label(self) -> &'static str {
-        match self {
-            Phase::Starting => "starting",
-            Phase::Working => "working",
-            Phase::Blocked => "blocked",
-            Phase::Done => "done",
-        }
-    }
     fn color(self) -> Color {
         match self {
             Phase::Starting => Color::DarkGray,
             Phase::Working => Color::Cyan,
             Phase::Blocked => Color::Yellow,
             Phase::Done => Color::Green,
-        }
-    }
-    fn from_event(ty: &str, e: &serde_json::Value) -> Self {
-        match ty {
-            "tool" | "tool_call" | "file_change" | "progress" | "stdout" | "stderr" => {
-                Phase::Working
-            }
-            "result" | "error" => Phase::Done,
-            "status" => {
-                if let Some(t) = e
-                    .get("payload")
-                    .and_then(|p| p.get("text"))
-                    .and_then(|t| t.as_str())
-                {
-                    if t.contains("succeeded") || t.contains("failed") || t.contains("cancelled") {
-                        return Phase::Done;
-                    }
-                }
-                Phase::Working
-            }
-            _ => Phase::Starting,
         }
     }
 }
@@ -291,7 +255,9 @@ async fn dashboard_loop(
 
 async fn read_key() -> anyhow::Result<Option<Event>> {
     tokio::task::spawn_blocking(|| -> anyhow::Result<Option<Event>> {
-        if !event::poll(Duration::from_secs(0))? {
+        // Non-zero poll timeout: a zero timeout here makes the select! loop
+        // busy-spin a whole core.
+        if !event::poll(Duration::from_millis(200))? {
             return Ok(None);
         }
         Ok(Some(event::read()?))
@@ -728,7 +694,8 @@ async fn refresh_list(state: &mut AppState, client: &Client, base: &str) {
 
 async fn fetch_tasks(state: &mut AppState, client: &Client, base: &str) -> anyhow::Result<()> {
     let resp = client.get(format!("{base}/v1/tasks")).send().await?;
-    let tasks: Vec<serde_json::Value> = resp.json().await.context("parse tasks")?;
+    let v: serde_json::Value = resp.json().await.context("parse tasks")?;
+    let tasks = crate::list_items(&v);
     state.tasks = tasks
         .iter()
         .map(|t| TaskRow {
@@ -755,7 +722,8 @@ async fn fetch_tasks(state: &mut AppState, client: &Client, base: &str) -> anyho
 
 async fn fetch_nodes(state: &mut AppState, client: &Client, base: &str) -> anyhow::Result<()> {
     let resp = client.get(format!("{base}/v1/nodes")).send().await?;
-    let nodes: Vec<serde_json::Value> = resp.json().await.context("parse nodes")?;
+    let v: serde_json::Value = resp.json().await.context("parse nodes")?;
+    let nodes = crate::list_items(&v);
     state.nodes = nodes
         .iter()
         .map(|n| NodeRow {
@@ -777,7 +745,7 @@ async fn fetch_nodes(state: &mut AppState, client: &Client, base: &str) -> anyho
             .map(|s| s == NodeStatus::Online)
             .unwrap_or(false),
             load: n
-                .get("running_attempts")
+                .get("active_attempts")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
             unsafe_active: n
@@ -824,9 +792,12 @@ async fn fetch_events(
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let resp = client
         .get(format!("{base}/v1/tasks/{task_id}/events"))
-        // Hardening P0 item 9: global cursor + server-side page cap keep the
-        // TUI bounded even for long event histories.
-        .query(&[("after_ingest", 0u64), ("limit", 1000u64)])
+        // Hardening P0 item 9: server-side page cap keeps the TUI bounded
+        // even for long event histories. No `after_ingest` cursor here: the
+        // TUI always reads the page from the start, and sending
+        // `after_ingest=0` would hide every event on servers/data where
+        // ingest_id is still 0.
+        .query(&[("limit", 1000u64)])
         .send()
         .await?;
     resp.json().await.context("parse events")
@@ -842,7 +813,8 @@ async fn pending_approval_for_task(
         .query(&[("status", "pending")])
         .send()
         .await?;
-    let views: Vec<serde_json::Value> = resp.json().await?;
+    let v: serde_json::Value = resp.json().await?;
+    let views = crate::list_items(&v);
     Ok(views
         .iter()
         .any(|v| v.get("task_id").and_then(|t| t.as_str()) == Some(task_id)))

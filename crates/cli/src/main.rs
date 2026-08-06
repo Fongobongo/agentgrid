@@ -11,7 +11,9 @@ use agentgrid_common::{
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
+mod phase;
 mod tui;
+use phase::Phase;
 use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
@@ -112,12 +114,6 @@ struct ServerStartArgs {
     /// SQLite database path (sets AGENTGRID_DB).
     #[arg(long, default_value = "control-plane.db")]
     db: String,
-    /// Bootstrap the first user with this username (one-time).
-    #[arg(long)]
-    bootstrap_user: Option<String>,
-    /// Bootstrap password for the first user.
-    #[arg(long)]
-    bootstrap_password: Option<String>,
     /// TLS certificate (PEM). Enables HTTPS on the control plane.
     #[arg(long)]
     tls_cert: Option<String>,
@@ -135,33 +131,6 @@ struct LogsArgs {
     /// Disable colored output. Default: color on.
     #[arg(long)]
     no_color: bool,
-}
-
-/// Render lifecycle phase derived from the event stream + pending approvals,
-/// orthogonal to the terminal `TaskStatus`. Mirrors the herdr agent-state idea
-/// (`idle | working | blocked | done`) but computed client-side from events
-/// the control plane already emits, so no store/migration change is needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    /// No structured events yet seen (just stdout/stderr).
-    Starting,
-    /// Last structured event was a tool call / progress / file change.
-    Working,
-    /// A durable approval is pending for this task (or the stream says so).
-    Blocked,
-    /// Vertically terminal — set by callers once `TaskStatus` is terminal.
-    Done,
-}
-
-impl Phase {
-    fn label(self) -> &'static str {
-        match self {
-            Phase::Starting => "starting",
-            Phase::Working => "working",
-            Phase::Blocked => "blocked",
-            Phase::Done => "done",
-        }
-    }
 }
 
 const C_RESET: &str = "\x1b[0m";
@@ -203,7 +172,9 @@ struct RetryArgs {
 #[derive(Args)]
 struct LoginArgs {
     username: String,
-    password: String,
+    /// Password. Omit (or pass `-`) to be prompted via stdin instead of
+    /// putting the secret in shell history / `ps`.
+    password: Option<String>,
 }
 
 #[derive(Args)]
@@ -754,16 +725,21 @@ async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<(
     let mut has_ingest = false;
     let mut phase = Phase::Starting;
     loop {
+        // Hardening P0 item 9: the global ingest_id cursor orders events
+        // across attempts (a retry no longer reorders old vs new attempts).
+        // It is only sent once events with a real ingest_id have been seen;
+        // before that the legacy per-attempt `after_sequence` cursor is used
+        // alone — on old servers/data `ingest_id` is 0, so an `after_ingest`
+        // filter would drop every event after the first page.
+        let mut query: Vec<(&str, u64)> = Vec::new();
+        if has_ingest {
+            query.push(("after_ingest", after_ingest));
+        } else {
+            query.push(("after_sequence", after_ingest));
+        }
         let resp = client
             .get(format!("{base}/v1/tasks/{}/events", a.task_id))
-            // Hardening P0 item 9: the global ingest_id cursor orders events
-            // across attempts (a retry no longer reorders old vs new attempts).
-            // `after_sequence` is kept alongside so an old server that ignores
-            // `after_ingest` still resumes per-attempt.
-            .query(&[
-                ("after_ingest", after_ingest),
-                ("after_sequence", after_ingest),
-            ])
+            .query(&query)
             .send()
             .await
             .context("events request failed")?;
@@ -781,7 +757,7 @@ async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<(
                     after_ingest = after_ingest.max(seq);
                 }
                 let ty = e.get("type").and_then(|v| v.as_str()).unwrap_or("?");
-                phase = phase_from_event(ty, e);
+                phase = Phase::from_event(ty, e);
                 print_event(e, seq, ty, nc, e.get("attempt_id").and_then(|v| v.as_str()));
             }
         }
@@ -840,26 +816,6 @@ async fn cmd_logs(client: &reqwest::Client, base: &str, a: LogsArgs) -> Result<(
     Ok(())
 }
 
-fn phase_from_event(ty: &str, e: &serde_json::Value) -> Phase {
-    match ty {
-        "tool" | "tool_call" | "file_change" | "progress" | "stdout" | "stderr" => Phase::Working,
-        "result" => Phase::Done,
-        "error" => Phase::Done,
-        "status" => {
-            // a status event with a terminal-ish payload hints at done; deault Working.
-            if let Some(p) = e.get("payload") {
-                if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
-                    if t.contains("succeeded") || t.contains("failed") || t.contains("cancelled") {
-                        return Phase::Done;
-                    }
-                }
-            }
-            Phase::Working
-        }
-        _ => Phase::Starting,
-    }
-}
-
 fn print_event(e: &serde_json::Value, seq: u64, ty: &str, nc: bool, attempt_id: Option<&str>) {
     let payload = e.get("payload").cloned().unwrap_or(serde_json::Value::Null);
     let text = payload.get("text").and_then(|t| t.as_str()).unwrap_or("");
@@ -901,10 +857,23 @@ fn print_event(e: &serde_json::Value, seq: u64, ty: &str, nc: bool, attempt_id: 
     // Hardening P2 item 37: prefix each event with its attempt id (shortened)
     // so logs from a retried attempt are distinguishable at a glance.
     let seq_tag = match attempt_id {
-        Some(aid) => format!("[{}] (att-{})", seq, &aid[..aid.len().min(8)]),
+        Some(aid) => {
+            let short: String = aid.chars().take(8).collect();
+            format!("[{}] (att-{short})", seq)
+        }
         None => format!("[{seq}]"),
     };
     println!("{} {}", paint(nc, C_GRAY, &seq_tag), line);
+}
+
+/// Extract `items` from the control plane's ListResponse envelope
+/// (`{"items":[...],"next_cursor":...}`); list endpoints no longer return a
+/// bare array.
+fn list_items(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    v.get("items")
+        .and_then(|i| i.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 async fn has_pending_approval(client: &reqwest::Client, base: &str, task_id: &str) -> bool {
@@ -919,11 +888,11 @@ async fn has_pending_approval(client: &reqwest::Client, base: &str, task_id: &st
         Ok(r) => r,
         Err(_) => return false,
     };
-    let views: Vec<serde_json::Value> = match resp.json().await {
+    let v: serde_json::Value = match resp.json().await {
         Ok(v) => v,
         Err(_) => return false,
     };
-    views
+    list_items(&v)
         .iter()
         .any(|v| v.get("task_id").and_then(|t| t.as_str()) == Some(task_id))
 }
@@ -1356,8 +1325,8 @@ fn run_remote(
         }
     }
 
-    // auth wrapper -> final argv (+ optional SSHPASS for sshpass mode)
-    let (argv, sshpass_pw) = if let Some(pw) = &a.password {
+    // auth wrapper -> final argv (+ optional secret passed via env, never argv)
+    let (argv, secret_env) = if let Some(pw) = &a.password {
         if std::process::Command::new("sshpass")
             .arg("true")
             .status()
@@ -1365,7 +1334,7 @@ fn run_remote(
         {
             let mut v = vec!["sshpass".to_string(), "-e".to_string()];
             v.extend(base);
-            (v, Some(pw.clone()))
+            (v, Some(("SSHPASS", pw.clone())))
         } else {
             let spawn_line = format!(
                 "spawn {}",
@@ -1374,10 +1343,16 @@ fn run_remote(
                     .collect::<Vec<_>>()
                     .join(" ")
             );
+            // The password is read from AGENTGRID_SSH_PASS at expect runtime:
+            // interpolating it into the script would expose it in `ps` (argv)
+            // and allow Tcl injection through the password text.
             let script = format!(
-                "set timeout 600\n{spawn_line}\nexpect {{\n    -re \"(?i)password:\" {{ send \"{pw}\\r\"; exp_continue }}\n    eof\n}}\n"
+                "set timeout 600\n{spawn_line}\nexpect {{\n    -re \"(?i)password:\" {{ send \"$env(AGENTGRID_SSH_PASS)\\r\"; exp_continue }}\n    eof\n}}\n"
             );
-            (vec!["expect".to_string(), "-c".to_string(), script], None)
+            (
+                vec!["expect".to_string(), "-c".to_string(), script],
+                Some(("AGENTGRID_SSH_PASS", pw.clone())),
+            )
         }
     } else {
         (base, None)
@@ -1386,8 +1361,8 @@ fn run_remote(
     if detach {
         let mut c = std::process::Command::new("setsid");
         c.arg("nohup").args(&argv);
-        if let Some(pw) = &sshpass_pw {
-            c.env("SSHPASS", pw);
+        if let Some((var, val)) = &secret_env {
+            c.env(var, val);
         }
         // Detached children must NOT inherit our stdout/stderr/ stdin — the
         // node install command would otherwise hang waiting on a pipe the
@@ -1401,8 +1376,8 @@ fn run_remote(
     }
     let mut c = std::process::Command::new(&argv[0]);
     c.args(&argv[1..]);
-    if let Some(pw) = &sshpass_pw {
-        c.env("SSHPASS", pw);
+    if let Some((var, val)) = &secret_env {
+        c.env(var, val);
     }
     let status = c
         .status()
@@ -1450,7 +1425,8 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         .send()
         .await
         .context("node list request failed")?;
-    let nodes: Vec<serde_json::Value> = resp.json().await.context("parse nodes")?;
+    let v: serde_json::Value = resp.json().await.context("parse nodes")?;
+    let nodes = list_items(&v);
     if json {
         println!("{}", serde_json::to_string_pretty(&nodes)?);
         return Ok(());
@@ -1554,7 +1530,10 @@ async fn cmd_approvals(client: &reqwest::Client, base: &str, a: ApprovalArgs) ->
             if !resp.status().is_success() {
                 anyhow::bail!("approvals list failed ({})", resp.status());
             }
-            let approvals: Vec<ApprovalView> = resp.json().await.context("bad approvals json")?;
+            let v: serde_json::Value = resp.json().await.context("bad approvals json")?;
+            let approvals: Vec<ApprovalView> =
+                serde_json::from_value(serde_json::Value::Array(list_items(&v)))
+                    .context("bad approvals json")?;
             for ap in &approvals {
                 println!(
                     "{:<36} {:<10} {:<9} {}",
@@ -1958,9 +1937,6 @@ fn cmd_server_start(a: ServerStartArgs) -> Result<()> {
     let mut cmd = std::process::Command::new(&bin);
     cmd.env("AGENTGRID_LISTEN", &a.listen)
         .env("AGENTGRID_DB", &a.db);
-    if let Some(u) = &a.bootstrap_user {
-        cmd.env("AGENTGRID_BOOTSTRAP_USER", u);
-    }
     if let Some(c) = &a.tls_cert {
         cmd.env("AGENTGRID_TLS_CERT", c);
     }
@@ -1981,9 +1957,26 @@ fn cmd_server_start(a: ServerStartArgs) -> Result<()> {
 }
 
 async fn cmd_login(client: &reqwest::Client, base: &str, a: LoginArgs) -> Result<()> {
+    let password = match &a.password {
+        Some(p) if p != "-" => p.clone(),
+        _ => {
+            // No password (or "-"): read it from stdin so it never appears in
+            // shell history or `ps`.
+            eprint!("password for {}: ", a.username);
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_line(&mut buf)
+                .context("read password from stdin")?;
+            let pw = buf.trim_end_matches(['\n', '\r']).to_string();
+            if pw.is_empty() {
+                anyhow::bail!("no password given (pass it as an argument or on stdin)");
+            }
+            pw
+        }
+    };
     let req = LoginRequest {
         username: a.username,
-        password: a.password,
+        password,
     };
     let resp = client
         .post(format!("{base}/v1/auth/login"))
@@ -2051,7 +2044,10 @@ async fn cmd_workflow_list(client: &reqwest::Client, base: &str, json: bool) -> 
         .send()
         .await
         .context("list workflows request failed")?;
-    let tpls: Vec<WorkflowTemplate> = resp.json().await.context("parse workflows response")?;
+    let v: serde_json::Value = resp.json().await.context("parse workflows response")?;
+    let tpls: Vec<WorkflowTemplate> =
+        serde_json::from_value(serde_json::Value::Array(list_items(&v)))
+            .context("parse workflows response")?;
     if json {
         println!("{}", serde_json::to_string_pretty(&tpls)?);
         return Ok(());
@@ -2135,8 +2131,10 @@ async fn cmd_workflow_schedules(
             if !resp.status().is_success() {
                 anyhow::bail!("list schedules failed ({})", resp.status());
             }
+            let v: serde_json::Value = resp.json().await.context("bad schedule json")?;
             let schedules: Vec<WorkflowSchedule> =
-                resp.json().await.context("bad schedule json")?;
+                serde_json::from_value(serde_json::Value::Array(list_items(&v)))
+                    .context("bad schedule json")?;
             if schedules.is_empty() {
                 println!("no schedules for {}", a.id);
             }
@@ -2336,19 +2334,19 @@ mod phase_tests {
 
     #[test]
     fn phase_from_event_lifecycle() {
-        assert_eq!(phase_from_event("tool_call", &json!({})), Phase::Working);
-        assert_eq!(phase_from_event("stdout", &json!({})), Phase::Working);
-        assert_eq!(phase_from_event("result", &json!({})), Phase::Done);
-        assert_eq!(phase_from_event("error", &json!({})), Phase::Done);
+        assert_eq!(Phase::from_event("tool_call", &json!({})), Phase::Working);
+        assert_eq!(Phase::from_event("stdout", &json!({})), Phase::Working);
+        assert_eq!(Phase::from_event("result", &json!({})), Phase::Done);
+        assert_eq!(Phase::from_event("error", &json!({})), Phase::Done);
         assert_eq!(
-            phase_from_event(
+            Phase::from_event(
                 "status",
                 &json!({ "payload": { "text": "attempt succeeded" } })
             ),
             Phase::Done
         );
-        assert_eq!(phase_from_event("status", &json!({})), Phase::Working);
-        assert_eq!(phase_from_event("weird", &json!({})), Phase::Starting);
+        assert_eq!(Phase::from_event("status", &json!({})), Phase::Working);
+        assert_eq!(Phase::from_event("weird", &json!({})), Phase::Starting);
     }
 
     #[test]
