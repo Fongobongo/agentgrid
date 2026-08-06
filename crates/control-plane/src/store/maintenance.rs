@@ -402,13 +402,17 @@ impl Store {
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
         let cpath = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
             Ok(c) => c,
-            Err(_) => return 0,
+            Err(_) => {
+                tracing::warn!("free_bytes: invalid artifact_root path, assuming disk not full");
+                return u64::MAX;
+            }
         };
         // SAFETY: cpath is a valid NUL-terminated path; the statvfs struct is
         // zeroed and written by the kernel.
         let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut s) };
         if rc != 0 {
-            return 0;
+            tracing::warn!("free_bytes: statvfs failed, assuming disk not full");
+            return u64::MAX;
         }
         s.f_bavail.saturating_mul(s.f_frsize)
     }
