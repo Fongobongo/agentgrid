@@ -57,8 +57,6 @@ start_cp() {
   AGENTGRID_LISTEN="127.0.0.1:$PORT" \
   AGENTGRID_DB="$CP_DB" \
   AGENTGRID_JWT_SECRET="e2e-stable-secret" \
-  AGENTGRID_BOOTSTRAP_USER="$USER" \
-  AGENTGRID_BOOTSTRAP_PASSWORD="$PASS" \
   AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
   nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
   CP_PID=$!
@@ -121,7 +119,7 @@ wait_nodes_online() {  # expect exactly N online
   local want="$1"
   for _ in $(seq 1 80); do
     n=$(curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt" 2>/dev/null \
-      | python3 -c 'import sys,json;ns=[n for n in json.load(sys.stdin) if n["status"]=="online"];print(len(ns))' 2>/dev/null) || n=0
+      | python3 -c 'import sys,json;ns=[n for n in (lambda d: d.get("items",d) if isinstance(d,dict) else d)(json.load(sys.stdin)) if n["status"]=="online"];print(len(ns))' 2>/dev/null) || n=0
     [ "$n" = "$want" ] && return 0
     sleep 0.5
   done

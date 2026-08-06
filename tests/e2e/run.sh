@@ -59,7 +59,7 @@ for _ in $(seq 1 "$TIMEOUT"); do
   status=$(curl -fsS "$BASE/v1/tasks/$TID" -H "authorization: Bearer $JWT" \
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')
   case "$status" in
-    succeeded|failed|cancelled|timed_out) break;;
+    succeeded|failed|cancelled) break;;
   esac
   sleep 1
 done

@@ -45,7 +45,7 @@ JWT=$(curl -fsS -X POST "$BASE/v1/auth/login" \
 
 echo ">> discovering node ids"
 readarray -t NODES < <(curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $JWT" \
-  | python3 -c 'import sys,json;print("\n".join(n["id"] for n in json.load(sys.stdin)))')
+  | python3 -c 'import sys,json;print("\n".join(n["id"] for n in (lambda d: d.get("items",d) if isinstance(d,dict) else d)(json.load(sys.stdin))))')
 [ "${#NODES[@]}" -ge 2 ] || { echo "expected >=2 enrolled nodes, got ${#NODES[@]}"; exit 1; }
 NODE_A="${NODES[0]}"; NODE_B="${NODES[1]}"
 echo ">> node A = $NODE_A   node B = $NODE_B"

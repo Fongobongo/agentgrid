@@ -24,6 +24,9 @@ services:
       AGENTGRID_ENROLL_TOKEN: ${NODE1_TOKEN:-}
       AGENTGRID_NODE_NAME: node-1
       AGENTGRID_MAX_CONCURRENCY: "2"
+      # Keep workspace/repo state on the mounted volume, not the container fs.
+      AGENTGRID_WORKSPACE_ROOT: /var/lib/agentgrid/data/workspace
+      AGENTGRID_REPOSITORY_ROOT: /var/lib/agentgrid/data/repos
     volumes:
       - agentgrid-demo-node1:/var/lib/agentgrid/data
 
@@ -37,6 +40,8 @@ services:
       AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:-}
       AGENTGRID_NODE_NAME: node-2
       AGENTGRID_MAX_CONCURRENCY: "2"
+      AGENTGRID_WORKSPACE_ROOT: /var/lib/agentgrid/data/workspace
+      AGENTGRID_REPOSITORY_ROOT: /var/lib/agentgrid/data/repos
     volumes:
       - agentgrid-demo-node2:/var/lib/agentgrid/data
 

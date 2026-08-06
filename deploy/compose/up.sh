@@ -42,8 +42,13 @@ curl -fsS "$BASE/health/ready" >/dev/null || { echo "control plane not ready"; e
 
 # Read the one-time setup token the control plane printed to stdout at boot.
 # (Only minted when no users exist yet; idempotent on subsequent runs.)
-SETUP_TOKEN=$(grep -m1 "agentgrid setup token" "${COMPOSE[@]}" logs control-plane 2>/dev/null \
-  | sed -n '2p' || true)
+# The token sits on the line right after the "=== agentgrid setup token"
+# banner; strip the compose log service prefix before use.
+SETUP_TOKEN=$("${COMPOSE[@]}" logs control-plane 2>/dev/null \
+  | grep -A1 "agentgrid setup token" \
+  | awk 'NR==2' \
+  | sed 's/^[^|]*| *//' \
+  | tr -d '[:space:]' || true)
 if [ -n "${SETUP_TOKEN:-}" ]; then
   echo ">> completing first-user bootstrap (POST /v1/auth/setup)"
   curl -fsS -X POST "$BASE/v1/auth/setup" \
@@ -85,7 +90,7 @@ echo ">> starting nodes"
 echo ">> waiting for nodes to enroll"
 for _ in $(seq 1 30); do
   NODES_UP=$(curl -fsS -H "authorization: Bearer $JWT" "$BASE/v1/nodes" \
-    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(1 for n in d if n.get("status")=="online"))' 2>/dev/null || echo 0)
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); ns=d.get("items",d) if isinstance(d,dict) else d; print(sum(1 for n in ns if n.get("status")=="online"))' 2>/dev/null || echo 0)
   [ "${NODES_UP:-0}" -ge 2 ] && break
   sleep 1
 done

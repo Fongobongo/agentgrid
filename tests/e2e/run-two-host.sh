@@ -79,8 +79,6 @@ start_cp() {
   AGENTGRID_LISTEN="0.0.0.0:$LISTEN_PORT" \
   AGENTGRID_DB="$CP_DB" \
   AGENTGRID_JWT_SECRET="e2e-2host-secret" \
-  AGENTGRID_BOOTSTRAP_USER="$USER" \
-  AGENTGRID_BOOTSTRAP_PASSWORD="$PASS" \
   AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
   nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
   CP_PID=$!
@@ -177,7 +175,7 @@ wait_node_online() {  # $1 = node name substring
   for _ in $(seq 1 60); do
     st=$(curl -fsS "$BASE_LOCAL/v1/nodes" -H "authorization: Bearer $jwt" \
       | python3 -c 'import sys,json
-ns=json.load(sys.stdin)
+d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d
 want=sys.argv[1]
 match=[n["status"] for n in ns if want in n.get("name","")]
 print(match[0] if match else "none")' "$1" 2>/dev/null) || st="none"
@@ -232,7 +230,7 @@ wait_node_online "e2e-remote" || { echo "  remote node never came online; remote
 echo "  discovering node ids"
 readarray -t NODES < <(curl -fsS "$BASE_LOCAL/v1/nodes" -H "authorization: Bearer $jwt" \
   | python3 -c 'import sys,json
-ns=json.load(sys.stdin)
+d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d
 ns.sort(key=lambda n:n["name"])
 print("\n".join(n["id"] for n in ns))')
 [ "${#NODES[@]}" -ge 2 ] || { echo "  expected >=2 enrolled nodes, got ${#NODES[@]}"; exit 1; }
@@ -240,12 +238,12 @@ print("\n".join(n["id"] for n in ns))')
 # Match node ids to roles: local runs integrator+verifier, remote runs workers.
 LOCAL_NODE=$(curl -fsS "$BASE_LOCAL/v1/nodes" -H "authorization: Bearer $jwt" \
   | python3 -c 'import sys,json
-ns=json.load(sys.stdin)
+d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d
 loc=[n["id"] for n in ns if "local" in n["name"]]
 print(loc[0] if loc else "")')
 REMOTE_NODE=$(curl -fsS "$BASE_LOCAL/v1/nodes" -H "authorization: Bearer $jwt" \
   | python3 -c 'import sys,json
-ns=json.load(sys.stdin)
+d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d
 rem=[n["id"] for n in ns if "remote" in n["name"]]
 print(rem[0] if rem else "")')
 [ -n "$LOCAL_NODE" ] && [ -n "$REMOTE_NODE" ] || { echo "  could not resolve local/remote node ids"; exit 1; }

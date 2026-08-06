@@ -49,8 +49,6 @@ start_cp() {
   AGENTGRID_LISTEN="127.0.0.1:7811" \
   AGENTGRID_DB="$CP_DB" \
   AGENTGRID_JWT_SECRET="e2e-stable-secret" \
-  AGENTGRID_BOOTSTRAP_USER="$USER" \
-  AGENTGRID_BOOTSTRAP_PASSWORD="$PASS" \
   AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
   nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
   CP_PID=$!
@@ -109,7 +107,7 @@ wait_node_online() {
   local st="none"
   for _ in $(seq 1 60); do
     st=$(curl -fsS "$BASE_REAL/v1/nodes" -H "authorization: Bearer $jwt" \
-      | python3 -c 'import sys,json;ns=json.load(sys.stdin);print(ns[0]["status"] if ns else "none")' 2>/dev/null) || st="none"
+      | python3 -c 'import sys,json;d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d;print(ns[0]["status"] if ns else "none")' 2>/dev/null) || st="none"
     [ "$st" = "online" ] && return 0
     sleep 0.5
   done
