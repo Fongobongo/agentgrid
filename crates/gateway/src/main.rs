@@ -378,7 +378,9 @@ async fn dispatch(ctl: &ControlPlane<'_>, text: &str, chat_id: i64, conv: &ConvS
             match adapter {
                 Some(adapter) => match ctl.create_conversation(&adapter, &repository).await {
                     Ok(id) => {
-                        conv.lock().unwrap_or_else(|e| e.into_inner()).insert(chat_id, id.clone());
+                        conv.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(chat_id, id.clone());
                         format!("conversation {id} created (adapter={adapter}, repo='{repository}')\nsend messages, I'll route them to an agent on a node and reply.")
                     }
                     Err(e) => format!("create conversation failed: {e}"),
@@ -417,7 +419,11 @@ async fn dispatch(ctl: &ControlPlane<'_>, text: &str, chat_id: i64, conv: &ConvS
             // conversation. If no conversation is bound for this chat, nudge the
             // operator to create one (offering to set up a repo too).
             let content = text.trim().to_string();
-            let cid = conv.lock().unwrap_or_else(|e| e.into_inner()).get(&chat_id).cloned();
+            let cid = conv
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&chat_id)
+                .cloned();
             match cid {
                 None => {
                     let adapters = std::env::var("AGENTGRID_GATEWAY_CHAT_ADAPTER")
@@ -447,11 +453,22 @@ const HELP: &str = "agentgrid gateway — /help /whoami /nodes /tasks /show <id>
 
 // ---- formatting ----
 
+/// Extract the item array from a list response: the control plane now returns
+/// the ListResponse envelope (`{"items":[...],"next_cursor":...}`); a bare
+/// array (old servers) is still accepted.
+fn list_items(v: &serde_json::Value) -> &[serde_json::Value] {
+    v.get("items")
+        .and_then(|x| x.as_array())
+        .or_else(|| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[])
+}
+
 fn fmt_nodes(v: &serde_json::Value) -> String {
-    let arr = match v.as_array() {
-        Some(a) if !a.is_empty() => a,
-        _ => return "(no nodes)".into(),
-    };
+    let arr = list_items(v);
+    if arr.is_empty() {
+        return "(no nodes)".into();
+    }
     let mut s = format!(
         "{:<12} {:<10} {:<3}/{:<3} {:<10}\n",
         "NODE", "STATUS", "ACT", "MAX", "DISK"
@@ -481,10 +498,10 @@ fn fmt_nodes(v: &serde_json::Value) -> String {
 }
 
 fn fmt_tasks(v: &serde_json::Value) -> String {
-    let arr = match v.as_array() {
-        Some(a) if !a.is_empty() => a,
-        _ => return "(no tasks)".into(),
-    };
+    let arr = list_items(v);
+    if arr.is_empty() {
+        return "(no tasks)".into();
+    }
     let mut s = format!("{:<12} {:<36} {:<12}\n", "REPO", "ID", "STATUS");
     for t in arr {
         let id = t.get("id").and_then(|v| v.as_str()).unwrap_or("-");
@@ -512,6 +529,11 @@ impl Telegram {
     fn url(&self, method: &str) -> String {
         format!("https://api.telegram.org/bot{}/{}", self.token, method)
     }
+    /// Redact the bot token from error text before logging: reqwest errors
+    /// include the request URL, which contains the token.
+    fn scrub(&self, e: &impl std::fmt::Display) -> String {
+        e.to_string().replace(&self.token, "[REDACTED]")
+    }
 }
 
 impl ChatProvider for Telegram {
@@ -534,13 +556,13 @@ impl ChatProvider for Telegram {
                     Ok(r) => match r.json().await {
                         Ok(v) => v,
                         Err(e) => {
-                            tracing::warn!("getUpdates parse: {e}");
+                            tracing::warn!("getUpdates parse: {}", tg.scrub(&e));
                             tokio::time::sleep(Duration::from_secs(3)).await;
                             continue;
                         }
                     },
                     Err(e) => {
-                        tracing::warn!("getUpdates: {e}");
+                        tracing::warn!("getUpdates: {}", tg.scrub(&e));
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         continue;
                     }
@@ -568,10 +590,12 @@ impl ChatProvider for Telegram {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    if !text.starts_with('/') {
+                    if text.trim().is_empty() {
                         continue;
                     }
-                    // /start and /whoami are open: echo the chat id + the
+                    // Non-slash text is a chat message for the active
+                    // conversation (dispatch's fallback arm); /start and
+                    // /whoami are open: echo the chat id + the
                     // host-side approval command so an operator can confirm
                     // ownership. Everything else needs the chat in the allowlist.
                     let cmd_only = text
@@ -602,7 +626,8 @@ then send /nodes\n\
                         tracing::info!("ignoring chat {chat_id} (not in allowlist)");
                         continue;
                     }
-                    tracing::info!("tg {chat_id}: {text}");
+                    let preview: String = text.chars().take(100).collect();
+                    tracing::info!("tg {chat_id}: {preview}");
                     let reply = dispatch(ctl, &text, chat_id, conv).await;
                     let _ = client
                         .post(tg.url("sendMessage"))
@@ -634,6 +659,31 @@ mod tests {
     #[test]
     fn fmt_nodes_empty() {
         assert_eq!(fmt_nodes(&serde_json::Value::Array(vec![])), "(no nodes)");
+        assert_eq!(fmt_nodes(&serde_json::json!({"items": []})), "(no nodes)");
+    }
+
+    #[test]
+    fn fmt_nodes_reads_list_response_envelope() {
+        let v: serde_json::Value = serde_json::json!({
+            "items": [
+                {"name":"a","status":"online","active_attempts":0,"max_concurrency":2,"free_disk_mb":500}
+            ],
+            "next_cursor": null
+        });
+        let s = fmt_nodes(&v);
+        assert!(s.contains("500 MB !"));
+        assert!(s.contains("online"));
+    }
+
+    #[test]
+    fn fmt_tasks_reads_list_response_envelope() {
+        let v: serde_json::Value = serde_json::json!({
+            "items": [{"id":"abc","status":"running","repository":"r1"}]
+        });
+        let s = fmt_tasks(&v);
+        assert!(s.contains("abc"));
+        assert!(s.contains("running"));
+        assert!(s.contains("r1"));
     }
 
     #[test]
