@@ -15,7 +15,19 @@ pub async fn load_or_enroll(cfg: &Config) -> Result<SavedCredential> {
         }
     }
     let cred = enroll_node(cfg).await?;
-    std::fs::write(&cfg.credential_path, serde_json::to_vec(&cred)?)?;
+    // Node credential is secret material: 0600 regardless of umask (matches
+    // the env-file scrub path), including for a pre-existing file.
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let data = serde_json::to_vec(&cred)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&cfg.credential_path)?;
+    f.write_all(&data)?;
+    std::fs::set_permissions(&cfg.credential_path, std::fs::Permissions::from_mode(0o600))?;
     scrub_enroll_token_from_env(cfg).await;
     Ok(cred)
 }

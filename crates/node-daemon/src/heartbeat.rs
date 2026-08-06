@@ -12,10 +12,9 @@ use tokio::sync::Semaphore;
 
 use crate::artifact_spool;
 use crate::capabilities::{
-    adapter_bin_name, adapter_permission_interception, probe_adapter, probe_cluster_adapter,
-    resolve_acp_launch, AdapterProbe,
+    adapter_bin_name, probe_adapter, probe_cluster_adapter, resolve_acp_launch, AdapterProbe,
 };
-use crate::config::{AdapterProtocol, Config};
+use crate::config::{adapter_permission_interception, AdapterProtocol, Config};
 use crate::git;
 use crate::outbox;
 use crate::sandbox;
@@ -118,9 +117,6 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 NodeStatus::Degraded
             };
 
-            // Wait for the configured heartbeat interval before sending.
-            tokio::time::sleep(Duration::from_secs(cfg.heartbeat_secs)).await;
-
             // Collect discovered skills (best-effort, never blocks heartbeat).
             let hb_home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             let hb_roots =
@@ -136,6 +132,37 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
 
             // Build and send heartbeat.
             let active = cfg.max_concurrency - sem.available_permits() as u32;
+            // Outbox/artifact scans are synchronous disk I/O; keep them off
+            // the runtime.
+            let hb_outbox_root = cfg.outbox_root.clone();
+            let hb_spool_root = cfg.artifact_spool_root.clone();
+            let (
+                hb_outbox_bytes,
+                hb_spool_bytes,
+                hb_outbox_rows,
+                hb_outbox_age_ms,
+                hb_outbox_corrupt,
+                hb_completion_rows,
+            ) = tokio::task::spawn_blocking(move || {
+                (
+                    outbox::total_bytes(&hb_outbox_root).unwrap_or(0),
+                    artifact_spool::pending(&hb_spool_root)
+                        .map(|p| {
+                            p.iter()
+                                .filter_map(|(_, _, path)| {
+                                    std::fs::metadata(path).ok().map(|m| m.len())
+                                })
+                                .sum()
+                        })
+                        .unwrap_or(0),
+                    outbox::pending_rows(&hb_outbox_root).unwrap_or(0),
+                    outbox::oldest_pending_age_ms(&hb_outbox_root).unwrap_or(0),
+                    outbox::corruption_count(&hb_outbox_root).unwrap_or(0),
+                    outbox::completion_rows(&hb_outbox_root).unwrap_or(0),
+                )
+            })
+            .await
+            .unwrap_or((0, 0, 0, 0, 0, 0));
             let req = HeartbeatRequest {
                 status: Some(status),
                 name: cfg.node_name.clone(),
@@ -151,21 +178,12 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 discovered_skills,
                 unsafe_active: node_unsafe_active(&cfg),
                 permission_interception: node_permission_interception(&cfg),
-                outbox_bytes: outbox::total_bytes(&cfg.outbox_root).unwrap_or(0),
-                artifact_spool_bytes: artifact_spool::pending(&cfg.artifact_spool_root)
-                    .map(|p| {
-                        p.iter()
-                            .filter_map(|(_, _, path)| {
-                                std::fs::metadata(path).ok().map(|m| m.len())
-                            })
-                            .sum()
-                    })
-                    .unwrap_or(0),
-                outbox_rows: outbox::pending_rows(&cfg.outbox_root).unwrap_or(0),
-                outbox_oldest_pending_age_ms: outbox::oldest_pending_age_ms(&cfg.outbox_root)
-                    .unwrap_or(0),
-                outbox_corruption_count: outbox::corruption_count(&cfg.outbox_root).unwrap_or(0),
-                outbox_completion_rows: outbox::completion_rows(&cfg.outbox_root).unwrap_or(0),
+                outbox_bytes: hb_outbox_bytes,
+                artifact_spool_bytes: hb_spool_bytes,
+                outbox_rows: hb_outbox_rows,
+                outbox_oldest_pending_age_ms: hb_outbox_age_ms,
+                outbox_corruption_count: hb_outbox_corrupt,
+                outbox_completion_rows: hb_completion_rows,
                 repo_lock_wait_ms: git::repo_lock_wait_ms(),
                 repo_cache_bytes: git::repo_cache_bytes(),
                 workspace_bytes: git::workspace_bytes(),
@@ -197,6 +215,9 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
             {
                 tracing::warn!("heartbeat failed: {e}");
             }
+
+            // Interval until the next heartbeat.
+            tokio::time::sleep(Duration::from_secs(cfg.heartbeat_secs)).await;
         }
     });
 }

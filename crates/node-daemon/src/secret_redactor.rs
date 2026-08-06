@@ -62,8 +62,13 @@ impl StreamingRedactor {
                     let mut masked = mask_line(truncated, &self.secrets, self.min_len);
                     masked.push_str("... [truncated]");
                     lines.push(masked.into_bytes());
-                    // Keep draining: remove the flushed portion from buffer
-                    self.buf = self.buf[self.line_cap..].to_vec();
+                    // Keep draining: remove the flushed portion from buffer,
+                    // but carry a trailing overlap (>= max secret length) into
+                    // the next chunk so a secret spanning this forced boundary
+                    // is masked in full there instead of leaking as two
+                    // unmasked fragments.
+                    let overlap = self.overlap_len();
+                    self.buf = self.buf[self.line_cap - overlap..].to_vec();
                     continue;
                 }
                 break;
@@ -71,6 +76,13 @@ impl StreamingRedactor {
         }
 
         lines
+    }
+
+    /// Trailing bytes re-processed after a forced line_cap split: the longest
+    /// secret, capped below `line_cap` so each split still drains the buffer.
+    fn overlap_len(&self) -> usize {
+        let max_secret = self.secrets.iter().map(|s| s.len()).max().unwrap_or(0);
+        max_secret.min(self.line_cap.saturating_sub(1))
     }
 
     /// Finish processing, returns any remaining partial line as a masked line.
@@ -247,14 +259,41 @@ mod tests {
         // 30 bytes, no newline
         let input: Vec<u8> = vec![b'x'; 30];
         let lines = redactor.feed(&input);
-        // Original behavior: emit when cap reached, then final remainder on finish
-        // feed() emits first 16 bytes as truncated, remainder stays in buffer
-        assert_eq!(lines.len(), 1, "expected 1 truncated line from feed");
+        // With the trailing overlap (6 = secret length) each forced split
+        // advances 10 bytes: 30 bytes -> two truncated lines from feed,
+        // remainder stays in buffer.
+        assert_eq!(lines.len(), 2, "expected 2 truncated lines from feed");
         assert!(String::from_utf8_lossy(&lines[0]).contains("... [truncated]"));
-        // finish() emits the remaining 14 bytes as final line (no truncation marker)
+        assert!(String::from_utf8_lossy(&lines[1]).contains("... [truncated]"));
+        // finish() emits the remaining 10 bytes as final line (no truncation marker)
         let final_line = redactor.finish();
         assert!(final_line.is_some());
-        assert!(!String::from_utf8_lossy(final_line.unwrap().as_ref()).contains("... [truncated]"));
+        let tail = String::from_utf8_lossy(final_line.unwrap().as_ref()).to_string();
+        assert!(!tail.contains("... [truncated]"));
+        assert_eq!(tail.len(), 10);
+    }
+
+    #[test]
+    fn masks_secret_spanning_forced_chunk_boundary() {
+        // Cap 16; the secret starts before the forced boundary and ends after
+        // it. The overlap carries it whole into the next masking window, so
+        // the full secret must never appear in the output.
+        let mut redactor = StreamingRedactor::new(vec!["secret123".to_string()], 6, 16);
+        let input = format!("{}secret123{}", "x".repeat(12), "y".repeat(4));
+        let mut lines = redactor.feed(input.as_bytes());
+        if let Some(tail) = redactor.finish() {
+            lines.push(tail);
+        }
+        let joined = lines
+            .iter()
+            .map(|l| String::from_utf8_lossy(l).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains("secret123"),
+            "secret spanning a forced boundary must be masked: {joined}"
+        );
+        assert!(joined.contains("***"), "mask marker expected: {joined}");
     }
 
     #[test]

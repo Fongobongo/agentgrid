@@ -313,10 +313,19 @@ fn validate_token(s: &str) -> Result<()> {
 }
 
 /// Reject a git URL that embeds shell metacharacters (defense-in-depth; the URL
-/// is passed as a single git argument, not through a shell).
+/// is passed as a single git argument, not through a shell). Whitespace is
+/// refused too (git treats spaces in scp-like URLs as argument separators),
+/// and the `ext::`/`fd::` transports are refused outright — git executes an
+/// `ext::` helper as an arbitrary command.
 fn validate_git_url(s: &str) -> Result<()> {
-    if s.chars().any(|c| "\"';|&$()`><\\\n\t".contains(c)) {
+    if s.chars()
+        .any(|c| c.is_whitespace() || "\"';|&$()`><\\".contains(c))
+    {
         anyhow::bail!("unsafe git url: {s:?}");
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("ext::") || lower.starts_with("fd::") {
+        anyhow::bail!("unsafe git url transport: {s:?}");
     }
     Ok(())
 }
@@ -476,7 +485,8 @@ pub fn prepare_workspace(
             "worktree",
             "add",
             ws.to_str().unwrap_or(""),
-            "-b",
+            // -B: reset a branch that survived a failed cleanup instead of failing.
+            "-B",
             &branch,
             start_point,
         ],
@@ -1385,6 +1395,24 @@ mod tests {
         assert!(
             prepare_workspace(&repos, &ws, &a, &[], &[]).is_err(),
             "url injection"
+        );
+
+        a.git_url = "ext::sh -c evil".into();
+        assert!(
+            prepare_workspace(&repos, &ws, &a, &[], &[]).is_err(),
+            "ext:: transport executes arbitrary commands"
+        );
+
+        a.git_url = "fd::0".into();
+        assert!(
+            prepare_workspace(&repos, &ws, &a, &[], &[]).is_err(),
+            "fd:: transport rejected"
+        );
+
+        a.git_url = "https://example.com/repo with space".into();
+        assert!(
+            prepare_workspace(&repos, &ws, &a, &[], &[]).is_err(),
+            "whitespace in url rejected"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-use crate::config::{AdapterProtocol, AdapterSpec};
 use agentgrid_common::cluster::probe_decision;
 
 /// Internal probe result for adapter discovery.
@@ -126,14 +125,6 @@ pub async fn probe_cluster_adapter(executor_bin: &str, runtime_bin: &str) -> Ada
     AdapterProbe {
         found: p.available,
         version: p.version,
-    }
-}
-
-/// Determine permission interception for a single adapter spec.
-pub fn adapter_permission_interception(a: &AdapterSpec) -> String {
-    match a.protocol {
-        AdapterProtocol::Acp => "structured".into(),
-        AdapterProtocol::Wrapper => "wrapper".into(),
     }
 }
 

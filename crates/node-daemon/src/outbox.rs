@@ -43,6 +43,18 @@ struct EventLine {
     #[serde(rename = "type")]
     ty: serde_json::Value,
     payload: serde_json::Value,
+    /// Enqueue timestamp (epoch ms) for outbox-age metrics. `#[serde(default)]`
+    /// keeps pre-existing spool lines (written before this field) parseable;
+    /// they report age 0 like before.
+    #[serde(default)]
+    enqueued_at: u64,
+}
+
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0) as u64
 }
 
 /// A durable event spool for one attempt. Append-only JSONL file guarded by a
@@ -172,6 +184,7 @@ impl EventOutbox {
             seq: ev.sequence,
             ty: serde_json::to_value(ev.r#type).unwrap_or(serde_json::Value::Null),
             payload: ev.payload.clone(),
+            enqueued_at: now_epoch_ms(),
         };
         let mut s = serde_json::to_string(&line)
             .context("encode outbox line")
@@ -626,15 +639,25 @@ pub fn oldest_pending_age_ms(dir: &Path) -> std::io::Result<u64> {
                         continue;
                     }
                     if let Ok(ev) = serde_json::from_str::<EventLine>(line) {
-                        if let Some(created_at) =
-                            ev.payload.get("created_at").and_then(|v| v.as_str())
-                        {
-                            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(created_at) {
-                                let event_ms = dt.timestamp_millis().max(0) as u64;
-                                if event_ms <= now {
-                                    let age = now.saturating_sub(event_ms);
-                                    oldest_ms = Some(oldest_ms.map_or(age, |o| o.max(age)));
-                                }
+                        // Prefer the enqueue timestamp; legacy spool lines
+                        // (pre-enqueued_at) fall back to payload.created_at,
+                        // which most events lack (age 0, as before).
+                        let event_ms = if ev.enqueued_at > 0 {
+                            Some(ev.enqueued_at)
+                        } else {
+                            ev.payload
+                                .get("created_at")
+                                .and_then(|v| v.as_str())
+                                .and_then(|created_at| {
+                                    chrono::DateTime::parse_from_rfc3339(created_at)
+                                        .ok()
+                                        .map(|dt| dt.timestamp_millis().max(0) as u64)
+                                })
+                        };
+                        if let Some(event_ms) = event_ms {
+                            if event_ms <= now {
+                                let age = now.saturating_sub(event_ms);
+                                oldest_ms = Some(oldest_ms.map_or(age, |o| o.max(age)));
                             }
                         }
                     }
@@ -996,8 +1019,9 @@ mod tests {
             quota_bytes: 0,
         };
         // Push several Stdout events until we're near the limit.
-        // Each event is roughly 40-50 bytes. 4 events should put us near 200.
-        for i in 1..=4 {
+        // Each event is roughly 70-80 bytes (incl. the enqueued_at field).
+        // 3 events should put us near 200.
+        for i in 1..=3 {
             let ev = IncomingEvent {
                 sequence: i,
                 r#type: EventType::Stdout,
