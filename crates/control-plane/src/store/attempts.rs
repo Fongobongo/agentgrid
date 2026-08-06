@@ -489,7 +489,7 @@ impl Store {
         let status: String = run.try_get("status")?;
         if matches!(
             status.as_str(),
-            "completed" | "failed" | "cancelled" | "blocked"
+            "succeeded" | "failed" | "cancelled" | "blocked"
         ) {
             let _ = tx.rollback().await;
             return Ok(false);

@@ -111,6 +111,12 @@ impl SchedulerService {
 
         let deadline = Instant::now() + POLL_TIMEOUT;
         loop {
+            // Construct the waiter before checking for work: Notify's permit
+            // captures a notify that lands between try_assign returning None
+            // and the select below (otherwise the node idled a full poll
+            // timeout despite work being assigned).
+            let notified = self.assignment_notify.notified();
+            tokio::pin!(notified);
             match self.store.try_assign(&req.node_id).await {
                 Ok(Some(assignment)) => return Ok((degraded, Some(assignment))),
                 Ok(None) => {}
@@ -121,7 +127,7 @@ impl SchedulerService {
             }
             let remaining = deadline - Instant::now();
             tokio::select! {
-                _ = self.assignment_notify.notified() => {}
+                _ = &mut notified => {}
                 _ = tokio::time::sleep(remaining) => {}
             }
         }

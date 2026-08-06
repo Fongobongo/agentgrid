@@ -3374,24 +3374,47 @@ async fn artifact_name_validation_rejects_nul_backslash_percent() {
 #[tokio::test]
 async fn backup_endpoint_writes_file() {
     let state = AppState::open_temp().await.unwrap();
-    let app = build_router(state);
-    let path =
-        std::path::Path::new("/var/tmp").join(format!("ag-admin-backup-{}.db", std::process::id()));
+    let app = build_router(state.clone());
+    // Hardened contract: only a plain file name is accepted; the backup lands
+    // in the data directory (parent of the artifact root, /var/tmp for temp DBs).
+    let name = format!("ag-admin-backup-{}.db", std::process::id());
+    let path = std::path::Path::new("/var/tmp").join(&name);
     if path.exists() {
         let _ = std::fs::remove_file(&path);
     }
+    let token = test_token(&app).await;
     let resp = app
         .clone()
         .oneshot(post_json(
             "/v1/admin/backup",
-            serde_json::to_string(&json!({ "path": path.to_str().unwrap() })).unwrap(),
-            Some(&test_token(&app).await),
+            serde_json::to_string(&json!({ "path": &name })).unwrap(),
+            Some(&token),
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(path.exists(), "backup file must be created");
+    assert!(path.exists(), "backup file must be created in the data dir");
     let _ = std::fs::remove_file(&path);
+    // Absolute paths / traversal must be rejected with a client error.
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/admin/backup",
+            serde_json::to_string(&json!({ "path": "/var/tmp/evil.db" })).unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = app
+        .oneshot(post_json(
+            "/v1/admin/backup",
+            serde_json::to_string(&json!({ "path": "../evil.db" })).unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

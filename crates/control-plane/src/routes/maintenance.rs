@@ -25,6 +25,10 @@ pub async fn admin_backup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BackupRequest>,
 ) -> StatusCode {
+    // Reject non-confined paths as a client error, not a server one.
+    if !crate::store::Store::is_valid_backup_name(&req.path) {
+        return StatusCode::BAD_REQUEST;
+    }
     match state.store.backup_to(&req.path).await {
         Ok(()) => StatusCode::OK,
         Err(e) => {
@@ -72,6 +76,15 @@ pub async fn storage_gc_handler(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+/// Escape a label value for the Prometheus exposition format. Node-supplied
+/// values (name, sandbox backend, network mode) must not be able to inject
+/// fake metrics via quotes/newlines.
+fn prom_label(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::response::Response) {
@@ -165,7 +178,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_free_disk_mb{{node=\"{}\"}} {}\n",
-            n.name, n.free_disk_mb
+            prom_label(&n.name),
+            n.free_disk_mb
         ));
     }
     s.push_str("# HELP agentgrid_node_load_avg Load average reported via heartbeat.\n");
@@ -173,7 +187,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_load_avg{{node=\"{}\"}} {}\n",
-            n.name, n.load_avg
+            prom_label(&n.name),
+            n.load_avg
         ));
     }
 
@@ -403,7 +418,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_outbox_bytes{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_bytes
+            prom_label(&n.name),
+            n.outbox_bytes
         ));
     }
     s.push_str("# HELP agentgrid_node_outbox_rows Pending outbox rows on the node.\n");
@@ -411,7 +427,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_outbox_rows{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_rows
+            prom_label(&n.name),
+            n.outbox_rows
         ));
     }
     s.push_str("# HELP agentgrid_node_outbox_oldest_pending_age_ms Age of the oldest unacked outbox event.\n");
@@ -419,7 +436,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_outbox_oldest_pending_age_ms{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_oldest_pending_age_ms
+            prom_label(&n.name),
+            n.outbox_oldest_pending_age_ms
         ));
     }
     s.push_str("# HELP agentgrid_node_outbox_corruption_total Quarantined corrupt outbox records on the node.\n");
@@ -427,7 +445,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_outbox_corruption_total{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_corruption_count
+            prom_label(&n.name),
+            n.outbox_corruption_count
         ));
     }
     s.push_str(
@@ -437,7 +456,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_outbox_completion_rows{{node=\"{}\"}} {}\n",
-            n.name, n.outbox_completion_rows
+            prom_label(&n.name),
+            n.outbox_completion_rows
         ));
     }
     s.push_str(
@@ -447,7 +467,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_artifact_spool_bytes{{node=\"{}\"}} {}\n",
-            n.name, n.artifact_spool_bytes
+            prom_label(&n.name),
+            n.artifact_spool_bytes
         ));
     }
     s.push_str(
@@ -457,7 +478,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_repo_lock_wait_ms{{node=\"{}\"}} {}\n",
-            n.name, n.repo_lock_wait_ms
+            prom_label(&n.name),
+            n.repo_lock_wait_ms
         ));
     }
     s.push_str("# HELP agentgrid_node_sandbox_backend Sandbox backend kind per node.\n");
@@ -465,17 +487,16 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_sandbox_backend{{node=\"{}\",backend=\"{}\"}} 1\n",
-            n.name, n.sandbox_backend
+            prom_label(&n.name),
+            prom_label(&n.sandbox_backend)
         ));
     }
-    s.push_str(
-        "# HELP agentgrid_node_enforced_limits Whether sandbox enforces resource limits.\n",
-    );
+    s.push_str("# HELP agentgrid_node_enforced_limits Whether sandbox enforces resource limits.\n");
     s.push_str("# TYPE agentgrid_node_enforced_limits gauge\n");
     for n in &nodes {
         s.push_str(&format!(
             "agentgrid_node_enforced_limits{{node=\"{}\"}} {}\n",
-            n.name,
+            prom_label(&n.name),
             if n.enforced_limits { 1 } else { 0 }
         ));
     }
@@ -488,7 +509,11 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
             "unrestricted" => 2,
             _ => 0,
         };
-        let labels = format!("node=\"{}\",mode=\"{}\"", n.name, n.network_mode);
+        let labels = format!(
+            "node=\"{}\",mode=\"{}\"",
+            prom_label(&n.name),
+            prom_label(&n.network_mode)
+        );
         s.push_str(&format!(
             "agentgrid_node_network_mode{{{}}} {}\n",
             labels, mode

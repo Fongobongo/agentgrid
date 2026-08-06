@@ -39,13 +39,13 @@ impl Store {
 
     /// Create a local user. Returns false if the username already exists.
     pub async fn create_user(&self, username: &str, password: &str) -> Result<bool> {
-        if self.user_exists(username).await? {
-            return Ok(false);
-        }
+        let pw = password.to_string();
+        let hash = tokio::task::spawn_blocking(move || hash_password(&pw)).await??;
         let id = Uuid::new_v4().to_string();
-        let hash = hash_password(password)?;
         let now = now_iso();
-        sqlx::query(
+        // No check-then-insert: the unique constraint on username decides, so
+        // concurrent creates cannot both succeed.
+        let res = sqlx::query(
             "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
         )
         .bind(&id)
@@ -53,8 +53,12 @@ impl Store {
         .bind(&hash)
         .bind(&now)
         .execute(&self.pool)
-        .await?;
-        Ok(true)
+        .await;
+        match res {
+            Ok(_) => Ok(true),
+            Err(e) if format!("{e}").contains("UNIQUE") => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn user_exists(&self, username: &str) -> Result<bool> {
@@ -76,10 +80,9 @@ impl Store {
         };
         let id: String = row.try_get("id")?;
         let hash: String = row.try_get("password_hash")?;
-        Ok(if verify_password(password, &hash) {
-            Some(id)
-        } else {
-            None
-        })
+        // Argon2 verification is CPU-heavy; keep it off the async executor.
+        let pw = password.to_string();
+        let ok = tokio::task::spawn_blocking(move || verify_password(&pw, &hash)).await?;
+        Ok(if ok { Some(id) } else { None })
     }
 }

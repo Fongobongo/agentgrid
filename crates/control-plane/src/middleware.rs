@@ -69,11 +69,6 @@ pub async fn request_id_middleware(
 /// never includes internal error chains (those stay in structured logs).
 /// The `X-Request-Id` header (added by the middleware) stays the correlation
 /// key; it is also embedded in the body for clients that only read the body.
-#[allow(dead_code)]
-pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    api_error_with_id(status, code, message, None)
-}
-
 pub fn api_error_with_id(
     status: StatusCode,
     code: &str,
@@ -94,7 +89,8 @@ pub fn api_error_with_id(
     // So request_id_middleware does not overwrite with a different id.
     let _ = res.headers_mut().try_insert(
         header::HeaderName::from_static("x-request-id"),
-        header::HeaderValue::from_str(&req_id).unwrap_or_else(|_| header::HeaderValue::from_static("")),
+        header::HeaderValue::from_str(&req_id)
+            .unwrap_or_else(|_| header::HeaderValue::from_static("")),
     );
     res
 }

@@ -115,7 +115,10 @@ impl Store {
         let highest_contiguous = self.contiguous_event_prefix(attempt_id).await?;
         Ok(IngestEventsAck {
             accepted,
-            highest_contiguous_sequence: highest_contiguous,
+            // Some(..) marks a live attempt (0 = no contiguous prefix yet);
+            // the default-ack path (None) is reserved for gone/terminal
+            // attempts so the route maps those — and only those — to 404.
+            highest_contiguous_sequence: highest_contiguous.or(Some(0)),
         })
     }
 

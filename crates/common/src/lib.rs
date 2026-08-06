@@ -396,6 +396,9 @@ pub struct NodeView {
     /// receives no NEW assignments (maintenance mode).
     #[serde(default)]
     pub drained: bool,
+    /// Row creation time; the list_nodes keyset cursor is (created_at, id).
+    #[serde(default)]
+    pub created_at: String,
     /// Hardening P2 item 35: repository cache size in bytes.
     #[serde(default)]
     pub repo_cache_bytes: u64,

@@ -308,7 +308,7 @@ pub async fn auth_login(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        if !rate.check_and_record(now) {
+        if !rate.check_and_record(&req.username.to_lowercase(), now) {
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
     }

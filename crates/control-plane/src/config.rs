@@ -43,32 +43,38 @@ impl SetupToken {
 }
 
 /// Sliding-window brute-force limiter for the login endpoint (Stage 2.5).
-/// Keyed globally per control-plane instance; a generic 429 (not a per-user
+/// Keyed per account (lowercased username): a generic 429 (not a per-user
 /// signal) is returned when the budget is spent, so it cannot be used to
-/// enumerate which usernames exist.
+/// enumerate which usernames exist. Per-account keying means one attacked
+/// account cannot exhaust the budget for everyone (a global key let a single
+/// attacker lock out all users).
 pub(crate) struct LoginRate {
-    window_start: i64,
-    count: u32,
+    per_key: std::collections::HashMap<String, (i64, u32)>,
     max: u32,
     window_secs: i64,
 }
 impl LoginRate {
     pub(crate) fn new() -> Self {
         Self {
-            window_start: 0,
-            count: 0,
+            per_key: std::collections::HashMap::new(),
             max: 10,
             window_secs: 60,
         }
     }
-    /// Record an attempt; returns false once the per-window budget is spent.
-    pub(crate) fn check_and_record(&mut self, now: i64) -> bool {
-        if now - self.window_start >= self.window_secs {
-            self.window_start = now;
-            self.count = 0;
+    /// Record an attempt for `key`; returns false once its per-window budget
+    /// is spent. Stale keys are pruned opportunistically.
+    pub(crate) fn check_and_record(&mut self, key: &str, now: i64) -> bool {
+        if self.per_key.len() > 1024 {
+            let window = self.window_secs;
+            self.per_key.retain(|_, (start, _)| now - *start < window);
         }
-        self.count += 1;
-        self.count <= self.max
+        let entry = self.per_key.entry(key.to_string()).or_insert((0, 0));
+        if now - entry.0 >= self.window_secs {
+            entry.0 = now;
+            entry.1 = 0;
+        }
+        entry.1 += 1;
+        entry.1 <= self.max
     }
 }
 

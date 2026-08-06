@@ -128,19 +128,21 @@ impl Store {
             "UPDATE nodes SET name = ?, \
                status = CASE WHEN status = 'revoked' THEN 'revoked' ELSE ? END, \
                agent_version = ?, max_concurrency = ?, adapters = ?, repositories = ?, \
-               active_attempts = ?, load_avg = ?, free_disk_mb = ?, last_heartbeat_at = ?, \
+               load_avg = ?, free_disk_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
                outbox_bytes = ?, artifact_spool_bytes = ?, \
                outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ? \
              WHERE id = ?",
         )
+        // active_attempts is intentionally not heartbeat-settable: it is the
+        // CP-authoritative quota counter (assign/complete + reconcile), and a
+        // stale or lying node report could break tasks_max enforcement.
         .bind(&req.name)
         .bind(node_status_str(status))
         .bind(&req.agent_version)
         .bind(req.max_concurrency as i64)
         .bind(&adapters)
         .bind(&repos)
-        .bind(req.active_attempts as i64)
         .bind(req.load_avg)
         .bind(req.free_disk_mb as i64)
         .bind(&now)
@@ -276,21 +278,10 @@ impl Store {
         subject: Option<&str>,
         payload: Option<&str>,
     ) -> Result<()> {
-        let id = Uuid::new_v4().to_string();
-        let now = now_iso();
-        sqlx::query(
-            "INSERT INTO audit_events (id, actor_type, actor_id, action, subject, payload, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(actor_type)
-        .bind(actor_id)
-        .bind(action)
-        .bind(subject)
-        .bind(payload)
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
+        let mut tx = begin_immediate(&self.pool).await?;
+        self.audit_tx(&mut tx, actor_type, actor_id, action, subject, payload)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 

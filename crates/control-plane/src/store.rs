@@ -10,7 +10,7 @@ use std::time::Duration;
 use agentgrid_common::{
     AgentProfile, ApprovalStatus, ApprovalView, AttemptStatus, EventType, InvalidTransition,
     McpServer, NodeStatus, NodeView, PollRequest, SkillTrustView, TaskStatus, TaskView,
-    WorkflowBudget, WorkflowRole, WorkflowSchedule,
+    WorkflowBudget, WorkflowSchedule,
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
@@ -77,6 +77,10 @@ pub struct Store {
     /// (from provenance).
     pub(crate) security_profile_attempts:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// TTL cache of the statvfs result: free_bytes() is called on every
+    /// try_assign (async hot path) and the syscall must not run each time.
+    pub(crate) free_bytes_cache:
+        std::sync::Arc<std::sync::Mutex<Option<(std::time::Instant, u64)>>>,
 }
 
 fn now_iso() -> String {
@@ -363,6 +367,7 @@ impl Store {
             security_profile_attempts: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            free_bytes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -471,12 +476,14 @@ async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<usize> {
     Ok(reverted)
 }
 
-async fn mark_offline_nodes(pool: &SqlitePool, _now: &str) -> Result<()> {
+async fn mark_offline_nodes(pool: &SqlitePool, now: &str) -> Result<()> {
     // Race-safe (hardening P0 item 7): CAS `online` -> `offline` under a single
     // write transaction and only run `lose_node_attempts` for nodes we actually
     // flipped. A concurrent heartbeat re-asserting `online` (via
     // upsert_heartbeat's own CAS) therefore never loses to this sweep.
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    let cutoff = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|d| (d - chrono::Duration::seconds(30)).to_rfc3339())
+        .unwrap_or_else(|_| (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339());
     let mut tx = begin_immediate(pool).await?;
     let rows = sqlx::query(
         "SELECT id FROM nodes WHERE status = 'online' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)",
@@ -676,6 +683,7 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
         network_mode: r
             .try_get::<String, _>("network_mode")
             .unwrap_or_else(|_| "none".to_string()),
+        created_at: r.try_get("created_at").unwrap_or_default(),
     }
 }
 
@@ -793,14 +801,7 @@ fn profile_from_row(r: &sqlx::sqlite::SqliteRow) -> AgentProfile {
 
 // ----- workflows (Stage 7) -----
 
-fn role_str(r: WorkflowRole) -> String {
-    serde_json::to_value(r)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default()
-}
-
-/// Serialize a status enum to its `snake_case` string for storage.
+/// Serialize a role/status enum to its `snake_case` string for storage.
 fn role_str_status<T: serde::Serialize>(t: T) -> String {
     serde_json::to_value(t)
         .ok()
@@ -813,7 +814,7 @@ mod workflow_tests {
     use super::*;
     use agentgrid_common::{
         CompleteAttemptRequest, CreateTaskRequest, EnrollRequest, IncomingEvent,
-        IngestEventsRequest, UploadArtifactRequest, WorkflowRunStatus, WorkflowStep,
+        IngestEventsRequest, UploadArtifactRequest, WorkflowRole, WorkflowRunStatus, WorkflowStep,
         WorkflowStepStatus,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1814,11 +1815,22 @@ mod workflow_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let backup = std::path::Path::new("/var/tmp").join(format!("ag-backup-{stamp}.db"));
+        // Hardened backup_to only accepts a plain file name and confines the
+        // output to the data dir (parent of the artifact root).
+        let name = format!("ag-backup-{stamp}.db");
+        assert!(
+            s.backup_to("/var/tmp/evil.db").await.is_err(),
+            "absolute paths must be rejected"
+        );
+        assert!(
+            s.backup_to("../evil.db").await.is_err(),
+            "path separators must be rejected"
+        );
+        let backup = s.artifact_root().parent().unwrap().join(&name);
         if backup.exists() {
             let _ = std::fs::remove_file(&backup);
         }
-        s.backup_to(backup.to_str().unwrap()).await.unwrap();
+        s.backup_to(&name).await.unwrap();
         assert!(backup.exists(), "VACUUM INTO must create the backup file");
         // Re-opening the backup must succeed and yield a usable store.
         let reopened = Store::open(backup.to_str().unwrap()).await.unwrap();

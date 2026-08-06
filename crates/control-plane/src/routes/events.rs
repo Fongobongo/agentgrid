@@ -53,13 +53,15 @@ pub async fn events_stream(
         headers.get("Last-Event-ID"),
     );
     let stream = async_stream::stream! {
+        let mut consecutive_errors = 0u32;
         loop {
             match state
                 .store
                 .get_events(&task_id, after_ingest, after_sequence, Some(500))
                 .await
             {
-                Ok(events) if !events.is_empty() => {
+                Ok(events) => {
+                    consecutive_errors = 0;
                     for e in events {
                         // Track both cursors: the global ingest_id drives
                         // pagination; the legacy sequence stays accurate for
@@ -78,7 +80,19 @@ pub async fn events_stream(
                         }
                     }
                 }
-                _ => {}
+                Err(e) => {
+                    // Don't hang forever on a broken store: surface repeated
+                    // failures as an error event and end the stream (clients
+                    // reconnect via Last-Event-ID without losing events).
+                    consecutive_errors += 1;
+                    tracing::warn!("SSE get_events failed ({consecutive_errors}): {e}");
+                    if consecutive_errors >= 20 {
+                        yield Ok(Event::default()
+                            .event("error")
+                            .data("event stream unavailable; reconnecting required"));
+                        break;
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }

@@ -1,8 +1,7 @@
 //! Artifact storage (bytes + metadata, path-safe). Extracted from `store.rs`.
 
 use super::{
-    is_safe_artifact_name, is_safe_opaque_id, now_iso, sha256_bytes_hex, Store,
-    StoreArtifactError,
+    is_safe_artifact_name, is_safe_opaque_id, now_iso, sha256_bytes_hex, Store, StoreArtifactError,
 };
 use agentgrid_common::{ArtifactMeta, ArtifactUploadResponse, UploadArtifactRequest};
 use anyhow::Result;

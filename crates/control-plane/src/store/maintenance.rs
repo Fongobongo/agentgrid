@@ -66,6 +66,19 @@ impl Store {
                 if let Err(e) = mark_offline_nodes(&store.pool, &now).await {
                     tracing::warn!("node maintenance failed: {e}");
                 }
+                // Approval expiry + scheduled-workflow triggers must fire on
+                // the background cadence too; tick_maintenance only runs at
+                // startup, so without these scheduled workflows would never
+                // fire and approvals would never expire in production.
+                if let Err(e) = store.tick_approval_expiry().await {
+                    tracing::warn!("approval expiry failed: {e}");
+                }
+                if let Err(e) = store
+                    .tick_workflow_schedules(chrono::Utc::now().timestamp())
+                    .await
+                {
+                    tracing::warn!("workflow schedule tick failed: {e}");
+                }
                 let _ = store.cleanup_artifacts(168).await;
                 tick = tick.wrapping_add(1);
                 if tick % 4 == 0 {
@@ -234,14 +247,33 @@ impl Store {
         }
     }
 
+    /// Valid backup target name: a single plain file name (no separators,
+    /// not absolute, no NUL). The backup always lands in the data directory.
+    pub fn is_valid_backup_name(path: &str) -> bool {
+        let p = std::path::Path::new(path);
+        !path.is_empty() && !path.contains('\0') && !p.is_absolute() && p.components().count() == 1
+    }
+
     /// Compact copy of the database for backup/restore rehearsal (Stage 2.5 ops).
-    /// The path is validated to avoid shell/SQL injection; `VACUUM INTO` refuses
-    /// to overwrite an existing file.
+    /// Only a plain file name is accepted; the backup always lands in the data
+    /// directory (parent of the artifact root) so the admin endpoint cannot be
+    /// used for arbitrary file writes. `VACUUM INTO` refuses to overwrite an
+    /// existing file.
     pub async fn backup_to(&self, path: &str) -> Result<()> {
-        if path.contains('\\') || path.contains(';') || path.contains('\0') || path.contains("..") {
-            return Err(anyhow::anyhow!("invalid backup path: {path}"));
+        if !Self::is_valid_backup_name(path) {
+            return Err(anyhow::anyhow!(
+                "backup path must be a plain file name, got: {path}"
+            ));
         }
-        let stmt = format!("VACUUM INTO '{}'", path.replace('\'', "''"));
+        let full = self
+            .artifact_root
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(path);
+        let stmt = format!(
+            "VACUUM INTO '{}'",
+            full.to_string_lossy().replace('\'', "''")
+        );
         sqlx::query(&stmt).execute(&self.pool).await?;
         Ok(())
     }
@@ -421,7 +453,24 @@ impl Store {
 
     /// Hardening P1 item 15: free bytes on the artifact root's filesystem
     /// (statvfs). Used by the critical-disk watermark to stop new assignments.
+    /// Cached briefly: this runs on every try_assign (async hot path) and the
+    /// syscall must not stall an executor thread each time.
     pub fn free_bytes(&self) -> u64 {
+        if let Ok(cache) = self.free_bytes_cache.lock() {
+            if let Some((at, v)) = *cache {
+                if at.elapsed() < std::time::Duration::from_secs(5) {
+                    return v;
+                }
+            }
+        }
+        let v = self.statvfs_free_bytes();
+        if let Ok(mut cache) = self.free_bytes_cache.lock() {
+            *cache = Some((std::time::Instant::now(), v));
+        }
+        v
+    }
+
+    fn statvfs_free_bytes(&self) -> u64 {
         let path = std::path::Path::new(&self.artifact_root);
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
         let cpath = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {

@@ -45,14 +45,16 @@ impl Store {
     /// Answer a pending approval. `event` must be `Allow`/`Deny` (the only
     /// operator-driven transitions); `Expire`/`Cancel` are applied by the
     /// maintenance tick. Honors the state machine — answering a terminal approval
-    /// is a no-op (idempotent), not an error.
+    /// is a no-op (idempotent), not an error. Returns `true` only when this
+    /// call performed the transition (concurrent answers are serialized by the
+    /// `status='pending'` guard, so at most one wins).
     pub async fn answer_approval(
         &self,
         id: &str,
         event: ApprovalEvent,
         reason: Option<&str>,
         actor: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let current: Option<String> = sqlx::query("SELECT status FROM approvals WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
@@ -60,19 +62,19 @@ impl Store {
             .map(|r| r.try_get("status"))
             .transpose()?;
         let Some(current) = current else {
-            return Ok(()); // unknown id: no-op
+            return Ok(false); // unknown id: no-op
         };
         let current_status: ApprovalStatus =
             serde_json::from_value(serde_json::Value::String(current))
                 .unwrap_or(ApprovalStatus::Pending);
         let Ok(next) = next_approval(current_status, event) else {
-            return Ok(()); // terminal already -> idempotent no-op
+            return Ok(false); // terminal already -> idempotent no-op
         };
         let decided = now_iso();
         let audit = serde_json::json!({ "actor": actor, "event": event, "at": decided });
-        sqlx::query(
+        let res = sqlx::query(
             "UPDATE approvals SET status = ?, decided_at = ?, reason = ?, audit = ? \
-         WHERE id = ?",
+         WHERE id = ? AND status = 'pending'",
         )
         .bind(serde_json::to_value(next).map(|v| v.as_str().unwrap_or("pending").to_string())?)
         .bind(&decided)
@@ -81,7 +83,7 @@ impl Store {
         .bind(id)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(res.rows_affected() > 0)
     }
 
     /// Fetch a single approval by id.
@@ -148,15 +150,18 @@ impl Store {
         for r in &rows {
             let id: String = r.try_get("id")?;
             let step_run_id: Option<String> = r.try_get("step_run_id").ok().flatten();
-            if self
+            match self
                 .answer_approval(&id, ApprovalEvent::Expire, Some("auto-expired"), "system")
                 .await
-                .is_ok()
             {
-                count += 1;
-                if let Some(step) = step_run_id {
-                    let _ = self.block_step_and_run(&step).await;
+                Ok(true) => {
+                    count += 1;
+                    if let Some(step) = step_run_id {
+                        let _ = self.block_step_and_run(&step).await;
+                    }
                 }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("approval expiry for {id} failed: {e}"),
             }
         }
         Ok(count)
@@ -176,7 +181,7 @@ impl Store {
         sqlx::query(
             "UPDATE workflow_runs SET status = 'blocked' \
              WHERE id = (SELECT run_id FROM workflow_steps WHERE id = ?) \
-             AND status NOT IN ('completed','failed','cancelled','blocked')",
+             AND status NOT IN ('succeeded','failed','cancelled','blocked','plan_ready')",
         )
         .bind(step_run_id)
         .execute(&self.pool)

@@ -2,8 +2,8 @@
 //! (Stage 6 / 8 / 14). Extracted from `store.rs`.
 
 use super::{
-    begin_immediate, from_snake, iso_to_unix, now_iso, parse_autonomy_level, role_str,
-    role_str_status, schedule_from_row, unix_to_iso, workflow_budget_from_col,
+    begin_immediate, from_snake, iso_to_unix, now_iso, parse_autonomy_level, role_str_status,
+    schedule_from_row, unix_to_iso, workflow_budget_from_col,
 };
 use crate::Store;
 use agentgrid_common::{
@@ -145,7 +145,7 @@ impl Store {
             .bind(&step.id)
             .bind(&step.prompt)
             .bind(&depends_json)
-            .bind(role_str(step.role))
+            .bind(role_str_status(step.role))
             .bind(&step.adapter)
             .bind(step.requested_node_id.as_deref())
             .bind(step.base_commit.as_deref())
@@ -163,7 +163,7 @@ impl Store {
             )
             .bind(&role_run_id)
             .bind(&step_run_id)
-            .bind(role_str(step.role))
+            .bind(role_str_status(step.role))
             .bind(&created_at)
             .execute(&mut *tx)
             .await?;
@@ -762,7 +762,6 @@ impl Store {
         let Some(step_row) = step_row else {
             return Ok(Vec::new());
         };
-        let role: String = step_row.try_get("role").unwrap_or_default();
         // Both Integrator and Verifier depend on upstream worker commits:
         // Integrator cherry-picks *all* upstream worker commits to integrate
         // them; Verifier (usually a single upstream worker) cherry-picks its
@@ -770,7 +769,6 @@ impl Store {
         // tree on top of the base — letting it review/read the worker's change
         // without ever seeing the worker's private transcripts (ADR: handoffs
         // reference commits, not logs). Non-workflow / no-deps steps yield [].
-        let _ = role;
         let deps_json: String = step_row
             .try_get::<String, _>("depends_on")
             .unwrap_or_default();
@@ -864,13 +862,29 @@ impl Store {
             let Some(consumer_task) = consumer_task else {
                 continue;
             };
-            let owner: Option<String> =
-                sqlx::query_scalar("SELECT node_id FROM attempts WHERE task_id = ?")
-                    .bind(&consumer_task)
-                    .fetch_optional(&self.pool)
-                    .await?;
-            if owner.as_deref() == Some(node_id) {
-                return Ok(true);
+            // Latest attempt only, and a failed/lost/cancelled attempt must
+            // not keep granting upstream artifact reads to its node.
+            let owner: Option<(String, String)> = sqlx::query(
+                "SELECT node_id, status FROM attempts WHERE task_id = ? \
+                 ORDER BY number DESC LIMIT 1",
+            )
+            .bind(&consumer_task)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|r| {
+                (
+                    r.try_get::<String, _>("node_id").unwrap_or_default(),
+                    r.try_get::<String, _>("status").unwrap_or_default(),
+                )
+            });
+            if let Some((node, status)) = owner {
+                let eligible = matches!(
+                    status.as_str(),
+                    "assigned" | "running" | "validating" | "succeeded"
+                );
+                if eligible && node == node_id {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -933,7 +947,7 @@ impl Store {
             .bind(&step.id)
             .bind(&step.prompt)
             .bind(&depends_json)
-            .bind(role_str(step.role))
+            .bind(role_str_status(step.role))
             .bind(&step.adapter)
             .bind(step.requested_node_id.as_deref())
             .bind(step.base_commit.as_deref())
@@ -949,7 +963,7 @@ impl Store {
             )
             .bind(&role_run_id)
             .bind(&step_run_id)
-            .bind(role_str(step.role))
+            .bind(role_str_status(step.role))
             .bind(&now)
             .execute(&mut *tx)
             .await?;
@@ -1217,8 +1231,26 @@ impl Store {
                         if let Some(ts) = self.get_task_status(&task_id).await? {
                             match ts {
                                 TaskStatus::Succeeded => {
-                                    self.set_step_status(&step.id, WorkflowStepStatus::Succeeded)
-                                        .await?;
+                                    // Claim the running→succeeded transition
+                                    // atomically: the background ticker and the
+                                    // task-completion path can tick the same run
+                                    // concurrently, and without the CAS both
+                                    // would emit the handoff / fire plan
+                                    // expansion twice.
+                                    let claimed = sqlx::query(
+                                        "UPDATE workflow_steps SET status = 'succeeded', \
+                                         finished_at = COALESCE(finished_at, ?) \
+                                         WHERE id = ? AND status = 'running'",
+                                    )
+                                    .bind(now_iso())
+                                    .bind(&step.id)
+                                    .execute(&self.pool)
+                                    .await?
+                                    .rows_affected()
+                                        > 0;
+                                    if !claimed {
+                                        continue;
+                                    }
                                     status_by_id
                                         .insert(&step.step_id, WorkflowStepStatus::Succeeded);
                                     self.set_role_run_status_by_step(
@@ -1289,7 +1321,23 @@ impl Store {
                                     // `node_lost` is treated the same as any other
                                     // failure (default = step fails).
                                     let attempts = step.attempts + 1;
-                                    self.set_step_attempts(&step.id, attempts).await?;
+                                    // CAS on the attempts counter: concurrent
+                                    // ticks must not both claim the same retry
+                                    // (that created duplicate retry tasks).
+                                    let claimed = sqlx::query(
+                                        "UPDATE workflow_steps SET attempts = ? \
+                                         WHERE id = ? AND attempts = ?",
+                                    )
+                                    .bind(attempts as i64)
+                                    .bind(&step.id)
+                                    .bind(step.attempts as i64)
+                                    .execute(&self.pool)
+                                    .await?
+                                    .rows_affected()
+                                        > 0;
+                                    if !claimed {
+                                        continue;
+                                    }
                                     let max = step.max_attempts.unwrap_or(1);
                                     let retryable = step.retryable.unwrap_or(false);
                                     if retryable && attempts < max {
@@ -1312,7 +1360,16 @@ impl Store {
                                             security_profile: None,
                                             network_mode: None,
                                         };
-                                        let tv = self.create_task(&req).await?;
+                                        let tv = match self.create_task(&req).await {
+                                            Ok(tv) => tv,
+                                            Err(e) => {
+                                                // Release the claimed retry slot.
+                                                let _ = self
+                                                    .set_step_attempts(&step.id, step.attempts)
+                                                    .await;
+                                                return Err(e);
+                                            }
+                                        };
                                         self.set_role_run_task(&step.id, &tv.id).await?;
                                         created.push(tv.id);
                                         // step stays `Running` pending the retry
@@ -1355,7 +1412,29 @@ impl Store {
                                         .await?;
                                     }
                                 }
-                                // Cancelled / still in flight: leave the step as-is.
+                                TaskStatus::Cancelled => {
+                                    let claimed = sqlx::query(
+                                        "UPDATE workflow_steps SET status = 'cancelled', \
+                                         finished_at = COALESCE(finished_at, ?) \
+                                         WHERE id = ? AND status = 'running'",
+                                    )
+                                    .bind(now_iso())
+                                    .bind(&step.id)
+                                    .execute(&self.pool)
+                                    .await?
+                                    .rows_affected()
+                                        > 0;
+                                    if claimed {
+                                        status_by_id
+                                            .insert(&step.step_id, WorkflowStepStatus::Cancelled);
+                                        self.set_role_run_status_by_step(
+                                            &step.id,
+                                            WorkflowStepStatus::Cancelled,
+                                        )
+                                        .await?;
+                                    }
+                                }
+                                // Still in flight: leave the step as-is.
                                 _ => {}
                             }
                         }
@@ -1397,10 +1476,38 @@ impl Store {
                             security_profile: None,
                             network_mode: None,
                         };
-                        let tv = self.create_task(&req).await?;
-                        self.set_role_run_task(&step.id, &tv.id).await?;
-                        self.set_step_status(&step.id, WorkflowStepStatus::Running)
+                        // Claim the pending→running transition before creating
+                        // the task: the background ticker and the
+                        // task-completion path can tick the same run
+                        // concurrently, and without the claim both created a
+                        // task for the same step.
+                        let claimed = {
+                            let mut tx = begin_immediate(&self.pool).await?;
+                            let res = sqlx::query(
+                                "UPDATE workflow_steps SET status = 'running', \
+                                 started_at = COALESCE(started_at, ?) \
+                                 WHERE id = ? AND status = 'pending'",
+                            )
+                            .bind(now_iso())
+                            .bind(&step.id)
+                            .execute(&mut *tx)
                             .await?;
+                            tx.commit().await?;
+                            res.rows_affected() > 0
+                        };
+                        if !claimed {
+                            continue;
+                        }
+                        let tv = match self.create_task(&req).await {
+                            Ok(tv) => tv,
+                            Err(e) => {
+                                // Release the claim so a later tick retries.
+                                self.set_step_status(&step.id, WorkflowStepStatus::Pending)
+                                    .await?;
+                                return Err(e);
+                            }
+                        };
+                        self.set_role_run_task(&step.id, &tv.id).await?;
                         status_by_id.insert(&step.step_id, WorkflowStepStatus::Running);
                         self.set_role_run_status_by_step(&step.id, WorkflowStepStatus::Running)
                             .await?;

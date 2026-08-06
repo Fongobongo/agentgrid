@@ -28,9 +28,7 @@ pub async fn list_nodes(
     match state.store.list_nodes(after, q.limit).await {
         Ok(items) => {
             let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
-                items
-                    .last()
-                    .map(|n| format!("{},{}", n.last_heartbeat_at, n.id))
+                items.last().map(|n| format!("{},{}", n.created_at, n.id))
             } else {
                 None
             };

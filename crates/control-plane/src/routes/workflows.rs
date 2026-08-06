@@ -70,7 +70,7 @@ pub async fn create_workflow(
         .map(|t| (StatusCode::CREATED, Json(t)))
         .map_err(|e| {
             tracing::error!("create_workflow failed: {e}");
-            StatusCode::BAD_REQUEST
+            StatusCode::INTERNAL_SERVER_ERROR
         })
 }
 
@@ -277,12 +277,14 @@ pub async fn workflow_run_plan(
     // Stage 13: exposes the pending plan on a `PlanReady` run (the projection
     // already carries `run.status`); the bare plan text is the architect's
     // emitted YAML/JSON — read-only so an operator can inspect before approving.
-    let _ = state.store.get_workflow_run_plan(&id).await;
     match state.store.get_workflow_run_projection(&id).await {
         Ok(Some(p)) => Ok(Json(p)),
         // 404 if the run doesn't exist; the plan field lives on the projection.
         Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(_) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("workflow_run_plan failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
