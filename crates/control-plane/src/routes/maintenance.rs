@@ -179,15 +179,19 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
 
     s.push_str("# HELP agentgrid_sqlite_db_bytes Main database file size in bytes.\n");
     s.push_str("# TYPE agentgrid_sqlite_db_bytes gauge\n");
-    let db_bytes = std::fs::metadata(&state.db_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let db_path_c = state.db_path.clone();
+    let (db_bytes, wal_bytes) = tokio::task::spawn_blocking(move || {
+        let db = std::fs::metadata(&db_path_c).map(|m| m.len()).unwrap_or(0);
+        let wal = std::fs::metadata(format!("{db_path_c}-wal"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        (db, wal)
+    })
+    .await
+    .unwrap_or((0, 0));
     s.push_str(&format!("agentgrid_sqlite_db_bytes {db_bytes}\n"));
     s.push_str("# HELP agentgrid_sqlite_wal_bytes WAL file size in bytes.\n");
     s.push_str("# TYPE agentgrid_sqlite_wal_bytes gauge\n");
-    let wal_bytes = std::fs::metadata(format!("{}-wal", state.db_path))
-        .map(|m| m.len())
-        .unwrap_or(0);
     s.push_str(&format!("agentgrid_sqlite_wal_bytes {wal_bytes}\n"));
 
     s.push_str(
@@ -366,7 +370,13 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     ));
     s.push_str("# HELP agentgrid_validation_outcomes_total Validation outcomes.\n");
     s.push_str("# TYPE agentgrid_validation_outcomes_total counter\n");
-    for (k, v) in state.store.validation_outcomes.lock().unwrap().iter() {
+    for (k, v) in state
+        .store
+        .validation_outcomes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+    {
         s.push_str(&format!(
             "agentgrid_validation_outcomes_total{{outcome=\"{k}\"}} {v}\n"
         ));
@@ -375,7 +385,13 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         "# HELP agentgrid_attempts_by_security_profile_total Attempts by security profile.\n",
     );
     s.push_str("# TYPE agentgrid_attempts_by_security_profile_total counter\n");
-    for (k, v) in state.store.security_profile_attempts.lock().unwrap().iter() {
+    for (k, v) in state
+        .store
+        .security_profile_attempts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+    {
         s.push_str(&format!(
             "agentgrid_attempts_by_security_profile_total{{profile=\"{k}\"}} {v}\n"
         ));

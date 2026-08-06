@@ -373,10 +373,16 @@ pub async fn auth_logout(
 pub async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
     let dir = std::path::Path::new(&state.db_path)
         .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
     let probe = dir.join(".agentgrid-health-probe");
-    let writable = std::fs::write(&probe, b"ok").is_ok();
-    let _ = std::fs::remove_file(&probe);
+    let writable = tokio::task::spawn_blocking(move || {
+        let ok = std::fs::write(&probe, b"ok").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        ok
+    })
+    .await
+    .unwrap_or(false);
     if state.store.health_check().await && writable {
         StatusCode::OK
     } else {

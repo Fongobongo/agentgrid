@@ -112,7 +112,10 @@ impl Store {
         .bind(&now)
         .execute(&self.pool)
         .await?;
-        Ok(self.get_mcp_server(&body.id).await?.unwrap())
+        Ok(self
+            .get_mcp_server(&body.id)
+            .await?
+            .expect("just-inserted mcp server should be readable"))
     }
 
     pub async fn get_mcp_server(&self, id: &str) -> Result<Option<McpServer>> {

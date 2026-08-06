@@ -166,7 +166,7 @@ impl Store {
             *self
                 .validation_outcomes
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .entry(outcome)
                 .or_insert(0) += 1;
         }
@@ -178,7 +178,7 @@ impl Store {
             *self
                 .security_profile_attempts
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .entry(sp.to_string())
                 .or_insert(0) += 1;
         }
