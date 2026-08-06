@@ -12,7 +12,7 @@ use axum::{
 };
 
 use crate::auth::{fencing_token_header, AuthedNode};
-use crate::services::{ArtifactError, ArtifactService, UploadArtifact};
+use crate::services::{ArtifactService, UploadArtifact};
 use crate::AppState;
 
 pub async fn get_artifact(
@@ -83,14 +83,7 @@ pub async fn upload_artifact(
     .await
     {
         Ok(resp) => Json(resp).into_response(),
-        Err(ArtifactError::BadName) => StatusCode::BAD_REQUEST.into_response(),
-        Err(ArtifactError::NotFound) => StatusCode::NOT_FOUND.into_response(),
-        Err(ArtifactError::Forbidden) => StatusCode::FORBIDDEN.into_response(),
-        Err(ArtifactError::StaleFence) => StatusCode::CONFLICT.into_response(),
-        Err(ArtifactError::TooLarge) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-        Err(ArtifactError::InsufficientStorage) => StatusCode::INSUFFICIENT_STORAGE.into_response(),
-        Err(ArtifactError::HashMismatch) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
-        Err(ArtifactError::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => StatusCode::from(e).into_response(),
     }
 }
 
@@ -138,14 +131,7 @@ pub async fn upload_artifact_raw(
     .await
     {
         Ok(resp) => Json(resp).into_response(),
-        Err(ArtifactError::BadName) => StatusCode::BAD_REQUEST.into_response(),
-        Err(ArtifactError::NotFound) => StatusCode::NOT_FOUND.into_response(),
-        Err(ArtifactError::Forbidden) => StatusCode::FORBIDDEN.into_response(),
-        Err(ArtifactError::StaleFence) => StatusCode::CONFLICT.into_response(),
-        Err(ArtifactError::TooLarge) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-        Err(ArtifactError::InsufficientStorage) => StatusCode::INSUFFICIENT_STORAGE.into_response(),
-        Err(ArtifactError::HashMismatch) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
-        Err(ArtifactError::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => StatusCode::from(e).into_response(),
     }
 }
 

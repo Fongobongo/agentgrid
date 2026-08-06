@@ -298,18 +298,6 @@ impl Store {
         Ok(res.rows_affected())
     }
 
-    /// Delete artifact metadata older than `retention_hours`, recording failures.
-    pub async fn cleanup_artifacts_recorded(&self, retention_hours: i64) -> Result<u64> {
-        match self.cleanup_artifacts(retention_hours).await {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                self.artifact_cleanup_failures
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Err(e)
-            }
-        }
-    }
-
     /// Hardening P1 item 15: scan the artifact root for drift between the
     /// metadata table and the on-disk tree.
     ///

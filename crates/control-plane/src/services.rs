@@ -170,6 +170,24 @@ pub enum ArtifactError {
     Internal,
 }
 
+impl From<ArtifactError> for axum::http::StatusCode {
+    fn from(e: ArtifactError) -> Self {
+        match e {
+            ArtifactError::BadName => Self::BAD_REQUEST,
+            ArtifactError::NotFound => Self::NOT_FOUND,
+            ArtifactError::Forbidden => Self::FORBIDDEN,
+            ArtifactError::StaleFence => Self::CONFLICT,
+            ArtifactError::TooLarge => Self::PAYLOAD_TOO_LARGE,
+            ArtifactError::InsufficientStorage => Self::INSUFFICIENT_STORAGE,
+            ArtifactError::HashMismatch => Self::UNPROCESSABLE_ENTITY,
+            ArtifactError::Internal => {
+                tracing::error!("artifact operation failed");
+                Self::INTERNAL_SERVER_ERROR
+            }
+        }
+    }
+}
+
 impl ArtifactService {
     /// Store an artifact on behalf of a node, enforcing name safety, attempt
     /// ownership, fencing, size limit, and storage quota before the write.

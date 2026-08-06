@@ -55,45 +55,19 @@ async fn enroll_node(cfg: &Config) -> Result<SavedCredential> {
 
 /// After successful enrollment, scrub `AGENTGRID_ENROLL_TOKEN` from the
 /// operator-provisioned env file so a rebooting node reuses the persisted
-/// credential and the token can't be leaked off disk.
+/// credential and the token can't be leaked off disk. Atomic (temp+rename)
+/// so a crash mid-write never leaves a truncated env file; the temp gets
+/// 0600 so the token can't be read by other users between write and rename.
 pub async fn scrub_enroll_token_from_env(cfg: &Config) {
     let Some(path) = &cfg.env_file else {
         return;
     };
-    if !path.exists() {
-        return;
-    }
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let lines: Vec<&str> = content.lines().collect();
-    let mut changed = false;
-    let new_lines: Vec<String> = lines
-        .into_iter()
-        .map(|l| {
-            if l.trim_start().starts_with("AGENTGRID_ENROLL_TOKEN=") {
-                changed = true;
-                "# AGENTGRID_ENROLL_TOKEN=*** (scrubbed after enrollment)".to_string()
-            } else {
-                l.to_string()
-            }
-        })
-        .collect();
-    if changed {
-        let _ = std::fs::write(
-            path,
-            new_lines.join(
-                "
-",
-            ),
-        );
-    }
+    scrub_token_from_file(path).await;
 }
 
 /// Remove any `AGENTGRID_ENROLL_TOKEN=...` line from `path` in place (atomic
 /// temp+rename, perm 0600). No-op if the file is missing; logged failures are
 /// never fatal (the credential is already persisted).
-#[allow(dead_code)]
 pub async fn scrub_token_from_file(path: &std::path::Path) {
     let Ok(text) = tokio::fs::read_to_string(path).await else {
         return;

@@ -60,24 +60,6 @@ impl Store {
         Ok(())
     }
 
-    /// Fetch the active revision of a profile, or None if no profile / none active.
-    pub async fn get_active_profile(&self, id: &str) -> Result<Option<AgentProfile>> {
-        let row = sqlx::query(
-            "SELECT p.id, p.revision, p.system_prompt, p.autonomy, p.memory_max, \
-                    p.cpu_quota, p.tasks_max, p.created_at, p.created_by, \
-                    p.secret_requirements, p.adapter_version, p.mcp_server_ids,\
-                    (a.active_revision IS NOT NULL) AS active \
-             FROM agent_profiles p \
-             LEFT JOIN agent_profiles_active a ON a.id = p.id AND a.active_revision = p.revision \
-             WHERE p.id = ? \
-             ORDER BY p.revision DESC LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.as_ref().map(profile_from_row))
-    }
-
     /// List all revisions of a profile (newest first).
     pub async fn list_profile_revisions(&self, id: &str) -> Result<Vec<AgentProfile>> {
         let rows = sqlx::query(
