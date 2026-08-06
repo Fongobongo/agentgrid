@@ -1632,8 +1632,8 @@ mod tests {
         // embeds the secret, the secret split across a chunk boundary (fed in
         // one buffer here; boundary coverage lives in secret_redactor tests),
         // and a trailing partial line containing the secret (no newline).
-        let adapter_line = json!({"type": "log", "payload": {"text": format!("key={secret}")}})
-            .to_string();
+        let adapter_line =
+            json!({"type": "log", "payload": {"text": format!("key={secret}")}}).to_string();
         let input = format!("token={secret}\n{adapter_line}\nfinal line key={secret}");
         let reader = tokio::io::BufReader::new(std::io::Cursor::new(input.into_bytes()));
         read_stream(reader, sink.clone(), "stdout", vec![secret.clone()], raw).await;
