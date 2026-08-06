@@ -126,8 +126,7 @@ impl Store {
         .await?
         .rows_affected();
             if affected != 1 {
-                let _ = tx.rollback().await;
-                return Ok(None);
+                continue;
             }
             // Observability: queued→assigned latency (Stage 2.5 ops).
             if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&created_at) {
