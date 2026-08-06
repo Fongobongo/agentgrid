@@ -125,7 +125,7 @@ pub async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>
     // Check each path component for symlinks pointing outside root.
     let fs_path = web_root.join(rel);
     if let Ok(canon_file) = fs_path.canonicalize() {
-        if !canon_file.starts_with(web_root.canonicalize().unwrap_or_default()) {
+        if !canon_file.starts_with(&web_root) {
             return StatusCode::FORBIDDEN.into_response();
         }
     }
