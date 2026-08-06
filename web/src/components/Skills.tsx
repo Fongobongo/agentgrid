@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listSkills, setSkillTrust, SkillTrustView } from '../api';
+import { ConfirmModal } from './Modal';
 import { ErrorBox, Loading, fmtTime } from './util';
 
 // Stage 9.2 skill trust ledger: list recorded trust decisions and flip a
@@ -15,6 +16,7 @@ export default function Skills() {
   const [items, setItems] = useState<SkillTrustView[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<SkillTrustView | null>(null);
 
   const load = () => {
     listSkills()
@@ -33,7 +35,6 @@ export default function Skills() {
   const toggle = async (s: SkillTrustView) => {
     const next = !s.trusted;
     const verb = next ? 'Trust' : 'Untrust';
-    if (!confirm(`${verb} skill "${s.name}" (${s.source})?`)) return;
     setBusy(`${s.name}/${s.source}`);
     try {
       const r = await setSkillTrust(s.name, s.source, next);
@@ -85,7 +86,7 @@ export default function Skills() {
                   <button
                     className={s.trusted ? 'danger' : 'ok'}
                     disabled={busy === `${s.name}/${s.source}`}
-                    onClick={() => toggle(s)}
+                    onClick={() => setConfirming(s)}
                   >
                     {s.trusted ? 'Untrust' : 'Trust'}
                   </button>
@@ -94,6 +95,20 @@ export default function Skills() {
             ))}
           </tbody>
         </table>
+      )}
+      {confirming && (
+        <ConfirmModal
+          title={`${confirming.trusted ? 'Untrust' : 'Trust'} skill`}
+          body={`${confirming.trusted ? 'Untrust' : 'Trust'} skill "${confirming.name}" (${confirming.source})?`}
+          confirmLabel={confirming.trusted ? 'Untrust' : 'Trust'}
+          danger={confirming.trusted}
+          onConfirm={() => {
+            const s = confirming;
+            setConfirming(null);
+            toggle(s);
+          }}
+          onCancel={() => setConfirming(null)}
+        />
       )}
     </section>
   );

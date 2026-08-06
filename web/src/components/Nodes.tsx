@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { drainNode, listNodes, NodeView, revokeNode } from '../api';
+import { ConfirmModal } from './Modal';
 import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
 
 export default function Nodes() {
   const [nodes, setNodes] = useState<NodeView[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<NodeView | null>(null);
 
   const load = () => {
     listNodes()
@@ -19,7 +21,6 @@ export default function Nodes() {
   useEffect(load, []);
 
   const revoke = async (n: NodeView) => {
-    if (!confirm(`Revoke node "${n.name}"? It will be denied auth immediately.`)) return;
     setBusy(n.id);
     try {
       const r = await revokeNode(n.id);
@@ -114,7 +115,7 @@ export default function Nodes() {
                     <button
                       className="danger"
                       disabled={busy === n.id}
-                      onClick={() => revoke(n)}
+                      onClick={() => setConfirming(n)}
                     >
                       Revoke
                     </button>
@@ -125,6 +126,20 @@ export default function Nodes() {
           ))}
         </tbody>
       </table>
+      {confirming && (
+        <ConfirmModal
+          title="Revoke node"
+          body={`Revoke node "${confirming.name}"? It will be denied auth immediately.`}
+          confirmLabel="Revoke"
+          danger
+          onConfirm={() => {
+            const n = confirming;
+            setConfirming(null);
+            revoke(n);
+          }}
+          onCancel={() => setConfirming(null)}
+        />
+      )}
     </section>
   );
 }

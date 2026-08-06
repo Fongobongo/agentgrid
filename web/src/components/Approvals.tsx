@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { answerApproval, ApprovalView, listApprovals } from '../api';
+import { PromptModal } from './Modal';
 import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
 
 // Stage 9.2 operator approval UI: list pending approvals, allow/deny with a
@@ -13,6 +14,7 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
   const [items, setItems] = useState<ApprovalView[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pending, setPending] = useState<{ a: ApprovalView; decision: 'allow' | 'deny' } | null>(null);
 
   const load = () => {
     listApprovals(filter === 'all' ? undefined : filter)
@@ -29,15 +31,13 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
-  const answer = async (a: ApprovalView, decision: 'allow' | 'deny') => {
-    const prompt = decision === 'allow'
-      ? `Reason for allowing "${a.permission}" (optional):`
-      : `Reason for denying "${a.permission}":`;
-    const reason = window.prompt(prompt, decision === 'deny' ? 'denied by operator' : '');
-    if (decision === 'deny' && (reason === null || reason.trim() === '')) return;
+  const submit = async (reason: string) => {
+    if (!pending) return;
+    const { a, decision } = pending;
+    setPending(null);
     setBusy(a.id);
     try {
-      const r = await answerApproval(a.id, decision, reason?.trim() || undefined);
+      const r = await answerApproval(a.id, decision, reason.trim() || undefined);
       if (!r.ok) setError(new Error(`${decision} failed (${r.status})`));
       else load();
     } catch (e) {
@@ -87,8 +87,8 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
                 <td>
                   {a.status === 'pending' && (
                     <>
-                      <button className="ok" disabled={busy === a.id} onClick={() => answer(a, 'allow')}>Allow</button>{' '}
-                      <button className="danger" disabled={busy === a.id} onClick={() => answer(a, 'deny')}>Deny</button>
+                      <button className="ok" disabled={busy === a.id} onClick={() => setPending({ a, decision: 'allow' })}>Allow</button>{' '}
+                      <button className="danger" disabled={busy === a.id} onClick={() => setPending({ a, decision: 'deny' })}>Deny</button>
                     </>
                   )}
                 </td>
@@ -96,6 +96,21 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
             ))}
           </tbody>
         </table>
+      )}
+      {pending && (
+        <PromptModal
+          title={pending.decision === 'allow' ? 'Allow permission' : 'Deny permission'}
+          label={
+            pending.decision === 'allow'
+              ? `Reason for allowing "${pending.a.permission}" (optional)`
+              : `Reason for denying "${pending.a.permission}"`
+          }
+          initialValue={pending.decision === 'deny' ? 'denied by operator' : ''}
+          submitLabel={pending.decision === 'allow' ? 'Allow' : 'Deny'}
+          required={pending.decision === 'deny'}
+          onSubmit={submit}
+          onCancel={() => setPending(null)}
+        />
       )}
     </section>
   );

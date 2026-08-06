@@ -303,3 +303,34 @@ button.link, a.link {
 .wf-wf-bar.run { background: var(--accent); }
 .wf-wf-bar.idle { background: var(--muted); }
 .wf-wf-stub { display: inline-block; padding: 0 6px; font-size: 11px; line-height: 18px; color: var(--muted); }
+
+/* Plan 3.1: in-app modals (replace native prompt/confirm). */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  width: 420px;
+  max-width: calc(100vw - 40px);
+}
+.modal h3 { margin: 0 0 10px; }
+.modal-body { margin-bottom: 14px; }
+.modal-body label { display: flex; flex-direction: column; gap: 4px; }
+.modal-body input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 8px;
+  border-radius: 6px;
+}
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--border); }
