@@ -989,6 +989,37 @@ mod workflow_tests {
         assert!(again.is_empty());
     }
 
+    /// Plan 0.2 item 2.2: the background ticker and the complete_attempt
+    // path can tick the same run concurrently. 20 simultaneous ticks must
+    // still spawn exactly one task for the ready step (CAS, no duplicates).
+    #[tokio::test]
+    async fn concurrent_ticks_do_not_duplicate_step_tasks() {
+        let s = temp_store().await;
+        let tpl = s
+            .create_workflow_template("conc", &[step("a", &[], WorkflowRole::Worker)], &None)
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let st = s.clone();
+            let id = run.id.clone();
+            handles.push(tokio::spawn(async move { st.tick_workflow_run(&id).await }));
+        }
+        let mut spawned = 0usize;
+        for h in handles {
+            spawned += h.await.unwrap().unwrap().len();
+        }
+        assert_eq!(spawned, 1, "exactly one concurrent tick may spawn the step");
+        let steps = s.get_workflow_run_steps(&run.id).await.unwrap();
+        assert_eq!(steps.len(), 1);
+        let task = s.step_task_id(&steps[0].id).await.unwrap();
+        assert!(task.is_some(), "step bound to exactly one task");
+    }
+
     #[tokio::test]
     async fn restart_does_not_duplicate_in_flight_workflow_step_tasks() {
         // line 487: a workflow run idempotently survives a "CP restart" — no
