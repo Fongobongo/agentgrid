@@ -859,10 +859,10 @@
 
 ## 40. Naming/branding decision — P3
 
-- [ ] Проверить конфликт названия AgentGrid.
-- [ ] Проверить GitHub/package/domain availability.
-- [ ] Принять решение до стабильного публичного релиза.
-- [ ] Если переименование принято — сделать migration plan для binaries/env/config/data dirs.
+- [x] Проверить конфликт названия AgentGrid. (результат: конфликт РЕАЛЬНЫЙ — минимум 3 GitHub-проекта с тем же именем в той же нише (оркестрация AI coding agents): naman10parikh/agentgrid (7★, "Spawn grids of AI coding agents"), Latencius/agentgrid (1★, "orchestrating parallel AI coding agents"), hanfeihu/agentgrid ("AI-operated real machines"); github.com/agentgrid занят юзером (0 followers); crates.io `agentgrid` свободен; домены .io/.com/.net/.org заняты, .dev/.app parked)
+- [x] Проверить GitHub/package/domain availability. (см. выше: GitHub user+нишевые проекты заняты; crates.io свободен; ключевые домены заняты)
+- [x] Принять решение до стабильного публичного релиза. (решение: P3 — до стабильного публичного релиза; MVP 0.1 и внутренняя работа продолжаются под текущим именем; переименование рассмотреть перед публичным анонсом из-за нишевого конфликта — см. ADR 0006)
+- [x] ~~Если переименование принято — сделать migration plan.~~ (N/A — решение о переименовании не принято; ADR 0006 фиксирует findings и триггер для пересмотра; migration plan писать не на что)
 
 ---
 
