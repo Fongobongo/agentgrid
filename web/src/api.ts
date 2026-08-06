@@ -161,16 +161,27 @@ export function getTask(id: string) {
   return getJson<TaskView>(`/v1/tasks/${id}`);
 }
 
-export function listTasks() {
-  return getJson<TaskView[]>('/v1/tasks');
+interface ListResponse<T> { items: T[]; next_cursor?: string | null }
+
+async function listGet<T>(path: string): Promise<T[]> {
+  const raw = await getJson<unknown>(path);
+  if (Array.isArray(raw)) return raw as T[];
+  if (raw && typeof raw === 'object' && Array.isArray((raw as ListResponse<T>).items)) {
+    return (raw as ListResponse<T>).items;
+  }
+  return [];
 }
 
-export function listNodes() {
-  return getJson<NodeView[]>('/v1/nodes');
+export function listTasks(): Promise<TaskView[]> {
+  return listGet<TaskView>('/v1/tasks');
 }
 
-export function listRepos() {
-  return getJson<RepositoryView[]>('/v1/repositories');
+export function listNodes(): Promise<NodeView[]> {
+  return listGet<NodeView>('/v1/nodes');
+}
+
+export function listRepos(): Promise<RepositoryView[]> {
+  return listGet<RepositoryView>('/v1/repositories');
 }
 
 export function getEligibility(id: string) {
@@ -256,8 +267,8 @@ export interface WorkflowProjection {
   budget?: BudgetSnapshot | null;
 }
 
-export function listWorkflowRuns() {
-  return getJson<WorkflowRun[]>('/v1/workflow-runs');
+export function listWorkflowRuns(): Promise<WorkflowRun[]> {
+  return listGet<WorkflowRun>('/v1/workflow-runs');
 }
 
 export function getWorkflowProjection(id: string) {
@@ -280,16 +291,16 @@ export function retryTask(id: string) {
   return req('POST', `/v1/tasks/${id}/retry`, {});
 }
 
-export function listApprovals(status?: string) {
-  return getJson<ApprovalView[]>(status ? `/v1/approvals?status=${encodeURIComponent(status)}` : '/v1/approvals');
+export function listApprovals(status?: string): Promise<ApprovalView[]> {
+  return listGet<ApprovalView>(status ? `/v1/approvals?status=${encodeURIComponent(status)}` : '/v1/approvals');
 }
 
 export function answerApproval(id: string, decision: 'allow' | 'deny', reason?: string) {
   return req('POST', `/v1/approvals/${id}/${decision}`, reason ? { reason } : {});
 }
 
-export function listSkills(source?: string) {
-  return getJson<SkillTrustView[]>(source ? `/v1/skills?source=${encodeURIComponent(source)}` : '/v1/skills');
+export function listSkills(source?: string): Promise<SkillTrustView[]> {
+  return listGet<SkillTrustView>(source ? `/v1/skills?source=${encodeURIComponent(source)}` : '/v1/skills');
 }
 
 export function setSkillTrust(name: string, source: string, trusted: boolean) {
