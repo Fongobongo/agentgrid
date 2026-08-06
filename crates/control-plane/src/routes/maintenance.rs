@@ -443,47 +443,40 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
             "agentgrid_node_repo_lock_wait_ms{{node=\"{}\"}} {}\n",
             n.name, n.repo_lock_wait_ms
         ));
-        s.push_str("# HELP agentgrid_node_sandbox_backend Sandbox backend kind per node.\n");
-        s.push_str("# TYPE agentgrid_node_sandbox_backend gauge\n");
-        for n in &nodes {
-            s.push_str(&format!(
-                "agentgrid_node_sandbox_backend{{node=\"{}\",backend=\"{}\"}} 1\n",
-                n.name, n.sandbox_backend
-            ));
-        }
-        s.push_str(
-            "# HELP agentgrid_node_enforced_limits Whether sandbox enforces resource limits.\n",
-        );
-        s.push_str("# TYPE agentgrid_node_enforced_limits gauge\n");
-        for n in &nodes {
-            s.push_str(&format!(
-                "agentgrid_node_enforced_limits{{node=\"{}\"}} {}\n",
-                n.name,
-                if n.enforced_limits { 1 } else { 0 }
-            ));
-        }
-        // Hardening P2 item 659: node network mode
-        s.push_str(
-            "# HELP agentgrid_node_network_mode Network mode per node.
-",
-        );
-        s.push_str(
-            "# TYPE agentgrid_node_network_mode gauge
-",
-        );
-        for n in &nodes {
-            let mode = match n.network_mode.as_str() {
-                "none" => 0,
-                "restricted" => 1,
-                "unrestricted" => 2,
-                _ => 0,
-            };
-            let labels = format!("node=\"{}\",mode=\"{}\"", n.name, n.network_mode);
-            s.push_str(&format!(
-                "agentgrid_node_network_mode{{{}}} {}",
-                labels, mode
-            ));
-        }
+    }
+    s.push_str("# HELP agentgrid_node_sandbox_backend Sandbox backend kind per node.\n");
+    s.push_str("# TYPE agentgrid_node_sandbox_backend gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_sandbox_backend{{node=\"{}\",backend=\"{}\"}} 1\n",
+            n.name, n.sandbox_backend
+        ));
+    }
+    s.push_str(
+        "# HELP agentgrid_node_enforced_limits Whether sandbox enforces resource limits.\n",
+    );
+    s.push_str("# TYPE agentgrid_node_enforced_limits gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_enforced_limits{{node=\"{}\"}} {}\n",
+            n.name,
+            if n.enforced_limits { 1 } else { 0 }
+        ));
+    }
+    s.push_str("# HELP agentgrid_node_network_mode Network mode per node.\n");
+    s.push_str("# TYPE agentgrid_node_network_mode gauge\n");
+    for n in &nodes {
+        let mode = match n.network_mode.as_str() {
+            "none" => 0,
+            "restricted" => 1,
+            "unrestricted" => 2,
+            _ => 0,
+        };
+        let labels = format!("node=\"{}\",mode=\"{}\"", n.name, n.network_mode);
+        s.push_str(&format!(
+            "agentgrid_node_network_mode{{{}}} {}\n",
+            labels, mode
+        ));
     }
 
     (
