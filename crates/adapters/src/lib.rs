@@ -86,6 +86,16 @@ pub fn unsafe_unattended_from_env() -> bool {
         .unwrap_or(false)
 }
 
+/// Operator acknowledgement that unsafe unattended mode runs without a
+/// sandbox and with permissions bypassed. Unsafe mode requested via
+/// `AGENTGRID_UNSAFE_UNATTENDED` must be paired with this flag or the
+/// node daemon refuses to start (fail-closed).
+pub fn unsafe_ack_from_env() -> bool {
+    std::env::var("AGENTGRID_I_UNDERSTAND_UNSAFE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Build the base argv launched against the Claude Code CLI, gated on
 /// [`unsafe_unattended_from_env`]. `--dangerously-skip-permissions` is added
 /// only when unsafe unattended mode is on; by default the adapter never adds

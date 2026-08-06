@@ -462,6 +462,22 @@ async fn main() -> Result<()> {
         anyhow::bail!("refusing to run as root; set AGENTGRID_ALLOW_ROOT=1 to override");
     }
 
+    // Fail-closed gate on unsafe unattended mode: it disables the sandbox and
+    // bypasses permission interception, so it must be explicitly acknowledged
+    // or the daemon refuses to start.
+    if agentgrid_adapters::unsafe_unattended_from_env() {
+        if !agentgrid_adapters::unsafe_ack_from_env() {
+            anyhow::bail!(
+                "AGENTGRID_UNSAFE_UNATTENDED is set but AGENTGRID_I_UNDERSTAND_UNSAFE=1 is missing; \
+                 unsafe mode runs without a sandbox and bypasses permissions — refusing to start"
+            );
+        }
+        tracing::warn!(
+            "UNSAFE UNATTENDED MODE ACTIVE: no sandbox, permissions bypassed; \
+             this node is flagged in the control plane"
+        );
+    }
+
     let mut cfg = config_from_env();
     for a in &cfg.adapters {
         let probe = if a.id == "zeroshot" {
@@ -834,10 +850,21 @@ mod tests {
     async fn validation_timeout_kills_forked_child_tree() {
         let dir = std::env::temp_dir().join(format!("ag-valto-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
+        // The sleepers run through a uniquely-named wrapper script so the
+        // leak check can pgrep for the test's own uuid instead of matching
+        // every unrelated `sleep` on the machine.
+        let marker = uuid::Uuid::new_v4().to_string();
+        let sleeper = dir.join(format!("sleeper-{marker}.sh"));
+        std::fs::write(&sleeper, "#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(
+            &sleeper,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
         // Shell that starts a background sleeper and then sleeps itself: the
         // sleeper is in the same process group, so terminate_group(pid) must
         // reap it too.
-        let run_cmd = "sleep 60 & sleep 60";
+        let run_cmd = format!("{s} & {s}", s = sleeper.display());
         let sink = EventSink::new(
             "a-valto".into(),
             reqwest::Client::new(),
@@ -847,7 +874,7 @@ mod tests {
         );
         let out = run_validation(
             &dir,
-            run_cmd,
+            &run_cmd,
             std::time::Duration::from_millis(300),
             "http://x/v1/node/attempts/a-valto/cancel".into(),
             reqwest::Client::new(),
@@ -861,9 +888,9 @@ mod tests {
         .unwrap();
         assert!(out.timed_out, "short timeout must fire: {out:?}");
         // Give terminate_group's SIGKILL escalation a moment, then assert no
-        // `sleep` processes from this group survive.
+        // sleeper from THIS test survives (matched by the unique marker).
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        let leaked = run_pgrep("sleep");
+        let leaked = run_pgrep(&marker);
         assert_eq!(
             leaked, 0,
             "validation timeout must reap the whole tree; {leaked} sleeper(s) leaked"
