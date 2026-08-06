@@ -8,16 +8,21 @@ export function statusClass(status: string): string {
   switch (status) {
     case 'succeeded':
     case 'online':
+    case 'allowed':
       return 'ok';
     case 'failed':
     case 'offline':
     case 'lost':
     case 'revoked':
+    case 'denied':
+    case 'expired':
       return 'bad';
     case 'running':
     case 'validating':
     case 'assigned':
     case 'degraded':
+    case 'blocked':
+    case 'plan_ready':
       return 'warn';
     case 'queued':
     case 'pending':

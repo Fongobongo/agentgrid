@@ -8,7 +8,12 @@ export default function Nodes() {
   const [busy, setBusy] = useState<string | null>(null);
 
   const load = () => {
-    listNodes().then(setNodes).catch(setError);
+    listNodes()
+      .then((n) => {
+        setError(null);
+        setNodes(n);
+      })
+      .catch(setError);
   };
 
   useEffect(load, []);
@@ -41,12 +46,15 @@ export default function Nodes() {
     }
   };
 
-  if (error) return <ErrorBox err={error} />;
-  if (!nodes) return <Loading />;
+  if (!nodes) {
+    if (error) return <ErrorBox err={error} />;
+    return <Loading />;
+  }
 
   return (
     <section>
       <h2>Nodes</h2>
+      {error ? <ErrorBox err={error} /> : null}
       <table className="grid">
         <thead>
           <tr>

@@ -9,12 +9,6 @@ export function isAuthed(): boolean { return authed; }
 export function markAuthed() { authed = true; }
 export function markUnauthed() { authed = false; }
 
-// Backwards-compatible names retained from the old localStorage API (callers use
-// markAuthed/markUnauthed now); kept as no-ops so imports don't break.
-export function getToken(): string | null { return null; }
-export function setToken(_t: string) { markAuthed(); }
-export function clearToken() { markUnauthed(); }
-
 export interface TaskView {
   id: string;
   repository: string;
@@ -356,6 +350,12 @@ export function streamTask(
         `/v1/tasks/${taskId}/events/stream?after_ingest=${lastIngest}`,
         { credentials: 'include' },
       );
+      if (r.status === 401) {
+        // Cookie expired: same handling as req() — back to login, no retry loop.
+        markUnauthed();
+        if (typeof window !== 'undefined') window.location.reload();
+        return;
+      }
       if (!r.ok || !r.body) throw new ApiError(r.status, `stream -> ${r.status}`);
       backoff = 500;
       const reader = r.body.getReader();

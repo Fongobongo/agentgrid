@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ApiError, clearToken, getToken, isAuthed, logout as apiLogout, markAuthed, setToken } from './api';
+import { ApiError, isAuthed, logout as apiLogout, markAuthed } from './api';
 import Login from './components/Login';
 import Dashboard from './components/Dashboard';
 import Nodes from './components/Nodes';
@@ -23,7 +23,6 @@ function parseHash(): { name: string; id?: string } {
 }
 
 export default function App() {
-  const [token, setTokenState] = useState<string | null>(getToken());
   const [authed, setAuthed] = useState(isAuthed());
   const [route, setRoute] = useState(parseHash());
 
@@ -35,20 +34,16 @@ export default function App() {
 
   const logout = async () => {
     await apiLogout();
-    clearToken();
-    setTokenState(null);
     setAuthed(false);
   };
 
-  const onAuthed = (t: string) => {
-    setToken(t);
-    setTokenState(t);
+  const onAuthed = () => {
     markAuthed();
     setAuthed(true);
     window.location.hash = '#/';
   };
 
-  if (!token || !authed) return <Login onAuthed={onAuthed} />;
+  if (!authed) return <Login onAuthed={onAuthed} />;
 
   const nav = (to: string) => () => {
     window.location.hash = to;
@@ -87,5 +82,3 @@ export default function App() {
     </div>
   );
 }
-
-export { ApiError };

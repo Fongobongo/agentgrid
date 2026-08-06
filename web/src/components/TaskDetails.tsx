@@ -42,24 +42,37 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
     getEligibility(taskId).then(setElig).catch(() => {});
   }, [taskId]);
 
-  // Initial history, then live stream with automatic reconnect/resume.
+  // Initial history, then live stream with automatic reconnect/resume. The
+  // stream opens only after the history resolves, seeded with the history's
+  // max ingest_id — starting both from 0 double-delivered every event.
   useEffect(() => {
     setEvents([]);
+    let cancelled = false;
+    let handle: { close: () => void } | null = null;
     getTaskEvents(taskId, 0)
       .then((hist) => {
+        if (cancelled) return;
         setEvents(hist);
+        const after = hist.reduce((m, e) => Math.max(m, e.ingest_id || 0), 0);
+        handle = streamTask(taskId, {
+          after,
+          onEvent: (e) => {
+            setEvents((prev) => {
+              if (e.ingest_id && prev.some((p) => p.ingest_id === e.ingest_id)) {
+                return prev;
+              }
+              const next = prev.length > 5000 ? prev.slice(prev.length - 4000) : prev.slice();
+              next.push(e);
+              return next;
+            });
+          },
+        });
       })
       .catch(setError);
-    const handle = streamTask(taskId, {
-      onEvent: (e) => {
-        setEvents((prev) => {
-          const next = prev.length > 5000 ? prev.slice(prev.length - 4000) : prev.slice();
-          next.push(e);
-          return next;
-        });
-      },
-    });
-    return () => handle.close();
+    return () => {
+      cancelled = true;
+      handle?.close();
+    };
   }, [taskId]);
 
   // Fetch artifacts once the task is terminal.

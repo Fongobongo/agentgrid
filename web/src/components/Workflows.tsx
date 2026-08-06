@@ -154,7 +154,10 @@ export function WorkflowsList({ onOpen }: { onOpen: (id: string) => void }) {
 
   const load = () => {
     listWorkflowRuns()
-      .then(setRuns)
+      .then((r) => {
+        setErr(null);
+        setRuns(r);
+      })
       .catch((e) => setErr(e instanceof ApiError ? `load failed (${e.status})` : String(e)));
   };
 
@@ -164,13 +167,14 @@ export function WorkflowsList({ onOpen }: { onOpen: (id: string) => void }) {
     return () => clearInterval(t);
   }, []);
 
-  if (err) return <div className="error">{err}</div>;
+  if (err && !runs) return <div className="error">{err}</div>;
   if (!runs) return <div className="loading">loading…</div>;
   if (runs.length === 0) return <div className="empty">no workflow runs</div>;
 
   return (
     <div className="runs">
       <h2>Workflow Runs</h2>
+      {err && <div className="error">{err}</div>}
       <table className="runs-table">
         <thead>
           <tr>
@@ -211,12 +215,16 @@ export function WorkflowDetails({ runId }: { runId: string }) {
       .catch((e) => setErr(e instanceof ApiError ? `load failed (${e.status})` : String(e)));
   };
 
+  const terminal = ['succeeded', 'failed', 'cancelled', 'blocked'].includes(
+    (proj?.run.status ?? '').toLowerCase(),
+  );
+
   useEffect(() => {
     load();
-    const terminal = proj?.run.status.toLowerCase();
-    const t = setInterval(load, terminal === 'succeeded' || terminal === 'failed' || terminal === 'cancelled' || terminal === 'blocked' ? 10_000 : 2000);
+    const t = setInterval(load, terminal ? 10_000 : 2000);
     return () => clearInterval(t);
-  }, [runId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, terminal]);
 
   const cancel = () => {
     cancelWorkflowRun(runId).then(load).catch((e) => setErr(String(e)));
@@ -241,13 +249,13 @@ export function WorkflowDetails({ runId }: { runId: string }) {
           {run.status.toLowerCase() === 'plan_ready' && (
             <button className="navbtn" onClick={approve}>Approve plan</button>
           )}
-          {!(run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled' || run.status === 'blocked' || run.status === 'plan_ready') && (
+          {!(terminal || run.status === 'plan_ready') && (
             <button className="navbtn danger" onClick={cancel}>Cancel</button>
           )}
         </div>
         {err && <div className="error">{err}</div>}
       </div>
-      {(proj.budget || run.status.toLowerCase()==="blocked") && proj.budget && <BudgetBlock snap={proj.budget} />}
+      {proj.budget && <BudgetBlock snap={proj.budget} />}
       <div className="wf-view-toggle">
         <button className={view === 'dag' ? 'navbtn active' : 'navbtn'} onClick={() => setView('dag')}>DAG</button>
         <button className={view === 'waterfall' ? 'navbtn active' : 'navbtn'} onClick={() => setView('waterfall')}>Timeline</button>

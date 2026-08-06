@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ApiError, listNodes, listTasks, NodeView, TaskView } from '../api';
+import { listNodes, listTasks, NodeView, TaskView } from '../api';
 import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
 
 export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
@@ -10,6 +10,7 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
   const load = () => {
     Promise.all([listTasks(), listNodes()])
       .then(([t, n]) => {
+        setError(null);
         setTasks(t);
         setNodes(n);
       })
@@ -18,8 +19,10 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
 
   useEffect(load, []);
 
-  if (error) return <ErrorBox err={error} />;
-  if (!tasks || !nodes) return <Loading />;
+  if (!tasks || !nodes) {
+    if (error) return <ErrorBox err={error} />;
+    return <Loading />;
+  }
 
   const nodeByStatus: Record<string, number> = {};
   for (const n of nodes) nodeByStatus[n.status] = (nodeByStatus[n.status] ?? 0) + 1;
@@ -40,6 +43,7 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
 
   return (
     <div className="dashboard">
+      {error && <ErrorBox err={error} />}
       <div className="cards">
         {cards.map((c) => (
           <div className="card" key={c.label}>
@@ -76,5 +80,3 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
     </div>
   );
 }
-
-export { ApiError };

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { answerApproval, ApprovalView, listApprovals } from '../api';
-import { ApiError } from '../api';
 import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
 
 // Stage 9.2 operator approval UI: list pending approvals, allow/deny with a
@@ -17,7 +16,10 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
 
   const load = () => {
     listApprovals(filter === 'all' ? undefined : filter)
-      .then(setItems)
+      .then((items) => {
+        setError(null);
+        setItems(items);
+      })
       .catch(setError);
   };
   useEffect(() => {
@@ -45,12 +47,15 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
     }
   };
 
-  if (error) return <ErrorBox err={error} />;
-  if (!items) return <Loading />;
+  if (!items) {
+    if (error) return <ErrorBox err={error} />;
+    return <Loading />;
+  }
 
   return (
     <section>
       <h2>Approvals{filter !== 'all' && ` — ${filter}`}</h2>
+      {error ? <ErrorBox err={error} /> : null}
       {items.length === 0 ? (
         <div className="muted">No {filter} approvals.</div>
       ) : (

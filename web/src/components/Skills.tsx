@@ -17,7 +17,12 @@ export default function Skills() {
   const [busy, setBusy] = useState<string | null>(null);
 
   const load = () => {
-    listSkills().then(setItems).catch(setError);
+    listSkills()
+      .then((items) => {
+        setError(null);
+        setItems(items);
+      })
+      .catch(setError);
   };
   useEffect(() => {
     load();
@@ -41,12 +46,15 @@ export default function Skills() {
     }
   };
 
-  if (error) return <ErrorBox err={error} />;
-  if (!items) return <Loading />;
+  if (!items) {
+    if (error) return <ErrorBox err={error} />;
+    return <Loading />;
+  }
 
   return (
     <section>
       <h2>Skills — trust</h2>
+      {error ? <ErrorBox err={error} /> : null}
       <div className="muted">
         A skill not listed here is <b>untrusted</b> by default (fail-closed):
         the agent may not load or execute it until you trust it.
