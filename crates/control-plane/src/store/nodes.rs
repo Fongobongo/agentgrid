@@ -34,7 +34,7 @@ impl Store {
 
     /// Exchange a valid (unused, unexpired) token for a permanent node credential.
     pub async fn enroll_node(&self, req: &EnrollRequest) -> Result<Option<EnrollResponse>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = begin_immediate(&self.pool).await?;
         let hash = sha256_hex(&req.token);
         let tok = sqlx::query(
             "SELECT id, expires_at, used_at FROM enrollment_tokens WHERE token_hash = ?",

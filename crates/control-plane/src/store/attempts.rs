@@ -20,7 +20,7 @@ impl Store {
         attempt_id: &str,
         req: &CompleteAttemptRequest,
     ) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = begin_immediate(&self.pool).await?;
         let attempt = sqlx::query(
             "SELECT task_id, node_id, status, cancel_requested, validated_at FROM attempts WHERE id = ?",
         )
@@ -430,7 +430,7 @@ impl Store {
     }
 
     pub async fn cancel_task(&self, task_id: &str) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = begin_immediate(&self.pool).await?;
         let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
             .bind(task_id)
             .fetch_optional(&mut *tx)
@@ -477,7 +477,7 @@ impl Store {
     }
 
     pub async fn cancel_workflow_run(&self, run_id: &str) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = begin_immediate(&self.pool).await?;
         let run = sqlx::query("SELECT status FROM workflow_runs WHERE id = ?")
             .bind(run_id)
             .fetch_optional(&mut *tx)
@@ -551,7 +551,7 @@ impl Store {
     }
 
     pub async fn retry_task(&self, task_id: &str) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = begin_immediate(&self.pool).await?;
         let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
             .bind(task_id)
             .fetch_optional(&mut *tx)

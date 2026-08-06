@@ -2,8 +2,8 @@
 //! (Stage 6 / 8 / 14). Extracted from `store.rs`.
 
 use super::{
-    from_snake, iso_to_unix, now_iso, parse_autonomy_level, role_str, role_str_status,
-    schedule_from_row, unix_to_iso, workflow_budget_from_col,
+    begin_immediate, from_snake, iso_to_unix, now_iso, parse_autonomy_level, role_str,
+    role_str_status, schedule_from_row, unix_to_iso, workflow_budget_from_col,
 };
 use crate::Store;
 use agentgrid_common::{
@@ -119,7 +119,7 @@ impl Store {
             .ok_or_else(|| anyhow::anyhow!("unknown workflow template {template_id}"))?;
         let run_id = format!("wfr-{}", Uuid::new_v4());
         let created_at = now_iso();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = begin_immediate(&self.pool).await?;
         sqlx::query(
             "INSERT INTO workflow_runs (id, template_id, status, context, repository, base_commit, created_at, finished_at) \
              VALUES (?, ?, 'pending', ?, ?, ?, ?, NULL)",
@@ -919,7 +919,7 @@ impl Store {
             .ok_or_else(|| anyhow::anyhow!("no plan to approve for run {run_id}"))?;
         let steps = agentgrid_common::parse_plan_steps(&plan).map_err(anyhow::Error::msg)?;
         let now = now_iso();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = begin_immediate(&self.pool).await?;
         for step in &steps {
             let step_run_id = format!("wfs-{}", Uuid::new_v4());
             let depends_json = serde_json::to_string(&step.depends_on)?;
@@ -973,7 +973,7 @@ impl Store {
     ) -> Result<()> {
         let id = format!("wfm-{}", Uuid::new_v4());
         let now = now_iso();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = begin_immediate(&self.pool).await?;
         // Increment the per-run sequence atomically under the txn.
         sqlx::query(
             "UPDATE workflow_runs SET message_sequence = message_sequence + 1 WHERE id = ?",
