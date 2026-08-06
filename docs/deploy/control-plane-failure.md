@@ -66,3 +66,20 @@ task) completes in under 5 minutes.
 - Run two CPs against the same DB or on NFS/shared storage.
 - Copy a live DB file while writes are in flight without `VACUUM INTO`
   (you get a torn copy); use the backup endpoint or stop the CP first.
+
+## Graceful node drain (maintenance)
+
+To take a node out of rotation without killing in-flight work:
+
+1. `POST /v1/nodes/{id}/drain` with `{"drain": true}` (CLI: `ag node drain`).
+   The scheduler stops assigning new attempts to the node; in-flight attempts
+   run to completion and the heartbeat keeps the node `online`.
+2. Watch `GET /v1/nodes/{id}` / the attempts list until the node has no
+   `assigned|running|validating` attempts.
+3. Stop the daemon, do the maintenance.
+4. `POST /v1/nodes/{id}/drain` with `{"drain": false}` to accept work again;
+   queued tasks are assigned on the next scheduler pass.
+
+Verified end-to-end by `tests/e2e/run-drain.sh` (in-flight task finishes under
+drain, new tasks stay queued, undrain resumes assignment).
+

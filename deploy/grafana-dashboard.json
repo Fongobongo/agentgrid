@@ -1,0 +1,208 @@
+{
+  "title": "agentgrid overview",
+  "uid": "agentgrid-overview",
+  "tags": ["agentgrid"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "ds",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Tasks by status",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "agentgrid_tasks",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Nodes by status",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "agentgrid_nodes",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Attempts total",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "agentgrid_attempts_total",
+          "legendFormat": "attempts"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Scheduler latency (queued→assigned, ms)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "agentgrid_scheduler_latency_ms",
+          "legendFormat": "latency"
+        },
+        {
+          "expr": "rate(agentgrid_scheduler_assignments_total[5m])",
+          "legendFormat": "assignments/s"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "SQLite health",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "rate(agentgrid_sqlite_busy_total[5m])",
+          "legendFormat": "busy/s"
+        },
+        {
+          "expr": "agentgrid_sqlite_checkpoint_ms",
+          "legendFormat": "checkpoint ms"
+        },
+        {
+          "expr": "agentgrid_sqlite_db_bytes / 1048576",
+          "legendFormat": "db MB"
+        },
+        {
+          "expr": "agentgrid_sqlite_wal_bytes / 1048576",
+          "legendFormat": "wal MB"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Backups (age + errors)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      },
+      "targets": [
+        {
+          "expr": "agentgrid_last_backup_age_seconds",
+          "legendFormat": "last backup age"
+        },
+        {
+          "expr": "agentgrid_backup_errors_total",
+          "legendFormat": "errors (cumulative)"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Lease reverts / attempt drift / cross-node rejects",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "rate(agentgrid_lease_reverts_total[5m])",
+          "legendFormat": "lease reverts/s"
+        },
+        {
+          "expr": "agentgrid_active_attempt_drift_total",
+          "legendFormat": "attempt drift"
+        },
+        {
+          "expr": "rate(agentgrid_cross_node_rejects_total[5m])",
+          "legendFormat": "cross-node rejects/s"
+        },
+        {
+          "expr": "rate(agentgrid_stale_fencing_tokens_total[5m])",
+          "legendFormat": "stale fencing/s"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Node outbox (bytes / oldest pending age)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "agentgrid_node_outbox_bytes",
+          "legendFormat": "{{node}} bytes"
+        },
+        {
+          "expr": "agentgrid_node_outbox_oldest_pending_age_ms",
+          "legendFormat": "{{node}} oldest pending ms"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Node free disk (MB)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "agentgrid_node_free_disk_mb",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Task outcomes (rate)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(agentgrid_tasks_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Event ingest health",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "targets": [
+        {
+          "expr": "rate(agentgrid_event_rejections_total[5m])",
+          "legendFormat": "rejections/s"
+        },
+        {
+          "expr": "rate(agentgrid_event_gaps_total[5m])",
+          "legendFormat": "gaps/s"
+        }
+      ]
+    }
+  ]
+}
