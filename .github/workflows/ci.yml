@@ -132,6 +132,10 @@ jobs:
       - name: build tests once
         run: cargo test --workspace --no-run --locked
       - name: run workspace tests x3 at high parallelism
+        env:
+          # Full 100-iteration ack/lease race gate lives in the nightly stress
+          # job; per-PR runs use the quick default (10).
+          AGENTGRID_RACE_ITERS: "100"
         run: |
           for i in 1 2 3; do
             echo "::group::stress iteration $i"

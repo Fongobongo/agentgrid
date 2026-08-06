@@ -269,6 +269,19 @@ impl AppState {
     }
 }
 
+impl Drop for AppState {
+    /// Test hygiene: `open_temp*` databases live in /var/tmp and would
+    /// otherwise accumulate one db + wal + shm set per test. Unlink is safe
+    /// while the pool is still open on Linux; the inode vanishes on close.
+    fn drop(&mut self) {
+        if self.db_path.starts_with("/var/tmp/ag-test-") {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{}", self.db_path, suffix));
+            }
+        }
+    }
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health/live", get(auth::health_live))
