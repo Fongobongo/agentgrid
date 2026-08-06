@@ -146,9 +146,18 @@ pub async fn check_fencing_token(
     match stored {
         Ok(None) => Err(StatusCode::NOT_FOUND),
         // N-1 backcompat: a legacy attempt (or legacy node on a freshly
-        // migrated CP) has a blank token; accept any presenter to avoid
-        // breaking in-flight nodes before they roll the token.
-        Ok(Some(s)) if s.is_empty() => Ok(()),
+        // migrated CP) has a blank token; accept only a legacy presenter
+        // (no header) to avoid letting any arbitrary token hijack it.
+        Ok(Some(s)) if s.is_empty() => {
+            if presented.is_none_or(|p| p.is_empty()) {
+                Ok(())
+            } else {
+                state
+                    .stale_fencing_tokens
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(StatusCode::CONFLICT)
+            }
+        }
         Ok(Some(s)) if Some(s.as_str()) == presented => Ok(()),
         Ok(Some(_)) => {
             state
