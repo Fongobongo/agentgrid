@@ -100,17 +100,7 @@ fn is_locked_err(e: &anyhow::Error) -> bool {
 /// the flip and making compare-and-set guards sound (hardening P0 item 7).
 /// Retries once on `SQLITE_BUSY` with the configured busy_timeout.
 async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
-    // sqlx/sqlite exposes no `begin_with(str)`; we rely on `pool.begin()`
-    // (deferred BEGIN) plus the configured busy_timeout=5000 ms: the first
-    // UPDATE in a transaction acquires the SQLite RESERVED lock, and a second
-    // concurrent writer blocks until it is freed or busy_timeout elapses.
-    // The compare-and-set `WHERE status = ...` guards in ack/revert/offline then
-    // observe the winning state and return idempotently, so a deferred BEGIN
-    // plus CAS is still race-free for these control transitions. True
-    // BEGIN IMMEDIATE would shave one retry path; the CAS is the actual guard.
-    // TODO: replace with `Connection::begin_with("BEGIN IMMEDIATE")` if sqlx
-    // grows that API and contention shows up here.
-    Ok(pool.begin().await?)
+    Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
 }
 
 /// Parse a profile autonomy string (`l0`..`l4`) into an `AutonomyLevel`.
