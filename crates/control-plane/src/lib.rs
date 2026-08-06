@@ -43,6 +43,8 @@ pub struct AppState {
     /// workflow run advance). Handlers call the service instead of the store
     /// when the operation spans aggregates.
     pub lifecycle: services::TaskLifecycleService,
+    /// Plan 533: node poll orchestration (degrade + touch + assign).
+    pub scheduler: services::SchedulerService,
     pub(crate) assignment_notify: Arc<Notify>,
     pub(crate) jwt_secret: Vec<u8>,
     /// Directory with the built web UI (Stage 4.3). Served as static files;
@@ -177,9 +179,11 @@ impl AppState {
         let assignment_notify = Arc::new(Notify::new());
         let lifecycle =
             services::TaskLifecycleService::new(store.clone(), assignment_notify.clone());
+        let scheduler = services::SchedulerService::new(store.clone(), assignment_notify.clone());
         Ok(Arc::new(Self {
             store,
             lifecycle,
+            scheduler,
             assignment_notify,
             jwt_secret,
             web_root,

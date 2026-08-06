@@ -172,6 +172,23 @@ pub fn is_safe_opaque_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// Plan 535: artifact name safety (no traversal, no control chars) — shared by
+/// the routes and the artifact service. A crafted name must never escape the
+/// artifact root via a path join; reject early as 404/400 so a denial does not
+/// disclose whether the task/artifact exists.
+pub fn is_safe_artifact_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 255 {
+        return false;
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return false;
+    }
+    if name == "." || name == ".." || name.starts_with("../") || name.starts_with("..\\") {
+        return false;
+    }
+    name.chars().all(|c| !c.is_control())
+}
+
 #[cfg(test)]
 mod opaque_id_tests {
     use super::is_safe_opaque_id;

@@ -1,7 +1,6 @@
 //! Event + poll routes: SSE stream, event history, scheduler poll.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use agentgrid_common::{EventsQuery, PollRequest, PollResponse, TaskEvent};
 use axum::{
@@ -13,7 +12,7 @@ use axum::{
 use futures_core::Stream;
 
 use crate::auth::AuthedNode;
-use crate::{AppState, POLL_TIMEOUT};
+use crate::AppState;
 
 /// Resolve the SSE `after` cursor for a reconnect. `Last-Event-ID` header
 /// (browser default) carries the global `ingest_id` of the last delivered
@@ -119,46 +118,21 @@ pub async fn poll(
 ) -> (StatusCode, Json<PollResponse>) {
     // The authenticated node id is the source of truth; ignore any client-supplied id.
     req.node_id = auth.node_id;
-    if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
-        let _ = state.store.set_node_degraded(&req.node_id).await;
-    }
-    if let Err(e) = state.store.register_or_touch_node(&req).await {
-        tracing::error!("register node failed: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(PollResponse { assignment: None }),
-        );
-    }
-
-    let deadline = Instant::now() + POLL_TIMEOUT;
-    loop {
-        match state.store.try_assign(&req.node_id).await {
-            Ok(Some(assignment)) => {
-                return (
-                    StatusCode::OK,
-                    Json(PollResponse {
-                        assignment: Some(assignment),
-                    }),
-                );
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!("try_assign failed: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(PollResponse { assignment: None }),
-                );
-            }
-        }
-        if Instant::now() >= deadline {
-            return (StatusCode::OK, Json(PollResponse { assignment: None }));
-        }
-        let remaining = deadline - Instant::now();
-        tokio::select! {
-            _ = state.assignment_notify.notified() => {}
-            _ = tokio::time::sleep(remaining) => {
-                return (StatusCode::OK, Json(PollResponse { assignment: None }));
-            }
+    // Plan 533: degrade + touch + assign are coordinated in SchedulerService.
+    match state.scheduler.poll(&req).await {
+        Ok((_, Some(assignment))) => (
+            StatusCode::OK,
+            Json(PollResponse {
+                assignment: Some(assignment),
+            }),
+        ),
+        Ok((_, None)) => (StatusCode::OK, Json(PollResponse { assignment: None })),
+        Err(e) => {
+            tracing::error!("poll failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(PollResponse { assignment: None }),
+            )
         }
     }
 }

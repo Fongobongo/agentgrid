@@ -1,14 +1,21 @@
-//! Service layer (plan 534): business workflows that coordinate several store
-//! aggregates, so handlers stay thin (one call) and cross-aggregate rules live
-//! in one testable place. Only added when a real multi-store scenario exists —
-//! see [`TaskLifecycleService`], the first one.
+//! Service layer (plans 534/533/535): business workflows that coordinate
+//! several store aggregates, so handlers stay thin (one call) and
+//! cross-aggregate rules live in one testable place. Added per real
+//! multi-store scenario:
+//! - [`TaskLifecycleService`] (534): completing an attempt must also advance
+//!   the owning workflow run + wake the scheduler.
+//! - [`SchedulerService`] (533): a node poll is degrade + touch + assign, all
+//!   three store operations coordinated in one request.
+//! - [`ArtifactService`] (535): upload is auth + quota + write + metadata.
 
 use std::sync::Arc;
+use std::time::Instant;
 
-use agentgrid_common::CompleteAttemptRequest;
+use agentgrid_common::{CompleteAttemptRequest, PollRequest};
 use tokio::sync::Notify;
 
-use crate::store::Store;
+use crate::store::{is_safe_artifact_name, Store};
+use crate::POLL_TIMEOUT;
 
 /// Attempt lifecycle orchestration: completing an attempt is atomic in the
 /// store, but a completed task that belongs to a workflow run must also
@@ -66,6 +73,211 @@ impl TaskLifecycleService {
             ),
         }
         Ok(true)
+    }
+}
+
+/// Scheduler poll orchestration (plan 533): one node poll is three store
+/// operations — mark degraded on protocol mismatch, register/touch the node
+/// heartbeat, then try to assign a task (waiting on wake notifications up to
+/// the poll timeout). Moving them out of the route handler makes the poll
+/// contract testable in isolation and keeps the handler thin.
+pub struct SchedulerService {
+    store: Store,
+    assignment_notify: Arc<Notify>,
+}
+
+impl SchedulerService {
+    pub fn new(store: Store, assignment_notify: Arc<Notify>) -> Self {
+        Self {
+            store,
+            assignment_notify,
+        }
+    }
+
+    /// Serve one long-poll. The authenticated node id is the source of truth;
+    /// a client-supplied id is ignored (the handler stamps `req.node_id`).
+    /// Returns `(degraded, assignment)`: `degraded` is true when the node's
+    /// protocol was rejected as incompatible (the node marks itself degraded).
+    pub async fn poll(
+        &self,
+        req: &PollRequest,
+    ) -> anyhow::Result<(bool, Option<agentgrid_common::Assignment>)> {
+        let mut degraded = false;
+        if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
+            self.store.set_node_degraded(&req.node_id).await?;
+            degraded = true;
+        }
+        self.store.register_or_touch_node(req).await?;
+
+        let deadline = Instant::now() + POLL_TIMEOUT;
+        loop {
+            match self.store.try_assign(&req.node_id).await {
+                Ok(Some(assignment)) => return Ok((degraded, Some(assignment))),
+                Ok(None) => {}
+                Err(e) => return Err(e),
+            }
+            if Instant::now() >= deadline {
+                return Ok((degraded, None));
+            }
+            let remaining = deadline - Instant::now();
+            tokio::select! {
+                _ = self.assignment_notify.notified() => {}
+                _ = tokio::time::sleep(remaining) => {}
+            }
+        }
+    }
+}
+
+/// Artifact authorization/storage orchestration (plan 535): one upload is
+/// name safety + attempt-owner auth + fencing + quota + save; one read is
+/// name safety + producer authorization + bytes + metadata. Coordinating them
+/// in the service (instead of the route handler) keeps the handler thin and
+/// the auth+quota+storage rules in one testable place. The service takes
+/// `&AppState` per call (metrics counters + limits live there) and holds no
+/// state of its own, so it cannot borrow-cycle with `AppState`.
+pub struct ArtifactService;
+
+/// One artifact upload: caller node, target attempt, fencing token, name,
+/// body, optional media type and optional sha256 hint. Bundled so the service
+/// method stays under clippy's argument-count ceiling.
+pub struct UploadArtifact<'a> {
+    pub node_id: &'a str,
+    pub attempt_id: &'a str,
+    pub fencing: Option<&'a str>,
+    pub name: &'a str,
+    pub bytes: &'a [u8],
+    pub media_type: Option<&'a str>,
+    pub sha256: Option<&'a str>,
+}
+
+/// Errors an artifact operation can fail with, before HTTP mapping.
+pub enum ArtifactError {
+    /// Unsafe name (traversal / control chars) or invalid attempt id.
+    BadName,
+    /// Attempt does not exist (or not owned by the caller).
+    NotFound,
+    /// Owned by another node (attempt owner mismatch).
+    Forbidden,
+    /// Fencing token mismatch (reassigned/lost attempt).
+    StaleFence,
+    /// Body over the configured artifact size limit.
+    TooLarge,
+    /// Storage quota would be exceeded.
+    InsufficientStorage,
+    /// Supplied sha256 does not match the computed hash.
+    HashMismatch,
+    /// Storage/db failure.
+    Internal,
+}
+
+impl ArtifactService {
+    /// Store an artifact on behalf of a node, enforcing name safety, attempt
+    /// ownership, fencing, size limit, and storage quota before the write.
+    pub async fn upload(
+        state: &crate::AppState,
+        upload: UploadArtifact<'_>,
+    ) -> Result<agentgrid_common::ArtifactUploadResponse, ArtifactError> {
+        let UploadArtifact {
+            node_id,
+            attempt_id,
+            fencing,
+            name,
+            bytes,
+            media_type,
+            sha256,
+        } = upload;
+        if !is_safe_artifact_name(name) {
+            return Err(ArtifactError::BadName);
+        }
+        let auth = crate::auth::AuthedNode {
+            node_id: node_id.to_string(),
+        };
+        if let Err(code) = crate::auth::check_attempt_owner(state, &auth, attempt_id).await {
+            return Err(match code {
+                axum::http::StatusCode::NOT_FOUND => ArtifactError::NotFound,
+                axum::http::StatusCode::FORBIDDEN => ArtifactError::Forbidden,
+                _ => ArtifactError::Internal,
+            });
+        }
+        if let Err(code) = crate::auth::check_fencing_token(state, attempt_id, fencing).await {
+            return Err(match code {
+                axum::http::StatusCode::CONFLICT => ArtifactError::StaleFence,
+                axum::http::StatusCode::NOT_FOUND => ArtifactError::NotFound,
+                _ => ArtifactError::Internal,
+            });
+        }
+        if bytes.len() > state.limits.artifact {
+            return Err(ArtifactError::TooLarge);
+        }
+        // Hardening P1 item 15: artifact storage quota (0 = unlimited).
+        if let Some(quota_mb) = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            if quota_mb > 0 {
+                let used = state.store.artifact_storage_bytes().await.unwrap_or(0);
+                if used + bytes.len() as u64 > quota_mb * 1024 * 1024 {
+                    return Err(ArtifactError::InsufficientStorage);
+                }
+            }
+        }
+        state
+            .store
+            .save_artifact_bytes(attempt_id, name, bytes, media_type, sha256)
+            .await
+            .map_err(|e| match e {
+                crate::store::StoreArtifactError::HashMismatch { .. } => {
+                    ArtifactError::HashMismatch
+                }
+                crate::store::StoreArtifactError::InvalidAttemptId => ArtifactError::BadName,
+                _ => ArtifactError::Internal,
+            })
+    }
+
+    /// Read an artifact (user path — public download) with name safety.
+    pub async fn read(
+        state: &crate::AppState,
+        task_id: &str,
+        name: &str,
+    ) -> Result<Option<(Vec<u8>, Option<agentgrid_common::ArtifactMeta>)>, ArtifactError> {
+        if !is_safe_artifact_name(name) {
+            return Ok(None); // 404: deny without disclosing existence
+        }
+        match state.store.read_artifact_bytes(task_id, name).await {
+            Ok(Some(bytes)) => {
+                let meta = state
+                    .store
+                    .read_artifact_meta(task_id, name)
+                    .await
+                    .ok()
+                    .flatten();
+                Ok(Some((bytes, meta)))
+            }
+            Ok(None) => Ok(None),
+            Err(_) => Err(ArtifactError::Internal),
+        }
+    }
+
+    /// Read an artifact on behalf of a node (workflow upstream fetch) — the
+    /// caller node must be authorized to read the producer task's artifact.
+    pub async fn read_node(
+        state: &crate::AppState,
+        node_id: &str,
+        task_id: &str,
+        name: &str,
+    ) -> Result<Option<(Vec<u8>, Option<agentgrid_common::ArtifactMeta>)>, ArtifactError> {
+        if !is_safe_artifact_name(name) {
+            return Ok(None); // 404: deny without disclosing existence
+        }
+        let allowed = state
+            .store
+            .can_node_read_upstream_artifact(node_id, task_id)
+            .await
+            .map_err(|_| ArtifactError::Internal)?;
+        if !allowed {
+            return Ok(None); // 404 on denial, same as the old handler
+        }
+        Self::read(state, task_id, name).await
     }
 }
 
@@ -186,5 +398,38 @@ mod tests {
             WorkflowRunStatus::Running,
             "run still running (b pending)"
         );
+    }
+
+    /// Plan 533: a node poll with an incompatible protocol is served with the
+    /// `degraded` flag set (the service marks the node degraded, touches the
+    /// heartbeat, and returns no assignment).
+    #[tokio::test]
+    async fn scheduler_poll_marks_degraded_on_protocol_mismatch() {
+        let s = temp_store().await;
+        let svc = SchedulerService::new(s.clone(), Arc::new(Notify::new()));
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            agent_version: "test".into(),
+            protocol_version: None,
+            permission_interception: "wrapper".into(),
+        };
+        s.enroll_node(&node).await.unwrap().expect("enroll");
+        // Incompatible protocol version -> degraded, no assignment.
+        let req = agentgrid_common::PollRequest {
+            node_id: "n1".into(),
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            protocol_version: Some("999.0.0".into()),
+        };
+        let (degraded, assignment) = svc.poll(&req).await.unwrap();
+        assert!(degraded, "incompatible protocol must degrade the node");
+        assert!(assignment.is_none());
     }
 }

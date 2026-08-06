@@ -11,37 +11,25 @@ use axum::{
     Json,
 };
 
-use crate::auth::{check_attempt_owner, check_fencing_token, fencing_token_header, AuthedNode};
+use crate::auth::{fencing_token_header, AuthedNode};
+use crate::services::{ArtifactError, ArtifactService, UploadArtifact};
 use crate::AppState;
 
 pub async fn get_artifact(
     State(state): State<Arc<AppState>>,
     Path((task_id, name)): Path<(String, String)>,
 ) -> Result<Response, StatusCode> {
-    // Stage 2.2: a crafted name (../, absolute, ...) must not traverse out of
-    // the artifact root via store::read_artifact's join. Reject as 404 so a
-    // denial does not disclose whether the task/artifact exists.
-    if !is_safe_artifact_name(&name) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    match state.store.read_artifact_bytes(&task_id, &name).await {
-        Ok(Some(bytes)) => {
-            let mt = state
-                .store
-                .read_artifact_meta(&task_id, &name)
-                .await
-                .ok()
-                .flatten();
-            Ok(artifact_response(
-                bytes,
-                mt.as_ref().and_then(|m| m.media_type.as_deref()),
-                &name,
-                mt.as_ref().and_then(|m| m.sha256.as_deref()),
-            ))
-        }
+    // Plan 535: name safety + read + metadata coordinated in ArtifactService.
+    match ArtifactService::read(&state, &task_id, &name).await {
+        Ok(Some((bytes, mt))) => Ok(artifact_response(
+            bytes,
+            mt.as_ref().and_then(|m| m.media_type.as_deref()),
+            &name,
+            mt.as_ref().and_then(|m| m.sha256.as_deref()),
+        )),
         Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("read_artifact failed: {e}");
+        Err(_) => {
+            tracing::error!("read_artifact failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -54,43 +42,18 @@ pub async fn get_artifact_node(
 ) -> Result<Response, StatusCode> {
     // Stage 8 / line 257: node-side mirror of `get_artifact` so the node can
     // fetch an upstream worker's `changes.patch` artifact with its own
-    // node-credential (no user JWT available on the node). Same safety:
-    // reject traversal names as 404.
-    if !is_safe_artifact_name(&name) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    // Hardening P0: authorize the caller node to read this producer task's
-    // artifact (workflow dependency producer -> consumer attempt owned by
-    // the caller). Always 404 on denial to avoid disclosing existence.
-    let allowed = state
-        .store
-        .can_node_read_upstream_artifact(&auth.node_id, &task_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("can_node_read_upstream_artifact failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    if !allowed {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    match state.store.read_artifact_bytes(&task_id, &name).await {
-        Ok(Some(bytes)) => {
-            let mt = state
-                .store
-                .read_artifact_meta(&task_id, &name)
-                .await
-                .ok()
-                .flatten();
-            Ok(artifact_response(
-                bytes,
-                mt.as_ref().and_then(|m| m.media_type.as_deref()),
-                &name,
-                mt.as_ref().and_then(|m| m.sha256.as_deref()),
-            ))
-        }
+    // node-credential (no user JWT available on the node). Plan 535: name
+    // safety + producer authorization + read coordinated in ArtifactService.
+    match ArtifactService::read_node(&state, &auth.node_id, &task_id, &name).await {
+        Ok(Some((bytes, mt))) => Ok(artifact_response(
+            bytes,
+            mt.as_ref().and_then(|m| m.media_type.as_deref()),
+            &name,
+            mt.as_ref().and_then(|m| m.sha256.as_deref()),
+        )),
         Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("read_artifact (node) failed: {e}");
+        Err(_) => {
+            tracing::error!("read_artifact (node) failed");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -103,62 +66,31 @@ pub async fn upload_artifact(
     headers: HeaderMap,
     Json(req): Json<UploadArtifactRequest>,
 ) -> Response {
-    // Stage 2.2: never let a crafted name escape the artifact root
-    // (../../etc/passwd, absolute paths, separators). Validated before the
-    // ownership check so a traversal attempt never reaches the store and
-    // never discloses attempt existence.
-    if !is_safe_artifact_name(&req.name) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
+    // Plan 535: name safety + ownership + fencing + quota + save are
+    // coordinated in ArtifactService; the handler only maps the outcome.
+    match ArtifactService::upload(
         &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
+        UploadArtifact {
+            node_id: &auth.node_id,
+            attempt_id: &attempt_id,
+            fencing: fencing_token_header(&headers).as_deref(),
+            name: &req.name,
+            bytes: req.content.as_bytes(),
+            media_type: req.media_type.as_deref(),
+            sha256: req.sha256.as_deref(),
+        },
     )
     .await
     {
-        return code.into_response();
-    }
-    if req.content.len() > state.limits.artifact {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
-    // Hardening P1 item 15: artifact storage quota (see upload_artifact_raw).
-    if let Some(quota_mb) = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if quota_mb > 0 {
-            let used = state.store.artifact_storage_bytes().await.unwrap_or(0);
-            if used + req.content.len() as u64 > quota_mb * 1024 * 1024 {
-                return StatusCode::INSUFFICIENT_STORAGE.into_response();
-            }
-        }
-    }
-    match state
-        .store
-        .save_artifact_bytes(
-            &attempt_id,
-            &req.name,
-            req.content.as_bytes(),
-            req.media_type.as_deref(),
-            req.sha256.as_deref(),
-        )
-        .await
-    {
         Ok(resp) => Json(resp).into_response(),
-        Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
-            StatusCode::UNPROCESSABLE_ENTITY.into_response()
-        }
-        Err(crate::store::StoreArtifactError::InvalidAttemptId) => {
-            StatusCode::BAD_REQUEST.into_response()
-        }
-        Err(e) => {
-            tracing::error!("save_artifact failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Err(ArtifactError::BadName) => StatusCode::BAD_REQUEST.into_response(),
+        Err(ArtifactError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(ArtifactError::Forbidden) => StatusCode::FORBIDDEN.into_response(),
+        Err(ArtifactError::StaleFence) => StatusCode::CONFLICT.into_response(),
+        Err(ArtifactError::TooLarge) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Err(ArtifactError::InsufficientStorage) => StatusCode::INSUFFICIENT_STORAGE.into_response(),
+        Err(ArtifactError::HashMismatch) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(ArtifactError::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -174,35 +106,6 @@ pub async fn upload_artifact_raw(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
-        return code.into_response();
-    }
-    if body.len() > state.limits.artifact {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
-    // Hardening P1 item 15: artifact storage quota — refuse uploads past
-    // `AGENTGRID_ARTIFACT_QUOTA_MB` (0 = unlimited) so the artifact volume
-    // cannot grow without bound.
-    if let Some(quota_mb) = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if quota_mb > 0 {
-            let used = state.store.artifact_storage_bytes().await.unwrap_or(0);
-            if used + body.len() as u64 > quota_mb * 1024 * 1024 {
-                return StatusCode::INSUFFICIENT_STORAGE.into_response();
-            }
-        }
-    }
     let name = match headers
         .get("x-artifact-name")
         .and_then(|v| v.to_str().ok())
@@ -211,9 +114,6 @@ pub async fn upload_artifact_raw(
         Some(n) => n,
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
-    if !is_safe_artifact_name(&name) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
     let media_type = headers
         .get("x-artifact-media-type")
         .and_then(|v| v.to_str().ok())
@@ -222,28 +122,30 @@ pub async fn upload_artifact_raw(
         .get("x-artifact-sha256")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    match state
-        .store
-        .save_artifact_bytes(
-            &attempt_id,
-            &name,
-            &body,
-            media_type.as_deref(),
-            sha256.as_deref(),
-        )
-        .await
+    // Plan 535: ownership + fencing + size + quota + save in ArtifactService.
+    match ArtifactService::upload(
+        &state,
+        UploadArtifact {
+            node_id: &auth.node_id,
+            attempt_id: &attempt_id,
+            fencing: fencing_token_header(&headers).as_deref(),
+            name: &name,
+            bytes: &body,
+            media_type: media_type.as_deref(),
+            sha256: sha256.as_deref(),
+        },
+    )
+    .await
     {
         Ok(resp) => Json(resp).into_response(),
-        Err(crate::store::StoreArtifactError::HashMismatch { .. }) => {
-            StatusCode::UNPROCESSABLE_ENTITY.into_response()
-        }
-        Err(crate::store::StoreArtifactError::InvalidAttemptId) => {
-            StatusCode::BAD_REQUEST.into_response()
-        }
-        Err(e) => {
-            tracing::error!("save_artifact_bytes failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Err(ArtifactError::BadName) => StatusCode::BAD_REQUEST.into_response(),
+        Err(ArtifactError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(ArtifactError::Forbidden) => StatusCode::FORBIDDEN.into_response(),
+        Err(ArtifactError::StaleFence) => StatusCode::CONFLICT.into_response(),
+        Err(ArtifactError::TooLarge) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Err(ArtifactError::InsufficientStorage) => StatusCode::INSUFFICIENT_STORAGE.into_response(),
+        Err(ArtifactError::HashMismatch) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(ArtifactError::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -343,21 +245,6 @@ fn artifact_response(
         }
     }
     resp
-}
-
-/// A safe artifact name is a single path segment: no separators, no `.`
-/// traversal, no NUL, bounded length (Stage 2.2).
-fn is_safe_artifact_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 255 {
-        return false;
-    }
-    if name.contains('/') || name.contains('\\') || name.contains('\0') {
-        return false;
-    }
-    if name == "." || name == ".." || name.starts_with("../") || name.starts_with("..\\") {
-        return false;
-    }
-    name.chars().all(|c| !c.is_control())
 }
 
 #[cfg(test)]
