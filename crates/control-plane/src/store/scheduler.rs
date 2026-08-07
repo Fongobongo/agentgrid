@@ -187,14 +187,10 @@ impl Store {
         Ok(None)
     }
 
-    async fn attempt_count(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::sqlite::Sqlite>,
-        task_id: &str,
-    ) -> Result<i64> {
+    async fn attempt_count(&self, tx: &mut sqlx::SqliteConnection, task_id: &str) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) AS c FROM attempts WHERE task_id = ?")
             .bind(task_id)
-            .fetch_one(&mut **tx)
+            .fetch_one(&mut *tx)
             .await?;
         Ok(row.try_get::<i64, _>("c")?)
     }

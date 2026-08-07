@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed (0.3 pass, CP scale — plan stage 1)
+
+- **Single-writer write gate (plan 0.3 item 1.1):** every
+  `BEGIN IMMEDIATE` transaction now passes through a process-wide FIFO
+  gate (`store::WRITE_GATE` semaphore; `WriteTxn` holds the permit until
+  commit/rollback), so writers queue in memory instead of contending on
+  the SQLite write lock and relying on `busy_timeout`. Load harness
+  (50 nodes / 500 tasks): `write_lock_failures=0`, race tests green;
+  throughput unchanged — per-write cost is now the floor, which 1.2
+  (batched assign) attacks. Measurement in `docs/load-baseline-0.3.md`.
+
 ### Added (0.3 pass, load baseline — plan stage 0)
 
 - **Load harness + observability (plan 0.3 stage 0):**

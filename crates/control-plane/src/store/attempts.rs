@@ -10,7 +10,6 @@ use agentgrid_common::{
     CompleteAttemptRequest, InvalidTransition, TaskStatus, TaskTransition,
 };
 use anyhow::Result;
-use sqlx::sqlite::Sqlite;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -305,7 +304,7 @@ impl Store {
 
     pub async fn finish_agent_session(
         &self,
-        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        tx: &mut sqlx::SqliteConnection,
         attempt_id: &str,
         status: &str,
         error_code: Option<&str>,
@@ -319,7 +318,7 @@ impl Store {
         .bind(status)
         .bind(error_code)
         .bind(attempt_id)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
         Ok(())
     }

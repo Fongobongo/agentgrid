@@ -107,6 +107,13 @@ fn is_locked_err(e: &anyhow::Error) -> bool {
 static WRITE_TXNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static WRITE_BUSY_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Plan 0.3 item 1.1: single-writer gate. SQLite allows one writer at a
+/// time; letting many tasks race `BEGIN IMMEDIATE` burns time on lock
+/// waits (`busy_timeout` backoff) under load. Holding one permit across
+/// the whole transaction serializes writers in FIFO order, so the lock is
+/// never contended and `busy_timeout` is only a safety net.
+static WRITE_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
 /// (write transactions begun, write-lock failures) since process start.
 pub fn write_txn_stats() -> (u64, u64) {
     (
@@ -115,17 +122,58 @@ pub fn write_txn_stats() -> (u64, u64) {
     )
 }
 
+/// A write transaction holding the single-writer gate permit (plan 0.3 1.1).
+/// Derefs to `SqliteConnection` (same as `sqlx::Transaction` does), so query
+/// call sites work unchanged; the gate permit is released when the
+/// transaction commits, rolls back, or is dropped. Never acquire two of
+/// these in the same task (the gate is non-reentrant and would deadlock).
+pub struct WriteTxn<'a> {
+    tx: sqlx::Transaction<'a, sqlx::Sqlite>,
+    _permit: tokio::sync::SemaphorePermit<'static>,
+}
+
+impl std::ops::Deref for WriteTxn<'_> {
+    type Target = sqlx::SqliteConnection;
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+impl std::ops::DerefMut for WriteTxn<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tx
+    }
+}
+
+impl<'a> WriteTxn<'a> {
+    pub async fn commit(self) -> Result<()> {
+        Ok(self.tx.commit().await?)
+    }
+
+    pub async fn rollback(self) -> Result<()> {
+        Ok(self.tx.rollback().await?)
+    }
+}
+
 /// Begin a `BEGIN IMMEDIATE` write transaction. The default `pool.begin()` uses
 /// a deferred BEGIN that takes the write lock only at the first UPDATE, so two
 /// readers can both pass a `SELECT ... WHERE status=...` guard and then race
 /// on the flip. `BEGIN IMMEDIATE` takes the RESERVED lock up front, serializing
 /// the flip and making compare-and-set guards sound (hardening P0 item 7).
-/// Retries once on `SQLITE_BUSY` with the configured busy_timeout.
-async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
+/// The returned [`WriteTxn`] holds the process-wide write gate (plan 0.3 1.1),
+/// so writers queue in FIFO instead of contending on the SQLite lock.
+async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<WriteTxn<'static>> {
+    let permit = WRITE_GATE
+        .acquire()
+        .await
+        .expect("write gate semaphore closed");
     match pool.begin_with("BEGIN IMMEDIATE").await {
         Ok(tx) => {
             WRITE_TXNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(tx)
+            Ok(WriteTxn {
+                tx,
+                _permit: permit,
+            })
         }
         Err(e) => {
             let msg = format!("{e}").to_ascii_lowercase();
@@ -544,16 +592,13 @@ async fn mark_offline_nodes(pool: &SqlitePool, now: &str) -> Result<()> {
 /// concurrency capacity, and fail the owning tasks with `error_code =
 /// node_lost`. Idempotent: a node with no in-flight attempts is a no-op.
 /// Runs inside the caller's `BEGIN IMMEDIATE` transaction (no cascade races).
-async fn lose_node_attempts(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    node_id: &str,
-) -> Result<()> {
+async fn lose_node_attempts(tx: &mut sqlx::SqliteConnection, node_id: &str) -> Result<()> {
     let now = now_iso();
     let rows = sqlx::query(
         "SELECT id, task_id FROM attempts WHERE node_id = ? AND status IN ('assigned', 'running', 'validating')",
     )
     .bind(node_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(&mut *tx)
     .await?;
     if rows.is_empty() {
         return Ok(());
@@ -565,7 +610,7 @@ async fn lose_node_attempts(
         sqlx::query("UPDATE attempts SET status = 'lost', finished_at = ? WHERE id = ?")
             .bind(&now)
             .bind(&aid)
-            .execute(&mut **tx)
+            .execute(&mut *tx)
             .await?;
         // Fail the task only if it has not already reached a terminal state.
         // Hardening P1 item 13: clear assigned_attempt_id so a terminal task
@@ -576,13 +621,13 @@ async fn lose_node_attempts(
         )
         .bind(&now)
         .bind(&tid)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
     }
     sqlx::query("UPDATE nodes SET active_attempts = MAX(0, active_attempts - ?) WHERE id = ?")
         .bind(count)
         .bind(node_id)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
     Ok(())
 }

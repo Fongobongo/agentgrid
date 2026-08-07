@@ -287,7 +287,7 @@ impl Store {
 
     async fn audit_tx(
         &self,
-        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        tx: &mut sqlx::SqliteConnection,
         actor_type: &str,
         actor_id: Option<&str>,
         action: &str,
@@ -307,7 +307,7 @@ impl Store {
         .bind(subject)
         .bind(payload)
         .bind(&now)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
         Ok(())
     }
