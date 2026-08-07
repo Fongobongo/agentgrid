@@ -11,13 +11,14 @@ use reqwest::{Client, StatusCode};
 use tokio::sync::Semaphore;
 
 use crate::artifact_spool;
-use crate::config::Config;
+use crate::config::{Config, Transport};
 use crate::heartbeat;
 use crate::recovery;
 
-/// Run the main polling loop: startup recovery, heartbeat spawn, then long-poll
-/// for assignments and spawn attempt runners.
-pub async fn poll_loop(cfg: Config, cred: crate::config::SavedCredential) -> Result<()> {
+/// Transport entry point (plan 0.3 2.3): one-time startup (recovery,
+/// heartbeat) runs once regardless of transport, then the node runs the
+/// selected channel: long polling, WebSocket, or auto (WS with poll fallback).
+pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) -> Result<()> {
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
@@ -30,13 +31,38 @@ pub async fn poll_loop(cfg: Config, cred: crate::config::SavedCredential) -> Res
     // spool entries, and retry staged artifacts from a prior (killed) run.
     recovery::startup_recovery(&cfg, &client).await;
 
-    // Heartbeat loop: publish status/load/capabilities periodically.
+    // Heartbeat loop: publish status/load/capabilities periodically (runs on
+    // every transport; the WS channel additionally carries slot heartbeats).
     heartbeat::spawn_heartbeat(cfg.clone(), client.clone(), sem.clone());
-    let hb_node_id = cred.node_id.clone();
+
+    match cfg.transport {
+        Transport::Poll => poll_loop_inner(cfg, client, sem, cred.node_id, None).await,
+        Transport::Ws => crate::ws::ws_loop(cfg, cred, client, sem).await,
+        Transport::Auto => crate::ws::auto_loop(cfg, cred, client, sem).await,
+    }
+}
+
+/// Long-poll for assignments until cancelled or (if `max_duration` is set)
+/// the deadline elapses. The deadline is used by auto transport to bound the
+/// poll fallback before retrying the WebSocket channel.
+pub async fn poll_loop_inner(
+    cfg: Config,
+    client: Client,
+    sem: Arc<Semaphore>,
+    node_id: String,
+    max_duration: Option<Duration>,
+) -> Result<()> {
+    let deadline = max_duration.map(|d| tokio::time::Instant::now() + d);
 
     loop {
+        if let Some(d) = deadline {
+            if tokio::time::Instant::now() >= d {
+                tracing::info!("poll fallback window elapsed; retrying WebSocket transport");
+                return Ok(());
+            }
+        }
         let poll_req = PollRequest {
-            node_id: hb_node_id.clone(),
+            node_id: node_id.clone(),
             name: cfg.node_name.clone(),
             adapters: cfg.adapters.iter().map(|s| s.id.clone()).collect(),
             repositories: cfg.repositories.clone(),
@@ -73,22 +99,7 @@ pub async fn poll_loop(cfg: Config, cred: crate::config::SavedCredential) -> Res
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
-                for a in batch {
-                    // The CP caps the batch at our free slots; still wait (not
-                    // drop) if a slot is briefly busy, so no assignment is lost.
-                    let permit = match sem.clone().try_acquire_owned() {
-                        Ok(p) => p,
-                        Err(_) => sem.clone().acquire_owned().await?,
-                    };
-                    let cfg2 = cfg.clone();
-                    let client2 = client.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::attempt_runner::run_attempt(cfg2, client2, a).await {
-                            tracing::error!("attempt error: {e}");
-                        }
-                        drop(permit);
-                    });
-                }
+                dispatch_batch(&cfg, &client, &sem, batch).await?;
             }
             Ok(r) => {
                 tracing::warn!("poll returned status {}", r.status());
@@ -100,6 +111,32 @@ pub async fn poll_loop(cfg: Config, cred: crate::config::SavedCredential) -> Res
             }
         }
     }
+}
+
+/// Dispatch a batch of assignments: one task per attempt, gated by the
+/// concurrency semaphore. Shared by the poll and WS transports (plan 0.3 2.3);
+/// waits (never drops) if a slot is briefly busy, so no assignment is lost.
+pub async fn dispatch_batch(
+    cfg: &Config,
+    client: &Client,
+    sem: &Arc<Semaphore>,
+    batch: Vec<agentgrid_common::Assignment>,
+) -> Result<()> {
+    for a in batch {
+        let permit = match sem.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => sem.clone().acquire_owned().await?,
+        };
+        let cfg2 = cfg.clone();
+        let client2 = client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::attempt_runner::run_attempt(cfg2, client2, a).await {
+                tracing::error!("attempt error: {e}");
+            }
+            drop(permit);
+        });
+    }
+    Ok(())
 }
 
 /// Stage an artifact and upload it (idempotent; re-stages replace). On success

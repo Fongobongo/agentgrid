@@ -36,6 +36,7 @@ mod sandbox;
 mod secret_redactor;
 mod skills;
 mod validation;
+mod ws;
 
 use capabilities::{probe_adapter, probe_cluster_adapter, resolve_acp_launch, resolve_adapter_bin};
 use completion::{terminate_group, wait_for_cancel};
@@ -295,7 +296,7 @@ async fn drive_acp_session(
             Ok(_) => AcpResult { success: true, error_code: None, session_id: Some(session_id.clone()) },
             Err(e) => AcpResult { success: false, error_code: Some(format!("agent_error: {e}")), session_id: Some(session_id.clone()) },
         },
-        _ = wait_for_cancel(cancel_client, cancel_url) => {
+        _ = wait_for_cancel(&assignment.attempt_id, cancel_client, cancel_url) => {
             // Ponytail: bound the session_cancel RPC so a process already
             // tearing down (or one that ignores session/cancel) can't park
             // drive_acp_session forever. The reap below still enforces
@@ -581,7 +582,7 @@ async fn main() -> Result<()> {
         adapters = ?cfg.adapters,
         "node daemon starting"
     );
-    polling::poll_loop(cfg, cred).await
+    polling::run_transport(cfg, cred).await
 }
 
 #[cfg(test)]
@@ -1085,6 +1086,7 @@ mod tests {
             adapter_versions: Default::default(),
             max_artifact_size: 100 * 1024 * 1024,
             network_mode: "none".into(),
+            transport: crate::config::Transport::Auto,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-{}-{}",
@@ -1200,6 +1202,7 @@ mod tests {
             adapter_versions: Default::default(),
             max_artifact_size: 100 * 1024 * 1024,
             network_mode: "none".into(),
+            transport: crate::config::Transport::Auto,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-hang-{}-{}",
@@ -1311,6 +1314,7 @@ mod tests {
             adapter_versions: Default::default(),
             max_artifact_size: 100 * 1024 * 1024,
             network_mode: "none".into(),
+            transport: crate::config::Transport::Auto,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-cancel-{}-{}",
@@ -1481,6 +1485,7 @@ mod tests {
                 adapter_versions: Default::default(),
                 max_artifact_size: 100 * 1024 * 1024,
                 network_mode: "none".into(),
+                transport: crate::config::Transport::Auto,
             };
 
             let ws = tmp.join("ws");

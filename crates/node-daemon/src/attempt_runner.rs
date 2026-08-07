@@ -30,6 +30,9 @@ use crate::validation::run_validation;
 
 /// Run one task attempt assigned by the control plane.
 pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) -> Result<()> {
+    // WS Cancel messages wake the supervisor via this notifier (plan 0.3 2.3);
+    // unregistered automatically when the attempt finishes.
+    let _cancel_guard = crate::completion::CancelGuard::new(&assignment.attempt_id);
     let repo_root = cfg.repository_root.clone();
     let ws_root = cfg.workspace_root.clone();
     let prep_assignment = assignment.clone();

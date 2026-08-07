@@ -25,6 +25,30 @@ impl AdapterProtocol {
     }
 }
 
+/// Node↔CP transport selection (plan 0.3 2.3 / ADR 0009). `Auto` prefers the
+/// WebSocket control channel and falls back to long polling when the WS
+/// connection repeatedly fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Poll,
+    Ws,
+    Auto,
+}
+
+impl Transport {
+    pub fn parse(v: Option<String>) -> Self {
+        match v
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("poll") => Transport::Poll,
+            Some("ws") => Transport::Ws,
+            _ => Transport::Auto,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AdapterSpec {
     pub id: String,
@@ -81,6 +105,7 @@ pub struct Config {
     pub autonomy: AutonomyLevel,
     pub adapter_versions: HashMap<String, Option<String>>,
     pub network_mode: String,
+    pub transport: Transport,
 }
 
 fn split_csv(env: &str, default: &str) -> Vec<String> {
@@ -189,6 +214,7 @@ pub fn config_from_env() -> Config {
             .ok()
             .filter(|v| v == "none" || v == "restricted" || v == "unrestricted")
             .unwrap_or_else(|| "none".into()),
+        transport: Transport::parse(std::env::var("AGENTGRID_TRANSPORT").ok()),
     }
 }
 
@@ -218,5 +244,13 @@ mod tests {
     fn parse_adapters_empty() {
         let specs = parse_adapters("");
         assert_eq!(specs.len(), 0);
+    }
+
+    #[test]
+    fn parse_transport_values() {
+        assert_eq!(Transport::parse(None), Transport::Auto);
+        assert_eq!(Transport::parse(Some("poll".into())), Transport::Poll);
+        assert_eq!(Transport::parse(Some("WS".into())), Transport::Ws);
+        assert_eq!(Transport::parse(Some("garbage".into())), Transport::Auto);
     }
 }

@@ -4,14 +4,69 @@ use std::time::Duration;
 
 use agentgrid_common::{CancelState, CompleteAttemptRequest, CreateAgentSessionRequest};
 use reqwest::Client;
+use tokio::sync::Notify;
 
 use crate::outbox;
 use crate::polling::send_with_retry;
 
-/// Wait for the control plane to request cancellation of this attempt.
-pub async fn wait_for_cancel(client: Client, url: String) {
+/// Cancel notifiers for in-flight attempts: the WS transport signals a
+/// `Cancel` message here so supervisors wake instantly instead of waiting for
+/// the next 1s HTTP probe (plan 0.3 2.3 / ADR 0009).
+static CANCEL_NOTIFIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Notify>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// RAII guard: registers a cancel notifier for `attempt_id` on creation and
+/// removes it on drop. Hold for the lifetime of the attempt.
+pub struct CancelGuard {
+    attempt_id: String,
+}
+
+impl CancelGuard {
+    pub fn new(attempt_id: &str) -> Self {
+        let n = std::sync::Arc::new(Notify::new());
+        CANCEL_NOTIFIERS
+            .lock()
+            .unwrap()
+            .insert(attempt_id.to_string(), n);
+        Self {
+            attempt_id: attempt_id.to_string(),
+        }
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        CANCEL_NOTIFIERS.lock().unwrap().remove(&self.attempt_id);
+    }
+}
+
+/// Trigger the registered notifier for `attempt_id` (WS Cancel message).
+pub async fn notify_cancel(attempt_id: &str) {
+    if let Some(n) = CANCEL_NOTIFIERS.lock().unwrap().get(attempt_id) {
+        n.notify_waiters();
+    }
+}
+
+/// Wait for the control plane to request cancellation of this attempt. Wakes
+/// early if the WS channel pushes a `Cancel` (notifier), otherwise falls back
+/// to the 1s HTTP probe loop (poll transport).
+pub async fn wait_for_cancel(attempt_id: &str, client: Client, url: String) {
+    let notifier = CANCEL_NOTIFIERS.lock().unwrap().get(attempt_id).cloned();
+    // Build the notified() future up front so a Cancel that lands between
+    // attempt start and the first HTTP probe is not lost.
+    let notified_fut = async {
+        match notifier.as_ref() {
+            Some(n) => n.notified().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(notified_fut);
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::select! {
+            _ = &mut notified_fut => return,
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
         match client.get(&url).send().await {
             Ok(r) if r.status().is_success() => {
                 if let Ok(cs) = r.json::<CancelState>().await {

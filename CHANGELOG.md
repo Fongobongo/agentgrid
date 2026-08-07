@@ -6,6 +6,19 @@ All notable changes to this project are documented in this file.
 
 ### Added (0.3 pass, node WebSocket channel — plan stage 2)
 
+- **node-daemon WebSocket client + transport selection (plan 0.3 item 2.3):**
+  node-side WS control channel over tokio-tungstenite/rustls (no OpenSSL):
+  hello handshake, assignment pushes consumed through the same dispatch
+  path as polling, receipt acks, cancel messages that wake the attempt
+  supervisor instantly (cancel-notifier registry in completion.rs), and
+  free-slot heartbeats every 30 s. Reconnects with exponential backoff
+  (1 s → 60 s). New `AGENTGRID_TRANSPORT=ws|poll|auto` (default `auto`:
+  WS first, poll fallback window after 3 failed connects). One-time startup
+  (recovery + HTTP heartbeat) moved to `run_transport` so transport
+  switches don't duplicate background tasks. Acceptance test
+  `ws_node_survives_cp_restart`: the node re-registers with a restarted
+  control plane on the same address without manual intervention and
+  receives assignments over the restored channel.
 - **CP WebSocket endpoint `/v1/node/ws` (plan 0.3 item 2.2):** axum WS
   control channel per ADR 0009. Bearer node-credential auth at handshake
   (401 without upgrade), `hello`/`hello_ok` registration, one connection

@@ -71,7 +71,7 @@ pub async fn supervise_adapter(
         let outcome = tokio::select! {
             status = child.wait() => Outcome::Exited(status?.code().unwrap_or(-1)),
             _ = tokio::time::sleep(timeout) => Outcome::Timeout,
-            _ = wait_for_cancel(cancel_client, cancel_url) => Outcome::Cancel,
+            _ = wait_for_cancel(attempt_id, cancel_client, cancel_url) => Outcome::Cancel,
         };
         match outcome {
             Outcome::Exited(c) => (c, None),

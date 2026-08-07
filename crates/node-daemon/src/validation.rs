@@ -127,7 +127,7 @@ pub async fn run_validation(
     let verdict = tokio::select! {
         status = child.wait() => VOutcome::Exited(status?.code().unwrap_or(-1)),
         _ = tokio::time::sleep(timeout) => VOutcome::Timeout,
-        _ = wait_for_cancel(client.clone(), cancel_url) => VOutcome::Cancel,
+        _ = wait_for_cancel(attempt_id, client.clone(), cancel_url) => VOutcome::Cancel,
     };
     let (code, timed_out, cancelled) = match verdict {
         VOutcome::Exited(c) => (c, false, false),

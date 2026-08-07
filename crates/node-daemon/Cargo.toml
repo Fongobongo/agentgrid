@@ -25,4 +25,10 @@ agentgrid-acp.workspace = true
 agentgrid-skills.workspace = true
 chrono.workspace = true
 rand.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 libc = "0.2"
+
+[dev-dependencies]
+agentgrid-control-plane = { path = "../control-plane" }
+axum.workspace = true
