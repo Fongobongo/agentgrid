@@ -67,6 +67,13 @@ enum AgCommand {
     Workflow(WorkflowArgs),
     /// Full-screen TUI dashboard (read-only monitoring).
     Tui(TuiArgs),
+    /// One-screen overview: server health, nodes, tasks and workflow runs.
+    Status,
+    /// Print a shell completion script (bash/zsh/fish/elvish/powershell).
+    Completions {
+        /// Target shell.
+        shell: clap_complete::Shell,
+    },
     /// Storage maintenance (artifact GC, disk status).
     Storage(StorageArgs),
 }
@@ -550,7 +557,7 @@ async fn main() -> Result<()> {
         AgCommand::Nodes(a) => cmd_nodes(&client, &base, cli.json, a).await,
         AgCommand::Cancel(a) => cmd_cancel(&client, &base, a).await,
         AgCommand::Retry(a) => cmd_retry(&client, &base, a).await,
-        AgCommand::Token(a) => cmd_token(&client, &base, a).await,
+        AgCommand::Token(a) => cmd_token(&client, &base, cli.json, a).await,
         AgCommand::Repo(a) => cmd_repo(&client, &base, a).await,
         AgCommand::Login(a) => cmd_login(&client, &base, a).await,
         AgCommand::Approvals(a) => cmd_approvals(&client, &base, a).await,
@@ -560,6 +567,12 @@ async fn main() -> Result<()> {
         AgCommand::Server(a) => cmd_server_start(a),
         AgCommand::Workflow(a) => cmd_workflow(&client, &base, a, cli.json).await,
         AgCommand::Tui(a) => cmd_tui(&client, &base, a).await,
+        AgCommand::Status => cmd_status(&client, &base, cli.json).await,
+        AgCommand::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "ag", &mut std::io::stdout());
+            Ok(())
+        }
         AgCommand::Storage(a) => cmd_storage(&client, &base, a, cli.json).await,
     }
 }
@@ -874,6 +887,88 @@ fn list_items(v: &serde_json::Value) -> Vec<serde_json::Value> {
         .and_then(|i| i.as_array())
         .cloned()
         .unwrap_or_default()
+}
+
+/// Unified API error format (plan 6.1): one consistent message shape for
+/// non-2xx responses, with an actionable hint where the cause is obvious
+/// (401/403 = missing/expired session -> `ag login`).
+fn api_error(status: reqwest::StatusCode, what: &str) -> anyhow::Error {
+    use reqwest::StatusCode as S;
+    match status {
+        S::UNAUTHORIZED | S::FORBIDDEN => {
+            anyhow::anyhow!("{what} failed ({status}): not authenticated — run `ag login` first")
+        }
+        S::NOT_FOUND => anyhow::anyhow!("{what}: not found"),
+        s => anyhow::anyhow!("{what} failed ({s})"),
+    }
+}
+
+/// Plan 6.1: `ag status` — one-screen overview of server, nodes, tasks and
+/// workflow runs. Each section is independent: a failing/unauthorized section
+/// renders "(unavailable)" instead of aborting the whole overview.
+async fn cmd_status(client: &reqwest::Client, base: &str, json: bool) -> Result<()> {
+    async fn fetch_items(client: &reqwest::Client, url: String) -> Option<Vec<serde_json::Value>> {
+        let resp = client.get(url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = resp.json().await.ok()?;
+        Some(list_items(&v))
+    }
+
+    fn count_by_status(items: &[serde_json::Value]) -> std::collections::BTreeMap<String, u64> {
+        let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for item in items {
+            let st = item
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            *counts.entry(st).or_default() += 1;
+        }
+        counts
+    }
+
+    let health = client
+        .get(format!("{base}/health/ready"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    let nodes = fetch_items(client, format!("{base}/v1/nodes?limit=200")).await;
+    let tasks = fetch_items(client, format!("{base}/v1/tasks?limit=500")).await;
+    let runs = fetch_items(client, format!("{base}/v1/workflow-runs?limit=200")).await;
+
+    if json {
+        let obj = serde_json::json!({
+            "server": base,
+            "healthy": health,
+            "nodes": nodes.as_ref().map(|n| count_by_status(n)),
+            "tasks": tasks.as_ref().map(|t| count_by_status(t)),
+            "workflow_runs": runs.as_ref().map(|r| count_by_status(r)),
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+        return Ok(());
+    }
+
+    println!(
+        "server    : {base}  ({})",
+        if health { "healthy" } else { "UNREACHABLE" }
+    );
+    let render = |label: &str, items: &Option<Vec<serde_json::Value>>| match items {
+        None => println!("{label:<10}: (unavailable — not authenticated? try `ag login`)"),
+        Some(list) if list.is_empty() => println!("{label:<10}: none"),
+        Some(list) => {
+            let counts = count_by_status(list);
+            let total: u64 = counts.values().sum();
+            let parts: Vec<String> = counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
+            println!("{label:<10}: {total} total — {}", parts.join(", "));
+        }
+    };
+    render("nodes", &nodes);
+    render("tasks", &tasks);
+    render("workflows", &runs);
+    Ok(())
 }
 
 async fn has_pending_approval(client: &reqwest::Client, base: &str, task_id: &str) -> bool {
@@ -1425,6 +1520,9 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         .send()
         .await
         .context("node list request failed")?;
+    if !resp.status().is_success() {
+        return Err(api_error(resp.status(), "node list"));
+    }
     let v: serde_json::Value = resp.json().await.context("parse nodes")?;
     let nodes = list_items(&v);
     if json {
@@ -1846,11 +1944,18 @@ async fn cmd_repo(client: &reqwest::Client, base: &str, a: RepoArgs) -> Result<(
     }
 }
 
-async fn cmd_token(client: &reqwest::Client, base: &str, a: TokenArgs) -> Result<()> {
+async fn cmd_token(client: &reqwest::Client, base: &str, json: bool, a: TokenArgs) -> Result<()> {
     match a.action {
         TokenAction::Create => {
             let token = create_enrollment_token(client, base).await?;
-            println!("export AGENTGRID_ENROLL_TOKEN={token}");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "token": token }))?
+                );
+            } else {
+                println!("export AGENTGRID_ENROLL_TOKEN={token}");
+            }
             Ok(())
         }
     }
@@ -2109,7 +2214,7 @@ async fn cmd_workflow_cancel(
         anyhow::bail!("workflow run {} not found", a.id);
     }
     if !resp.status().is_success() {
-        anyhow::bail!("cancel workflow run failed ({})", resp.status());
+        return Err(api_error(resp.status(), "cancel workflow run"));
     }
     println!("workflow run {} cancelled", a.id);
     Ok(())

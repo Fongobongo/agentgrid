@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (0.2-completion pass, CLI)
+
+- **`ag status` one-screen overview (plan 6.1):** server health plus
+  nodes / tasks / workflow-run counts grouped by status; each section
+  degrades to "(unavailable)" instead of aborting the whole overview, and
+  `--json` emits the same data machine-readable.
+- **`ag completions <shell>` (plan 6.1):** generates bash/zsh/fish/elvish/
+  powershell completion scripts via `clap_complete`.
+- **Unified API error format (plan 6.1):** non-2xx responses now share one
+  message shape, and 401/403 tell you to run `ag login`. `ag --json token
+  create` emits `{"token": …}` instead of the shell export line, and
+  `ag nodes list` reports auth failures instead of a decode error.
+
 ### Added (0.2-completion pass, plan approval)
 
 - **Plan approval works with real agents (plan 2.3):** adapters now surface a
