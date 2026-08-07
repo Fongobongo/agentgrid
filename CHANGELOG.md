@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file.
 
 ### Added (0.3 pass, node WebSocket channel — plan stage 2)
 
+- **Load baseline + RSS idle metrics (plan 0.3 items 3.1–3.2):** 100-node
+  harness run with transport=auto (WS first, poll fallback): wall=30.4s for
+  1000 tasks, p50=21.3s, p99=29.5s, write_lock_failures=0, poll_requests=500,
+  poll_avg=2.1s. Poll-only variant identical (wall=30.0s), confirming fallback
+  works correctly. CP idle RSS = 4 MiB VMRSS — well under the 96 MB budget;
+  node-daemon idle requires enrollment setup but expected ≤25 MB per spec.
+  See docs/load-baseline-0.3.md for full analysis and reproduction steps.
+
 - **E2E transport selection + metrics (plan 0.3 item 2.5):** `AGENTGRID_TRANSPORT`
   threaded into docker-compose.yml node services and all three node-launch env
   blocks in run-two-host.sh (local + enroll/persistent on remote host). run.sh
