@@ -51,6 +51,7 @@ services:
       AGENTGRID_ENROLL_TOKEN: ${NODE1_TOKEN:?NODE1_TOKEN must be set}
       AGENTGRID_NODE_NAME: node-1
       AGENTGRID_MAX_CONCURRENCY: "2"
+      AGENTGRID_TRANSPORT: ${AGENTGRID_TRANSPORT:-auto}
       # Redirect workspace/repo roots onto the mounted /var/lib/agentgrid/data
       # volume so the read-only rootfs above does not block workspace prep.
       AGENTGRID_WORKSPACE_ROOT: /var/lib/agentgrid/data/workspace
@@ -75,6 +76,7 @@ services:
       AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:?NODE2_TOKEN must be set}
       AGENTGRID_NODE_NAME: node-2
       AGENTGRID_MAX_CONCURRENCY: "2"
+      AGENTGRID_TRANSPORT: ${AGENTGRID_TRANSPORT:-auto}
       AGENTGRID_WORKSPACE_ROOT: /var/lib/agentgrid/data/workspace
       AGENTGRID_REPOSITORY_ROOT: /var/lib/agentgrid/data/repos
     volumes:

@@ -17,7 +17,9 @@ TIMEOUT="${E2E_TIMEOUT:-120}"
 docker image inspect ag-cp:test >/dev/null 2>&1 || docker build -t ag-cp:test -f Dockerfile.control-plane .
 docker image inspect ag-node:test >/dev/null 2>&1 || docker build -t ag-node:test -f Dockerfile.node-daemon .
 
-cleanup() { bash deploy/compose/down.sh; }
+# Purge volumes on teardown: the next run must bootstrap a fresh admin user
+# with the pinned test password (a leftover DB rejects it).
+cleanup() { bash deploy/compose/down.sh --purge; }
 trap cleanup EXIT
 
 echo ">> bringing up stack"
@@ -66,4 +68,21 @@ done
 
 echo "final status: $status"
 [ "$status" = "succeeded" ] || { echo "E2E FAILED: task $TID -> $status"; exit 1; }
+
+# Plan 0.3 2.5: transport mix must be observable in /metrics. In ws mode at
+# least one node must show on the WS gauge; in poll mode the poll counter
+# must be non-zero (and the WS gauge zero).
+MODE="${AGENTGRID_TRANSPORT:-auto}"
+WS_NODES=$(curl -fsS "$BASE/metrics" | awk -F' ' '/^agentgrid_node_transport_connections\{transport="ws"\}/{print $2}')
+case "$MODE" in
+  poll)
+    POLLS=$(curl -fsS "$BASE/metrics" | awk '/^agentgrid_poll_requests_total /{print $2}')
+    [ "${POLLS:-0}" -ge 1 ] || { echo "E2E FAILED: poll mode but agentgrid_poll_requests_total=${POLLS:-0}"; exit 1; }
+    [ "${WS_NODES:-0}" -eq 0 ] || { echo "E2E FAILED: poll mode but ws gauge=${WS_NODES}"; exit 1; }
+    echo "metrics OK: poll_requests_total=$POLLS ws_nodes=0";;
+  *)
+    [ "${WS_NODES:-0}" -ge 1 ] || { echo "E2E FAILED: $MODE mode but ws gauge=${WS_NODES:-0}"; exit 1; }
+    echo "metrics OK: ws_nodes=$WS_NODES";;
+esac
+
 echo "E2E OK"

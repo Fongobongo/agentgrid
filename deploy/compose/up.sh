@@ -25,10 +25,17 @@ else
 fi
 
 # Generate fresh secrets unless an operator pre-set them via env.
+# (Finite input through base64 avoids the SIGPIPE you get piping infinite
+# /dev/urandom into `head -c` under `set -o pipefail`.)
+rand() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-"$1"; }
 ADMIN_USER="${AGENTGRID_ADMIN_USER:-admin}"
-ADMIN_PASS="${AGENTGRID_ADMIN_PASSWORD:-$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)}"
-JWT_SECRET="${AGENTGRID_JWT_SECRET:-$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 48)}"
-export AGENTGRID_JWT_SECRET
+ADMIN_PASS="${AGENTGRID_ADMIN_PASSWORD:-$(rand 24)}"
+JWT_SECRET="${AGENTGRID_JWT_SECRET:-$(rand 48)}"
+export AGENTGRID_JWT_SECRET="$JWT_SECRET"
+# Compose interpolates every service even when only the control plane starts;
+# the real one-time tokens are minted below and re-exported before the nodes
+# come up. Placeholders satisfy the `:?` guards here.
+export NODE1_TOKEN="${NODE1_TOKEN:-bootstrap}" NODE2_TOKEN="${NODE2_TOKEN:-bootstrap}"
 
 echo ">> building & starting control plane"
 "${COMPOSE[@]}" up -d control-plane
@@ -73,6 +80,9 @@ mint() {
 echo ">> minting enrollment tokens"
 NODE1_TOKEN=$(mint)
 NODE2_TOKEN=$(mint)
+# Compose interpolates from the process environment; without the exports the
+# `:?` guards in docker-compose.yml reject the node services.
+export NODE1_TOKEN NODE2_TOKEN
 
 # Compose auto-loads .env alongside the compose file; node services read it.
 cat > "$ENV_FILE" <<EOF

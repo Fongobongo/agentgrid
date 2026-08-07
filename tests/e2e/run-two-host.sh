@@ -125,6 +125,7 @@ start_local_node() {
     AGENTGRID_REPOSITORY_ROOT="$LOCAL_REPOS" \
     AGENTGRID_ADAPTERS="mock" \
     AGENTGRID_MAX_CONCURRENCY="2" \
+    AGENTGRID_TRANSPORT="${AGENTGRID_TRANSPORT:-auto}" \
     RUST_LOG="info" \
     "${env_args[@]}" \
     nohup "$BIN/agentgrid-node-daemon" >"$TMP/local-node.log" 2>&1 &
@@ -144,6 +145,7 @@ start_remote_node() {
     AGENTGRID_REPOSITORY_ROOT='$REMOTE_REPOS' \
     AGENTGRID_ADAPTERS='mock' \
     AGENTGRID_MAX_CONCURRENCY='2' \
+    AGENTGRID_TRANSPORT='${AGENTGRID_TRANSPORT:-auto}' \
     AGENTGRID_ENROLL_TOKEN='$tok' \
     AGENTGRID_ALLOW_ROOT=1 \
     $REMOTE_PATH_PREFIX \
@@ -163,6 +165,7 @@ start_remote_node_persistent() {
     AGENTGRID_REPOSITORY_ROOT='$REMOTE_REPOS' \
     AGENTGRID_ADAPTERS='mock' \
     AGENTGRID_MAX_CONCURRENCY='2' \
+    AGENTGRID_TRANSPORT='${AGENTGRID_TRANSPORT:-auto}' \
     AGENTGRID_ALLOW_ROOT=1 \
     $REMOTE_PATH_PREFIX \
     nohup $REMOTE_BIN_DIR/agentgrid-node-daemon >/tmp/ag-remote-node.log 2>&1 </dev/null &

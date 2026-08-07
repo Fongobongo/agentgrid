@@ -15,7 +15,9 @@ COPY . .
 # the world.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --bins -p agentgrid-control-plane -p agentgrid-cli
+    cargo build --release --bins -p agentgrid-control-plane -p agentgrid-cli \
+    && mkdir -p /out \
+    && cp target/release/agentgrid-control-plane target/release/ag /out/
 # Build the web UI static bundle.
 RUN --mount=type=cache,target=/src/web/node_modules \
     cd web && npm ci && npm run build
@@ -34,8 +36,8 @@ RUN useradd -r -m -d /var/lib/agentgrid agentgrid \
     && mkdir -p /var/lib/agentgrid /var/lib/agentgrid/web \
     && chown -R agentgrid:agentgrid /var/lib/agentgrid
 WORKDIR /var/lib/agentgrid
-COPY --from=builder /src/target/release/agentgrid-control-plane /usr/local/bin/
-COPY --from=builder /src/target/release/ag /usr/local/bin/
+COPY --from=builder /out/agentgrid-control-plane /usr/local/bin/
+COPY --from=builder /out/ag /usr/local/bin/
 COPY --from=builder /src/web/dist /var/lib/agentgrid/web
 ENV AGENTGRID_LISTEN=0.0.0.0:7800 \
     AGENTGRID_DB=/var/lib/agentgrid/control-plane.db \

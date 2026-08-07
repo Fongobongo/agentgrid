@@ -15,6 +15,10 @@ else
   COMPOSE=(docker compose -f docker-compose.yml)
   ENV_FILE="deploy/compose/.env"
 fi
+# `down` does not use the secrets, but compose still interpolates the file;
+# dummy values satisfy the `:?` guards when no real env is present.
+export AGENTGRID_JWT_SECRET="${AGENTGRID_JWT_SECRET:-down}"
+export NODE1_TOKEN="${NODE1_TOKEN:-down}" NODE2_TOKEN="${NODE2_TOKEN:-down}"
 if [ "$PURGE" = "1" ]; then
   "${COMPOSE[@]}" down -v
   rm -f "$ENV_FILE"

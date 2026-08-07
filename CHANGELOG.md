@@ -6,6 +6,17 @@ All notable changes to this project are documented in this file.
 
 ### Added (0.3 pass, node WebSocket channel — plan stage 2)
 
+- **E2E transport selection + metrics (plan 0.3 item 2.5):** `AGENTGRID_TRANSPORT`
+  threaded into docker-compose.yml node services and all three node-launch env
+  blocks in run-two-host.sh (local + enroll/persistent on remote host). run.sh
+  asserts the transport metric: ws/auto → gauge
+  `agentgrid_node_transport_connections{transport="ws"} ≥ 1`, poll →
+  `agentgrid_poll_requests_total ≥ 1` at zero ws-gauge. All four runs pass:
+  run.sh ws (ws_nodes=2) and poll, run-two-host.sh ws and poll (workers on
+  remote host, workflow succeeded). Along the way: BuildKit cache-mount hiding
+  release binaries from COPY --from (copy to /out inside same RUN in both
+  Dockerfiles), SIGPIPE+missing JWT_SECRET export in deploy/compose/up.sh,
+  down.sh interpolation fixes, run.sh cleanup with --purge volumes.
 - **WS resilience + fencing on the WS path (plan 0.3 item 2.4):** failure-
   injection test kills the control plane mid-attempt and restarts it on the
   same address — the attempt still completes and every event lands (durable

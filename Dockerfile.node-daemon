@@ -9,7 +9,10 @@ COPY . .
 # across rebuilds.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --bins -p agentgrid-node-daemon -p agentgrid-adapters
+    cargo build --release --bins -p agentgrid-node-daemon -p agentgrid-adapters \
+    && mkdir -p /out \
+    && cp target/release/agentgrid-node-daemon target/release/adapter-mock \
+       target/release/adapter-claude target/release/adapter-opencode /out/
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 # Hardening P2 item 31: OCI provenance labels.
@@ -25,10 +28,10 @@ RUN useradd -r -m -d /var/lib/agentgrid agentgrid \
     && mkdir -p /var/lib/agentgrid/workspace /var/lib/agentgrid/repos /var/lib/agentgrid/data \
     && chown -R agentgrid:agentgrid /var/lib/agentgrid
 WORKDIR /var/lib/agentgrid
-COPY --from=builder /src/target/release/agentgrid-node-daemon /usr/local/bin/
-COPY --from=builder /src/target/release/adapter-mock /usr/local/bin/
-COPY --from=builder /src/target/release/adapter-claude /usr/local/bin/
-COPY --from=builder /src/target/release/adapter-opencode /usr/local/bin/
+COPY --from=builder /out/agentgrid-node-daemon /usr/local/bin/
+COPY --from=builder /out/adapter-mock /usr/local/bin/
+COPY --from=builder /out/adapter-claude /usr/local/bin/
+COPY --from=builder /out/adapter-opencode /usr/local/bin/
 ENV AGENTGRID_DATA_DIR=/var/lib/agentgrid/data \
     AGENTGRID_WORKSPACE_ROOT=/var/lib/agentgrid/workspace \
     AGENTGRID_REPOSITORY_ROOT=/var/lib/agentgrid/repos \
