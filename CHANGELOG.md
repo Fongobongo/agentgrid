@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (0.3 pass, node WebSocket channel — plan stage 2)
+
+- **ADR 0009 + node WS protocol spec (plan 0.3 item 2.1):** design for the
+  `/v1/node/ws` control channel — WebSocket carries only assignment push,
+  ack, cancel and liveness; the data plane (events, completion, artifacts)
+  stays on the existing HTTP endpoints. Auth reuses the Bearer
+  node-credential at handshake; one connection per node; assignment ack
+  deadline 25 s (reaper fallback identical to a lost poll response).
+  Message and close-code tables in `docs/node-ws-protocol.md`.
+
 ### Changed (0.3 pass, CP scale — plan stage 1)
 
 - **Single-writer write gate (plan 0.3 item 1.1):** every
