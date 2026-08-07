@@ -101,6 +101,20 @@ fn is_locked_err(e: &anyhow::Error) -> bool {
     false
 }
 
+/// Plan 0.3 stage 0: write-path counters for load observability. `busy` is
+/// incremented when a `BEGIN IMMEDIATE` still cannot take the write lock
+/// after the 5s `busy_timeout` — a direct signal of writer contention.
+static WRITE_TXNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WRITE_BUSY_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// (write transactions begun, write-lock failures) since process start.
+pub fn write_txn_stats() -> (u64, u64) {
+    (
+        WRITE_TXNS.load(std::sync::atomic::Ordering::Relaxed),
+        WRITE_BUSY_FAILURES.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 /// Begin a `BEGIN IMMEDIATE` write transaction. The default `pool.begin()` uses
 /// a deferred BEGIN that takes the write lock only at the first UPDATE, so two
 /// readers can both pass a `SELECT ... WHERE status=...` guard and then race
@@ -108,7 +122,19 @@ fn is_locked_err(e: &anyhow::Error) -> bool {
 /// the flip and making compare-and-set guards sound (hardening P0 item 7).
 /// Retries once on `SQLITE_BUSY` with the configured busy_timeout.
 async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
-    Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
+    match pool.begin_with("BEGIN IMMEDIATE").await {
+        Ok(tx) => {
+            WRITE_TXNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(tx)
+        }
+        Err(e) => {
+            let msg = format!("{e}").to_ascii_lowercase();
+            if msg.contains("busy") || msg.contains("locked") {
+                WRITE_BUSY_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(e.into())
+        }
+    }
 }
 
 /// Parse a profile autonomy string (`l0`..`l4`) into an `AutonomyLevel`.

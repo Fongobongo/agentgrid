@@ -255,6 +255,39 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
             .load(std::sync::atomic::Ordering::Relaxed)
     ));
 
+    // Plan 0.3 stage 0: write-path + poll observability under load.
+    let (write_txns, write_lock_failures) = crate::store::write_txn_stats();
+    s.push_str(
+        "# HELP agentgrid_sqlite_write_txns_total BEGIN IMMEDIATE write transactions begun.\n",
+    );
+    s.push_str("# TYPE agentgrid_sqlite_write_txns_total counter\n");
+    s.push_str(&format!("agentgrid_sqlite_write_txns_total {write_txns}\n"));
+    s.push_str(
+        "# HELP agentgrid_sqlite_write_lock_failures_total Write-lock acquisitions still busy after busy_timeout.\n",
+    );
+    s.push_str("# TYPE agentgrid_sqlite_write_lock_failures_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_sqlite_write_lock_failures_total {write_lock_failures}\n"
+    ));
+
+    let (poll_requests, poll_ms) = crate::routes::events::poll_stats();
+    s.push_str("# HELP agentgrid_poll_requests_total Node poll requests served.\n");
+    s.push_str("# TYPE agentgrid_poll_requests_total counter\n");
+    s.push_str(&format!("agentgrid_poll_requests_total {poll_requests}\n"));
+    s.push_str("# HELP agentgrid_poll_duration_ms_sum Cumulative poll handler time in ms.\n");
+    s.push_str("# TYPE agentgrid_poll_duration_ms_sum counter\n");
+    s.push_str(&format!("agentgrid_poll_duration_ms_sum {poll_ms}\n"));
+
+    let oldest_queued = state.store.oldest_queued_age_secs().await.unwrap_or(None);
+    s.push_str("# HELP agentgrid_oldest_queued_task_seconds Age of the oldest queued task.\n");
+    s.push_str("# TYPE agentgrid_oldest_queued_task_seconds gauge\n");
+    s.push_str(&format!(
+        "agentgrid_oldest_queued_task_seconds {}\n",
+        oldest_queued
+            .map(|a| format!("{a:.3}"))
+            .unwrap_or_else(|| "0".into())
+    ));
+
     // Plan 0.2 item 4.2: automatic-backup observability.
     let last_backup_at = state
         .store

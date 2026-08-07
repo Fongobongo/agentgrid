@@ -171,15 +171,27 @@ pub async fn get_events(
     }
 }
 
+/// Plan 0.3 stage 0: (poll requests served, cumulative handler ms).
+static POLL_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static POLL_DURATION_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn poll_stats() -> (u64, u64) {
+    (
+        POLL_REQUESTS.load(std::sync::atomic::Ordering::Relaxed),
+        POLL_DURATION_MS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 pub async fn poll(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
     Json(mut req): Json<PollRequest>,
 ) -> (StatusCode, Json<PollResponse>) {
+    let start = std::time::Instant::now();
     // The authenticated node id is the source of truth; ignore any client-supplied id.
     req.node_id = auth.node_id;
     // Plan 533: degrade + touch + assign are coordinated in SchedulerService.
-    match state.scheduler.poll(&req).await {
+    let out = match state.scheduler.poll(&req).await {
         Ok((_, Some(assignment))) => (
             StatusCode::OK,
             Json(PollResponse {
@@ -194,7 +206,13 @@ pub async fn poll(
                 Json(PollResponse { assignment: None }),
             )
         }
-    }
+    };
+    POLL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    POLL_DURATION_MS.fetch_add(
+        start.elapsed().as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    out
 }
 
 #[cfg(test)]

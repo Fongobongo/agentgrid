@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (0.3 pass, load baseline — plan stage 0)
+
+- **Load harness + observability (plan 0.3 stage 0):**
+  `crates/control-plane/tests/load.rs` (`#[ignore]`, run via
+  `tests/e2e/run-load.sh`) brings up a real HTTP control plane and drives
+  N mock nodes against M tasks, printing a `LOAD-RESULT` line with
+  assignment p50/p99, write-lock failures and poll-handler cost. New
+  `/metrics` series for the same: `agentgrid_sqlite_write_txns_total`,
+  `agentgrid_sqlite_write_lock_failures_total`,
+  `agentgrid_poll_requests_total`, `agentgrid_poll_duration_ms_sum`,
+  `agentgrid_oldest_queued_task_seconds` (+ three Grafana panels).
+  Baseline (50 nodes / 500 tasks, debug build): wall 15.9 s, poll handler
+  585 ms average under contention — write serialization is the bottleneck;
+  numbers and interpretation live in `docs/load-baseline-0.3.md`.
+
 ### Added (0.2-completion pass, real-agent E2E)
 
 - **Nightly real-agent E2E (plan 1.5):** `tests/e2e/run-real-agent.sh`

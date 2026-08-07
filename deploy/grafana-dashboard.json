@@ -1,11 +1,16 @@
 {
   "title": "agentgrid overview",
   "uid": "agentgrid-overview",
-  "tags": ["agentgrid"],
+  "tags": [
+    "agentgrid"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "refresh": "30s",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
@@ -22,8 +27,16 @@
       "id": 1,
       "type": "timeseries",
       "title": "Tasks by status",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "agentgrid_tasks",
@@ -35,8 +48,16 @@
       "id": 2,
       "type": "timeseries",
       "title": "Nodes by status",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "agentgrid_nodes",
@@ -48,8 +69,16 @@
       "id": 3,
       "type": "stat",
       "title": "Attempts total",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "agentgrid_attempts_total",
@@ -60,9 +89,17 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Scheduler latency (queued→assigned, ms)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "title": "Scheduler latency (queued\u2192assigned, ms)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "agentgrid_scheduler_latency_ms",
@@ -78,8 +115,16 @@
       "id": 5,
       "type": "timeseries",
       "title": "SQLite health",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "rate(agentgrid_sqlite_busy_total[5m])",
@@ -103,10 +148,20 @@
       "id": 6,
       "type": "timeseries",
       "title": "Backups (age + errors)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "s" }
+        "defaults": {
+          "unit": "s"
+        }
       },
       "targets": [
         {
@@ -123,8 +178,16 @@
       "id": 7,
       "type": "timeseries",
       "title": "Lease reverts / attempt drift / cross-node rejects",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "rate(agentgrid_lease_reverts_total[5m])",
@@ -148,8 +211,16 @@
       "id": 8,
       "type": "timeseries",
       "title": "Node outbox (bytes / oldest pending age)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "agentgrid_node_outbox_bytes",
@@ -165,8 +236,16 @@
       "id": 9,
       "type": "timeseries",
       "title": "Node free disk (MB)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "agentgrid_node_free_disk_mb",
@@ -178,8 +257,16 @@
       "id": 10,
       "type": "timeseries",
       "title": "Task outcomes (rate)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "sum by (status) (rate(agentgrid_tasks_total[5m]))",
@@ -191,8 +278,16 @@
       "id": 11,
       "type": "timeseries",
       "title": "Event ingest health",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
-      "datasource": { "type": "prometheus", "uid": "${ds}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
       "targets": [
         {
           "expr": "rate(agentgrid_event_rejections_total[5m])",
@@ -203,6 +298,77 @@
           "legendFormat": "gaps/s"
         }
       ]
+    },
+    {
+      "id": 101,
+      "title": "Write txns + lock failures (rate)",
+      "targets": [
+        {
+          "expr": "rate(agentgrid_sqlite_write_txns_total[1m])",
+          "legendFormat": "write txns/s"
+        },
+        {
+          "expr": "rate(agentgrid_sqlite_write_lock_failures_total[1m])",
+          "legendFormat": "lock failures/s"
+        }
+      ],
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 40
+      }
+    },
+    {
+      "id": 102,
+      "title": "Poll requests/s + avg handler ms",
+      "targets": [
+        {
+          "expr": "rate(agentgrid_poll_requests_total[1m])",
+          "legendFormat": "polls/s"
+        },
+        {
+          "expr": "rate(agentgrid_poll_duration_ms_sum[1m]) / clamp_min(rate(agentgrid_poll_requests_total[1m]), 1e-9)",
+          "legendFormat": "avg ms"
+        }
+      ],
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 40
+      }
+    },
+    {
+      "id": 103,
+      "title": "Oldest queued task age (s)",
+      "targets": [
+        {
+          "expr": "agentgrid_oldest_queued_task_seconds",
+          "legendFormat": "age s"
+        }
+      ],
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 40
+      }
     }
   ]
 }

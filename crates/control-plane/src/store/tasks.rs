@@ -182,4 +182,16 @@ impl Store {
         }
         Ok(events)
     }
+
+    /// Age in seconds of the oldest `queued` task (plan 0.3 stage 0 metric);
+    /// None when nothing is queued.
+    pub async fn oldest_queued_age_secs(&self) -> Result<Option<f64>> {
+        let row = sqlx::query(
+            "SELECT (julianday('now') - julianday(MIN(created_at))) * 86400.0 AS age \
+             FROM tasks WHERE status = 'queued'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get::<Option<f64>, _>("age")?)
+    }
 }
