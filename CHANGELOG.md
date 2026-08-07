@@ -36,6 +36,11 @@ All notable changes to this project are documented in this file.
   function (was: O(rows) row transfer per ingest). New test: duplicates
   inside one batch land once; a 1000-event batch is exactly one write
   transaction with the correct prefix.
+- **ADR 0008 — SQLite single-instance ceiling (plan 0.3 item 1.5):**
+  measured write ceiling and the scaling options (Postgres as an option,
+  leader election, repo-sharding) with the 0.4 decision: stay on one
+  SQLite instance, ship the WebSocket push first, re-measure on release
+  builds.
 
 ### Added (0.3 pass, load baseline — plan stage 0)
 
