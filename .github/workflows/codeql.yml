@@ -25,7 +25,7 @@ jobs:
       matrix:
         language: ["rust", "javascript-typescript"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: initialize CodeQL
         uses: github/codeql-action/init@dfbc6164313353db46c80e2fcfd38820bd2c3c46
         with:
