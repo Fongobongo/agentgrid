@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-control-plane
+  namespace: {{ .Release.Namespace | default "default" }}
+  labels:
+    app.kubernetes.io/name: agentgrid-control-plane
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    version: {{ .Chart.AppVersion | quote }}
+  {{- if .Values.metrics.serviceMonitor.enabled }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: agentgrid-control-plane
+    app.kubernetes.io/instance: {{ .Release.Name }}
+
+---
+
+# Metrics service for Prometheus scraping
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-metrics
+  namespace: {{ .Release.Namespace | default "default" }}
+  labels:
+    app.kubernetes.io/name: agentgrid-control-plane
+    app.kubernetes.io/component: metrics
+    version: {{ .Chart.AppVersion | quote }}
+spec:
+  clusterIP: None  # Headless service
+  ports:
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    app.kubernetes.io/name: agentgrid-control-plane
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

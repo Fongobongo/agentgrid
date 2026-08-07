@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-control-plane
+  namespace: {{ .Release.Namespace | default "default" }}
+  labels:
+    app.kubernetes.io/name: agentgrid-control-plane
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentgrid-control-plane
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentgrid-control-plane
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        version: {{ .Chart.AppVersion | quote }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      serviceAccountName: {{ .Release.Name }}-control-plane
+      containers:
+        - name: control-plane
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: AGENTGRID_BIND_ADDR
+              value: "0.0.0.0:8080"
+            - name: RUST_LOG
+              value: {{ .Values.logging.level | quote }}
+            - name: AGENTGRID_DATABASE_TYPE
+              {{- if .Values.externalDatabase.enabled }}
+              value: postgresql
+              {{- else }}
+              value: sqlite
+              {{- end }}
+            {{- if .Values.externalDatabase.enabled }}
+            - name: POSTGRES_HOST
+              value: {{ .Values.externalDatabase.host | quote }}
+            - name: POSTGRES_PORT
+              value: {{ .Values.externalDatabase.port | quote }}
+            - name: POSTGRES_DATABASE
+              value: {{ .Values.externalDatabase.database | quote }}
+            - name: POSTGRES_USERNAME
+              value: {{ .Values.externalDatabase.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalDatabase.passwordSecret.name }}
+                  key: {{ .Values.externalDatabase.passwordSecret.key }}
+            - name: POSTGRES_SSL_MODE
+              value: {{ .Values.externalDatabase.sslMode | quote }}
+            {{- end }}
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.passwordSecret.name }}
+                  key: {{ .Values.redis.passwordSecret.key }}
+            {{- end }}
+            {{- with .Values.extraEnvVars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            {{- if .Values.artifacts.storageType | eq "s3" }}
+            - secretRef:
+                name: {{ .Values.artifacts.s3.accessKeySecret.name }}
+            - secretRef:
+                name: {{ .Values.artifacts.s3.secretKeySecret.name }}
+            {{- end }}
+          volumeMounts:
+            {{- if and .Values.persistence.enabled (not .Values.externalDatabase.enabled) }}
+            - name: data
+              mountPath: /var/lib/agentgrid/data
+              readOnly: false
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+              readOnly: false
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          lifecycle:
+            preStop:
+              {{- toYaml .Values.lifecycle.preStop | nindent 14 }}
+      volumes:
+        {{- if and .Values.persistence.enabled (not .Values.externalDatabase.enabled) }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-pvc
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
