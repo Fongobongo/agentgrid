@@ -198,6 +198,12 @@ paths:
   /v1/node/poll:
     post:
       summary: Long-poll a node for an assignment (node credentials)
+      description: |
+        Plan 0.3 item 1.2: with the `x-agentgrid-max-batch: N` request
+        header the response `assignments` array carries up to N assignments
+        (capped at the node's free concurrency slots) made in one write
+        transaction; without the header exactly the legacy single
+        `assignment` semantics apply.
   /v1/node/attempts/{id}/ack:
     post:
       summary: Acknowledge an assignment started (node credentials)

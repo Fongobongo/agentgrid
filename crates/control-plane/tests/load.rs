@@ -123,6 +123,7 @@ async fn load_baseline_mock_nodes() {
                 let resp = http
                     .post(format!("{base}/v1/node/poll"))
                     .header("authorization", format!("Bearer {}", node.credential))
+                    .header("x-agentgrid-max-batch", "2")
                     .json(&json!({
                         "node_id": node.node_id,
                         "name": "load",
@@ -143,28 +144,36 @@ async fn load_baseline_mock_nodes() {
                         continue;
                     }
                 };
-                let Some(a) = pr.assignment else {
+                let mut batch = pr.assignments;
+                if batch.is_empty() {
+                    if let Some(a) = pr.assignment {
+                        batch.push(a);
+                    }
+                }
+                if batch.is_empty() {
                     tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
                     continue;
-                };
-                if let Some(t0) = created.lock().await.get(&a.task_id) {
-                    latencies.lock().await.push(t0.elapsed().as_millis());
                 }
-                let fence = format!("Bearer {}", node.credential);
-                let _ = http
-                    .post(format!("{base}/v1/node/attempts/{}/ack", a.attempt_id))
-                    .header("authorization", &fence)
-                    .header("x-agentgrid-fencing-token", &a.fencing_token)
-                    .send()
-                    .await;
-                let _ = http
-                    .post(format!("{base}/v1/node/attempts/{}/complete", a.attempt_id))
-                    .header("authorization", &fence)
-                    .header("x-agentgrid-fencing-token", &a.fencing_token)
-                    .json(&json!({"exit_code": 0, "pending_artifacts": []}))
-                    .send()
-                    .await;
-                completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                for a in batch {
+                    if let Some(t0) = created.lock().await.get(&a.task_id) {
+                        latencies.lock().await.push(t0.elapsed().as_millis());
+                    }
+                    let fence = format!("Bearer {}", node.credential);
+                    let _ = http
+                        .post(format!("{base}/v1/node/attempts/{}/ack", a.attempt_id))
+                        .header("authorization", &fence)
+                        .header("x-agentgrid-fencing-token", &a.fencing_token)
+                        .send()
+                        .await;
+                    let _ = http
+                        .post(format!("{base}/v1/node/attempts/{}/complete", a.attempt_id))
+                        .header("authorization", &fence)
+                        .header("x-agentgrid-fencing-token", &a.fencing_token)
+                        .json(&json!({"exit_code": 0, "pending_artifacts": []}))
+                        .send()
+                        .await;
+                    completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }));
     }

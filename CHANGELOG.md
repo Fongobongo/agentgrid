@@ -14,6 +14,15 @@ All notable changes to this project are documented in this file.
   (50 nodes / 500 tasks): `write_lock_failures=0`, race tests green;
   throughput unchanged — per-write cost is now the floor, which 1.2
   (batched assign) attacks. Measurement in `docs/load-baseline-0.3.md`.
+- **Batched assignment (plan 0.3 item 1.2):** a poll can now assign up to
+  the node's free concurrency slots in ONE `BEGIN IMMEDIATE` transaction
+  (`try_assign_batch`). Opt-in via the `x-agentgrid-max-batch` request
+  header — nodes that don't send it keep the legacy one-assignment
+  semantics; the node daemon sets it to `max_concurrency`, and
+  `PollResponse` gains an `assignments` array alongside the legacy
+  `assignment` field. Unit test pins 100 assignments to exactly one write
+  transaction; load run (50 nodes / 500 tasks, batch 2): wall −35 %,
+  poll requests −50 %, zero write-lock failures.
 
 ### Added (0.3 pass, load baseline — plan stage 0)
 

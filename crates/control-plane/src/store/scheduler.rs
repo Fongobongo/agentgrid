@@ -11,6 +11,14 @@ use uuid::Uuid;
 
 impl Store {
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
+        Ok(self.try_assign_batch(node_id, 1).await?.into_iter().next())
+    }
+
+    /// Plan 0.3 item 1.2: assign up to `limit` queued tasks to this node in a
+    /// single `BEGIN IMMEDIATE` transaction (was: one transaction per task).
+    /// The batch is capped by the node's free concurrency slots, so a poll
+    /// fills the node instead of one slot per round trip.
+    pub async fn try_assign_batch(&self, node_id: &str, limit: usize) -> Result<Vec<Assignment>> {
         // Hardening P1 item 15: critical-disk watermark — refuse NEW
         // assignments when the artifact-root filesystem is nearly full, so the
         // disk cannot be driven to zero by queued work. Node-side low-disk
@@ -29,7 +37,7 @@ impl Store {
                     crit_mb,
                     "critical disk watermark reached; refusing new assignments"
                 );
-                return Ok(None);
+                return Ok(Vec::new());
             }
         }
         // Hardening P2 item 37: a drained node stops receiving NEW assignments
@@ -42,8 +50,11 @@ impl Store {
                 .unwrap_or(0);
             if drained != 0 {
                 tracing::info!(node_id, "node is drained; skipping assignment");
-                return Ok(None);
+                return Ok(Vec::new());
             }
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
         }
         let mut tx = begin_immediate(&self.pool).await?;
         let cands = sqlx::query(
@@ -54,7 +65,36 @@ impl Store {
         .bind(node_id)
         .fetch_all(&mut *tx)
         .await?;
+
+        let node = sqlx::query(
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, drained \
+             FROM nodes WHERE id = ?",
+        )
+        .bind(node_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(node) = node else {
+            let _ = tx.rollback().await;
+            return Ok(Vec::new());
+        };
+        let nv = row_to_node_view(&node);
+        // Batch cap: the node's free concurrency slots (plan 0.3 1.2).
+        let free_slots = nv.max_concurrency.saturating_sub(nv.active_attempts) as usize;
+        let cap = limit.min(free_slots);
+        if cap == 0 {
+            let _ = tx.rollback().await;
+            return Ok(Vec::new());
+        }
+
+        struct Pending {
+            assignment: Assignment,
+            created_at: String,
+        }
+        let mut batch: Vec<Pending> = Vec::new();
         for c in &cands {
+            if batch.len() >= cap {
+                break;
+            }
             let task_id: String = c.try_get("id")?;
             let prompt: String = c.try_get("prompt")?;
             let adapter: String = c.try_get("adapter")?;
@@ -70,11 +110,11 @@ impl Store {
 
             // Resolve repository git info (absent for plain-dir tasks).
             let repo = sqlx::query(
-            "SELECT git_url, default_branch, validation_command FROM repositories WHERE name = ?",
-        )
-        .bind(&repository)
-        .fetch_optional(&mut *tx)
-        .await?;
+                "SELECT git_url, default_branch, validation_command FROM repositories WHERE name = ?",
+            )
+            .bind(&repository)
+            .fetch_optional(&mut *tx)
+            .await?;
             let (git_url, default_branch, validation_command) = match repo {
                 Some(r) => (
                     r.try_get::<String, _>("git_url")?,
@@ -84,18 +124,6 @@ impl Store {
                 None => (String::new(), String::new(), None),
             };
 
-            let node = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, drained \
-             FROM nodes WHERE id = ?",
-        )
-        .bind(node_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-            let Some(node) = node else {
-                let _ = tx.rollback().await;
-                return Ok(None);
-            };
-            let nv = row_to_node_view(&node);
             let inelig = node_ineligibility(
                 &nv,
                 &repository,
@@ -128,15 +156,6 @@ impl Store {
             if affected != 1 {
                 continue;
             }
-            // Observability: queued→assigned latency (Stage 2.5 ops).
-            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&created_at) {
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let latency = (now_ms - created.timestamp_millis()).max(0) as u64;
-                self.scheduler_latency_ms
-                    .store(latency, std::sync::atomic::Ordering::Relaxed);
-                self.scheduler_assignments
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
             sqlx::query(
             "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at, fencing_token) \
              VALUES (?, ?, ?, ?, 'assigned', ?, ?, ?, ?)",
@@ -151,40 +170,63 @@ impl Store {
         .bind(&fencing_token)
         .execute(&mut *tx)
         .await?;
-            sqlx::query("UPDATE nodes SET active_attempts = active_attempts + 1 WHERE id = ?")
-                .bind(node_id)
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-
-            let upstream_refs = self.upstream_refs_for_task(&task_id).await?;
-            let (upstream_commits, upstream_task_ids): (Vec<String>, Vec<String>) =
-                upstream_refs.into_iter().unzip();
-            return Ok(Some(Assignment {
-                attempt_id,
-                fencing_token,
-                task_id,
-                repository,
-                prompt,
-                adapter,
-                number: number as u32,
-                timeout_secs: timeout_secs as u64,
-                git_url,
-                default_branch,
-                validation_command: task_validation.or(validation_command),
-                validation_timeout_secs: None,
-                base_commit,
-                parent_acp_session_id,
-                network_mode: network_mode.clone(),
-                provenance: None,
-                upstream_commits,
-                upstream_task_ids,
-            }));
+            batch.push(Pending {
+                assignment: Assignment {
+                    attempt_id,
+                    fencing_token,
+                    task_id,
+                    repository,
+                    prompt,
+                    adapter,
+                    number: number as u32,
+                    timeout_secs: timeout_secs as u64,
+                    git_url,
+                    default_branch,
+                    validation_command: task_validation.or(validation_command),
+                    validation_timeout_secs: None,
+                    base_commit,
+                    parent_acp_session_id,
+                    network_mode: network_mode.clone(),
+                    provenance: None,
+                    upstream_commits: Vec::new(),
+                    upstream_task_ids: Vec::new(),
+                },
+                created_at,
+            });
         }
 
-        // No queued task this node can run.
-        let _ = tx.rollback().await;
-        Ok(None)
+        if batch.is_empty() {
+            let _ = tx.rollback().await;
+            return Ok(Vec::new());
+        }
+        sqlx::query("UPDATE nodes SET active_attempts = active_attempts + ? WHERE id = ?")
+            .bind(batch.len() as i64)
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        // Post-commit work: upstream refs (read-only) + latency observability.
+        let mut out = Vec::with_capacity(batch.len());
+        for p in batch {
+            // Observability: queued→assigned latency (Stage 2.5 ops).
+            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&p.created_at) {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let latency = (now_ms - created.timestamp_millis()).max(0) as u64;
+                self.scheduler_latency_ms
+                    .store(latency, std::sync::atomic::Ordering::Relaxed);
+                self.scheduler_assignments
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let mut assignment = p.assignment;
+            let upstream_refs = self.upstream_refs_for_task(&assignment.task_id).await?;
+            let (upstream_commits, upstream_task_ids): (Vec<String>, Vec<String>) =
+                upstream_refs.into_iter().unzip();
+            assignment.upstream_commits = upstream_commits;
+            assignment.upstream_task_ids = upstream_task_ids;
+            out.push(assignment);
+        }
+        Ok(out)
     }
 
     async fn attempt_count(&self, tx: &mut sqlx::SqliteConnection, task_id: &str) -> Result<i64> {

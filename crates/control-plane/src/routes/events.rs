@@ -185,25 +185,44 @@ pub fn poll_stats() -> (u64, u64) {
 pub async fn poll(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
+    headers: axum::http::HeaderMap,
     Json(mut req): Json<PollRequest>,
 ) -> (StatusCode, Json<PollResponse>) {
     let start = std::time::Instant::now();
     // The authenticated node id is the source of truth; ignore any client-supplied id.
     req.node_id = auth.node_id;
+    // Plan 0.3 1.2: batch assignment is opt-in via header; legacy nodes (no
+    // header) keep single-assignment semantics.
+    let max_batch = headers
+        .get("x-agentgrid-max-batch")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1);
     // Plan 533: degrade + touch + assign are coordinated in SchedulerService.
-    let out = match state.scheduler.poll(&req).await {
-        Ok((_, Some(assignment))) => (
+    let out = match state.scheduler.poll(&req, max_batch).await {
+        Ok((_, batch)) if !batch.is_empty() => {
+            let mut resp = PollResponse {
+                assignment: None,
+                assignments: batch,
+            };
+            resp.assignment = Some(resp.assignments[0].clone());
+            (StatusCode::OK, Json(resp))
+        }
+        Ok(_) => (
             StatusCode::OK,
             Json(PollResponse {
-                assignment: Some(assignment),
+                assignment: None,
+                assignments: Vec::new(),
             }),
         ),
-        Ok((_, None)) => (StatusCode::OK, Json(PollResponse { assignment: None })),
         Err(e) => {
             tracing::error!("poll failed: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(PollResponse { assignment: None }),
+                Json(PollResponse {
+                    assignment: None,
+                    assignments: Vec::new(),
+                }),
             )
         }
     };

@@ -96,12 +96,16 @@ impl SchedulerService {
 
     /// Serve one long-poll. The authenticated node id is the source of truth;
     /// a client-supplied id is ignored (the handler stamps `req.node_id`).
-    /// Returns `(degraded, assignment)`: `degraded` is true when the node's
+    /// Returns `(degraded, assignments)`: `degraded` is true when the node's
     /// protocol was rejected as incompatible (the node marks itself degraded).
+    /// Plan 0.3 1.2: `max_batch` (from the opt-in `x-agentgrid-max-batch`
+    /// header, 1 for legacy nodes) lets one poll fill several free slots in a
+    /// single write transaction.
     pub async fn poll(
         &self,
         req: &PollRequest,
-    ) -> anyhow::Result<(bool, Option<agentgrid_common::Assignment>)> {
+        max_batch: usize,
+    ) -> anyhow::Result<(bool, Vec<agentgrid_common::Assignment>)> {
         let mut degraded = false;
         if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
             self.store.set_node_degraded(&req.node_id).await?;
@@ -117,13 +121,14 @@ impl SchedulerService {
             // timeout despite work being assigned).
             let notified = self.assignment_notify.notified();
             tokio::pin!(notified);
-            match self.store.try_assign(&req.node_id).await {
-                Ok(Some(assignment)) => return Ok((degraded, Some(assignment))),
-                Ok(None) => {}
+            let cap = max_batch.max(1).min(req.max_concurrency as usize);
+            match self.store.try_assign_batch(&req.node_id, cap).await {
+                Ok(batch) if !batch.is_empty() => return Ok((degraded, batch)),
+                Ok(_) => {}
                 Err(e) => return Err(e),
             }
             if Instant::now() >= deadline {
-                return Ok((degraded, None));
+                return Ok((degraded, Vec::new()));
             }
             let remaining = deadline - Instant::now();
             tokio::select! {
@@ -452,8 +457,8 @@ mod tests {
             max_concurrency: 2,
             protocol_version: Some("999.0.0".into()),
         };
-        let (degraded, assignment) = svc.poll(&req).await.unwrap();
+        let (degraded, assignments) = svc.poll(&req, 1).await.unwrap();
         assert!(degraded, "incompatible protocol must degrade the node");
-        assert!(assignment.is_none());
+        assert!(assignments.is_empty());
     }
 }

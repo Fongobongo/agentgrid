@@ -2047,6 +2047,51 @@ mod workflow_tests {
         );
     }
 
+    // Plan 0.3 item 1.2: a batch of 100 assignments lands in ONE write
+    // transaction (was: one BEGIN IMMEDIATE per assignment).
+    #[tokio::test]
+    async fn assign_batch_hundred_tasks_one_write_txn() {
+        let s = temp_store().await;
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "batch-node".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 100,
+            agent_version: "test".into(),
+            protocol_version: None,
+            permission_interception: "wrapper".into(),
+        };
+        let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+        for i in 0..100 {
+            s.create_task(&CreateTaskRequest {
+                prompt: format!("task {i}"),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: Some(60),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+            })
+            .await
+            .unwrap();
+        }
+        let (txns_before, _) = write_txn_stats();
+        let batch = s.try_assign_batch(&node_id, 100).await.unwrap();
+        let (txns_after, failures) = write_txn_stats();
+        assert_eq!(batch.len(), 100, "all 100 tasks assigned in one batch");
+        assert_eq!(
+            txns_after - txns_before,
+            1,
+            "the batch must be a single write transaction"
+        );
+        assert_eq!(failures, 0, "no write-lock failures");
+    }
+
     #[tokio::test]
     async fn cancel_workflow_run_cancels_steps_and_tasks() {
         let s = temp_store().await;

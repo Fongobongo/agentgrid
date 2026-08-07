@@ -709,6 +709,11 @@ fn default_max_concurrency() -> u32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PollResponse {
     pub assignment: Option<Assignment>,
+    /// Plan 0.3 item 1.2: the full assignment batch (up to the node's free
+    /// concurrency slots). Legacy nodes read only `assignment` (N/N-1
+    /// compat); new nodes consume every entry.
+    #[serde(default)]
+    pub assignments: Vec<Assignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1075,8 +1080,13 @@ mod tests {
                 upstream_commits: vec![],
                 upstream_task_ids: vec![],
             }),
+            assignments: vec![],
         };
         assert_eq!(round_trip(&pr), pr);
+        // Batch field round-trips and tolerates absence (N/N-1 compat).
+        let legacy = r#"{"assignment":null}"#;
+        let parsed: PollResponse = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.assignments.is_empty());
     }
 
     #[test]

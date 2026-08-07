@@ -45,6 +45,7 @@ pub async fn poll_loop(cfg: Config, cred: crate::config::SavedCredential) -> Res
         };
         let resp = client
             .post(format!("{}/v1/node/poll", cfg.server))
+            .header("x-agentgrid-max-batch", cfg.max_concurrency.to_string())
             .json(&poll_req)
             .send()
             .await;
@@ -59,14 +60,25 @@ pub async fn poll_loop(cfg: Config, cred: crate::config::SavedCredential) -> Res
                         continue;
                     }
                 };
-                if let Some(a) = pr.assignment {
+                // Plan 0.3 1.2: consume the whole batch; legacy CPs only fill
+                // `assignment` (N/N-1 compat).
+                let mut batch = pr.assignments;
+                if batch.is_empty() {
+                    if let Some(a) = pr.assignment {
+                        batch.push(a);
+                    }
+                }
+                if batch.is_empty() {
+                    // No assignment: pace the loop instead of hammering the CP.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                for a in batch {
+                    // The CP caps the batch at our free slots; still wait (not
+                    // drop) if a slot is briefly busy, so no assignment is lost.
                     let permit = match sem.clone().try_acquire_owned() {
                         Ok(p) => p,
-                        Err(_) => {
-                            // At capacity; the control plane will re-offer on next poll.
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
+                        Err(_) => sem.clone().acquire_owned().await?,
                     };
                     let cfg2 = cfg.clone();
                     let client2 = client.clone();
@@ -76,9 +88,6 @@ pub async fn poll_loop(cfg: Config, cred: crate::config::SavedCredential) -> Res
                         }
                         drop(permit);
                     });
-                } else {
-                    // No assignment: pace the loop instead of hammering the CP.
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
             Ok(r) => {
