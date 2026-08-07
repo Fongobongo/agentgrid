@@ -31,12 +31,17 @@ rand() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-"$1"; 
 ADMIN_USER="${AGENTGRID_ADMIN_USER:-admin}"
 ADMIN_PASS="${AGENTGRID_ADMIN_PASSWORD:-$(rand 24)}"
 JWT_SECRET="${AGENTGRID_JWT_SECRET:-$(rand 48)}"
+# Compose requires process env vars (not just .env) for :? guards
 export AGENTGRID_JWT_SECRET="$JWT_SECRET"
-# Compose interpolates every service even when only the control plane starts;
-# the real one-time tokens are minted below and re-exported before the nodes
-# come up. Placeholders satisfy the `:?` guards here.
-export NODE1_TOKEN="${NODE1_TOKEN:-bootstrap}" NODE2_TOKEN="${NODE2_TOKEN:-bootstrap}"
-
+export NODE1_TOKEN="${NODE1_TOKEN:-bootstrap}"
+export NODE2_TOKEN="${NODE2_TOKEN:-bootstrap}"
+# Write secrets to .env file first (compose reads it for fallbacks)
+cat > "$ENV_FILE" <<EOF
+AGENTGRID_JWT_SECRET=$JWT_SECRET
+NODE1_TOKEN=$NODE1_TOKEN
+NODE2_TOKEN=$NODE2_TOKEN
+EOF
+chmod 600 "$ENV_FILE"
 echo ">> building & starting control plane"
 "${COMPOSE[@]}" up -d control-plane
 
