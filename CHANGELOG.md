@@ -23,6 +23,13 @@ All notable changes to this project are documented in this file.
   `assignment` field. Unit test pins 100 assignments to exactly one write
   transaction; load run (50 nodes / 500 tasks, batch 2): wall −35 %,
   poll requests −50 %, zero write-lock failures.
+- **Hot-path indexes + read probe (plan 0.3 item 1.3):** migration 0053
+  adds `attempts(node_id)`, `attempts(task_id, number DESC)` and
+  `tasks(status, created_at)`. The load harness now probes
+  `GET /v1/tasks?limit=500` every 200 ms while 50 writers drain the
+  queue and reports `tasks_read_p50_ms`/`tasks_read_p99_ms` (debug:
+  p50 ~98 ms within target, p99 ~256-316 ms — serialization/CPU-bound,
+  not write-lock-bound).
 
 ### Added (0.3 pass, load baseline — plan stage 0)
 

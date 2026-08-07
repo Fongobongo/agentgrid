@@ -178,6 +178,32 @@ async fn load_baseline_mock_nodes() {
         }));
     }
 
+    // Plan 0.3 item 1.3: read path under full write load. While the nodes
+    // drain the queue, probe GET /v1/tasks?limit=500 every 200 ms and record
+    // latencies (criterion: p99 < 100 ms).
+    let read_latencies: Arc<tokio::sync::Mutex<Vec<u128>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    {
+        let (http, base, token) = (http.clone(), base.clone(), token.clone());
+        let (read_latencies, completed) = (read_latencies.clone(), completed.clone());
+        handles.push(tokio::spawn(async move {
+            while completed.load(std::sync::atomic::Ordering::Relaxed) < tasks_n {
+                let t0 = Instant::now();
+                let ok = http
+                    .get(format!("{base}/v1/tasks?limit=500"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false);
+                if ok {
+                    read_latencies.lock().await.push(t0.elapsed().as_millis());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }));
+    }
+
     // Wait for the full workload to drain (or fail loudly).
     let deadline = Instant::now() + std::time::Duration::from_secs(600);
     while completed.load(std::sync::atomic::Ordering::Relaxed) < tasks_n {
@@ -199,6 +225,16 @@ async fn load_baseline_mock_nodes() {
     let pct = |p: f64| lat[(lat.len() as f64 * p).min(lat.len() as f64 - 1.0) as usize];
     let (p50, p99, max) = (pct(0.50), pct(0.99), *lat.last().unwrap_or(&0));
 
+    // Read-path percentiles (plan 0.3 1.3).
+    let mut rl = read_latencies.lock().await.clone();
+    rl.sort_unstable();
+    let rpct = |p: f64| rl[(rl.len() as f64 * p).min(rl.len() as f64 - 1.0) as usize];
+    let (rp50, rp99) = if rl.is_empty() {
+        (0, 0)
+    } else {
+        (rpct(0.50), rpct(0.99))
+    };
+
     // Pull the counters from /metrics on the live server.
     let metrics = http.get(format!("{base}/metrics")).send().await.unwrap();
     let m = metrics.text().await.unwrap();
@@ -214,6 +250,7 @@ async fn load_baseline_mock_nodes() {
     println!(
         "LOAD-RESULT nodes={nodes_n} tasks={tasks_n} completed={} wall_s={wall:.1} \
          assign_p50_ms={p50} assign_p99_ms={p99} assign_max_ms={max} \
+         tasks_read_p50_ms={rp50} tasks_read_p99_ms={rp99} \
          write_txns={} write_lock_failures={} poll_requests={} \
          poll_avg_ms={:.2}",
         completed.load(std::sync::atomic::Ordering::Relaxed),
