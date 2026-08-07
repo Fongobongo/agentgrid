@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (0.2-completion pass, real-agent E2E)
+
+- **Nightly real-agent E2E (plan 1.5):** `tests/e2e/run-real-agent.sh`
+  brings up a control plane plus two local nodes on a real adapter
+  (claude by default, opencode optional) and runs the trivial greeting
+  task twice so one attempt lands on each node; it exits 77 (skip) when
+  the API key or agent CLI is absent. A `real-agent` job joins the CI
+  nightly schedule (`AG_REAL_KEY` secret) and treats 77 as skip. The
+  per-adapter contract side stays in the `#[ignore]`d conformance tests.
+
 ### Added (0.2-completion pass, RBAC)
 
 - **Admin / operator roles (plan 5.2):** users gain a `role` (migration

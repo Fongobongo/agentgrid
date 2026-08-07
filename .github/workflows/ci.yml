@@ -197,3 +197,33 @@ jobs:
           AG_REMOTE_PASS=$AG_REMOTE_PASS
           EOF
           bash tests/e2e/run-two-host.sh
+
+  real-agent:
+    name: real-agent E2E (API key, two nodes)
+    runs-on: ubuntu-latest
+    # Plan 1.5: one real task across two nodes behind an API key. The script
+    # exits 77 when AG_REAL_KEY (or the agent CLI) is missing → treated as a
+    # skip so CI without keys stays green. The adapter-contract side of this
+    # gate is the `#[ignore]`d tests in crates/adapters. Nightly + manual.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: [rust]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: build debug binaries
+        run: cargo build --workspace
+      - name: install the real agent CLI
+        run: npm install -g @anthropic-ai/claude-code
+      - name: run one real task on two nodes
+        env:
+          AG_REAL_KEY: ${{ secrets.AG_REAL_KEY }}
+        run: |
+          rc=0
+          bash tests/e2e/run-real-agent.sh || rc=$?
+          if [ "$rc" = "77" ]; then
+            echo "no AG_REAL_KEY configured — skipping real-agent job"
+            exit 0
+          fi
+          exit "$rc"
