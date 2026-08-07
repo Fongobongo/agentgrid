@@ -52,6 +52,7 @@ pub async fn report_complete(
     commit_sha: Option<String>,
     error_code: Option<String>,
     acp_session_id: Option<String>,
+    plan: Option<String>,
     resolved_base_sha: Option<String>,
     remote_head_at_start: Option<String>,
     remote_head_at_finish: Option<String>,
@@ -69,7 +70,7 @@ pub async fn report_complete(
         remote_head_at_start,
         remote_head_at_finish,
         acp_session_id,
-        plan: None,
+        plan,
         provenance,
         pending_artifacts,
     };

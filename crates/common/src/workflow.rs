@@ -1047,6 +1047,10 @@ pub struct WorkflowProjection {
     /// declares a `WorkflowBudget`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<BudgetSnapshot>,
+    /// Stage 13 plan approval: the pending machine-readable plan on a
+    /// `PlanReady` run (read-only; approve via `/approve-plan`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_plan: Option<String>,
 }
 
 /// Stage 13: a scheduled trigger that creates a `WorkflowRun` of a template

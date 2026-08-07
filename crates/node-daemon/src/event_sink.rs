@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentgrid_adapters::{to_event_type, AdapterEvent};
-use agentgrid_common::{AgentEventEnvelope, EventType, IncomingEvent, IngestEventsRequest};
+use agentgrid_common::{
+    AgentEventEnvelope, EventKind, EventType, IncomingEvent, IngestEventsRequest,
+};
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -50,6 +52,10 @@ pub struct EventSink {
     // calls become no-ops and `run_attempt` should fail the attempt with
     // `error_code=spool_full` (disk-full fail-closed).
     spool_full: AtomicBool,
+    /// Stage 13 plan approval: the last `plan` event text the adapter emitted
+    /// during this attempt; carried on the completion so an `expandable`
+    /// architect step can pause its workflow run in `PlanReady`.
+    plan: std::sync::Mutex<Option<String>>,
 }
 
 impl EventSink {
@@ -75,7 +81,22 @@ impl EventSink {
             dropped_count: AtomicU64::new(0),
             dropped_bytes: AtomicU64::new(0),
             spool_full: AtomicBool::new(false),
+            plan: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Stage 13 plan approval: remember the latest `plan` event text emitted
+    /// by the adapter (last wins).
+    pub fn note_plan(&self, text: String) {
+        if let Ok(mut g) = self.plan.lock() {
+            *g = Some(text);
+        }
+    }
+
+    /// Stage 13 plan approval: take the captured plan (if any) so the
+    /// completion can carry it to the control plane.
+    pub fn take_plan(&self) -> Option<String> {
+        self.plan.lock().ok().and_then(|mut g| g.take())
     }
 
     /// Record that an event originated from the adapter output (not the
@@ -522,12 +543,22 @@ async fn emit_line_masked(
     // Unknown kinds are preserved (never fatal).
     let s = String::from_utf8_lossy(line).to_string();
     if let Ok(env) = serde_json::from_str::<AgentEventEnvelope>(&s) {
+        if env.kind == EventKind::Plan {
+            if let Some(text) = env.payload.get("text").and_then(|x| x.as_str()) {
+                sink.note_plan(text.to_string());
+            }
+        }
         sink.push(env.kind.to_event_type(), env.payload).await;
         sink.note_adapter_event();
         return;
     }
     match serde_json::from_str::<AdapterEvent>(&s) {
         Ok(ae) => {
+            if ae.r#type == "plan" {
+                if let Some(text) = ae.payload.get("text").and_then(|x| x.as_str()) {
+                    sink.note_plan(text.to_string());
+                }
+            }
             sink.push(to_event_type(&ae.r#type), ae.payload).await;
             sink.note_adapter_event();
         }
@@ -540,5 +571,51 @@ async fn emit_line_masked(
             sink.push(ty, json!({ "text": s })).await;
             sink.note_adapter_event();
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_capture_tests {
+    use super::*;
+    use crate::outbox::EventOutbox;
+
+    fn test_sink(id: &str) -> Arc<EventSink> {
+        let dir = std::env::temp_dir().join(format!("ag-sink-plan-{}-{}", std::process::id(), id));
+        let ob = EventOutbox::open(&dir, id).expect("open test outbox");
+        EventSink::new(
+            id.into(),
+            Client::new(),
+            "http://unused".into(),
+            String::new(),
+            Arc::new(ob),
+        )
+    }
+
+    #[tokio::test]
+    async fn plan_event_captured_last_wins() {
+        let sink = test_sink("plan-capture");
+        emit_line_masked(
+            br#"{"type":"plan","payload":{"text":"plan-a"}}"#,
+            &sink,
+            "stdout",
+            &None,
+        )
+        .await;
+        emit_line_masked(
+            br#"{"type":"log","payload":{"text":"hi"}}"#,
+            &sink,
+            "stdout",
+            &None,
+        )
+        .await;
+        emit_line_masked(
+            br#"{"type":"plan","payload":{"text":"plan-b"}}"#,
+            &sink,
+            "stdout",
+            &None,
+        )
+        .await;
+        assert_eq!(sink.take_plan().as_deref(), Some("plan-b"));
+        assert!(sink.take_plan().is_none(), "take is consuming");
     }
 }

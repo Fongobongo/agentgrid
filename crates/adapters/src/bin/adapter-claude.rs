@@ -85,6 +85,11 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
             }
             let text = v.get("result").and_then(|x| x.as_str()).unwrap_or("");
             out.push(json!({ "type": "result", "payload": { "text": text } }));
+            // Stage 13 plan approval: surface fenced ```plan blocks from the
+            // final answer as `plan` events.
+            for plan in agentgrid_adapters::plan_blocks(text) {
+                out.push(json!({ "type": "plan", "payload": { "text": plan } }));
+            }
             // `claude -p` result lines carry usage + cost; surface them as
             // `progress` (stored as `metric`) so workflow token budgets fire.
             let mut tokens = 0u64;
@@ -232,6 +237,23 @@ mod tests {
         assert_eq!(types(&evs), vec!["result", "progress"]);
         assert_eq!(evs[1]["payload"]["tokens"], 125);
         assert_eq!(evs[1]["payload"]["cost_cents"], 1);
+        assert!(!err);
+    }
+
+    #[test]
+    fn translate_result_with_plan_fence_emits_plan_event() {
+        let mut err = false;
+        let line = json!({
+            "type": "result",
+            "result": "ok\n```plan\n- id: w\n  prompt: work\n  role: worker\n```"
+        })
+        .to_string();
+        let evs = translate(&line, &mut err);
+        assert_eq!(types(&evs), vec!["result", "plan"]);
+        assert_eq!(
+            evs[1]["payload"]["text"],
+            "- id: w\n  prompt: work\n  role: worker"
+        );
         assert!(!err);
     }
 

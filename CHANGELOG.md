@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (0.2-completion pass, plan approval)
+
+- **Plan approval works with real agents (plan 2.3):** adapters now surface a
+  machine-readable plan when the agent fences it — `adapter-opencode` scans
+  assistant text and `adapter-claude` the final `result` for ` ```plan `
+  blocks and emit `plan` events. The node daemon captures the last such plan
+  and carries it on the attempt completion, so an `expandable` architect step
+  pauses the workflow run in `PlanReady` and `POST /v1/workflow-runs/{id}/approve-plan`
+  expands the approved plan into steps — no mock-only plumbing left. The
+  projection now carries the pending plan (`pending_plan`) on `plan_ready`
+  runs, and the Workflows UI shows it for review next to the Approve button.
+
 ### Added (0.2-completion pass, budgets)
 
 - **Token/cost budgets actually fire (plan 1.4):** real adapters now report

@@ -263,6 +263,7 @@ export interface WorkflowProjection {
   run: WorkflowRun;
   steps: StepProjection[];
   budget?: BudgetSnapshot | null;
+  pending_plan?: string | null;
 }
 
 export function listWorkflowRuns(): Promise<WorkflowRun[]> {

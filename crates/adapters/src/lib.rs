@@ -71,6 +71,33 @@ pub fn to_event_kind(t: &str) -> EventKind {
     }
 }
 
+/// Extract fenced ` ```plan ` code blocks from an agent's text output
+/// (Stage 13 plan approval). A workflow architect instructed to wrap its
+/// machine-readable plan in such a fence gets it surfaced as a `plan` event;
+/// the last block wins downstream. Unclosed fences are ignored.
+pub fn plan_blocks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_plan = false;
+    let mut cur = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if !in_plan && (t == "```plan" || t.starts_with("```plan ")) {
+            in_plan = true;
+            cur.clear();
+        } else if in_plan && t == "```" {
+            in_plan = false;
+            out.push(cur.trim().to_string());
+        } else if in_plan {
+            if !cur.is_empty() {
+                cur.push('\n');
+            }
+            cur.push_str(line);
+        }
+    }
+    out.retain(|p| !p.is_empty());
+    out
+}
+
 /// Hardening P0 (unsafe adapter defaults): resolve whether an adapter may
 /// run its "unsafe unattended" mode — bypassing interactive permission
 /// prompts / auto-running every tool call — under a single operator opt-in
@@ -215,5 +242,35 @@ mod unsafe_tests {
     #[test]
     fn opencode_auto_via_unsafe_knob() {
         with_env(None, || assert!(opencode_auto(true)));
+    }
+}
+
+#[cfg(test)]
+mod plan_block_tests {
+    use super::plan_blocks;
+
+    #[test]
+    fn extracts_single_fenced_plan() {
+        let text =
+            "Here is my plan:\n```plan\n- id: w\n  prompt: do work\n  role: worker\n```\nDone.";
+        let plans = plan_blocks(text);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0], "- id: w\n  prompt: do work\n  role: worker");
+    }
+
+    #[test]
+    fn unclosed_fence_ignored() {
+        assert!(plan_blocks("```plan\n- id: w").is_empty());
+    }
+
+    #[test]
+    fn no_plan_fence_yields_none() {
+        assert!(plan_blocks("just some text\n```yaml\nfoo: bar\n```").is_empty());
+    }
+
+    #[test]
+    fn last_block_kept_when_multiple() {
+        let text = "```plan\nA\n```\nmid\n```plan\nB\n```";
+        assert_eq!(plan_blocks(text), vec!["A".to_string(), "B".to_string()]);
     }
 }

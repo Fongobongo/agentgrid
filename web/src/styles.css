@@ -260,6 +260,10 @@ button.link, a.link {
 .badge.warn { background: rgba(210,153,34,0.15); color: var(--warn); }
 .badge.run { background: var(--panel2); color: var(--accent); }
 
+.wf-plan { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 8px; padding: 10px 12px; }
+.wf-plan summary { cursor: pointer; font-weight: 600; }
+.wf-plan pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 0.85rem; }
+
 .wf-dag { display: flex; gap: 24px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
 .wf-col { display: flex; flex-direction: column; gap: 12px; min-width: 200px; }
 .wf-step { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }

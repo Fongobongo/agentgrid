@@ -565,10 +565,16 @@ impl Store {
                 result,
             });
         }
+        let pending_plan = if run.status == agentgrid_common::WorkflowRunStatus::PlanReady {
+            self.get_workflow_run_plan(run_id).await?
+        } else {
+            None
+        };
         Ok(Some(agentgrid_common::WorkflowProjection {
             run,
             steps: out,
             budget: self.workflow_run_budget_snapshot(run_id).await?,
+            pending_plan,
         }))
     }
 

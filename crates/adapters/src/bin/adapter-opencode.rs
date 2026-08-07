@@ -39,12 +39,18 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
     let part = v.get("part");
     match t {
         "text" => {
+            let mut out = Vec::new();
             if let Some(text) = part.and_then(|p| p.get("text")).and_then(|x| x.as_str()) {
                 if !text.is_empty() {
-                    return vec![json!({ "type": "log", "payload": { "text": text } })];
+                    out.push(json!({ "type": "log", "payload": { "text": text } }));
+                }
+                // Stage 13 plan approval: an architect instructed to fence its
+                // machine-readable plan in ```plan gets it surfaced here.
+                for plan in agentgrid_adapters::plan_blocks(text) {
+                    out.push(json!({ "type": "plan", "payload": { "text": plan } }));
                 }
             }
-            Vec::new()
+            out
         }
         "tool_use" => {
             let mut out = Vec::new();
@@ -212,6 +218,21 @@ mod tests {
         let evs = translate(line, &mut err);
         assert_eq!(types(&evs), vec!["log"]);
         assert_eq!(evs[0]["payload"]["text"], "hello");
+        assert!(!err);
+    }
+
+    #[test]
+    fn translate_text_with_plan_fence_emits_plan_event() {
+        let mut err = false;
+        let text = "ok\n```plan\n- id: w\n  prompt: work\n  role: worker\n```\n";
+        let line =
+            serde_json::json!({"type":"text","part":{"type":"text","text":text}}).to_string();
+        let evs = translate(&line, &mut err);
+        assert_eq!(types(&evs), vec!["log", "plan"]);
+        assert_eq!(
+            evs[1]["payload"]["text"],
+            "- id: w\n  prompt: work\n  role: worker"
+        );
         assert!(!err);
     }
 

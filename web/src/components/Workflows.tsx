@@ -295,6 +295,12 @@ export function WorkflowDetails({ runId }: { runId: string }) {
         </div>
         {err && <div className="error">{err}</div>}
       </div>
+      {run.status.toLowerCase() === 'plan_ready' && proj.pending_plan && (
+        <details className="wf-plan" open>
+          <summary>Pending plan (review, then approve)</summary>
+          <pre className="mono">{proj.pending_plan}</pre>
+        </details>
+      )}
       {proj.budget && <BudgetBlock snap={proj.budget} />}
       <div className="wf-view-toggle">
         <button className={view === 'dag' ? 'navbtn active' : 'navbtn'} onClick={() => setView('dag')}>DAG</button>
