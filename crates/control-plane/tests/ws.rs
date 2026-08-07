@@ -167,10 +167,11 @@ async fn ws_assignment_pushed_under_200ms_and_ack_lands() {
     );
 
     // Ack over WS flips the attempt assigned→running (same store path as the
-    // HTTP ack endpoint).
+    // HTTP ack endpoint). The ack must carry the fencing token (2.4).
     let attempt_id = assignments[0].attempt_id.clone();
     let ack = NodeWsMsg::Ack {
         attempt_ids: vec![attempt_id.clone()],
+        fencing_tokens: vec![assignments[0].fencing_token.clone()],
         ok: true,
         error: None,
     };
@@ -325,4 +326,46 @@ async fn poll_node_and_ws_node_coexist() {
         .unwrap();
     let poll_assignment = resp.assignment.expect("poll node must get task 2");
     assert_eq!(poll_assignment.task_id, t2);
+}
+
+/// Plan 0.3 2.4: fencing applies on the WS path — an ack with a stale token
+/// must not move the attempt (same 409 semantics as the HTTP node endpoints).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ws_ack_with_stale_fencing_token_rejected() {
+    let (base, token) = boot().await;
+    let (node_id, cred) = enroll(&base, &token, "ws-fence", 1).await;
+    let mut sock = ws_connect(&base, &cred).await;
+    send_hello(&mut sock, &node_id, 1).await;
+    expect_hello_ok(&mut sock).await;
+
+    let task_id = create_task(&base, &token).await;
+    let msg = recv_msg(&mut sock, Duration::from_secs(5)).await;
+    let Some(NodeWsMsg::Assignment { assignments }) = msg else {
+        panic!("expected assignment push, got {msg:?}")
+    };
+    let ack = NodeWsMsg::Ack {
+        attempt_ids: vec![assignments[0].attempt_id.clone()],
+        fencing_tokens: vec!["stale-token".into()],
+        ok: true,
+        error: None,
+    };
+    sock.send(Message::Text(serde_json::to_string(&ack).unwrap()))
+        .await
+        .unwrap();
+    // Give the CP time to (wrongly) apply it; the attempt must stay assigned.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let st: agentgrid_common::TaskView = reqwest::Client::new()
+        .get(format!("{base}/v1/tasks/{task_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        st.status,
+        agentgrid_common::TaskStatus::Assigned,
+        "a stale fencing token must not ack the attempt"
+    );
 }

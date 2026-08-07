@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file.
 
 ### Added (0.3 pass, node WebSocket channel — plan stage 2)
 
+- **WS resilience + fencing on the WS path (plan 0.3 item 2.4):** failure-
+  injection test kills the control plane mid-attempt and restarts it on the
+  same address — the attempt still completes and every event lands (durable
+  event outbox, idempotent ingest, bounded retries all verified in-process).
+  The WS `ack` message now carries `fencing_tokens` (parallel to
+  `attempt_ids`); the control plane validates each one with the same
+  `check_fencing_token` semantics as the HTTP node endpoints (stale token →
+  rejected, 409-equivalent), and the node echoes the tokens from the pushed
+  `assignment`. Message table updated in `docs/node-ws-protocol.md`.
 - **node-daemon WebSocket client + transport selection (plan 0.3 item 2.3):**
   node-side WS control channel over tokio-tungstenite/rustls (no OpenSSL):
   hello handshake, assignment pushes consumed through the same dispatch

@@ -233,10 +233,11 @@ async fn handle_client_msg(state: &Arc<AppState>, node_id: &str, msg: NodeWsMsg)
     match msg {
         NodeWsMsg::Ack {
             attempt_ids,
+            fencing_tokens,
             ok,
             error,
         } => {
-            for id in &attempt_ids {
+            for (i, id) in attempt_ids.iter().enumerate() {
                 match state.store.attempt_owner(id).await {
                     Ok(Some(owner)) if owner == *node_id => {}
                     Ok(_) => {
@@ -244,6 +245,18 @@ async fn handle_client_msg(state: &Arc<AppState>, node_id: &str, msg: NodeWsMsg)
                         continue;
                     }
                     _ => continue,
+                }
+                // Plan 0.3 2.4: fencing applies on the WS path too — a stale
+                // session must not ack an attempt that was reassigned/lost.
+                if let Err(code) = crate::auth::check_fencing_token(
+                    state,
+                    id,
+                    fencing_tokens.get(i).map(|s| s.as_str()),
+                )
+                .await
+                {
+                    tracing::warn!(node_id, attempt = %id, %code, "ws ack rejected: fencing token mismatch");
+                    continue;
                 }
                 if ok {
                     if let Err(e) = state.store.ack_attempt(id).await {

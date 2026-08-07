@@ -28,7 +28,7 @@
 | узел → CP | `hello` | `node_id`, `name`, `adapters`, `repositories`, `max_concurrency`, `protocol_version`, `agent_version` | Регистрация в сессии. Аналог полей `PollRequest`; несовместимый major `protocol_version` → close `4002`. |
 | CP → узел | `hello_ok` | `server_time` (unix ms) | Сессия принята, узел в реестре. |
 | CP → узел | `assignment` | `assignments`: массив `Assignment` (те же поля, что в `PollResponse.assignments`, включая `fencing_token`, `timeout_secs`, `attempt_id`) | Пуш назначения после commit планировщика. Батч ≤ свободных слотов узла. |
-| узел → CP | `ack` | `attempt_ids`: массив, `ok`: bool, `error?` | Подтверждение получения назначения. Нет ack за 25 с → attempt гасится reaper'ом, задача возвращается в очередь (как потерянный poll-ответ). `ok=false` → попытка сразу failed с ошибкой. |
+| узел → CP | `ack` | `attempt_ids`: массив, `fencing_tokens`: массив (параллельно `attempt_ids`, legacy-узлы опускают), `ok`: bool, `error?` | Подтверждение получения назначения. Нет ack за 25 с → attempt гасится reaper'ом, задача возвращается в очередь (как потерянный poll-ответ). `ok=false` → попытка сразу failed с ошибкой. |
 | CP → узел | `cancel` | `attempt_id` | Отмена попытки (по `POST /v1/tasks/:id/cancel`). |
 | узел → CP | `cancel_ack` | `attempt_id` | Подтверждение получения отмены. Отмена действительна по статусу attempt'а в store даже без ack — пуш только ускоряет доставку. |
 | CP → узел | `ping` | — (WS ping-фрейм, раз в 15 с) | Liveness. Ответ — стандартный WS pong. Нет pong 45 с → разрыв. |
@@ -53,8 +53,9 @@ WS и poll дают одинаковое поведение:
 - батч ограничивается `min(max_batch?, свободные слоты)` — в WS батч
   всегда оптимален по слотам (заголовок `x-agentgrid-max-batch` не нужен);
 - `fencing_token` генерируется на назначении и проверяется на HTTP
-  data-plane вызовах (ack/события/завершение) — одинаково для обоих
-  транспортов;
+  data-plane вызовах (ack/события/завершение) и на WS `ack`
+  (`check_fencing_token`, рассинхрон → отклонение, как 409) — одинаково
+  для обоих транспортов;
 - узел на poll не видит назначений, отданных WS-узлу, и наоборот:
   планировщик один, очередь задач одна (`queued` → `assigned` атомарно);
 - отмена идемпотентна по статусу attempt'а.
@@ -82,7 +83,7 @@ WS и poll дают одинаковое поведение:
              "protocol_version":"1","agent_version":"0.3.0"}
 CP → узел:  {"type":"hello_ok","server_time":1786350000000}
 CP → узел:  {"type":"assignment","assignments":[{...attempt a1...},{...attempt a2...}]}
-узел → CP:  {"type":"ack","attempt_ids":["a1","a2"],"ok":true}
+узел → CP:  {"type":"ack","attempt_ids":["a1","a2"],"fencing_tokens":["t1","t2"],"ok":true}
 ... работа, события идут по HTTP POST /v1/attempts/:id/events ...
 CP → узел:  {"type":"cancel","attempt_id":"a2"}
 узел → CP:  {"type":"cancel_ack","attempt_id":"a2"}

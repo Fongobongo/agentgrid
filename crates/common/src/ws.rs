@@ -36,8 +36,12 @@ pub enum NodeWsMsg {
     Assignment { assignments: Vec<Assignment> },
     /// Node → CP: received assignment(s). `ok=false` rejects the attempts
     /// (they are completed failed so the tasks requeue via retry).
+    /// `fencing_tokens` parallels `attempt_ids` (plan 0.3 2.4: fencing on the
+    /// WS path); legacy nodes omit it and are checked as token-less.
     Ack {
         attempt_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fencing_tokens: Vec<String>,
         ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -65,6 +69,7 @@ mod tests {
     fn round_trip_and_tag_names() {
         let m = NodeWsMsg::Ack {
             attempt_ids: vec!["a1".into()],
+            fencing_tokens: vec!["t1".into()],
             ok: true,
             error: None,
         };

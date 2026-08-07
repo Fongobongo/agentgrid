@@ -105,11 +105,17 @@ async fn handle_msg(
     match serde_json::from_str::<NodeWsMsg>(text) {
         Ok(NodeWsMsg::Assignment { assignments }) if !assignments.is_empty() => {
             let ids: Vec<String> = assignments.iter().map(|a| a.attempt_id.clone()).collect();
+            // Echo the fencing tokens back with the ack (plan 0.3 2.4).
+            let tokens: Vec<String> = assignments
+                .iter()
+                .map(|a| a.fencing_token.clone())
+                .collect();
             dispatch_batch(cfg, client, sem, assignments).await?;
             // Receipt ack; the authoritative "agent started" ack still comes
             // from the attempt runner over HTTP.
             let ack = NodeWsMsg::Ack {
                 attempt_ids: ids,
+                fencing_tokens: tokens,
                 ok: true,
                 error: None,
             };
@@ -307,6 +313,21 @@ mod tests {
         }
     }
 
+    /// Node HTTP client carrying the node credential, exactly like
+    /// `run_transport` builds it — the attempt runner's data-plane calls
+    /// (events/completion/artifacts) authenticate with this header.
+    fn authed_client(cred: &SavedCredential) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", cred.credential).parse().unwrap(),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
+    }
+
     async fn wait_until<F, Fut>(desc: &str, timeout: Duration, mut f: F)
     where
         F: FnMut() -> Fut,
@@ -350,7 +371,8 @@ mod tests {
             credential,
         };
         let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
-        let node_task = tokio::spawn(ws_loop(cfg, cred, reqwest::Client::new(), sem));
+        let http = authed_client(&cred);
+        let node_task = tokio::spawn(ws_loop(cfg, cred, http, sem));
 
         // 1) node registers automatically.
         let st = state.clone();
@@ -401,5 +423,127 @@ mod tests {
         .await;
 
         node_task.abort();
+    }
+
+    /// Plan 0.3 2.4 failure injection: kill the CP mid-attempt. The attempt
+    /// must complete once the CP is back, and its events must all land
+    /// (durable event outbox + idempotent ingest + bounded retry).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ws_attempt_survives_cp_kill_midflight() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ag-fi-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        // A self-contained `adapter-mock` (JSON-line protocol): 5 log events,
+        // a 4 s sleep spanning the CP outage, 5 more events, clean result.
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let script = bin_dir.join("adapter-mock");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             for i in 1 2 3 4 5; do echo '{\"type\":\"log\",\"payload\":{\"text\":\"pre\"}}'; done\n\
+             sleep 4\n\
+             for i in 1 2 3 4 5; do echo '{\"type\":\"log\",\"payload\":{\"text\":\"post\"}}'; done\n\
+             echo '{\"type\":\"result\",\"payload\":{\"exit_code\":0,\"text\":\"done\"}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{old_path}", bin_dir.display()));
+
+        let state = AppState::open_temp().await.unwrap();
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.set_reuseaddr(true).unwrap();
+        sock.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = sock.local_addr().unwrap();
+        let listener = sock.listen(64).unwrap();
+        let st1 = state.clone();
+        let server1 = tokio::spawn(async move {
+            let _ = axum::serve(listener, build_router(st1)).await;
+        });
+        let base = format!("http://{addr}");
+        let token = login(&base).await;
+        let (node_id, credential) = enroll(&base, &token).await;
+
+        let cfg = test_cfg(&base, &dir.join("data"));
+        let cred = SavedCredential {
+            node_id: node_id.clone(),
+            credential,
+        };
+        let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
+        let http = authed_client(&cred);
+        let node_task = tokio::spawn(ws_loop(cfg, cred, http, sem));
+
+        let st = state.clone();
+        wait_until("ws registration", Duration::from_secs(10), || async {
+            st.ws_registry.connection_count().await == 1
+        })
+        .await;
+
+        let task_id = create_task(&base, &token).await;
+        wait_until("attempt running", Duration::from_secs(15), || async {
+            let Ok(r) = reqwest::Client::new()
+                .get(format!("{base}/v1/tasks/{task_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .send()
+                .await
+            else {
+                return false;
+            };
+            r.text().await.unwrap_or_default().contains("\"running\"")
+        })
+        .await;
+
+        // Kill the CP mid-attempt; the adapter keeps working for ~4 s.
+        server1.abort();
+        let _ = server1.await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let sock2 = tokio::net::TcpSocket::new_v4().unwrap();
+        sock2.set_reuseaddr(true).unwrap();
+        sock2.bind(addr).unwrap();
+        let listener2 = sock2.listen(64).unwrap();
+        let st2 = state.clone();
+        let _server2 = tokio::spawn(async move {
+            let _ = axum::serve(listener2, build_router(st2)).await;
+        });
+
+        // Attempt completes and all events land after the CP is back.
+        wait_until(
+            "task succeeded after CP restart",
+            Duration::from_secs(60),
+            || async {
+                let Ok(r) = reqwest::Client::new()
+                    .get(format!("{base}/v1/tasks/{task_id}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .send()
+                    .await
+                else {
+                    return false;
+                };
+                r.text().await.unwrap_or_default().contains("\"succeeded\"")
+            },
+        )
+        .await;
+        let events: serde_json::Value = reqwest::Client::new()
+            .get(format!("{base}/v1/tasks/{task_id}/events"))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let count = events.as_array().map(|a| a.len()).unwrap_or(0);
+        assert!(
+            count >= 10,
+            "events lost across the CP outage: got {count}, want >= 10"
+        );
+
+        node_task.abort();
+        std::env::set_var("PATH", old_path);
     }
 }
