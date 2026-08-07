@@ -2464,6 +2464,87 @@ mod workflow_tests {
         assert_eq!(ack.highest_contiguous_sequence, Some(6));
     }
 
+    // Plan 0.3 item 1.4: duplicates INSIDE one batch land once, and a large
+    // batch ingests in a single write transaction.
+    #[tokio::test]
+    async fn ingest_events_batch_intra_dedup_and_single_txn() {
+        let s = temp_store().await;
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec![String::new()],
+                max_concurrency: 2,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        let _task = s
+            .create_task(&CreateTaskRequest {
+                prompt: "p".into(),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: Some(60),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+            })
+            .await
+            .unwrap();
+        let a = s.try_assign(&node_id).await.unwrap().unwrap();
+
+        let mk = |seq, text: &str| IncomingEvent {
+            sequence: seq,
+            r#type: EventType::Stdout,
+            payload: serde_json::json!({"text": text}),
+        };
+        // Intra-batch duplicates: 1,2,2,3,3,3 → only 3 distinct sequences land.
+        let ack = s
+            .ingest_events(
+                &a.attempt_id,
+                &IngestEventsRequest {
+                    events: vec![
+                        mk(1, "a"),
+                        mk(2, "b"),
+                        mk(2, "b2"),
+                        mk(3, "c"),
+                        mk(3, "c2"),
+                        mk(3, "c3"),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ack.accepted, 3);
+        assert_eq!(ack.highest_contiguous_sequence, Some(3));
+
+        // 1000-event batch: one write transaction, contiguous prefix 1003.
+        let (txns_before, _) = write_txn_stats();
+        let big: Vec<IncomingEvent> = (4..=1003u64).map(|i| mk(i, "x")).collect();
+        let ack = s
+            .ingest_events(&a.attempt_id, &IngestEventsRequest { events: big })
+            .await
+            .unwrap();
+        let (txns_after, failures) = write_txn_stats();
+        assert_eq!(ack.accepted, 1000);
+        assert_eq!(ack.highest_contiguous_sequence, Some(1003));
+        assert_eq!(
+            txns_after - txns_before,
+            1,
+            "a 1000-event batch must be one write transaction"
+        );
+        assert_eq!(failures, 0);
+    }
+
     #[tokio::test]
     async fn artifact_save_rejects_traversal_names() {
         let s = temp_store().await;

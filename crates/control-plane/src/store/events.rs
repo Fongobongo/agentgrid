@@ -74,21 +74,27 @@ impl Store {
         }
 
         let mut accepted = 0u64;
-        for ev in &req.events {
-            let payload = serde_json::to_string(&ev.payload)?;
-            let id = Uuid::new_v4().to_string();
-            // Hardening P0 item 9: allocate the global ingest cursor from the
-            // single-row counter inside the same transaction, so every inserted
-            // event gets a strictly monotonic id ordered across attempts.
-            // Duplicate redeliveries consume a counter value but land nowhere
-            // (ON CONFLICT DO NOTHING) — the cursor stays monotonic, not
-            // necessarily gap-free, which is all the read path requires.
-            let ingest_id: i64 = sqlx::query_scalar(
-                "UPDATE event_ingest_counter SET next_val = next_val + 1 \
+        // Plan 0.3 item 1.4: allocate the batch's ingest-id block with ONE
+        // counter bump (was: one per event). Duplicates still consume cursor
+        // values and land nowhere (ON CONFLICT DO NOTHING) — the cursor stays
+        // monotonic, not necessarily gap-free, which is all the read path
+        // requires.
+        let batch_n = req.events.len() as i64;
+        let block_last: i64 = if batch_n > 0 {
+            sqlx::query_scalar(
+                "UPDATE event_ingest_counter SET next_val = next_val + ? \
                  WHERE id = 1 RETURNING next_val",
             )
+            .bind(batch_n)
             .fetch_one(&mut *tx)
-            .await?;
+            .await?
+        } else {
+            0
+        };
+        let block_first = block_last - batch_n + 1;
+        for (i, ev) in req.events.iter().enumerate() {
+            let payload = serde_json::to_string(&ev.payload)?;
+            let id = Uuid::new_v4().to_string();
             let r = sqlx::query(
                 "INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at, ingest_id) \
                  VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -100,7 +106,7 @@ impl Store {
             .bind(event_type_str(ev.r#type))
             .bind(&payload)
             .bind(now_iso())
-            .bind(ingest_id)
+            .bind(block_first + i as i64)
             .execute(&mut *tx)
             .await?;
             accepted += r.rows_affected();
@@ -108,9 +114,8 @@ impl Store {
         // Hardening P1 item 14: report the contiguous event-sequence prefix we
         // hold for this attempt (1..=N with no gaps), so a client can detect a
         // gap when the durable outbox redelivers. Computed after commit so the
-        // prefix reflects the rows this batch landed; cheap for typical event
-        // counts, but O(rows) load — TODO: switch to a recursive CTE / tracked
-        // cursor once an attempt surfaces millions of events.
+        // prefix reflects the rows this batch landed; server-side window query
+        // (plan 0.3 1.4), so no per-row transfer.
         tx.commit().await?;
         let highest_contiguous = self.contiguous_event_prefix(attempt_id).await?;
         Ok(IngestEventsAck {
@@ -123,26 +128,22 @@ impl Store {
     }
 
     /// Largest `N` such that sequences `1..=N` all exist in `task_events` for
-    /// this attempt (the contiguous prefix). `0` if no events. O(rows) load —
-    /// see `ingest_events` for the ceiling.
+    /// this attempt (the contiguous prefix). `None` if no events. Computed
+    /// server-side with a window function (plan 0.3 1.4): on the distinct
+    /// sorted sequences, `sequence <> row_number()` first holds at the first
+    /// gap, whose `sequence - 1` is the prefix; with no gap the prefix is
+    /// `MAX(sequence)`.
     async fn contiguous_event_prefix(&self, attempt_id: &str) -> Result<Option<u64>> {
-        let rows: Vec<i64> = sqlx::query_scalar(
-            "SELECT sequence FROM task_events WHERE attempt_id = ? GROUP BY sequence ORDER BY sequence",
+        let prefix: Option<i64> = sqlx::query_scalar(
+            "WITH ds AS (SELECT DISTINCT sequence FROM task_events WHERE attempt_id = ?), \
+                    numbered AS (SELECT sequence, ROW_NUMBER() OVER (ORDER BY sequence) AS rn FROM ds) \
+             SELECT CASE WHEN (SELECT COUNT(*) FROM ds) = 0 THEN NULL \
+                         ELSE COALESCE((SELECT MIN(rn) - 1 FROM numbered WHERE sequence <> rn), \
+                                       (SELECT MAX(sequence) FROM numbered)) END",
         )
         .bind(attempt_id)
-        .fetch_all(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        let mut prev = 0i64;
-        for s in rows {
-            if s != prev + 1 {
-                break;
-            }
-            prev = s;
-        }
-        if prev <= 0 {
-            Ok(None)
-        } else {
-            Ok(Some(prev as u64))
-        }
+        Ok(prefix.map(|p| p as u64))
     }
 }

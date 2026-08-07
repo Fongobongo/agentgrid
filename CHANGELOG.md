@@ -30,6 +30,12 @@ All notable changes to this project are documented in this file.
   queue and reports `tasks_read_p50_ms`/`tasks_read_p99_ms` (debug:
   p50 ~98 ms within target, p99 ~256-316 ms — serialization/CPU-bound,
   not write-lock-bound).
+- **Event-ingest batch optimizations (plan 0.3 item 1.4):** a batch now
+  bumps the global `event_ingest_counter` once (was: once per event) and
+  the contiguous-sequence prefix is computed server-side with a window
+  function (was: O(rows) row transfer per ingest). New test: duplicates
+  inside one batch land once; a 1000-event batch is exactly one write
+  transaction with the correct prefix.
 
 ### Added (0.3 pass, load baseline — plan stage 0)
 
