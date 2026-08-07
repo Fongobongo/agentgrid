@@ -527,6 +527,36 @@ pub struct LoginResponse {
     pub token: String,
 }
 
+/// Plan 5.2: roles for RBAC. `admin` = full access; `operator` = view +
+/// approvals only (enforced by the control-plane middleware).
+pub const ROLE_ADMIN: &str = "admin";
+pub const ROLE_OPERATOR: &str = "operator";
+
+pub fn is_valid_role(role: &str) -> bool {
+    role == ROLE_ADMIN || role == ROLE_OPERATOR
+}
+
+/// Plan 5.2: admin creates additional users with a role.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub password: String,
+    /// "admin" or "operator"; defaults to "operator".
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+fn default_role() -> String {
+    ROLE_OPERATOR.to_string()
+}
+
+/// Plan 5.2: user entry in the admin users list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserEntry {
+    pub username: String,
+    pub role: String,
+}
+
 /// Node→control-plane protocol version (Stage 2.5). Bump the major on any
 /// incompatible change to enroll/heartbeat/poll; a node advertising a
 /// different major is marked `degraded(incompatible_protocol)`.

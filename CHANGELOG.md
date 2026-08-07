@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (0.2-completion pass, RBAC)
+
+- **Admin / operator roles (plan 5.2):** users gain a `role` (migration
+  0052; existing users stay `admin`) carried as a JWT claim. The auth
+  middleware rejects any operator request that is not a view (GET/HEAD),
+  an approval allow/deny, a plan approval, or logout — so an operator
+  cannot create tasks, workflows, users, or node enrollment tokens (403).
+  Admins manage accounts via `GET/POST /v1/users` (role defaults to
+  `operator`); the first user bootstrapped via `/v1/auth/setup` is always
+  an admin. Tokens minted before this change decode as admin.
+
 ### Added (0.2-completion pass, CLI)
 
 - **`ag status` one-screen overview (plan 6.1):** server health plus

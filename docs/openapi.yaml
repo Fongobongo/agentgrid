@@ -53,6 +53,17 @@ paths:
   /v1/auth/logout:
     post:
       summary: Invalidate the current JWT
+  /v1/users:
+    get:
+      summary: List users (username + role)
+      description: Plan 5.2 RBAC. Admin view of local accounts.
+    post:
+      summary: Create a user (admin only)
+      description: |
+        Body `{ "username", "password", "role"? }` where role is `admin` or
+        `operator` (defaults to `operator`). Operators may only view (GET) and
+        approve/deny; all other mutating calls return 403. Non-admin callers
+        receive 403 from the RBAC middleware.
   /v1/admin/backup:
     post:
       summary: Snapshot the SQLite DB (VACUUM INTO) to a downloadable artifact

@@ -214,20 +214,25 @@ impl AppState {
         let p = std::path::Path::new("/var/tmp").join(format!("ag-test-{}.db", Uuid::new_v4()));
         let state = Self::open(p.to_str().unwrap()).await?;
         if state.store.user_count().await? == 0 {
-            state.store.create_user("test", "test").await?;
+            state
+                .store
+                .create_user("test", "test", agentgrid_common::ROLE_ADMIN)
+                .await?;
         }
         Ok(state)
     }
 
     /// Issue a 12h JWT for `username` (Stage 4.1).
-    /// Includes `jti` for session revocation (Stage 4.2).
-    pub(crate) fn issue_token(&self, username: &str) -> anyhow::Result<String> {
+    /// Includes `jti` for session revocation (Stage 4.2) and the RBAC
+    /// `role` claim (plan 5.2).
+    pub(crate) fn issue_token(&self, username: &str, role: &str) -> anyhow::Result<String> {
         let exp = (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp() as usize;
         let jti = Uuid::new_v4().to_string();
         let claims = Claims {
             sub: username.to_string(),
             exp,
             jti,
+            role: role.to_string(),
         };
         Ok(encode(
             &Header::default(),
@@ -236,9 +241,9 @@ impl AppState {
         )?)
     }
 
-    /// Validate a JWT and return the username, or None if revoked/invalid.
-    /// Checks revoked_sessions blocklist (Stage 4.2).
-    pub(crate) async fn verify_token(&self, token: &str) -> Option<String> {
+    /// Validate a JWT and return the username and role, or None if
+    /// revoked/invalid. Checks revoked_sessions blocklist (Stage 4.2).
+    pub(crate) async fn verify_token(&self, token: &str) -> Option<(String, String)> {
         let claims = decode::<Claims>(
             token,
             &DecodingKey::from_secret(&self.jwt_secret),
@@ -254,7 +259,7 @@ impl AppState {
         {
             return None;
         }
-        Some(claims.claims.sub)
+        Some((claims.claims.sub, claims.claims.role))
     }
 
     /// Read the current one-time setup token (if live) for tests / operators
@@ -334,6 +339,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/auth/setup", post(auth::auth_setup))
         .route("/v1/auth/login", post(auth::auth_login))
         .route("/v1/auth/logout", post(auth::auth_logout))
+        .route(
+            "/v1/users",
+            get(routes::users::list_users_handler).post(routes::users::create_user_handler),
+        )
         .route(
             "/v1/policy/evaluate",
             post(routes::profiles::evaluate_policy),

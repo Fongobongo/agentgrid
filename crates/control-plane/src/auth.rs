@@ -17,12 +17,20 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 
 /// JWT claims for user sessions (Stage 4.1).
-/// Includes `jti` (JWT ID) for session revocation (Stage 4.2).
+/// Includes `jti` (JWT ID) for session revocation (Stage 4.2) and `role`
+/// for RBAC (plan 5.2). Tokens minted before 5.2 lack `role` and decode
+/// as admin (all pre-existing users were admins).
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Claims {
     pub(crate) sub: String,
     pub(crate) exp: usize,
     pub(crate) jti: String,
+    #[serde(default = "default_role_admin")]
+    pub(crate) role: String,
+}
+
+fn default_role_admin() -> String {
+    agentgrid_common::ROLE_ADMIN.to_string()
 }
 
 /// Stage 2.5: the cookie name carrying the session JWT, set HttpOnly so the
@@ -67,6 +75,31 @@ pub fn auth_cookie_header(token: &str) -> String {
 #[derive(Clone)]
 pub struct AuthedUser {
     pub username: String,
+    /// RBAC role (plan 5.2): "admin" or "operator".
+    pub role: String,
+}
+
+/// RBAC (plan 5.2): an operator may view (GET/HEAD) and approve/deny, but
+/// nothing else mutates. All other mutating verbs are rejected with 403 by
+/// [`require_user_auth`] before the handler runs.
+fn operator_allowed(method: &str, path: &str) -> bool {
+    if method == "GET" || method == "HEAD" {
+        return true;
+    }
+    if method == "POST" {
+        if path == "/v1/auth/logout" {
+            return true;
+        }
+        if path.starts_with("/v1/approvals/")
+            && (path.ends_with("/allow") || path.ends_with("/deny"))
+        {
+            return true;
+        }
+        if path.starts_with("/v1/workflow-runs/") && path.ends_with("/approve-plan") {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Clone)]
@@ -223,8 +256,14 @@ pub async fn require_user_auth(
             Ok(_) => {
                 if let Some(token) = auth_token_from_headers(req.headers()) {
                     match state.verify_token(&token).await {
-                        Some(u) => {
-                            req.extensions_mut().insert(AuthedUser { username: u });
+                        Some((username, role)) => {
+                            // RBAC (plan 5.2): operators view + approve only.
+                            if role != agentgrid_common::ROLE_ADMIN
+                                && !operator_allowed(req.method().as_str(), &path)
+                            {
+                                return Err(StatusCode::FORBIDDEN);
+                            }
+                            req.extensions_mut().insert(AuthedUser { username, role });
                         }
                         None => return Err(StatusCode::UNAUTHORIZED),
                     }
@@ -271,7 +310,11 @@ pub async fn auth_setup(
         // Consume: the token is single-use.
         *guard = None;
     }
-    match state.store.create_user(&req.username, &req.password).await {
+    match state
+        .store
+        .create_user(&req.username, &req.password, agentgrid_common::ROLE_ADMIN)
+        .await
+    {
         Ok(true) => {}
         Ok(false) => return Err(StatusCode::CONFLICT),
         Err(e) => {
@@ -279,10 +322,13 @@ pub async fn auth_setup(
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
-    let token = state.issue_token(&req.username).map_err(|e| {
-        tracing::error!("issue_token failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // The bootstrapped first user is always an admin.
+    let token = state
+        .issue_token(&req.username, agentgrid_common::ROLE_ADMIN)
+        .map_err(|e| {
+            tracing::error!("issue_token failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let _ = state
         .store
         .audit("user", Some(&req.username), "user.create", None, None)
@@ -320,10 +366,10 @@ pub async fn auth_login(
             tracing::error!("verify_user failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    let Some(_) = user else {
+    let Some((_, role)) = user else {
         return Err(StatusCode::UNAUTHORIZED);
     };
-    let token = state.issue_token(&req.username).map_err(|e| {
+    let token = state.issue_token(&req.username, &role).map_err(|e| {
         tracing::error!("issue_token failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;

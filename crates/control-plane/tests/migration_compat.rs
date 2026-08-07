@@ -36,7 +36,10 @@ async fn migrations_serve_legacy_happy_path() {
     let s = temp_store().await;
 
     // 1. Bootstrap user (migration 0006).
-    assert!(s.create_user("admin", "pw").await.unwrap());
+    assert!(s
+        .create_user("admin", "pw", agentgrid_common::ROLE_ADMIN)
+        .await
+        .unwrap());
 
     // 2. Enrollment token + node enroll (migrations 0003, 0001).
     let (token, _tok_id) = s.create_enrollment_token().await.unwrap();

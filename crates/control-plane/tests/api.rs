@@ -6333,7 +6333,11 @@ async fn storage_gc_removes_orphans_and_dangling_metadata() {
     let db = dir.join("test.db");
     let state = AppState::open(db.to_str().unwrap()).await.unwrap();
     if state.store.user_count().await.unwrap() == 0 {
-        state.store.create_user("test", "test").await.unwrap();
+        state
+            .store
+            .create_user("test", "test", agentgrid_common::ROLE_ADMIN)
+            .await
+            .unwrap();
     }
     let app = build_router(state.clone());
     let (node_id, cred) = enroll(&app, "n-gc", vec!["mock".into()], vec!["*".into()]).await;
@@ -7225,4 +7229,109 @@ async fn change_stream_sends_hello_fingerprint() {
         s.contains("tasks"),
         "fingerprint must carry task counts: {s}"
     );
+}
+
+/// Plan 5.2 RBAC: admin creates an operator; the operator can view and
+/// approve but cannot create tasks, nodes/enrollment tokens, or users.
+#[tokio::test]
+async fn rbac_operator_limited_to_view_and_approve() {
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
+
+    // Bootstrap: first user is admin.
+    assert_eq!(
+        auth_setup(&app, &state, "alice", "secret").await,
+        StatusCode::CREATED
+    );
+    let admin = auth_login(&app, "alice", "secret").await.unwrap();
+
+    // Admin creates an operator and sees both in the users list.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/users",
+            json!({"username": "bob", "password": "pw", "role": "operator"}).to_string(),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/users", &admin))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let users: Vec<agentgrid_common::UserEntry> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(users
+        .iter()
+        .any(|u| u.username == "alice" && u.role == "admin"));
+    assert!(users
+        .iter()
+        .any(|u| u.username == "bob" && u.role == "operator"));
+
+    let op = auth_login(&app, "bob", "pw").await.unwrap();
+
+    // Operator can view.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/tasks", &op))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/nodes", &op))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Operator cannot create a task.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            json!({"prompt": "x", "repository": "demo"}).to_string(),
+            &op,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Operator cannot create a node enrollment token.
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/nodes/enrollment-token", "{}".into(), &op))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Operator cannot create a user (the plan-5.2 criterion).
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/users",
+            json!({"username": "eve", "password": "pw"}).to_string(),
+            &op,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Operator can still log out.
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/auth/logout", "{}".into(), &op))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Admin keeps full access: enrollment token creation succeeds.
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/nodes/enrollment-token", "{}".into(), &admin))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
 }
