@@ -204,6 +204,16 @@ paths:
         (capped at the node's free concurrency slots) made in one write
         transaction; without the header exactly the legacy single
         `assignment` semantics apply.
+  /v1/node/ws:
+    get:
+      summary: Node WebSocket control channel upgrade (node credentials)
+      description: |
+        Plan 0.3 item 2.2 (ADR 0009): WebSocket upgrade carrying only
+        control messages — assignment push, ack, cancel, heartbeat.
+        `Authorization: Bearer <node-credential>` is checked at handshake
+        (401 without upgrade). Message envelopes and close codes:
+        `docs/node-ws-protocol.md`. Polling remains the N-1 fallback with
+        identical scheduling semantics.
   /v1/node/attempts/{id}/ack:
     post:
       summary: Acknowledge an assignment started (node credentials)

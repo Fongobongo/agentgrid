@@ -1,5 +1,6 @@
 pub mod policy;
 pub mod workflow;
+pub mod ws;
 pub use policy::{
     AutonomyLevel, BuiltinPolicyProvider, CommandPolicyProvider, PolicyDecision, PolicyError,
     PolicyVerdict, RiskClass,

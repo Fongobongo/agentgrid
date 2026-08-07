@@ -53,6 +53,11 @@ pub struct Store {
     pub(crate) checkpoint_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Stage 2.5 ops: cumulative count of `SQLITE_BUSY`-class failures.
     pub(crate) sqlite_busy: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Write transactions begun by THIS store (per-instance counterpart of
+    /// the process-wide `write_txn_stats` counter; tests that assert an exact
+    /// transaction count need per-store isolation because the lib suites run
+    /// tests in parallel).
+    pub(crate) write_txn_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Unix timestamp of the last successful automatic backup (0 = never).
     pub(crate) last_backup_at: std::sync::Arc<std::sync::atomic::AtomicI64>,
     /// Cumulative count of failed automatic backups.
@@ -386,6 +391,22 @@ fn node_status_str(s: NodeStatus) -> String {
 }
 
 impl Store {
+    /// Begin a write transaction on this store, counting it in the
+    /// per-instance [`Self::write_txn_count`] (see the field doc: exact-count
+    /// test assertions need per-store isolation under parallel test runs).
+    pub(crate) async fn write_txn(&self) -> Result<WriteTxn<'static>> {
+        let tx = begin_immediate(&self.pool).await?;
+        self.write_txn_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(tx)
+    }
+
+    /// Write transactions begun by this store instance (tests/ops).
+    pub fn write_txn_count(&self) -> u64 {
+        self.write_txn_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub async fn open(db_path: &str) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
             .filename(db_path)
@@ -429,6 +450,7 @@ impl Store {
             scheduler_assignments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             checkpoint_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sqlite_busy: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            write_txn_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_backup_at: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
             backup_errors: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             lease_reverts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2080,16 +2102,16 @@ mod workflow_tests {
             .await
             .unwrap();
         }
-        let (txns_before, _) = write_txn_stats();
+        let txns_before = s.write_txn_count();
         let batch = s.try_assign_batch(&node_id, 100).await.unwrap();
-        let (txns_after, failures) = write_txn_stats();
+        let txns_after = s.write_txn_count();
         assert_eq!(batch.len(), 100, "all 100 tasks assigned in one batch");
         assert_eq!(
             txns_after - txns_before,
             1,
             "the batch must be a single write transaction"
         );
-        assert_eq!(failures, 0, "no write-lock failures");
+        assert_eq!(write_txn_stats().1, 0, "no write-lock failures");
     }
 
     #[tokio::test]
@@ -2528,13 +2550,13 @@ mod workflow_tests {
         assert_eq!(ack.highest_contiguous_sequence, Some(3));
 
         // 1000-event batch: one write transaction, contiguous prefix 1003.
-        let (txns_before, _) = write_txn_stats();
+        let txns_before = s.write_txn_count();
         let big: Vec<IncomingEvent> = (4..=1003u64).map(|i| mk(i, "x")).collect();
         let ack = s
             .ingest_events(&a.attempt_id, &IngestEventsRequest { events: big })
             .await
             .unwrap();
-        let (txns_after, failures) = write_txn_stats();
+        let txns_after = s.write_txn_count();
         assert_eq!(ack.accepted, 1000);
         assert_eq!(ack.highest_contiguous_sequence, Some(1003));
         assert_eq!(
@@ -2542,7 +2564,7 @@ mod workflow_tests {
             1,
             "a 1000-event batch must be one write transaction"
         );
-        assert_eq!(failures, 0);
+        assert_eq!(write_txn_stats().1, 0);
     }
 
     #[tokio::test]

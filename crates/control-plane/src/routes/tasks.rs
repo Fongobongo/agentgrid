@@ -141,6 +141,9 @@ pub async fn cancel_task_handler(
 ) -> StatusCode {
     match state.store.cancel_task(&task_id).await {
         Ok(true) => {
+            // Plan 0.3 2.2: push the cancel to the owning WS node (best
+            // effort; the store flag stays authoritative for poll nodes).
+            crate::ws::push_cancel_for_task(&state, &task_id).await;
             let _ = state
                 .store
                 .audit(

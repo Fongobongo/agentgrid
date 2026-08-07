@@ -1,10 +1,7 @@
 //! Attempt lifecycle: completion, agent sessions, ack, cancel, retry.
 //! Extracted from `store.rs`.
 
-use super::{
-    attempt_status_str, begin_immediate, from_snake, now_iso, status_str, Store,
-    StoreTransitionError,
-};
+use super::{attempt_status_str, from_snake, now_iso, status_str, Store, StoreTransitionError};
 use agentgrid_common::{
     next_attempt_status, next_task_status, AgentSession, AttemptStatus, AttemptTransition,
     CompleteAttemptRequest, InvalidTransition, TaskStatus, TaskTransition,
@@ -19,7 +16,7 @@ impl Store {
         attempt_id: &str,
         req: &CompleteAttemptRequest,
     ) -> Result<bool> {
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let attempt = sqlx::query(
             "SELECT task_id, node_id, status, cancel_requested, validated_at FROM attempts WHERE id = ?",
         )
@@ -356,7 +353,7 @@ impl Store {
     }
 
     pub async fn ack_attempt(&self, attempt_id: &str) -> Result<bool> {
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let row = sqlx::query("SELECT status FROM attempts WHERE id = ?")
             .bind(attempt_id)
             .fetch_optional(&mut *tx)
@@ -404,7 +401,7 @@ impl Store {
     }
 
     pub async fn begin_validate(&self, attempt_id: &str) -> Result<bool> {
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let n = sqlx::query(
             "UPDATE attempts SET status = 'validating', validated_at = ? WHERE id = ? AND status = 'running'",
         )
@@ -429,7 +426,7 @@ impl Store {
     }
 
     pub async fn cancel_task(&self, task_id: &str) -> Result<bool> {
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
             .bind(task_id)
             .fetch_optional(&mut *tx)
@@ -464,6 +461,28 @@ impl Store {
         Ok(false)
     }
 
+    /// Plan 0.3 2.2: live attempts of a task with cancel requested, with
+    /// their owning node — the WS push targets (poll nodes discover the
+    /// cancel via the attempt cancel probe instead).
+    pub async fn cancel_targets_for_task(&self, task_id: &str) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT id, node_id FROM attempts WHERE task_id = ? AND cancel_requested = 1 \
+             AND status IN ('assigned','running','validating')",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.try_get::<String, _>("id").unwrap_or_default(),
+                    r.try_get::<String, _>("node_id").unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+
     pub async fn attempt_cancel_requested(&self, attempt_id: &str) -> Result<bool> {
         let row = sqlx::query("SELECT cancel_requested FROM attempts WHERE id = ?")
             .bind(attempt_id)
@@ -476,7 +495,7 @@ impl Store {
     }
 
     pub async fn cancel_workflow_run(&self, run_id: &str) -> Result<bool> {
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let run = sqlx::query("SELECT status FROM workflow_runs WHERE id = ?")
             .bind(run_id)
             .fetch_optional(&mut *tx)
@@ -550,7 +569,7 @@ impl Store {
     }
 
     pub async fn retry_task(&self, task_id: &str) -> Result<bool> {
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
             .bind(task_id)
             .fetch_optional(&mut *tx)

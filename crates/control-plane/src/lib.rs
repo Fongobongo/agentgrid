@@ -13,6 +13,7 @@ mod services;
 pub mod store;
 mod tls;
 pub mod workflow;
+pub mod ws;
 
 // OpenTelemetry metrics (optional feature)
 pub mod otel;
@@ -76,6 +77,9 @@ pub struct AppState {
     /// introduced (a sequence > current contiguous-prefix+1). Out-of-order /
     /// skipped-sequence redelivery bumps this monotonically.
     pub event_gaps: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Plan 0.3 2.2: connected WS nodes (ADR 0009). The pump task pushes
+    /// assignments through this registry; poll-based nodes never touch it.
+    pub ws_registry: std::sync::Arc<ws::WsRegistry>,
 }
 
 impl AppState {
@@ -180,7 +184,7 @@ impl AppState {
         let lifecycle =
             services::TaskLifecycleService::new(store.clone(), assignment_notify.clone());
         let scheduler = services::SchedulerService::new(store.clone(), assignment_notify.clone());
-        Ok(Arc::new(Self {
+        let state = Arc::new(Self {
             store,
             lifecycle,
             scheduler,
@@ -196,7 +200,12 @@ impl AppState {
             stale_fencing_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             event_rejections: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             event_gaps: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        }))
+            ws_registry: std::sync::Arc::new(ws::WsRegistry::new()),
+        });
+        // Plan 0.3 2.2: push assignments to connected WS nodes on every
+        // scheduler wake. Harmless when no node is connected (tests).
+        ws::start_pump(state.clone());
+        Ok(state)
     }
 
     /// Open a fresh temporary database with no users (used by tests that
@@ -407,6 +416,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/node/enroll", post(routes::nodes::enroll))
         .route("/v1/node/poll", post(routes::events::poll))
+        .route("/v1/node/ws", get(ws::node_ws))
         .route("/v1/node/heartbeat", post(routes::nodes::heartbeat))
         .route(
             "/v1/node/attempts/{id}/cancel",

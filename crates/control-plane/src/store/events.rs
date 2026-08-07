@@ -1,6 +1,6 @@
 //! Task event ingestion (idempotent, contiguous-prefix ack). Extracted from `store.rs`.
 
-use super::{begin_immediate, event_type_str, is_locked_err, now_iso, Store};
+use super::{event_type_str, is_locked_err, now_iso, Store};
 use agentgrid_common::IngestEventsRequest;
 use anyhow::Result;
 use sqlx::Row;
@@ -38,7 +38,7 @@ impl Store {
         req: &IngestEventsRequest,
     ) -> Result<agentgrid_common::IngestEventsAck> {
         use agentgrid_common::IngestEventsAck;
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let attempt = sqlx::query("SELECT task_id, status FROM attempts WHERE id = ?")
             .bind(attempt_id)
             .fetch_optional(&mut *tx)

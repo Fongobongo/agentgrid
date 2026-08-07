@@ -278,6 +278,21 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
     s.push_str("# TYPE agentgrid_poll_duration_ms_sum counter\n");
     s.push_str(&format!("agentgrid_poll_duration_ms_sum {poll_ms}\n"));
 
+    // Plan 0.3 2.2/2.5: transport mix visibility (a silent fallback of WS
+    // nodes to poll must be observable).
+    let ws_nodes = state.ws_registry.connection_count().await;
+    s.push_str("# HELP agentgrid_node_transport_connections Connected nodes by transport.\n");
+    s.push_str("# TYPE agentgrid_node_transport_connections gauge\n");
+    s.push_str(&format!(
+        "agentgrid_node_transport_connections{{transport=\"ws\"}} {ws_nodes}\n"
+    ));
+    s.push_str("# HELP agentgrid_ws_assignment_pushes_total Assignment batches pushed over WS.\n");
+    s.push_str("# TYPE agentgrid_ws_assignment_pushes_total counter\n");
+    s.push_str(&format!(
+        "agentgrid_ws_assignment_pushes_total {}\n",
+        crate::ws::ws_pushes()
+    ));
+
     let oldest_queued = state.store.oldest_queued_age_secs().await.unwrap_or(None);
     s.push_str("# HELP agentgrid_oldest_queued_task_seconds Age of the oldest queued task.\n");
     s.push_str("# TYPE agentgrid_oldest_queued_task_seconds gauge\n");

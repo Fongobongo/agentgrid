@@ -1,8 +1,8 @@
 //! Node enrollment, lifecycle, sessions and audit. Extracted from `store.rs`.
 
 use super::{
-    audit_from_row, begin_immediate, iso_plus_secs, lose_node_attempts, node_status_str, now_iso,
-    sha256_hex, AuditEvent, Store,
+    audit_from_row, iso_plus_secs, lose_node_attempts, node_status_str, now_iso, sha256_hex,
+    AuditEvent, Store,
 };
 use agentgrid_common::{EnrollRequest, EnrollResponse, HeartbeatRequest, NodeStatus};
 use anyhow::Result;
@@ -34,7 +34,7 @@ impl Store {
 
     /// Exchange a valid (unused, unexpired) token for a permanent node credential.
     pub async fn enroll_node(&self, req: &EnrollRequest) -> Result<Option<EnrollResponse>> {
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let hash = sha256_hex(&req.token);
         let tok = sqlx::query(
             "SELECT id, expires_at, used_at FROM enrollment_tokens WHERE token_hash = ?",
@@ -165,7 +165,7 @@ impl Store {
         .await?
         .rows_affected();
         if affected == 1 && status == NodeStatus::Offline {
-            let mut t = begin_immediate(&self.pool).await?;
+            let mut t = self.write_txn().await?;
             lose_node_attempts(&mut t, node_id).await?;
             t.commit().await?;
         }
@@ -186,7 +186,7 @@ impl Store {
         if affected == 1 {
             self.audit("node", Some(node_id), "revoke", None, None)
                 .await?;
-            let mut t = begin_immediate(&self.pool).await?;
+            let mut t = self.write_txn().await?;
             lose_node_attempts(&mut t, node_id).await?;
             t.commit().await?;
         }
@@ -253,7 +253,7 @@ impl Store {
     /// flipped, so a concurrent heartbeat can't re-online a node mid-lose.
     pub async fn mark_node_offline(&self, node_id: &str) -> Result<bool> {
         let now = now_iso();
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let affected = sqlx::query(
             "UPDATE nodes SET status = 'offline', last_heartbeat_at = ? \
              WHERE id = ? AND status NOT IN ('offline','pending','revoked')",
@@ -278,7 +278,7 @@ impl Store {
         subject: Option<&str>,
         payload: Option<&str>,
     ) -> Result<()> {
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         self.audit_tx(&mut tx, actor_type, actor_id, action, subject, payload)
             .await?;
         tx.commit().await?;

@@ -1,8 +1,8 @@
 //! Scheduler: atomic assignment + task eligibility. Extracted from `store.rs`.
 
 use super::{
-    begin_immediate, iso_plus_secs, node_ineligibility, now_iso, row_to_node_view, Store,
-    ACK_DEADLINE_SECS, ASSIGNMENT_LEASE_SECS,
+    iso_plus_secs, node_ineligibility, now_iso, row_to_node_view, Store, ACK_DEADLINE_SECS,
+    ASSIGNMENT_LEASE_SECS,
 };
 use agentgrid_common::{Assignment, NodeEligibility, NodeView, TaskEligibility};
 use anyhow::Result;
@@ -56,7 +56,7 @@ impl Store {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let cands = sqlx::query(
             "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \

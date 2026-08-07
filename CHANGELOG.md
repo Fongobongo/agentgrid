@@ -6,6 +6,18 @@ All notable changes to this project are documented in this file.
 
 ### Added (0.3 pass, node WebSocket channel — plan stage 2)
 
+- **CP WebSocket endpoint `/v1/node/ws` (plan 0.3 item 2.2):** axum WS
+  control channel per ADR 0009. Bearer node-credential auth at handshake
+  (401 without upgrade), `hello`/`hello_ok` registration, one connection
+  per node (a newer connection closes the older with code 4003), and a pump
+  task on the same scheduler notify as long-poll pushes fresh assignments
+  to connected nodes — measured under 200 ms from task creation in the
+  acceptance test. Cancel is pushed to the owning node; a WS `ack` moves
+  the attempt to running via the same store path as the HTTP endpoint.
+  Polling nodes are untouched and share the queue (coexistence test).
+  New metrics: `agentgrid_node_transport_connections{transport="ws"}`,
+  `agentgrid_ws_assignment_pushes_total`. Shared envelope types live in
+  `agentgrid_common::ws` (`NodeWsMsg`).
 - **ADR 0009 + node WS protocol spec (plan 0.3 item 2.1):** design for the
   `/v1/node/ws` control channel — WebSocket carries only assignment push,
   ack, cancel and liveness; the data plane (events, completion, artifacts)

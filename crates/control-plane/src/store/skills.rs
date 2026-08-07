@@ -1,6 +1,6 @@
 //! Skill trust + MCP server registry (Stage 9.2 / 13). Extracted from `store.rs`.
 
-use super::{begin_immediate, mcp_server_from_row, now_iso, skill_trust_from_row};
+use super::{mcp_server_from_row, now_iso, skill_trust_from_row};
 use crate::Store;
 use agentgrid_common::{McpServer, McpServerCreate, SkillTrustView};
 use anyhow::Result;
@@ -75,7 +75,7 @@ impl Store {
         if skills.is_empty() {
             return Ok(());
         }
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         for (name, source) in skills {
             sqlx::query(
                 "INSERT INTO skills_trust (name, source, trusted, decided_by, decided_at) \

@@ -1,6 +1,6 @@
 //! Agent profile revisions (Stage 13). Extracted from `store.rs`.
 
-use super::{begin_immediate, now_iso, profile_from_row};
+use super::{now_iso, profile_from_row};
 use crate::Store;
 use agentgrid_common::{AgentProfile, AgentProfileCreate};
 use anyhow::Result;
@@ -16,7 +16,7 @@ impl Store {
         created_by: &str,
     ) -> Result<i64> {
         let now = now_iso();
-        let mut tx = begin_immediate(&self.pool).await?;
+        let mut tx = self.write_txn().await?;
         let next: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(revision), 0) + 1 FROM agent_profiles WHERE id = ?",
         )
