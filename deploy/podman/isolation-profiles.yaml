@@ -1,0 +1,122 @@
+# Podman Isolation Profiles for Agent Sandboxes
+# 
+# Defines security configurations for running AI agents in isolated containers.
+# Referenced by Helm chart values: node-daemon/podman/isolationProfile
+---
+profiles:
+  # Strictest isolation - minimal permissions, no network access
+  strict:
+    description: "Maximum security, no external access required"
+    capabilities:
+      drop:
+        - ALL
+      add: []
+    seccomp_profile:
+      type: runtime/default
+    apparmor_profile: unconfined
+    read_only_rootfs: true
+    no_new_privileges: true
+    user: "1000:1000"
+    network:
+      mode: none  # Air-gapped execution
+    volumes:
+      # Only allow named volume mounts, not host paths
+      allow_host_paths: false
+    devices:
+      deny_all: true
+    annotations: {}
+
+  # Restricted mode - default production setting with basic networking
+  restricted:
+    description: "Balanced security with outbound HTTP/HTTPS only"
+    capabilities:
+      drop:
+        - ALL
+      add:
+        - NET_BIND_SERVICE
+        - CHOWN
+    seccomp_profile:
+      type: runtime/default
+    apparmor_profile: unconfined
+    read_only_rootfs: true
+    no_new_privileges: true
+    user: "1000:1000"
+    network:
+      mode: bridge
+      dns_policy: cluster_first
+      # Firewall rules applied via iptables
+      firewall_enabled: true
+    volumes:
+      allow_host_paths: false
+      permitted_volumes:
+        - name: worktrees
+          mount_path: /worktrees
+        - name: tmp
+          mount_path: /tmp
+    devices:
+      deny_all: true
+    annotations:
+      io.k8s.pod.security: restricted
+
+  # Standard mode - allows limited host access for common tasks
+  standard:
+    description: "Full network access, limited host mounts"
+    capabilities:
+      drop:
+        - SYS_ADMIN
+        - NET_ADMIN
+      add:
+        - NET_RAW
+        - CHOWN
+        - SETUID
+        - SETGID
+    seccomp_profile:
+      type: runtime/default
+    apparmor_profile: unconfined
+    read_only_rootfs: false
+    no_new_privileges: false
+    user: root  # Some tools require root
+    network:
+      mode: bridge
+      dns_policy: cluster_first
+      firewall_enabled: true
+    volumes:
+      allow_host_paths: true
+      permitted_paths:
+        - /var/run/docker.sock  # If Docker fallback needed
+        - /proc  # For certain container introspection
+    devices:
+      deny_all: false
+      allow_list:
+        - path: "/dev/null"
+        - path: "/dev/zero"
+        - path: "/dev/random"
+    annotations:
+      io.k8s.pod.security: standard
+
+  # Unconfined - development/testing only, NOT for production
+  unconfined:
+    description: "No restrictions, development/debugging use ONLY"
+    capabilities:
+      drop: []
+      add:
+        - ALL
+    seccomp_profile:
+      type: unconfined
+    apparmor_profile: unconfined
+    read_only_rootfs: false
+    no_new_privileges: false
+    user: root
+    network:
+      mode: host
+    volumes:
+      allow_host_paths: true
+      permitted_paths:
+        - "/"
+    devices:
+      deny_all: false
+    annotations: {}
+    warning: "UNRESTRICTED ACCESS - DO NOT USE IN PRODUCTION"
+
+# Default profile selector (overrides Helm values)
+default_profile: restricted
