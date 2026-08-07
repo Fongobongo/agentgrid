@@ -38,7 +38,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 argon2 = "0.5"
 password-hash = { version = "0.5", features = ["std"] }
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 rand = "0.8"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # Stage 11.5 TUI: full-screen dashboards (ratatui + crossterm backend).
