@@ -14,6 +14,14 @@ All notable changes to this project are documented in this file.
   tradeoffs, deployment guidance, monitoring metrics, testing commands, and load
   baseline numbers (100-node harness: wall=30.4s, p50=21.3s, write_lock_failures=0).
 
+### Operator Documentation
+
+- **OPS-STARTER.md:** Quick deployment guide for Docker Compose and systemd installations,
+  monitoring setup, backup procedures, and common operations.
+- **TROUBLESHOOTING.md:** Comprehensive troubleshooting guide for transport issues, resource
+  constraints, task execution failures, disk problems, WebSocket-specific issues, performance
+  optimization, security concerns, and disaster recovery procedures.
+
 ### Metrics & Baselines
 
 - **CP idle RSS:** 4 MiB VMRSS (well under 96 MB budget)
