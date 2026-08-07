@@ -1,0 +1,50 @@
+# Multi-stage musl build for statically linked Linux release binaries.
+# Produces x86_64-unknown-linux-musl binaries that run anywhere without libc deps.
+# Stage 5.3 release artifacts. Uses rust:1-bookworm image with musl toolchain installed.
+
+FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
+WORKDIR /src
+COPY . .
+
+# Install musl tools and linker, add musl target to Rust
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends musl-tools wget nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+RUN rustup target add x86_64-unknown-linux-musl
+
+# Build control-plane and CLI for musl target
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    RUSTFLAGS="-C target-feature=+crt-static -C link-args=-static" cargo build \
+        --release \
+        --target x86_64-unknown-linux-musl \
+        --bins \
+        -p agentgrid-control-plane -p agentgrid-cli \
+    && mkdir -p /out \
+    && cp target/x86_64-unknown-linux-musl/release/agentgrid-control-plane \
+           target/x86_64-unknown-linux-musl/release/ag /out/
+
+# Build web UI static bundle for musl build stage
+RUN --mount=type=cache,target=/src/web/node_modules \
+    cd web && npm ci && npm run build
+
+FROM scratch AS final-release
+LABEL org.opencontainers.image.title="agentgrid-control-plane-musl" \
+      org.opencontainers.image.source="https://github.com/earendil-works/agentgrid" \
+      org.opencontainers.image.description="AgentGrid control plane (statically linked musl binary)" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
+
+# Statically linked binary (no external dependencies)
+COPY --from=builder /out/agentgrid-control-plane /usr/local/bin/
+COPY --from=builder /out/ag /usr/local/bin/
+COPY --from=builder /src/web/dist /var/lib/agentgrid/web
+
+ENV AGENTGRID_LISTEN=0.0.0.0:7800 \
+    AGENTGRID_DB=/var/lib/agentgrid/control-plane.db \
+    AGENTGRID_ARTIFACT_ROOT=/var/lib/agentgrid/artifacts \
+    AGENTGRID_WEB_ROOT=/var/lib/agentgrid/web
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:7800/health/ready || exit 1
+
+ENTRYPOINT ["agentgrid-control-plane"]

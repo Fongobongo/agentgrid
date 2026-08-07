@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Added (0.3 pass, node WebSocket channel — plan stage 2)
 
+- **Musl release binaries via Docker (v0.3.0 milestone):** static-link Linux
+  releases built in Docker with musl toolchain (`Dockerfile.control-plane-musl`),
+  producing `x86_64-unknown-linux-musl` binaries that run anywhere without libc
+  dependencies. Image `ag-cp:musl` includes control-plane + CLI + web UI, fully
+  self-contained. See docs/runbook-transport.md for transport selection guidance.
+
 - **Load baseline + RSS idle metrics (plan 0.3 items 3.1–3.2):** 100-node
   harness run with transport=auto (WS first, poll fallback): wall=30.4s for
   1000 tasks, p50=21.3s, p99=29.5s, write_lock_failures=0, poll_requests=500,
