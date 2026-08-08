@@ -250,8 +250,7 @@ mod tests {
     use std::io::Write;
 
     fn discovered(name: &str, source: SkillSource, body: &str) -> DiscoveredSkill {
-        let dir =
-            std::env::temp_dir().join(format!("ag_sk_{}_{}", name, std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ag_sk_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("SKILL.md");
@@ -347,8 +346,7 @@ mod tests {
 
     #[test]
     fn revision_activate_and_rollback() {
-        let src =
-            std::env::temp_dir().join(format!("ag_rev_src_{}", std::process::id()));
+        let src = std::env::temp_dir().join(format!("ag_rev_src_{}", std::process::id()));
         let root = std::env::temp_dir().join(format!("ag_rev_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&root);

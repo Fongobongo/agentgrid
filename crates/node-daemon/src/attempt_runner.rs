@@ -426,6 +426,13 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             cfg.secrets.clone(),
             raw_file.clone(),
             &assignment.attempt_id,
+            // Plan 1.2 (#4): command guard derived from the daemon's config.
+            // A single Arc is shared for the whole attempt; the same instance
+            // enforces the policy on every tool_call line.
+            std::sync::Arc::new(crate::command_guard::CommandGuard::new(
+                cfg.guard_deny.clone(),
+                cfg.guard_allow.clone(),
+            )),
         )
         .await
         {

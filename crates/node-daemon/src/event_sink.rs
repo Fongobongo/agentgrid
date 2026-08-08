@@ -491,6 +491,7 @@ pub async fn read_stream<R: AsyncRead + Unpin>(
     stream: &str,
     secrets: Vec<String>,
     raw: Option<Arc<Mutex<tokio::fs::File>>>,
+    guard: Arc<crate::command_guard::CommandGuard>,
 ) {
     let mut reader = tokio::io::BufReader::new(reader);
     let mut chunk = vec![0u8; 4096];
@@ -511,13 +512,13 @@ pub async fn read_stream<R: AsyncRead + Unpin>(
             Err(_) => break,
         };
         for line in redactor.feed(&chunk[..n]) {
-            emit_line_masked(&line, &sink, stream, &raw).await;
+            emit_line_masked(&line, &sink, stream, &raw, &guard).await;
         }
     }
 
     // Flush any remaining partial line
     if let Some(line) = redactor.finish() {
-        emit_line_masked(&line, &sink, stream, &raw).await;
+        emit_line_masked(&line, &sink, stream, &raw, &guard).await;
     }
 }
 
@@ -527,6 +528,7 @@ async fn emit_line_masked(
     sink: &Arc<EventSink>,
     stream: &str,
     raw: &Option<Arc<Mutex<tokio::fs::File>>>,
+    guard: &crate::command_guard::CommandGuard,
 ) {
     if let Some(f) = raw {
         let mut g = f.lock().await;
@@ -548,6 +550,35 @@ async fn emit_line_masked(
                 sink.note_plan(text.to_string());
             }
         }
+        // Plan 1.2: command guard — deny-listed tool calls are replaced with
+        // a `guard_blocked` error event so the operator/audit trail sees the
+        // block instead of silently forwarding the dangerous call.
+        if matches!(env.kind, EventKind::ToolCall) {
+            if let Some(cmd) = env
+                .payload
+                .get("input")
+                .and_then(|v| v.as_str())
+                .or_else(|| env.payload.get("tool").and_then(|v| v.as_str()))
+            {
+                use crate::command_guard::GuardDecision::*;
+                match guard.decide(cmd) {
+                    Allowed => {}
+                    DeniedMatch | DeniedNotAllowlisted => {
+                        sink.push(
+                            EventType::Error,
+                            json!({
+                                "kind": "guard_blocked",
+                                "command": cmd,
+                                "reason": "denylist match",
+                            }),
+                        )
+                        .await;
+                        sink.note_adapter_event();
+                        return;
+                    }
+                }
+            }
+        }
         sink.push(env.kind.to_event_type(), env.payload).await;
         sink.note_adapter_event();
         return;
@@ -557,6 +588,33 @@ async fn emit_line_masked(
             if ae.r#type == "plan" {
                 if let Some(text) = ae.payload.get("text").and_then(|x| x.as_str()) {
                     sink.note_plan(text.to_string());
+                }
+            }
+            // Plan 1.2: same guard for legacy wrapper adapters.
+            if ae.r#type == "tool_call" {
+                if let Some(cmd) = ae
+                    .payload
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| ae.payload.get("tool").and_then(|v| v.as_str()))
+                {
+                    use crate::command_guard::GuardDecision::*;
+                    match guard.decide(cmd) {
+                        Allowed => {}
+                        DeniedMatch | DeniedNotAllowlisted => {
+                            sink.push(
+                                EventType::Error,
+                                json!({
+                                    "kind": "guard_blocked",
+                                    "command": cmd,
+                                    "reason": "denylist match",
+                                }),
+                            )
+                            .await;
+                            sink.note_adapter_event();
+                            return;
+                        }
+                    }
                 }
             }
             sink.push(to_event_type(&ae.r#type), ae.payload).await;
@@ -594,11 +652,13 @@ mod plan_capture_tests {
     #[tokio::test]
     async fn plan_event_captured_last_wins() {
         let sink = test_sink("plan-capture");
+        let guard = crate::command_guard::CommandGuard::new(vec![], vec![]);
         emit_line_masked(
             br#"{"type":"plan","payload":{"text":"plan-a"}}"#,
             &sink,
             "stdout",
             &None,
+            &guard,
         )
         .await;
         emit_line_masked(
@@ -606,6 +666,7 @@ mod plan_capture_tests {
             &sink,
             "stdout",
             &None,
+            &guard,
         )
         .await;
         emit_line_masked(
@@ -613,6 +674,7 @@ mod plan_capture_tests {
             &sink,
             "stdout",
             &None,
+            &guard,
         )
         .await;
         assert_eq!(sink.take_plan().as_deref(), Some("plan-b"));

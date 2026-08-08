@@ -310,6 +310,8 @@ mod tests {
             adapter_versions: Default::default(),
             network_mode: "none".into(),
             transport: Transport::Ws,
+            guard_deny: vec![],
+            guard_allow: vec![],
         }
     }
 

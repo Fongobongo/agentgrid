@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 mod artifact_spool;
 mod attempt_runner;
 mod capabilities;
+mod command_guard;
 mod completion;
 mod config;
 mod enrollment;
@@ -934,7 +935,15 @@ mod tests {
             String::new(),
             test_outbox("a1"),
         );
-        read_stream(reader, sink, "stdout", vec![], Some(raw.clone())).await;
+        read_stream(
+            reader,
+            sink,
+            "stdout",
+            vec![],
+            Some(raw.clone()),
+            Arc::new(crate::command_guard::CommandGuard::new(vec![], vec![])),
+        )
+        .await;
         let got = tokio::fs::read_to_string(&raw_path).await.unwrap();
         assert!(got.contains("hello"), "structured line mirrored: {got}");
         assert!(got.contains("not json"), "unparsed line mirrored: {got}");
@@ -969,7 +978,15 @@ mod tests {
             String::new(),
             test_outbox("a1"),
         );
-        read_stream(reader, sink, "stdout", vec![], Some(raw.clone())).await;
+        read_stream(
+            reader,
+            sink,
+            "stdout",
+            vec![],
+            Some(raw.clone()),
+            Arc::new(crate::command_guard::CommandGuard::new(vec![], vec![])),
+        )
+        .await;
         let got = tokio::fs::read_to_string(&raw_path).await.unwrap();
         assert!(got.contains("line1"), "complete line mirrored: {got}");
         assert!(
@@ -1087,6 +1104,8 @@ mod tests {
             max_artifact_size: 100 * 1024 * 1024,
             network_mode: "none".into(),
             transport: crate::config::Transport::Auto,
+            guard_deny: vec![],
+            guard_allow: vec![],
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-{}-{}",
@@ -1203,6 +1222,8 @@ mod tests {
             max_artifact_size: 100 * 1024 * 1024,
             network_mode: "none".into(),
             transport: crate::config::Transport::Auto,
+            guard_deny: vec![],
+            guard_allow: vec![],
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-hang-{}-{}",
@@ -1315,6 +1336,8 @@ mod tests {
             max_artifact_size: 100 * 1024 * 1024,
             network_mode: "none".into(),
             transport: crate::config::Transport::Auto,
+            guard_deny: vec![],
+            guard_allow: vec![],
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-cancel-{}-{}",
@@ -1486,6 +1509,8 @@ mod tests {
                 max_artifact_size: 100 * 1024 * 1024,
                 network_mode: "none".into(),
                 transport: crate::config::Transport::Auto,
+                guard_deny: vec![],
+                guard_allow: vec![],
             };
 
             let ws = tmp.join("ws");
@@ -1579,7 +1604,15 @@ mod tests {
         );
         // 100 bytes, no newline — must be split into multiple flushed lines.
         let input: Vec<u8> = vec![b'x'; 100];
-        read_stream(&input[..], sink.clone(), "stdout", vec![], None).await;
+        read_stream(
+            &input[..],
+            sink.clone(),
+            "stdout",
+            vec![],
+            None,
+            Arc::new(crate::command_guard::CommandGuard::new(vec![], vec![])),
+        )
+        .await;
         std::env::remove_var("AGENTGRID_MAX_LINE_BYTES");
         let buf = sink.buffered_events().await;
         // At least a few stdout lines were emitted despite no newline.
@@ -1603,7 +1636,15 @@ mod tests {
         // Valid JSON line + invalid UTF-8 bytes (0xFF 0xFE is invalid UTF-8)
         let input = b"{\"type\":\"log\",\"payload\":{\"text\":\"ok\"}}\n\xff\xfe\n".to_vec();
         let reader = tokio::io::BufReader::new(std::io::Cursor::new(input));
-        read_stream(reader, sink.clone(), "stdout", vec![], None).await;
+        read_stream(
+            reader,
+            sink.clone(),
+            "stdout",
+            vec![],
+            None,
+            Arc::new(crate::command_guard::CommandGuard::new(vec![], vec![])),
+        )
+        .await;
         let buf = sink.buffered_events().await;
         // Should have produced at least the valid JSON event (Stdout type).
         let n = buf.iter().filter(|e| e.r#type == EventType::Stdout).count();
@@ -1641,7 +1682,15 @@ mod tests {
             json!({"type": "log", "payload": {"text": format!("key={secret}")}}).to_string();
         let input = format!("token={secret}\n{adapter_line}\nfinal line key={secret}");
         let reader = tokio::io::BufReader::new(std::io::Cursor::new(input.into_bytes()));
-        read_stream(reader, sink.clone(), "stdout", vec![secret.clone()], raw).await;
+        read_stream(
+            reader,
+            sink.clone(),
+            "stdout",
+            vec![secret.clone()],
+            raw,
+            Arc::new(crate::command_guard::CommandGuard::new(vec![], vec![])),
+        )
+        .await;
 
         for e in sink.buffered_events().await {
             let s = e.payload.to_string();

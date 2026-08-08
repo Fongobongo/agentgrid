@@ -114,10 +114,30 @@ pub async fn run_validation(
     let raw = raw.map(|f| Arc::new(tokio::sync::Mutex::new(f)));
     let s1 = sink.clone();
     let secrets_out = secrets.to_vec();
-    let r1 = tokio::spawn(read_stream(stdout, s1, "stdout", secrets_out, raw.clone()));
+    // Validation output is not an agent tool_call stream — use an empty guard
+    // (deny-list defaults still apply via `new`, but nothing passes through
+    // an `EventKind::ToolCall` parse here).
+    let guard = Arc::new(crate::command_guard::CommandGuard::new(vec![], vec![]));
+    let g1 = guard.clone();
+    let g2 = guard.clone();
+    let r1 = tokio::spawn(read_stream(
+        stdout,
+        s1,
+        "stdout",
+        secrets_out,
+        raw.clone(),
+        g1,
+    ));
     let s2 = sink.clone();
     let secrets_err = secrets.to_vec();
-    let r2 = tokio::spawn(read_stream(stderr, s2, "stderr", secrets_err, raw.clone()));
+    let r2 = tokio::spawn(read_stream(
+        stderr,
+        s2,
+        "stderr",
+        secrets_err,
+        raw.clone(),
+        g2,
+    ));
 
     enum VOutcome {
         Exited(i32),

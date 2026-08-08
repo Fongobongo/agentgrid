@@ -11,6 +11,7 @@ use reqwest::Client;
 use serde_json::json;
 use tokio::sync::Mutex;
 
+use crate::command_guard::CommandGuard;
 use crate::completion::{terminate_group, wait_for_cancel};
 use crate::event_sink::{read_stream, EventSink};
 
@@ -38,6 +39,7 @@ pub async fn supervise_adapter(
     secrets: Vec<String>,
     raw_file: Option<Arc<Mutex<tokio::fs::File>>>,
     attempt_id: &str,
+    guard: Arc<CommandGuard>,
 ) -> Result<SupervisedRun> {
     let bp = ProcessBackend.spawn(req)?;
     let pid = bp.pid;
@@ -47,12 +49,15 @@ pub async fn supervise_adapter(
     let mut child = bp.child;
     let cancel_client = cancel_client;
 
+    let g1 = guard.clone();
+    let g2 = guard.clone();
     let r1 = tokio::spawn(read_stream(
         stdout,
         sink.clone(),
         "stdout",
         secrets.clone(),
         raw_file.clone(),
+        g1.clone(),
     ));
     let r2 = tokio::spawn(read_stream(
         stderr,
@@ -60,6 +65,7 @@ pub async fn supervise_adapter(
         "stderr",
         secrets,
         raw_file,
+        g2,
     ));
 
     enum Outcome {

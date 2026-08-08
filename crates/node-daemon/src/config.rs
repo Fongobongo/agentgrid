@@ -106,6 +106,11 @@ pub struct Config {
     pub adapter_versions: HashMap<String, Option<String>>,
     pub network_mode: String,
     pub transport: Transport,
+    /// Plan 1.2 (#4): command guard config. Deny/allow CSV patterns matched
+    /// against tool_call commands. Deny is the safety net; allow (when
+    /// non-empty) is a quiet whitelist. See `command_guard.rs`.
+    pub guard_deny: Vec<String>,
+    pub guard_allow: Vec<String>,
 }
 
 fn split_csv(env: &str, default: &str) -> Vec<String> {
@@ -215,6 +220,24 @@ pub fn config_from_env() -> Config {
             .filter(|v| v == "none" || v == "restricted" || v == "unrestricted")
             .unwrap_or_else(|| "none".into()),
         transport: Transport::parse(std::env::var("AGENTGRID_TRANSPORT").ok()),
+        guard_deny: std::env::var("AGENTGRID_GUARD_DENY")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        guard_allow: std::env::var("AGENTGRID_GUARD_ALLOW")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

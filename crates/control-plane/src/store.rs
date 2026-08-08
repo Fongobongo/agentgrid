@@ -1950,14 +1950,9 @@ mod workflow_tests {
         // output to the data dir (parent of the artifact root).
         let name = format!("ag-backup-{stamp}.db");
         assert!(
-            s.backup_to(
-                std::env::temp_dir()
-                    .join("evil.db")
-                    .to_str()
-                    .unwrap(),
-            )
-            .await
-            .is_err(),
+            s.backup_to(std::env::temp_dir().join("evil.db").to_str().unwrap(),)
+                .await
+                .is_err(),
             "absolute paths must be rejected"
         );
         assert!(
