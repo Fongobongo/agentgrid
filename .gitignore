@@ -59,3 +59,7 @@ cp-test.db*
 *.db-shm
 *.db-wal
 *.db.lock
+
+# Local competitor research notes
+/docs/plans/competitor-features-roadmap.md
+/docs/plans/competitor-features-implementation-plan.md

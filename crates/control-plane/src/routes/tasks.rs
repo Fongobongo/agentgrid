@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use agentgrid_common::{CreateTaskRequest, ListResponse, TaskEligibility, TaskView};
+use agentgrid_common::{ApprovalView, CreateTaskRequest, ListResponse, TaskEligibility, TaskView};
 use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
@@ -160,6 +160,22 @@ pub async fn cancel_task_handler(
         Err(e) => {
             tracing::error!("cancel_task failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// Competitor plan 1.1: expose the pending patch-review approval for a task.
+/// 200 with `null` when there is nothing to review; the UI uses this to
+/// decide whether to show the approve/reject/rework buttons.
+pub async fn get_task_review_approval_handler(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Option<ApprovalView>>, StatusCode> {
+    match state.store.find_pending_patch_review(&task_id).await {
+        Ok(a) => Ok(Json(a)),
+        Err(e) => {
+            tracing::error!("get_task_review_approval failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }

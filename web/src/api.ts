@@ -290,6 +290,11 @@ export function retryTask(id: string) {
   return req('POST', `/v1/tasks/${id}/retry`, {});
 }
 
+// Competitor plan 1.1: pending patch-review approval for a task, or null.
+export function getTaskReviewApproval(taskId: string) {
+  return getJson<ApprovalView | null>(`/v1/tasks/${taskId}/review-approval`);
+}
+
 export function listApprovals(status?: string): Promise<ApprovalView[]> {
   return listGet<ApprovalView>(status ? `/v1/approvals?status=${encodeURIComponent(status)}` : '/v1/approvals');
 }

@@ -167,6 +167,23 @@ impl Store {
         Ok(count)
     }
 
+    /// Competitor plan 1.1: find the pending `task_patch_review` approval for
+    /// a task, if one exists. At most one is expected to be live at a time
+    /// (one per attempt completion). Returns the latest pending.
+    pub async fn find_pending_patch_review(&self, task_id: &str) -> Result<Option<ApprovalView>> {
+        let row = sqlx::query(
+            "SELECT id, task_id, attempt_id, session_id, permission, status, reason, \
+                created_at, expires_at, decided_at, scope \
+             FROM approvals \
+             WHERE task_id = ? AND scope = 'task_patch_review' AND status = 'pending' \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(approval_from_row))
+    }
+
     /// Block a workflow step (and its run) because an approval it depended on
     /// timed out. Only non-terminal steps/runs are touched, so a finished run
     /// is never reopened. Idempotent.

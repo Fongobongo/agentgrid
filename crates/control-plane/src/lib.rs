@@ -345,6 +345,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{id}/approvals",
             post(routes::approvals::create_approval_for_task_handler),
         )
+        // Competitor plan 1.1: pending patch-review approval lookup for the
+        // diff review UI.
+        .route(
+            "/v1/tasks/{id}/review-approval",
+            get(routes::tasks::get_task_review_approval_handler),
+        )
         .route("/v1/auth/setup", post(auth::auth_setup))
         .route("/v1/auth/login", post(auth::auth_login))
         .route("/v1/auth/logout", post(auth::auth_logout))

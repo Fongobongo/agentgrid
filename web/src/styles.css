@@ -240,6 +240,19 @@ button.link, a.link {
 .patch .pd { color: #ff9d96; }
 .patch .ph { color: var(--muted); }
 
+/* Competitor plan 1.1: patch review actions */
+.review-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.review-bar b { margin-right: auto; color: var(--accent); }
+
 /* Stage 11.6: workflow run viewer + DAG */
 .runs h2, .wf-summary h2 { margin-top: 0; }
 .runs-table { width: 100%; border-collapse: collapse; }

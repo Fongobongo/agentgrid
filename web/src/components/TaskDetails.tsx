@@ -1,12 +1,15 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
+  answerApproval,
   ApiError,
+  ApprovalView,
   ArtifactDownload,
   cancelTask,
   getArtifact,
   getEligibility,
   getTask,
   getTaskEvents,
+  getTaskReviewApproval,
   retryTask,
   streamTask,
   TaskEligibility,
@@ -33,6 +36,8 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   const [patch, setPatch] = useState<ArtifactDownload | null | undefined>(undefined);
   const [validationLog, setValidationLog] = useState<ArtifactDownload | null | undefined>(undefined);
   const [busy, setBusy] = useState<string | null>(null);
+  // Competitor plan 1.1 (diff review): pending patch-review approval, if any.
+  const [reviewApproval, setReviewApproval] = useState<ApprovalView | null>(null);
 
   const logRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -80,6 +85,9 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
     if (task && TERMINAL.includes(task.status)) {
       getArtifact(taskId, 'changes.patch').then(setPatch).catch(() => setPatch(null));
       getArtifact(taskId, 'validation.log').then(setValidationLog).catch(() => setValidationLog(null));
+      // Competitor plan 1.1: look for a pending patch-review approval so the
+      // UI can show approve/reject/rework buttons on the diff.
+      getTaskReviewApproval(taskId).then(setReviewApproval).catch(() => setReviewApproval(null));
     }
   }, [task, taskId]);
 
@@ -102,6 +110,36 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
       const r = kind === 'cancel' ? await cancelTask(taskId) : await retryTask(taskId);
       if (!r.ok) setError(new ApiError(r.status, `${kind} failed (${r.status})`));
       else getTask(taskId).then(setTask).catch(() => {});
+    } catch (e) {
+      setError(e as Error);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Competitor plan 1.1: operator decision on the patch-review approval.
+  // - accept -> allow the approval, task stays succeeded (patch accepted)
+  // - reject -> deny, human has seen the patch and rejected it
+  // - rework -> deny + retry the task (fresh attempt so the agent can
+  //   incorporate feedback; the denied approval records the operator's
+  //   rejection of this diff)
+  const reviewDecide = async (decision: 'accept' | 'reject' | 'rework') => {
+    if (!reviewApproval) return;
+    setBusy(decision);
+    try {
+      const deny = decision !== 'accept';
+      const r = await answerApproval(
+        reviewApproval.id,
+        deny ? 'deny' : 'allow',
+        decision === 'rework' ? 'operator requested rework' : undefined,
+      );
+      if (!r.ok) throw new ApiError(r.status, `review ${decision} failed (${r.status})`);
+      if (decision === 'rework') {
+        const rr = await retryTask(taskId);
+        if (!rr.ok) throw new ApiError(rr.status, `rework retry failed (${rr.status})`);
+      }
+      setReviewApproval(null);
+      getTask(taskId).then(setTask).catch(() => {});
     } catch (e) {
       setError(e as Error);
     } finally {
@@ -227,6 +265,25 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
                   <a className="link" href={`/v1/tasks/${taskId}/artifacts/changes.patch`} download>
                     Download
                   </a>
+                  {/* Competitor plan 1.1: review-actions on the diff. */}
+                  {reviewApproval && (
+                    <div className="review-bar">
+                      <b>Review required</b>
+                      <button disabled={busy === 'accept'} onClick={() => reviewDecide('accept')}>
+                        Accept
+                      </button>
+                      <button
+                        className="danger"
+                        disabled={busy === 'reject'}
+                        onClick={() => reviewDecide('reject')}
+                      >
+                        Reject
+                      </button>
+                      <button disabled={busy === 'rework'} onClick={() => reviewDecide('rework')}>
+                        Request rework
+                      </button>
+                    </div>
+                  )}
                   <pre className="patch">{renderPatch(patch.text)}</pre>
                 </>
               )}

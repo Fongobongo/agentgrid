@@ -1,7 +1,9 @@
 //! Attempt lifecycle: completion, agent sessions, ack, cancel, retry.
 //! Extracted from `store.rs`.
 
-use super::{attempt_status_str, from_snake, now_iso, status_str, Store, StoreTransitionError};
+use super::{
+    attempt_status_str, from_snake, iso_plus_secs, now_iso, status_str, Store, StoreTransitionError,
+};
 use agentgrid_common::{
     next_attempt_status, next_task_status, AgentSession, AttemptStatus, AttemptTransition,
     CompleteAttemptRequest, InvalidTransition, TaskStatus, TaskTransition,
@@ -279,6 +281,36 @@ impl Store {
             .bind(&node_id)
             .execute(&mut *tx)
             .await?;
+        // Competitor plan 1.1 (diff review UI): on a successful completion,
+        // create a pending patch-review approval so the operator must
+        // acknowledge the `changes.patch` before the task is treated as
+        // accepted. The task status stays `succeeded`; the approval records
+        // the human decision separately. 24h TTL keeps the page from
+        // accumulating zombie reviews.
+        if task_target == TaskStatus::Succeeded {
+            let approval_id = Uuid::new_v4().to_string();
+            let approval_now = now_iso();
+            // 24h=86400s — reviews are not safety-critical, just human gates.
+            let approval_expires = iso_plus_secs(86400);
+            let perm = serde_json::json!({
+                "kind": "patch_review",
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+            })
+            .to_string();
+            sqlx::query(
+                "INSERT INTO approvals (id, task_id, attempt_id, session_id, permission, status, created_at, expires_at, step_run_id, scope) \
+                 VALUES (?, ?, ?, NULL, ?, 'pending', ?, ?, NULL, 'task_patch_review')",
+            )
+            .bind(&approval_id)
+            .bind(&task_id)
+            .bind(attempt_id)
+            .bind(&perm)
+            .bind(&approval_now)
+            .bind(&approval_expires)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(true)
     }
