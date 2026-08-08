@@ -20,11 +20,13 @@ use agentgrid_control_plane::store::Store;
 use serde_json::json;
 
 async fn temp_store() -> Store {
+    // Disable critical disk watermark for tests (temp fs often has < 512 MB free).
+    std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let p = std::path::Path::new("/var/tmp").join(format!("ag-mig-{nanos}.db"));
+    let p = std::env::temp_dir().join(format!("ag-mig-{nanos}.db"));
     let _ = std::fs::remove_file(&p);
     let _ = std::fs::remove_file(format!("{}-wal", p.display()));
     let _ = std::fs::remove_file(format!("{}-shm", p.display()));

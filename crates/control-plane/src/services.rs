@@ -26,13 +26,20 @@ use crate::POLL_TIMEOUT;
 pub struct TaskLifecycleService {
     store: Store,
     assignment_notify: Arc<Notify>,
+    /// Plan 1.2 (competitor #22a): webhook for terminal task events.
+    notify_webhook: Option<String>,
 }
 
 impl TaskLifecycleService {
-    pub fn new(store: Store, assignment_notify: Arc<Notify>) -> Self {
+    pub fn new(
+        store: Store,
+        assignment_notify: Arc<Notify>,
+        notify_webhook: Option<String>,
+    ) -> Self {
         Self {
             store,
             assignment_notify,
+            notify_webhook,
         }
     }
 
@@ -54,6 +61,29 @@ impl TaskLifecycleService {
             Some(t) => t,
             None => return Ok(true), // orphaned attempt; nothing to advance
         };
+        // Plan 1.2 (competitor #22a): notify the operator on terminal states
+        // (mobile-friendly push). Best-effort; failures are logged inside
+        // `notify_task` and never abort the completion path.
+        if let Some(url) = &self.notify_webhook {
+            if let Ok(Some(task)) = self.store.show_task(&task_id).await {
+                use agentgrid_common::TaskStatus::*;
+                let status_str = match task.status {
+                    Succeeded => Some("completed"),
+                    Failed => Some("failed"),
+                    _ => None,
+                };
+                if let Some(s) = status_str {
+                    let url = url.clone();
+                    let note = crate::notify::TaskNotification {
+                        task_id: task_id.clone(),
+                        attempt_id: attempt_id.to_string(),
+                        status: s.to_string(),
+                        url: format!("/tasks/{task_id}"),
+                    };
+                    tokio::spawn(async move { crate::notify::notify_task(&url, &note).await });
+                }
+            }
+        }
         let Some(run_id) = self.store.workflow_run_id_for_task(&task_id).await? else {
             return Ok(true); // plain (non-workflow) task
         };
@@ -329,7 +359,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::path::Path::new("/var/tmp").join(format!("ag-svc-{nanos}-{n}.db"));
+        let p = std::env::temp_dir().join(format!("ag-svc-{nanos}-{n}.db"));
         let _ = std::fs::remove_file(&p);
         // NB: do NOT remove the file after open — the WAL pool can open a
         // second connection after the unlink, which would create a fresh empty
@@ -378,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn completion_advances_workflow_run_without_manual_tick() {
         let s = temp_store().await;
-        let svc = TaskLifecycleService::new(s.clone(), Arc::new(Notify::new()));
+        let svc = TaskLifecycleService::new(s.clone(), Arc::new(Notify::new()), None);
         // b depends on a: after a completes, tick must activate b.
         let tpl = s
             .create_workflow_template(

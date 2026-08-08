@@ -933,7 +933,7 @@ mod workflow_tests {
             .as_nanos();
         // std::env::temp_dir() returns /tmp which doesn't exist on this system.
         // Use /var/tmp which is the actual temp directory.
-        let temp_dir = std::path::Path::new("/var/tmp");
+        let temp_dir = std::env::temp_dir();
         let p = temp_dir.join(format!("ag-wf-{nanos}-{n}.db"));
         let _ = std::fs::remove_file(&p);
         let path_str = p.to_str().unwrap();
@@ -1950,7 +1950,14 @@ mod workflow_tests {
         // output to the data dir (parent of the artifact root).
         let name = format!("ag-backup-{stamp}.db");
         assert!(
-            s.backup_to("/var/tmp/evil.db").await.is_err(),
+            s.backup_to(
+                std::env::temp_dir()
+                    .join("evil.db")
+                    .to_str()
+                    .unwrap(),
+            )
+            .await
+            .is_err(),
             "absolute paths must be rejected"
         );
         assert!(
@@ -3042,7 +3049,7 @@ mod workflow_tests {
         let real_id = "550e8400-e29b-41d4-a716-446655440000";
         let attempt_dir = s.artifact_root.join(real_id);
         tokio::fs::create_dir_all(&s.artifact_root).await.unwrap();
-        let outside = std::path::Path::new("/var/tmp").join("ag-symlink-outside");
+        let outside = std::env::temp_dir().join("ag-symlink-outside");
         tokio::fs::create_dir_all(&outside).await.unwrap();
         // Clean any symlink/dir left by a prior run so the test is repeatable.
         let _ = tokio::fs::remove_file(&attempt_dir).await;
@@ -3072,7 +3079,7 @@ mod workflow_tests {
         // pre-exist from an old database. Plant the orphan exactly the way an
         // old DB would look: task + attempt + event, then remove the task.
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let p = std::path::Path::new("/var/tmp").join(format!("ag-wf-orphan-{n}.db"));
+        let p = std::env::temp_dir().join(format!("ag-wf-orphan-{n}.db"));
         let _ = std::fs::remove_file(&p);
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&p)

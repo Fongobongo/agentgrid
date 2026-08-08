@@ -3378,7 +3378,7 @@ async fn backup_endpoint_writes_file() {
     // Hardened contract: only a plain file name is accepted; the backup lands
     // in the data directory (parent of the artifact root, /var/tmp for temp DBs).
     let name = format!("ag-admin-backup-{}.db", std::process::id());
-    let path = std::path::Path::new("/var/tmp").join(&name);
+    let path = std::env::temp_dir().join(&name);
     if path.exists() {
         let _ = std::fs::remove_file(&path);
     }
@@ -3400,7 +3400,10 @@ async fn backup_endpoint_writes_file() {
         .clone()
         .oneshot(post_json(
             "/v1/admin/backup",
-            serde_json::to_string(&json!({ "path": "/var/tmp/evil.db" })).unwrap(),
+            serde_json::to_string(&json!({
+                "path": std::env::temp_dir().join("evil.db").to_str().unwrap()
+            }))
+            .unwrap(),
             Some(&token),
         ))
         .await
@@ -4704,7 +4707,7 @@ async fn static_fallback_rejects_traversal_and_caches_safe() {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let root = std::path::Path::new("/var/tmp").join(format!(
+    let root = std::env::temp_dir().join(format!(
         "ag-web-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -6328,7 +6331,7 @@ async fn storage_gc_removes_orphans_and_dangling_metadata() {
     use agentgrid_control_plane::AppState;
     // Use a DEDICATED temp dir so the artifact root is isolated from the
     // shared `ag-test-*.db` artifact root that other tests reuse.
-    let dir = std::path::Path::new("/var/tmp").join(format!("ag-gc-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("ag-gc-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("test.db");
     let state = AppState::open(db.to_str().unwrap()).await.unwrap();

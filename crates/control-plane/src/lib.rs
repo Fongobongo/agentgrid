@@ -8,6 +8,7 @@ mod auth;
 use auth::Claims;
 mod config;
 mod middleware;
+mod notify;
 mod routes;
 mod services;
 pub mod store;
@@ -80,6 +81,10 @@ pub struct AppState {
     /// Plan 0.3 2.2: connected WS nodes (ADR 0009). The pump task pushes
     /// assignments through this registry; poll-based nodes never touch it.
     pub ws_registry: std::sync::Arc<ws::WsRegistry>,
+    /// Plan 1.2 (#22a): optional webhook invoked on terminal/operator-facing
+    /// task events (completed, failed, awaiting review). Compatible with
+    /// ntfy.sh / Telegram bot API / FCM legacy. Disabled when unset.
+    pub notify_webhook: Option<String>,
 }
 
 impl AppState {
@@ -173,6 +178,10 @@ impl AppState {
             },
             None => None,
         };
+        let notify_webhook = std::env::var("AGENTGRID_NOTIFY_WEBHOOK")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let limits = Limits {
             prompt: env_usize("AGENTGRID_MAX_PROMPT_KB", 64) * 1024,
             event: env_usize("AGENTGRID_MAX_EVENT_KB", 1024) * 1024,
@@ -181,8 +190,11 @@ impl AppState {
             event_batch_bytes: env_usize("AGENTGRID_MAX_EVENT_BATCH_KB", 4096) * 1024,
         };
         let assignment_notify = Arc::new(Notify::new());
-        let lifecycle =
-            services::TaskLifecycleService::new(store.clone(), assignment_notify.clone());
+        let lifecycle = services::TaskLifecycleService::new(
+            store.clone(),
+            assignment_notify.clone(),
+            notify_webhook.clone(),
+        );
         let scheduler = services::SchedulerService::new(store.clone(), assignment_notify.clone());
         let state = Arc::new(Self {
             store,
@@ -201,6 +213,7 @@ impl AppState {
             event_rejections: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             event_gaps: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ws_registry: std::sync::Arc::new(ws::WsRegistry::new()),
+            notify_webhook,
         });
         // Plan 0.3 2.2: push assignments to connected WS nodes on every
         // scheduler wake. Harmless when no node is connected (tests).
@@ -212,7 +225,9 @@ impl AppState {
     /// exercise the bootstrap/setup flow). A one-time setup token is minted
     /// and printed to stdout (same as a fresh install).
     pub async fn open_temp_fresh() -> anyhow::Result<Arc<Self>> {
-        let p = std::path::Path::new("/var/tmp").join(format!("ag-test-{}.db", Uuid::new_v4()));
+        // Disable critical disk watermark for tests (temp fs often has < 512 MB free).
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let p = std::env::temp_dir().join(format!("ag-test-{}.db", Uuid::new_v4()));
         Self::open(p.to_str().unwrap()).await
     }
 
@@ -220,7 +235,9 @@ impl AppState {
     /// `test`/`test` user so the closed bootstrap window does not block
     /// test task creation; tests then login to obtain a JWT.
     pub async fn open_temp() -> anyhow::Result<Arc<Self>> {
-        let p = std::path::Path::new("/var/tmp").join(format!("ag-test-{}.db", Uuid::new_v4()));
+        // Disable critical disk watermark for tests (temp fs often has < 512 MB free).
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let p = std::env::temp_dir().join(format!("ag-test-{}.db", Uuid::new_v4()));
         let state = Self::open(p.to_str().unwrap()).await?;
         if state.store.user_count().await? == 0 {
             state
@@ -284,11 +301,12 @@ impl AppState {
 }
 
 impl Drop for AppState {
-    /// Test hygiene: `open_temp*` databases live in /var/tmp and would
+    /// Test hygiene: `open_temp*` databases live in the temp dir and would
     /// otherwise accumulate one db + wal + shm set per test. Unlink is safe
     /// while the pool is still open on Linux; the inode vanishes on close.
     fn drop(&mut self) {
-        if self.db_path.starts_with("/var/tmp/ag-test-") {
+        let prefix = std::env::temp_dir().join("ag-test-");
+        if self.db_path.starts_with(prefix.to_str().unwrap()) {
             for suffix in ["", "-wal", "-shm"] {
                 let _ = std::fs::remove_file(format!("{}{}", self.db_path, suffix));
             }

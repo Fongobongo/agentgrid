@@ -251,7 +251,7 @@ mod tests {
 
     fn discovered(name: &str, source: SkillSource, body: &str) -> DiscoveredSkill {
         let dir =
-            std::path::Path::new("/var/tmp").join(format!("ag_sk_{}_{}", name, std::process::id()));
+            std::env::temp_dir().join(format!("ag_sk_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("SKILL.md");
@@ -296,7 +296,7 @@ mod tests {
             discovered("u1", SkillSource::User, "user"),
         ];
         let u1_src = skills[1].path.clone();
-        let dest = std::path::Path::new("/var/tmp").join(format!("ag_mat_{}", std::process::id()));
+        let dest = std::env::temp_dir().join(format!("ag_mat_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dest);
         let (written, skipped) = materialize(&skills, &dest, &TrustStore::new(), None).unwrap();
         assert_eq!(skipped, vec!["p1".to_string()]);
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn materialize_verifies_lock_hashes() {
         let skills = vec![discovered("u2", SkillSource::User, "user")];
-        let dest = std::path::Path::new("/var/tmp").join(format!("ag_mat2_{}", std::process::id()));
+        let dest = std::env::temp_dir().join(format!("ag_mat2_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dest);
         let (written, _) = materialize(&skills, &dest, &TrustStore::new(), None).unwrap();
         let hash = written[0].hash.clone();
@@ -348,8 +348,8 @@ mod tests {
     #[test]
     fn revision_activate_and_rollback() {
         let src =
-            std::path::Path::new("/var/tmp").join(format!("ag_rev_src_{}", std::process::id()));
-        let root = std::path::Path::new("/var/tmp").join(format!("ag_rev_{}", std::process::id()));
+            std::env::temp_dir().join(format!("ag_rev_src_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ag_rev_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(src.join("s1")).unwrap();
