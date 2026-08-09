@@ -35,6 +35,19 @@ jobs:
         run: cargo test --workspace -- --report-time
       - name: build
         run: cargo build --workspace
+      # Plan 1.9 (#17): workflows are code — validate every committed
+      # `.agentgrid/workflows/*.yaml` against the strict schema + DAG.
+      # Locally-built `ag workflow validate` needs no server.
+      - name: validate agentgrid workflow yaml
+        run: |
+          set -euo pipefail
+          if ls .agentgrid/workflows/*.yaml >/dev/null 2>&1; then
+            for f in .agentgrid/workflows/*.yaml; do
+              target/debug/ag workflow validate "$f"
+            done
+          else
+            echo "no .agentgrid/workflows/*.yaml files to validate"
+          fi
 
   web:
     name: web build / lint

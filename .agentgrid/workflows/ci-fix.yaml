@@ -1,0 +1,30 @@
+# Example workflow (plan 1.9 / roadmap #17): workflows-as-code lives next to
+# the target repo so the CI process itself is versioned and peer-reviewable.
+# Validate with: ag workflow validate .agentgrid/workflows/ci-fix.yaml
+name: ci-fix
+steps:
+  - id: plan
+    prompt: >-
+      Investigate the failing CI job and write a short plan of the minimal fix.
+      Do not change code yet.
+    role: architect
+    adapter: mock
+  - id: implement
+    prompt: >-
+      Apply the planned fix. Keep the diff minimal and match the existing
+      style. Run the narrowest useful check to verify the change.
+    depends_on: [plan]
+    role: worker
+    adapter: mock
+  - id: review
+    prompt: >-
+      Review the fix diff for correctness and style. If it is not ready,
+      say exactly what must change.
+    depends_on: [implement]
+    role: reviewer
+    adapter: mock
+  - id: integrate
+    prompt: Commit the reviewed fix with a conventional commit message and push.
+    depends_on: [review]
+    role: integrator
+    adapter: mock

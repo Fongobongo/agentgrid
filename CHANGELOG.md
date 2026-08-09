@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.9)
+
+- **YAML workflows as code (#17):** `WorkflowTemplate::read_workflow_yaml`
+  parses a strict-schema YAML file (name + step DAG with id/prompt/deps/role/
+  adapter) and validates the graph before use; `ag workflow validate <path>`
+  runs the same check locally (no server, exit code 1 on error) and
+  `ag run --workflow <file|dir>` validates then creates+starts the run
+  (a directory picks the first `*.yaml`, the `.agentgrid/workflows/`
+  convention). CI validates every committed `.agentgrid/workflows/*.yaml`.
+
 ### Added (plan 1.8)
 
 - **Account pool / provider failover (#15):** node config

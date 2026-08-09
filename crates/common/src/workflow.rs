@@ -491,6 +491,53 @@ impl WorkflowTemplate {
         serde_yaml::from_str(s)
     }
 
+    /// Plan 1.9 (#17): read a workflow from a `.agentgrid/workflows/*.yaml` file
+    /// (or any path) with strict schema + DAG validation, returning the first
+    /// human-readable violation as a `String`. When `allowed_adapters` is `Some`,
+    /// every step whose `adapter` is set must name one of those — so a CI step can
+    /// validate against the repo's known adapters.
+    pub fn read_workflow_yaml(
+        path: &str,
+        allowed_adapters: Option<&[String]>,
+    ) -> Result<Self, String> {
+        let body = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+        let mut tmpl: WorkflowTemplate =
+            serde_yaml::from_str(&body).map_err(|e| format!("yaml parse {path}: {e}"))?;
+        if tmpl.id.is_empty() {
+            tmpl.id = "__from_yaml__".into();
+        }
+        if tmpl.name.trim().is_empty() {
+            return Err(format!("{path}: workflow has no name"));
+        }
+        if tmpl.steps.is_empty() {
+            return Err(format!("{path}: workflow declares no steps"));
+        }
+        for (i, s) in tmpl.steps.iter().enumerate() {
+            if s.id.trim().is_empty() {
+                return Err(format!("{path}: step {i} has no id"));
+            }
+            if s.prompt.trim().is_empty() {
+                return Err(format!("{path}: step `{}` has no prompt", s.id));
+            }
+            if let Some(adapter) = s.adapter.as_deref() {
+                if adapter.trim().is_empty() {
+                    return Err(format!("{path}: step `{}` declares an empty adapter", s.id));
+                }
+                if let Some(allowed) = allowed_adapters {
+                    if !allowed.iter().any(|a| a == adapter) {
+                        return Err(format!(
+                            "{path}: step `{}` names unknown adapter `{adapter}` (allowed: {})",
+                            s.id,
+                            allowed.join(", ")
+                        ));
+                    }
+                }
+            }
+        }
+        tmpl.validate_dag()?;
+        Ok(tmpl)
+    }
+
     /// Validate the step graph is a well-formed DAG (ADR 0004). Returns the
     /// first structural violation as a named error string, or `Ok(())`.
     /// Checks: unique ids, no self-dep, no orphan dep, acyclic.
@@ -553,6 +600,94 @@ impl WorkflowTemplate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_tmp(name: &str, content: &str) -> String {
+        let p =
+            std::env::temp_dir().join(format!("ag-wf-yaml-{name}-{}.yaml", uuid::Uuid::new_v4()));
+        std::fs::write(&p, content).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn read_workflow_yaml_parses_a_valid_file() {
+        let path = write_tmp(
+            "ok",
+            r#"
+name: ci-fix
+steps:
+  - id: plan
+    prompt: design the fix
+    role: architect
+    adapter: mock
+  - id: work
+    prompt: apply it
+    depends_on: [plan]
+    role: worker
+    adapter: mock
+"#,
+        );
+        let allowed = vec!["mock".to_string()];
+        let tmpl = WorkflowTemplate::read_workflow_yaml(&path, Some(&allowed)).unwrap();
+        assert_eq!(tmpl.name, "ci-fix");
+        assert_eq!(tmpl.steps.len(), 2);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_workflow_yaml_rejects_invalid_yaml() {
+        let path = write_tmp("bad", "name: ci\nsteps: [ this is not valid yaml ");
+        let err = WorkflowTemplate::read_workflow_yaml(&path, None).unwrap_err();
+        assert!(err.contains("yaml parse"), "err: {err}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_workflow_yaml_rejects_unknown_adapter() {
+        let path = write_tmp(
+            "unknown",
+            r#"
+name: ci
+steps:
+  - id: work
+    prompt: do
+    adapter: bogus-adapter
+"#,
+        );
+        let allowed = vec!["mock".to_string(), "claude".to_string()];
+        let err = WorkflowTemplate::read_workflow_yaml(&path, Some(&allowed)).unwrap_err();
+        assert!(
+            err.contains("unknown adapter `bogus-adapter`"),
+            "err: {err}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_workflow_yaml_rejects_cycle_and_missing_prompt() {
+        let p = write_tmp(
+            "cycle",
+            r#"
+name: ci
+steps:
+  - id: a
+    prompt: do
+    depends_on: [b]
+  - id: b
+    prompt: do
+    depends_on: [a]
+"#,
+        );
+        let err = WorkflowTemplate::read_workflow_yaml(&p, None).unwrap_err();
+        assert!(err.contains("cycle"), "err: {err}");
+        std::fs::remove_file(&p).ok();
+
+        // serde_yaml rejects a missing `prompt` at parse time before the schema
+        // check runs — the error must still name `prompt`.
+        let p = write_tmp("noprompt", "name: ci\nsteps:\n  - id: a\n");
+        let err = WorkflowTemplate::read_workflow_yaml(&p, None).unwrap_err();
+        assert!(err.contains("prompt"), "err: {err}");
+        std::fs::remove_file(&p).ok();
+    }
 
     #[test]
     fn yaml_round_trips_to_template() {

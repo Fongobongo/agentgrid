@@ -168,6 +168,11 @@ struct RunArgs {
     /// Per-task timeout in seconds.
     #[arg(long)]
     timeout: Option<u64>,
+    /// Plan 1.9 (#17): path to a `.agentgrid/workflows/*.yaml` file to run as
+    /// a workflow. When `--workflow` is a directory, the first `*.yaml` inside
+    /// it is used. Setting this ignores `prompt`/`adapter`.
+    #[arg(long, conflicts_with = "prompt")]
+    workflow: Option<String>,
 }
 
 #[derive(Args)]
@@ -538,6 +543,9 @@ enum WorkflowSub {
     Cancel(WorkflowCancelArgs),
     /// Manage scheduled/recurring triggers for a workflow template (Stage 13).
     Schedules(WorkflowSchedulesArgs),
+    /// Plan 1.9 (#17): validate a `.agentgrid/workflows/*.yaml` file against
+    /// the strict schema + DAG (no server round-trip). Exit code 1 on error.
+    Validate(WorkflowValidateArgs),
 }
 
 #[derive(Args)]
@@ -570,6 +578,16 @@ struct WorkflowSchedulesArgs {
     id: String,
     #[command(subcommand)]
     action: SchedulesAction,
+}
+
+#[derive(Args)]
+struct WorkflowValidateArgs {
+    /// Path to the `.agentgrid/workflows/*.yaml` file to validate.
+    path: String,
+    /// CSV of adapters allowed for this repo's workflows (e.g. `mock,claude`).
+    /// When set, a step naming an adapter not in the list fails validation.
+    #[arg(long)]
+    adapters: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -932,6 +950,13 @@ async fn cmd_tui(client: &reqwest::Client, base: &str, a: TuiArgs) -> Result<()>
 }
 
 async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()> {
+    // Plan 1.9 (#17): `--workflow <path|dir>` runs a workflow file instead of
+    // a plain task. The YAML is validated locally, then the template is
+    // created via the API and a run is started.
+    if let Some(wf) = a.workflow {
+        let repo = a.repository;
+        return cmd_run_workflow(client, base, repo, &wf).await;
+    }
     let req = CreateTaskRequest {
         prompt: a.prompt,
         repository: a.repository,
@@ -2385,6 +2410,7 @@ async fn cmd_workflow(
         WorkflowSub::List => cmd_workflow_list(client, base, json).await,
         WorkflowSub::Show(s) => cmd_workflow_show(client, base, s, json).await,
         WorkflowSub::Run(r) => cmd_workflow_run(client, base, r).await,
+        WorkflowSub::Validate(v) => cmd_workflow_validate(v).await,
         WorkflowSub::Cancel(c) => cmd_workflow_cancel(client, base, c).await,
         WorkflowSub::Schedules(s) => cmd_workflow_schedules(client, base, s).await,
     }
@@ -2417,6 +2443,32 @@ async fn cmd_workflow_create(
     println!("workflow {} created ({} steps)", tpl.id, tpl.steps.len());
     println!("{}", tpl.id);
     Ok(())
+}
+
+/// Plan 1.9 (#17): local schema + DAG validation of a workflow YAML file — no
+/// server round-trip, so CI can gate on it. Exit code 1 on error.
+async fn cmd_workflow_validate(v: WorkflowValidateArgs) -> Result<()> {
+    let allowed = v
+        .adapters
+        .as_deref()
+        .map(|csv| {
+            csv.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty());
+    match WorkflowTemplate::read_workflow_yaml(&v.path, allowed.as_deref()) {
+        Ok(tmpl) => {
+            println!("{}: valid ({} steps)", v.path, tmpl.steps.len());
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("{}: invalid", v.path);
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn cmd_workflow_list(client: &reqwest::Client, base: &str, json: bool) -> Result<()> {
@@ -2610,6 +2662,87 @@ async fn cmd_workflow_run(client: &reqwest::Client, base: &str, a: WorkflowRunAr
     Ok(())
 }
 
+/// Plan 1.9 (#17): `ag run --workflow <path|dir>` — validate the YAML locally,
+/// create the template via the API, then start a run.
+async fn cmd_run_workflow(
+    client: &reqwest::Client,
+    base: &str,
+    repository: String,
+    wf: &str,
+) -> Result<()> {
+    let path = resolve_workflow_path(wf)?;
+    let tmpl = WorkflowTemplate::read_workflow_yaml(&path, None)
+        .map_err(|e| anyhow::anyhow!("validate {path}: {e}"))?;
+    let req = CreateWorkflowRequest {
+        name: tmpl.name.clone(),
+        steps: tmpl.steps.clone(),
+        context: None,
+        budget: tmpl.budget.clone(),
+    };
+    let resp = client
+        .post(format!("{base}/v1/workflows"))
+        .json(&req)
+        .send()
+        .await
+        .context("create workflow request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("create workflow failed ({})", resp.status());
+    }
+    let created: WorkflowTemplate = resp.json().await.context("parse workflow response")?;
+    let run_req = CreateWorkflowRunRequest {
+        context: None,
+        repository: Some(repository),
+        base_commit: None,
+    };
+    let resp = client
+        .post(format!("{base}/v1/workflows/{}/runs", created.id))
+        .json(&run_req)
+        .send()
+        .await
+        .context("create workflow run request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("create workflow run failed ({})", resp.status());
+    }
+    let run: agentgrid_common::WorkflowRun =
+        resp.json().await.context("parse workflow run response")?;
+    println!(
+        "workflow {} run {} started ({} steps, status: {:?})",
+        created.id,
+        run.id,
+        created.steps.len(),
+        run.status
+    );
+    println!("{}", run.id);
+    Ok(())
+}
+
+/// Resolve `--workflow <path|dir>`: a directory means the first `*.yaml`
+/// inside it; anything else is used as-is. Errors when a directory has none.
+fn resolve_workflow_path(wf: &str) -> Result<String> {
+    let p = std::path::Path::new(wf);
+    if p.is_dir() {
+        let mut found: Vec<String> = std::fs::read_dir(p)
+            .with_context(|| format!("read workflow dir {wf}"))?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|x| x == "yaml" || x == "yml")
+            })
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no *.yaml workflow files in {wf}"))
+    } else if p.exists() {
+        Ok(wf.to_string())
+    } else {
+        Err(anyhow::anyhow!("workflow path {wf} does not exist"))
+    }
+}
+
 #[cfg(test)]
 mod node_install_tests {
     use super::*;
@@ -2705,6 +2838,45 @@ mod node_install_tests {
         let a = sample();
         assert!(!a.accept_new_host_key);
         assert!(a.host_key_fingerprint.is_none());
+    }
+}
+
+#[cfg(test)]
+mod workflow_file_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_workflow_path_dir_picks_first_yaml() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ag-wfdir-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.yaml"), "").unwrap();
+        std::fs::write(dir.join("a.yaml"), "").unwrap();
+        let got = resolve_workflow_path(&dir.to_string_lossy()).unwrap();
+        assert!(got.ends_with("a.yaml"), "got: {got}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_workflow_path_dir_without_yaml_errors() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ag-wfdir2-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = resolve_workflow_path(&dir.to_string_lossy()).unwrap_err();
+        assert!(err.to_string().contains("no *.yaml"), "err: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_workflow_path_missing_file_errors() {
+        let err = resolve_workflow_path("/nonexistent/wf.yaml").unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "err: {err}");
     }
 }
 
