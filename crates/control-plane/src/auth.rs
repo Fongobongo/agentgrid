@@ -226,6 +226,11 @@ pub fn user_protected(path: &str) -> bool {
     if path.starts_with("/v1/node/") {
         return false;
     }
+    // Plan 1.4: GitHub issue webhook carries its own HMAC signature; user
+    // JWT is not the right auth model.
+    if path.starts_with("/v1/webhooks/") {
+        return false;
+    }
     if path == "/v1/auth/login" || path == "/v1/auth/setup" || path == "/v1/auth/logout" {
         return false;
     }

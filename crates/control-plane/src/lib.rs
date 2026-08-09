@@ -330,6 +330,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{id}/tags/{tag}",
             post(routes::tasks::add_task_tag).delete(routes::tasks::remove_task_tag),
         )
+        .route(
+            "/v1/webhooks/github/issues",
+            post(routes::webhooks::github_issue_webhook),
+        )
         .route("/v1/search", get(routes::tasks::search_tasks))
         .route("/v1/tasks/{id}/events", get(routes::events::get_events))
         .route(

@@ -12,6 +12,7 @@ pub mod profiles;
 pub mod repositories;
 pub mod tasks;
 pub mod users;
+pub mod webhooks;
 pub mod workflows;
 
 /// Hardening P2 item 20: keyset pagination query (`after_created_at` +

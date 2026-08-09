@@ -82,6 +82,8 @@ enum AgCommand {
     Resume(ResumeArgs),
     /// Plan 1.3: add/remove/list task tags.
     Tag(TagArgs),
+    /// Plan 1.4: GitHub issues as tasks (#2b) via the `gh` CLI.
+    Issue(IssueArgs),
 }
 
 #[derive(Args)]
@@ -119,6 +121,24 @@ enum TagSub {
     Remove { task_id: String, tag: String },
     /// List a task's tags.
     List { task_id: String },
+}
+
+/// Plan 1.4 (#2b): issue-as-task via `gh`.
+#[derive(Args)]
+struct IssueArgs {
+    #[command(subcommand)]
+    command: IssueSub,
+}
+
+#[derive(Subcommand)]
+enum IssueSub {
+    /// Create a task from a GitHub issue (`gh issue view <N>` under the hood).
+    /// `[repo]` defaults to the current directory's GitHub repo.
+    Run { number: i64, repo: Option<String> },
+    /// List open issues (`gh issue list`).
+    Ls { repo: Option<String> },
+    /// Show an issue's title/body (`gh issue view <N>`).
+    Show { number: i64, repo: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -614,6 +634,7 @@ async fn main() -> Result<()> {
         AgCommand::Search(a) => cmd_search(&client, &base, a, cli.json).await,
         AgCommand::Resume(a) => cmd_resume(&client, &base, a).await,
         AgCommand::Tag(a) => cmd_tag(&client, &base, a, cli.json).await,
+        AgCommand::Issue(a) => cmd_issue(&client, &base, a).await,
     }
 }
 
@@ -821,6 +842,89 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+/// Plan 1.4 (#2b): run `gh <args>` in `repo` (or the current dir), returning
+/// stdout. `gh` is a required runtime dep for the issue commands only.
+fn gh_out(repo: Option<&str>, args: &[&str]) -> anyhow::Result<String> {
+    let mut cmd = std::process::Command::new("gh");
+    if let Some(r) = repo {
+        cmd.current_dir(r);
+    }
+    cmd.args(args);
+    let out = cmd
+        .output()
+        .map_err(|e| anyhow::anyhow!("gh not available: {e} (install GitHub CLI)"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Plan 1.4 (#2b): issue-as-task — `ag issue run/ls/show`.
+async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result<()> {
+    match a.command {
+        IssueSub::Show { number, repo } => {
+            let out = gh_out(repo.as_deref(), &["issue", "view", &number.to_string()])?;
+            print!("{out}");
+            Ok(())
+        }
+        IssueSub::Ls { repo } => {
+            let out = gh_out(repo.as_deref(), &["issue", "list", "--limit", "50"])?;
+            print!("{out}");
+            Ok(())
+        }
+        IssueSub::Run { number, repo } => {
+            // Fetch title + body via gh (JSON) to build the task prompt.
+            let json = gh_out(
+                repo.as_deref(),
+                &[
+                    "issue",
+                    "view",
+                    &number.to_string(),
+                    "--json",
+                    "title,body,repository",
+                ],
+            )?;
+            let v: serde_json::Value =
+                serde_json::from_str(&json).context("parse gh issue json")?;
+            let title = v["title"].as_str().unwrap_or("issue").to_string();
+            let body = v["body"].as_str().unwrap_or("").to_string();
+            let prompt = if body.trim().is_empty() {
+                format!("GitHub issue #{number}: {title}")
+            } else {
+                format!("GitHub issue #{number}: {title}\n\n{body}")
+            };
+            let req = CreateTaskRequest {
+                prompt,
+                repository: "*".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+            };
+            let resp = client
+                .post(format!("{base}/v1/tasks"))
+                .json(&req)
+                .send()
+                .await
+                .context("issue task create failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("issue task create failed ({})", resp.status());
+            }
+            let t: TaskView = resp.json().await.context("parse created task")?;
+            println!("issue #{number} '{title}' → task {}", t.id);
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_tui(client: &reqwest::Client, base: &str, a: TuiArgs) -> Result<()> {

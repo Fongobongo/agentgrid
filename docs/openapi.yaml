@@ -179,6 +179,14 @@ paths:
         in: path
         required: true
         schema: { type: string }
+  /v1/webhooks/github/issues:
+    post:
+      summary: GitHub issue webhook → create a task
+      description: |
+        Plan 1.4 (#2a): verifies the `X-Hub-Signature-256` HMAC-SHA256
+        signature against `AGENTGRID_GITHUB_WEBHOOK_SECRET`, then creates a
+        task from the issue body when the issue carries the `agent` label.
+        Disabled (404) when the secret is unset.
   /v1/tasks/{id}/events:
     get:
       summary: List task events (polling)

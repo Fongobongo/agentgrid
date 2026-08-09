@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.4)
+
+- **Issue-as-task (#2b CLI):** `ag issue run <N> [repo]` creates a task from a
+  GitHub issue via the `gh` CLI; `ag issue ls` / `ag issue show` for
+  inspection.
+- **GitHub issue webhook (#2a):** `POST /v1/webhooks/github/issues` with
+  `X-Hub-Signature-256` HMAC-SHA256 verification; issues carrying the `agent`
+  label auto-create tasks. Secret via `AGENTGRID_GITHUB_WEBHOOK_SECRET`
+  (disabled when unset).
+
 ### Added (plan 1.3)
 
 - **FTS5 task search:** `GET /v1/search?q=` (bm25-ranked, limit 50) over a
