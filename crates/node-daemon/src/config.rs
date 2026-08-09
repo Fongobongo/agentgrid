@@ -111,6 +111,46 @@ pub struct Config {
     /// non-empty) is a quiet whitelist. See `command_guard.rs`.
     pub guard_deny: Vec<String>,
     pub guard_allow: Vec<String>,
+    /// Plan 1.8 (#15): account pool for adapter provider failover. Each entry
+    /// is one credential env-var (e.g. `ANTHROPIC_API_KEY`) and a list of
+    /// tokens to rotate through on a 429 — extra tokens are cycling backups.
+    /// Parsed from `AGENTGRID_ACCOUNTS="ENV=tok1,tok2;ENV2=tok3"`.
+    /// Empty (default) = no pool, the single token in `adapter_env` is used.
+    pub accounts: Vec<AccountConfig>,
+}
+
+/// One credential env-var and the tokens that back it for failover rotation.
+#[derive(Clone, Debug)]
+pub struct AccountConfig {
+    /// The env var the adapter reads as its API key (e.g. `ANTHROPIC_API_KEY`).
+    pub env: String,
+    /// Ordered pool of tokens; rotation picks tokens past the first on 429.
+    pub tokens: Vec<String>,
+}
+
+/// Parse `AGENTGRID_ACCOUNTS` into a per-env token pool. Format:
+/// `ENV1=tok1,tok2;ENV2=tok3` — `;` separates env vars, `,` separates tokens.
+/// Empty / unset → no pool.
+pub fn parse_accounts(s: &str) -> Vec<AccountConfig> {
+    s.split(';')
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let (env, rest) = entry.split_once('=')?;
+            let tokens: Vec<String> = rest
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if tokens.is_empty() {
+                return None;
+            }
+            Some(AccountConfig {
+                env: env.trim().to_string(),
+                tokens,
+            })
+        })
+        .collect()
 }
 
 fn split_csv(env: &str, default: &str) -> Vec<String> {
@@ -238,6 +278,7 @@ pub fn config_from_env() -> Config {
                     .collect()
             })
             .unwrap_or_default(),
+        accounts: parse_accounts(&std::env::var("AGENTGRID_ACCOUNTS").unwrap_or_default()),
     }
 }
 
@@ -275,5 +316,27 @@ mod tests {
         assert_eq!(Transport::parse(Some("poll".into())), Transport::Poll);
         assert_eq!(Transport::parse(Some("WS".into())), Transport::Ws);
         assert_eq!(Transport::parse(Some("garbage".into())), Transport::Auto);
+    }
+
+    #[test]
+    fn parse_accounts_basic() {
+        let accs = parse_accounts("ANTHROPIC_API_KEY=k1,k2;OPENAI_API_KEY=k3");
+        assert_eq!(accs.len(), 2);
+        assert_eq!(accs[0].env, "ANTHROPIC_API_KEY");
+        assert_eq!(accs[0].tokens, vec!["k1".to_string(), "k2".to_string()]);
+        assert_eq!(accs[1].env, "OPENAI_API_KEY");
+        assert_eq!(accs[1].tokens, vec!["k3".to_string()]);
+    }
+
+    #[test]
+    fn parse_accounts_empty_and_skips_blank() {
+        assert!(parse_accounts("").is_empty());
+        // No tokens after `=` → entry dropped.
+        assert!(parse_accounts("FOO=").is_empty());
+        // Whitespace tolerated.
+        let accs = parse_accounts("  FOO = k1 , k2  ");
+        assert_eq!(accs.len(), 1);
+        assert_eq!(accs[0].env, "FOO");
+        assert_eq!(accs[0].tokens, vec!["k1".to_string(), "k2".to_string()]);
     }
 }

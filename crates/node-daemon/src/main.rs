@@ -11,12 +11,13 @@ use agentgrid_acp::{
 };
 use agentgrid_common::{
     policy::{AutonomyLevel, BuiltinPolicyProvider, CommandPolicyProvider, PolicyDecision},
-    ApprovalStatus, ApprovalView, Assignment, EventType, NoopContextProvider,
+    ApprovalStatus, ApprovalView, Assignment, EventKind, EventType, NoopContextProvider,
 };
 use anyhow::Result;
 
 use serde_json::{json, Value};
 
+mod account_usage;
 mod artifact_spool;
 mod attempt_runner;
 mod capabilities;
@@ -63,6 +64,9 @@ struct AcpResult {
     /// ACP session id from `session/new`, reported back so the control plane
     /// can resume it on a follow-up task (Stage 11.5).
     session_id: Option<String>,
+    /// Plan 1.8 (#15): the provider answered 429 / rate limit — the attempt
+    /// should be retried on the next account in the pool (rotate the token).
+    rate_limited: bool,
 }
 
 /// Stage 5: drive an ACP agent over stdio (JSON-RPC 2.0). Spawns
@@ -89,6 +93,7 @@ async fn drive_acp_session(
                     success: false,
                     error_code: Some("infrastructure_failed".into()),
                     session_id: None,
+                    rate_limited: false,
                 });
             }
         },
@@ -157,6 +162,7 @@ async fn drive_acp_session(
             success: false,
             error_code: Some(code),
             session_id: None,
+            rate_limited: false,
         });
     }
     // Stage 13 capability check: the profile's declared adapter_version must
@@ -171,6 +177,7 @@ async fn drive_acp_session(
             success: false,
             error_code: Some(code),
             session_id: None,
+            rate_limited: false,
         });
     }
     let mut child = cmd.spawn()?;
@@ -198,6 +205,7 @@ async fn drive_acp_session(
             success: false,
             error_code: Some("infrastructure_failed".into()),
             session_id: None,
+            rate_limited: false,
         });
     }
     let mcp_subset = cp_profile
@@ -224,6 +232,7 @@ async fn drive_acp_session(
                 success: false,
                 error_code: Some("infrastructure_failed".into()),
                 session_id: None,
+                rate_limited: false,
             });
         }
     };
@@ -238,12 +247,32 @@ async fn drive_acp_session(
     let client2 = client.clone();
     let server2 = cfg.server.clone();
     let autonomy = effective_autonomy(cfg.autonomy, cp_profile.as_ref());
+    // Plan 1.8 (#15): set by the stream task when an error event carries a
+    // rate-limit marker; read at outcome time to decide account rotation.
+    let rate_limited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rate_limited2 = rate_limited.clone();
     let stream_task = tokio::spawn(async move {
         while let Some(msg) = notif.recv().await {
             match msg {
                 Message::Notification { params, .. } => {
                     let upd = params.get("update").unwrap_or(&params);
                     let env = map_session_update(&sid, upd);
+                    // Plan 1.8 (#15): sniff provider rate-limit errors in the
+                    // event stream (type=error payload with 429 / rate limit /
+                    // too many requests / overloaded / quota) — the ACP
+                    // session may survive them, but the attempt must rotate.
+                    if env.kind == EventKind::Error {
+                        let text = env.payload.to_string();
+                        let l = text.to_ascii_lowercase();
+                        if l.contains("429")
+                            || l.contains("rate limit")
+                            || l.contains("too many requests")
+                            || l.contains("overloaded")
+                            || l.contains("quota")
+                        {
+                            rate_limited2.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                     sink2.push(env.kind.to_event_type(), env.payload).await;
                     sink2.note_adapter_event();
                 }
@@ -294,8 +323,14 @@ async fn drive_acp_session(
     let timeout = Duration::from_secs(assignment.timeout_secs.max(1));
     let outcome = tokio::select! {
         res = &mut prompt => match res {
-            Ok(_) => AcpResult { success: true, error_code: None, session_id: Some(session_id.clone()) },
-            Err(e) => AcpResult { success: false, error_code: Some(format!("agent_error: {e}")), session_id: Some(session_id.clone()) },
+            Ok(_) => {
+                let rl = rate_limited.load(std::sync::atomic::Ordering::Relaxed);
+                AcpResult { success: true, error_code: None, session_id: Some(session_id.clone()), rate_limited: rl }
+            }
+            Err(e) => {
+                let rl = rate_limited.load(std::sync::atomic::Ordering::Relaxed);
+                AcpResult { success: false, error_code: Some(format!("agent_error: {e}")), session_id: Some(session_id.clone()), rate_limited: rl }
+            }
         },
         _ = wait_for_cancel(&assignment.attempt_id, cancel_client, cancel_url) => {
             // Ponytail: bound the session_cancel RPC so a process already
@@ -314,7 +349,7 @@ async fn drive_acp_session(
                 child.wait(),
             )
             .await;
-            AcpResult { success: false, error_code: Some("cancelled".into()), session_id: Some(session_id.clone()) }
+            AcpResult { success: false, error_code: Some("cancelled".into()), session_id: Some(session_id.clone()), rate_limited: false }
         }
         _ = tokio::time::sleep(timeout) => {
             terminate_group(pid);
@@ -326,7 +361,7 @@ async fn drive_acp_session(
                 child.wait(),
             )
             .await;
-            AcpResult { success: false, error_code: Some("timeout".into()), session_id: Some(session_id.clone()) }
+            AcpResult { success: false, error_code: Some("timeout".into()), session_id: Some(session_id.clone()), rate_limited: false }
         }
     };
     stream_task.abort();
@@ -1106,6 +1141,7 @@ mod tests {
             transport: crate::config::Transport::Auto,
             guard_deny: vec![],
             guard_allow: vec![],
+            accounts: vec![],
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-{}-{}",
@@ -1161,6 +1197,167 @@ mod tests {
             "two session/update events should stream; got {}",
             sink.adapter_event_count()
         );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    /// Plan 1.8 (#15): a provider 429 surfaces as an `error`-type session/
+    /// update event carrying a rate-limit marker; `drive_acp_session` flags it
+    /// as `rate_limited`. With a 2-token account pool, `rotate_account_token`
+    /// advances to the second token and the second drive of the SAME fake agent
+    /// (test's marker file deleted) completes cleanly — primary 429 -> completed
+    /// via second account.
+    #[tokio::test]
+    async fn drive_acp_session_flags_rate_limit_then_rotates() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let fake = [
+            "../../target/debug/adapter-fake-acp",
+            "../../target/release/adapter-fake-acp",
+        ]
+        .iter()
+        .map(|p| std::path::Path::new(manifest).join(p))
+        .find(|p| p.is_file())
+        .expect("fake ACP agent built");
+        let bin_dir = fake.parent().unwrap();
+        let orig = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
+
+        // Marker file: only the FIRST drive emits the 429.
+        let rl_marker = std::env::temp_dir().join(format!("ag-rl-marker-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&rl_marker, b"1").unwrap();
+        std::env::set_var("AG_FAKE_RATE_LIMIT", &rl_marker);
+
+        let server = dummy_ingest_server().await;
+        let rl_token_env = format!("AG_FAKE_TOKEN_{}", uuid::Uuid::new_v4());
+        let mut cfg = Config {
+            server: server.clone(),
+            node_name: "test".into(),
+            workspace_root: std::env::temp_dir().join("ag-acp-ws-rl"),
+            max_concurrency: 2,
+            agent_version: "0.1.0".into(),
+            adapters: vec![AdapterSpec {
+                id: "fake-acp".into(),
+                protocol: AdapterProtocol::Acp,
+            }],
+            repositories: vec!["*".into()],
+            heartbeat_secs: 10,
+            enroll_token: None,
+            credential_path: std::env::temp_dir().join("ag-acp-cred-rl.json"),
+            env_file: None,
+            repository_root: std::env::temp_dir().join("ag-acp-repos-rl"),
+            secrets: vec![],
+            sandbox: sandbox::SandboxKind::None,
+            // Two-token pool backing a credential env var the fake agent ignores —
+            // rotation only swaps the value, which is enough to exercise the path.
+            accounts: vec![crate::config::AccountConfig {
+                env: rl_token_env.clone(),
+                tokens: vec!["tok-primary".into(), "tok-secondary".into()],
+            }],
+            adapter_env: vec![
+                (rl_token_env.clone(), "tok-primary".into()),
+                // env_clear strips the daemon env; the marker must ride in
+                // adapter_env like AG_FAKE_HANG does in the other tests.
+                ("AG_FAKE_RATE_LIMIT".into(), rl_marker.display().to_string()),
+            ],
+            outbox_root: std::env::temp_dir()
+                .join(format!("ag-acp-outbox-{}", uuid::Uuid::new_v4())),
+            artifact_spool_root: std::env::temp_dir()
+                .join(format!("ag-acp-spool-{}", uuid::Uuid::new_v4())),
+            completion_outbox: Arc::new(
+                outbox::CompletionOutbox::open(
+                    &std::env::temp_dir().join(format!("ag-acp-comp-{}", uuid::Uuid::new_v4())),
+                )
+                .unwrap(),
+            ),
+            autonomy: AutonomyLevel::default(),
+            adapter_versions: Default::default(),
+            max_artifact_size: 100 * 1024 * 1024,
+            network_mode: "none".into(),
+            transport: crate::config::Transport::Auto,
+            guard_deny: vec![],
+            guard_allow: vec![],
+        };
+        let ws = std::env::temp_dir().join(format!(
+            "ag-acp-rl-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let assignment = Assignment {
+            attempt_id: format!("att-{}", uuid::Uuid::new_v4()),
+            fencing_token: String::new(),
+            task_id: "t1".into(),
+            repository: "*".into(),
+            prompt: "do the thing".into(),
+            adapter: "fake-acp".into(),
+            number: 1,
+            timeout_secs: 30,
+            git_url: String::new(),
+            default_branch: String::new(),
+            validation_command: None,
+            validation_timeout_secs: None,
+            base_commit: None,
+            parent_acp_session_id: None,
+            network_mode: None,
+            provenance: None,
+            upstream_commits: vec![],
+            upstream_task_ids: vec![],
+        };
+        let sink = EventSink::new(
+            assignment.attempt_id.clone(),
+            reqwest::Client::new(),
+            cfg.server.clone(),
+            String::new(),
+            Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
+        );
+
+        // First drive: the marker file is present, so the fake agent emits a 429
+        // error event, then returns success — rate_limited must be true.
+        let res1 = drive_acp_session(
+            &cfg,
+            &reqwest::Client::new(),
+            &assignment,
+            &ws,
+            sink.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            res1.rate_limited,
+            "first drive should report rate_limited after the 429 event"
+        );
+
+        // Rotate the account token (one re-usable helper in attempt_runner).
+        let mut idx = 0usize;
+        assert!(
+            crate::attempt_runner::rotate_account_token(&mut cfg, &mut idx),
+            "rotation should succeed (second token available)"
+        );
+        assert_eq!(
+            cfg.adapter_env
+                .iter()
+                .find(|(k, _)| k == &rl_token_env)
+                .map(|(_, v)| v.clone()),
+            Some("tok-secondary".into()),
+            "adapter_env should now carry the second token"
+        );
+
+        // Second drive: marker file deleted by the fake — no 429, clean success.
+        let res2 = drive_acp_session(
+            &cfg,
+            &reqwest::Client::new(),
+            &assignment,
+            &ws,
+            sink.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !res2.rate_limited,
+            "second drive should not report rate_limited"
+        );
+        assert!(res2.success, "second drive should succeed");
+
+        std::env::remove_var("AG_FAKE_RATE_LIMIT");
         std::fs::remove_dir_all(&ws).ok();
     }
 
@@ -1224,6 +1421,7 @@ mod tests {
             transport: crate::config::Transport::Auto,
             guard_deny: vec![],
             guard_allow: vec![],
+            accounts: vec![],
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-hang-{}-{}",
@@ -1338,6 +1536,7 @@ mod tests {
             transport: crate::config::Transport::Auto,
             guard_deny: vec![],
             guard_allow: vec![],
+            accounts: vec![],
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-cancel-{}-{}",
@@ -1511,6 +1710,7 @@ mod tests {
                 transport: crate::config::Transport::Auto,
                 guard_deny: vec![],
                 guard_allow: vec![],
+                accounts: vec![],
             };
 
             let ws = tmp.join("ws");

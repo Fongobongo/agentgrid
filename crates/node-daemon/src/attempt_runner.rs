@@ -28,6 +28,40 @@ use crate::profiles::{
 use crate::sandbox;
 use crate::validation::run_validation;
 
+/// Plan 1.8 (#15): rotate to the next token for the first account whose env
+/// var matches `cfg.adapter_env` (or the first account when none match), so
+/// `drive_acp_session` re-launches the adapter with the next provider token
+/// after a 429. Mutates `cfg.adapter_env` in place (replaces the value for the
+/// account's env, or appends it). Returns `false` when the pool is exhausted
+/// or empty — the caller must not retry again.
+pub(crate) fn rotate_account_token(cfg: &mut Config, index: &mut usize) -> bool {
+    let Some(acc) = cfg.accounts.get(*index) else {
+        return false; // pool empty or exhausted
+    };
+    if acc.tokens.len() < 2 {
+        return false; // single token: nothing to rotate to
+    }
+    // Pick the next token (skip the one already in adapter_env, if present).
+    let current = cfg
+        .adapter_env
+        .iter()
+        .find(|(k, _)| k == &acc.env)
+        .map(|(_, v)| v.clone());
+    let next = acc
+        .tokens
+        .iter()
+        .find(|t| Some(t.as_str()) != current.as_deref())
+        .cloned()
+        .unwrap_or_else(|| acc.tokens[0].clone());
+    if let Some(slot) = cfg.adapter_env.iter_mut().find(|(k, _)| k == &acc.env) {
+        slot.1 = next;
+    } else {
+        cfg.adapter_env.push((acc.env.clone(), next));
+    }
+    *index += 1;
+    true
+}
+
 /// Run one task attempt assigned by the control plane.
 pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) -> Result<()> {
     // WS Cancel messages wake the supervisor via this notifier (plan 0.3 2.3);
@@ -150,8 +184,40 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             &assignment.fencing_token,
         )
         .await;
-        let res =
-            crate::drive_acp_session(&cfg, &client, &assignment, &ws.path, sink.clone()).await?;
+        // Plan 1.8 (#15): account failover — on a provider 429 (surfaced as a
+        // rate-limit error event by the adapter), rotate to the next token in
+        // the pool and re-drive the whole ACP session. The worktree is
+        // untouched across rotations; only the credential env changes.
+        let mut cfg = cfg.clone();
+        let mut account_index = 0usize;
+        let res = loop {
+            let res = crate::drive_acp_session(&cfg, &client, &assignment, &ws.path, sink.clone())
+                .await?;
+            if !res.rate_limited || !rotate_account_token(&mut cfg, &mut account_index) {
+                break res;
+            }
+            tracing::warn!(
+                attempt_id = %assignment.attempt_id,
+                account_index,
+                "provider 429; rotating account and retrying attempt"
+            );
+            // Plan 1.8 (#15): record the rotation for the heartbeat usage
+            // endpoint.
+            if let Some(acc) = cfg.accounts.get(account_index.saturating_sub(1)) {
+                crate::account_usage::note_rate_limited(&acc.env);
+            }
+            sink.push(
+                EventKind::Log.to_event_type(),
+                json!({ "kind": "feedback", "account_rotated": true, "round": account_index }),
+            )
+            .await;
+        };
+        // Plan 1.8 (#15): record the attempt against the account env backing
+        // this adapter (first account entry whose env is set in adapter_env,
+        // or none).
+        if let Some(acc) = cfg.accounts.first() {
+            crate::account_usage::note_attempt(&acc.env);
+        }
         // Stage 2.3: keep the per-attempt repo_dir/branch for cleanup after finalize takes ws.
         let workdir = ws.path.clone();
         let cleanup_repo = ws.repo_dir.clone();

@@ -206,6 +206,7 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 // docker network applied at spawn (restricted→none) is logged
                 // per-attempt (egress audit) — this field stays the policy.
                 network_mode: cfg.network_mode.clone(),
+                account_usage: crate::account_usage::snapshot(),
             };
             if let Err(e) = client
                 .post(format!("{}/v1/node/heartbeat", cfg.server))

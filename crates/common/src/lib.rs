@@ -659,6 +659,9 @@ pub struct HeartbeatRequest {
     /// hint, never blocks a task).
     #[serde(default)]
     pub discovered_skills: Vec<HeartbeatSkill>,
+    /// Plan 1.8 (#15): per-account usage counters. Absent on legacy nodes.
+    #[serde(default)]
+    pub account_usage: Vec<AccountUsage>,
     /// Hardening P0 item 5: this node is running an adapter with the unsafe
     /// unattended bypass active (no sandbox). Absent on legacy nodes.
     #[serde(default)]
@@ -714,6 +717,20 @@ pub struct HeartbeatRequest {
     /// Hardening P2 item 659: node-level network mode (`none` | `restricted` | `unrestricted`).
     #[serde(default = "default_network_mode")]
     pub network_mode: String,
+}
+
+/// Plan 1.8 (#15): per-account usage reported by a node in its heartbeat so
+/// the control plane can surface it at `GET /v1/nodes/{id}/accounts/usage`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountUsage {
+    /// Credential env var the account backs (e.g. `ANTHROPIC_API_KEY`).
+    pub env: String,
+    /// 0-based index of the token currently in use within the pool.
+    pub token_index: usize,
+    /// Attempts run on this account.
+    pub attempts: u64,
+    /// 429 / rate-limit hits that rotated to the next token.
+    pub rate_limited: u64,
 }
 
 /// A skill name + source ("project" | "user" | "managed") advertised in a
@@ -1179,6 +1196,7 @@ mod tests {
             capabilities: vec![],
             protocol_version: None,
             discovered_skills: vec![],
+            account_usage: vec![],
             unsafe_active: false,
             permission_interception: "wrapper".into(),
             outbox_bytes: 0,

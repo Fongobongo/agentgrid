@@ -299,6 +299,18 @@ paths:
         attempts finish and the heartbeat stays online; `?drain=false`
         re-enables scheduling. Audited as `node.drain` / `node.undrain`.
         (hardening P2 item 37)
+  /v1/nodes/{id}/accounts/usage:
+    get:
+      summary: Per-account usage for a node (provider failover metrics)
+      description: |
+        Plan 1.8 (#15): attempt counts and 429 rate-limits per credential
+        env var, as reported by the node in its heartbeats. In-memory; empty
+        list when the node never reported usage.
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
   /v1/nodes/enrollment-token:
     post:
       summary: Mint a one-time node enrollment token (admin)

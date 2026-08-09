@@ -724,6 +724,7 @@ async fn revoked_node_gets_401() {
         repo_cache_bytes: 0,
         workspace_bytes: 0,
         network_mode: "none".into(),
+        account_usage: vec![],
     };
     let resp = app
         .clone()
@@ -1749,6 +1750,7 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 repo_cache_bytes: 0,
                 workspace_bytes: 0,
                 network_mode: "none".into(),
+                account_usage: vec![],
             },
         )
         .await
@@ -1803,6 +1805,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         repo_cache_bytes: 0,
         workspace_bytes: 0,
         network_mode: "none".into(),
+        account_usage: vec![],
     };
     let resp = app
         .clone()
@@ -4138,6 +4141,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         repo_cache_bytes: 0,
         workspace_bytes: 0,
         network_mode: "none".into(),
+        account_usage: vec![],
     };
     let resp = app
         .clone()
@@ -6584,6 +6588,7 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         repo_cache_bytes: 0,
         workspace_bytes: 0,
         network_mode: "none".into(),
+        account_usage: vec![],
     };
     let resp = app
         .clone()
@@ -6615,6 +6620,76 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         mine.artifact_spool_bytes, 1337,
         "artifact spool bytes surfaced"
     );
+}
+
+/// Plan 1.8 (#15): account usage reported via heartbeat surfaces at
+/// `GET /v1/nodes/{id}/accounts/usage`.
+#[tokio::test]
+async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-usage", vec!["mock".into()], vec!["*".into()]).await;
+
+    let hb = HeartbeatRequest {
+        status: Some(NodeStatus::Online),
+        name: "node-usage".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        agent_version: "t".into(),
+        load_avg: 0.0,
+        free_disk_mb: 1000,
+        active_attempts: 0,
+        capabilities: vec![],
+        protocol_version: None,
+        discovered_skills: vec![],
+        unsafe_active: false,
+        permission_interception: "wrapper".into(),
+        outbox_bytes: 0,
+        artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
+        account_usage: vec![agentgrid_common::AccountUsage {
+            env: "ANTHROPIC_API_KEY".into(),
+            token_index: 0,
+            attempts: 7,
+            rate_limited: 2,
+        }],
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            serde_json::to_string(&hb).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/nodes/{node_id}/accounts/usage"),
+            &test_token(&app).await,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let usage: Vec<agentgrid_common::AccountUsage> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].env, "ANTHROPIC_API_KEY");
+    assert_eq!(usage[0].attempts, 7);
+    assert_eq!(usage[0].rate_limited, 2);
 }
 
 /// Hardening P1 item 15: `storage_reconcile` finds orphan files (no metadata)

@@ -85,6 +85,11 @@ pub struct AppState {
     /// task events (completed, failed, awaiting review). Compatible with
     /// ntfy.sh / Telegram bot API / FCM legacy. Disabled when unset.
     pub notify_webhook: Option<String>,
+    /// Plan 1.8 (#15): per-node account usage reported in heartbeats, kept in
+    /// memory (no schema change) for `GET /v1/nodes/{id}/accounts/usage`.
+    pub account_usage: std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, Vec<agentgrid_common::AccountUsage>>>,
+    >,
 }
 
 impl AppState {
@@ -214,6 +219,9 @@ impl AppState {
             event_gaps: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ws_registry: std::sync::Arc::new(ws::WsRegistry::new()),
             notify_webhook,
+            account_usage: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         });
         // Plan 0.3 2.2: push assignments to connected WS nodes on every
         // scheduler wake. Harmless when no node is connected (tests).
@@ -451,6 +459,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/nodes/{id}/drain",
             post(routes::nodes::drain_node_handler),
+        )
+        .route(
+            "/v1/nodes/{id}/accounts/usage",
+            get(routes::nodes::node_account_usage),
         )
         .route(
             "/v1/repositories",

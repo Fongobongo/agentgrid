@@ -98,6 +98,28 @@ fn main() {
                     out.flush().ok();
                     break;
                 }
+                // Test mode (plan 1.8 #15): emit an error event carrying a
+                // 429 marker only on the FIRST invocation, then return a
+                // successful prompt. The path in `AG_FAKE_RATE_LIMIT` is a
+                // marker file: this invocation emits the 429 + deletes it, so
+                // the next side-by-side `drive_acp_session` (rotated to the
+                // second token) runs the normal success path — letting a test
+                // assert "primary 429 -> completed via second account".
+                if let Some(p) = std::env::var_os("AG_FAKE_RATE_LIMIT") {
+                    if std::path::Path::new(&p).exists() {
+                        std::fs::remove_file(&p).ok();
+                        let err = json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": { "update": { "type": "error", "text": "429 Too Many Requests: rate limit exceeded" } }
+                        });
+                        writeln!(out, "{}", err).ok();
+                        out.flush().ok();
+                        // Give the node's stream task time to observe the
+                        // error event before the prompt result lands.
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                    }
+                }
                 // Emit two updates, then the prompt result.
                 let u1 = json!({
                     "jsonrpc": "2.0",

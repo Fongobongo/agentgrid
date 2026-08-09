@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.8)
+
+- **Account pool / provider failover (#15):** node config
+  `AGENTGRID_ACCOUNTS="ENV=tok1,tok2;ENV2=tok3"` defines a per-credential
+  token pool. The ACP event stream sniffs provider rate-limit errors (429 /
+  rate limit / too many requests / overloaded / quota); on a hit the attempt
+  runner rotates to the next token and re-drives the session without touching
+  the worktree. Per-account counters (attempts / rate-limited) ride in the
+  heartbeat and surface at `GET /v1/nodes/{id}/accounts/usage`.
+
 ### Added (plan 1.7)
 
 - **Token-budget compression (#14):** `agentgrid_common::compress` —

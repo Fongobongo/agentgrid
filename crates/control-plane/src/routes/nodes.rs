@@ -110,6 +110,15 @@ pub async fn heartbeat(
     }
     match state.store.heartbeat(&auth.node_id, &req).await {
         Ok(true) => {
+            // Plan 1.8 (#15): stash per-account usage for the usage endpoint
+            // (memory-only; survives only while the CP runs).
+            if !req.account_usage.is_empty() {
+                state
+                    .account_usage
+                    .lock()
+                    .await
+                    .insert(auth.node_id.clone(), req.account_usage.clone());
+            }
             // Stage 9.2: auto-fill the trust ledger from heartbeat discovery.
             // Upsert is idempotent and never overwrites an operator decision.
             let discovered: Vec<(String, String)> = req
@@ -168,6 +177,23 @@ pub async fn revoke_node(
 pub(crate) struct NodeDrainQuery {
     #[serde(default)]
     drain: Option<bool>,
+}
+
+/// Plan 1.8 (#15): per-account usage for a node (reported via heartbeat).
+/// In-memory; empty list when the node never reported usage.
+pub async fn node_account_usage(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<agentgrid_common::AccountUsage>>, StatusCode> {
+    Ok(Json(
+        state
+            .account_usage
+            .lock()
+            .await
+            .get(&id)
+            .cloned()
+            .unwrap_or_default(),
+    ))
 }
 
 pub async fn drain_node_handler(

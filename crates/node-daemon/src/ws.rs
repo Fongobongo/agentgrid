@@ -312,6 +312,7 @@ mod tests {
             transport: Transport::Ws,
             guard_deny: vec![],
             guard_allow: vec![],
+            accounts: vec![],
         }
     }
 
