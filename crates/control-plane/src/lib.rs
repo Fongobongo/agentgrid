@@ -325,6 +325,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/tasks/{id}", get(routes::tasks::show_task))
         .route("/v1/attempts/{id}", get(routes::tasks::show_attempt))
+        .route(
+            "/v1/attempts/{id}/annotations",
+            get(routes::tasks::list_annotations).post(routes::tasks::add_annotation),
+        )
+        .route(
+            "/v1/attempts/{id}/rework",
+            post(routes::tasks::rework_attempt),
+        )
         .route("/v1/tasks/{id}/tags", get(routes::tasks::list_task_tags))
         .route(
             "/v1/tasks/{id}/tags/{tag}",

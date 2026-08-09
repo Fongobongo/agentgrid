@@ -975,6 +975,47 @@ impl<T> ListResponse<T> {
     }
 }
 
+/// Plan 1.6 (#3b): an inline annotation a reviewer left on an attempt's
+/// diff/plan. `file` is the file path ("" for a whole-patch or plan-level
+/// comment); `line_start`/`line_end` are 1-based and inclusibe, `None` for a
+/// whole-file comment. Aggregated into a rework task prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchAnnotation {
+    pub id: String,
+    pub attempt_id: String,
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<i64>,
+    pub comment: String,
+    pub created_at: String,
+}
+
+/// Plan 1.6 (#3b): create one inline annotation on an attempt's diff/plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateAnnotationRequest {
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<i64>,
+    pub comment: String,
+}
+
+/// Plan 1.6 (#3b): "send for rework" — start a new task that re-runs the
+/// original work with the reviewer's inline annotations folded into the
+/// prompt. The CP looks up the annotated attempt's owning task for the
+/// original prompt + repo/adapter, appends an `[ANNOTATIONS]` block, and
+/// creates a fresh task. Returns the new task id so the caller can poll.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReworkRequest {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReworkResponse {
+    pub task_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

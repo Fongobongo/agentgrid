@@ -145,6 +145,54 @@ paths:
         in: path
         required: true
         schema: { type: string }
+  /v1/attempts/{id}/annotations:
+    get:
+      summary: List inline annotations on an attempt's diff/plan
+      description: Plan 1.6 (#3b): reviewer comments pinned to file/line.
+    post:
+      summary: Leave an inline annotation
+      description: |
+        Plan 1.6 (#3b): create a comment pinned to a file (and optional
+        1-based line range) on an attempt's diff/plan. Stored in SQLite as
+        `patch_annotations`; folded into a rework task prompt by
+        `POST /v1/attempts/{id}/rework`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file, comment]
+              properties:
+                file: { type: string }
+                line_start: { type: integer }
+                line_end: { type: integer }
+                comment: { type: string }
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+  /v1/attempts/{id}/rework:
+    post:
+      summary: Send an attempt for rework with the annotations as feedback
+      description: |
+        Plan 1.6 (#3b): creates a NEW task whose prompt is the original
+        prompt plus an `[ANNOTATIONS]` block built from the attempt's inline
+        annotations. Returns the new task id.
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      responses:
+        '201':
+          description: Rework task created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string }
   /v1/tasks/{id}/review-approval:
     get:
       summary: Fetch the pending patch-review approval for a task

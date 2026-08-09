@@ -157,6 +157,110 @@ pub async fn show_attempt(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+/// Plan 1.6 (#3b): leave an inline annotation on an attempt's diff/plan.
+pub async fn add_annotation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<agentgrid_common::CreateAnnotationRequest>,
+) -> Result<(StatusCode, Json<agentgrid_common::PatchAnnotation>), StatusCode> {
+    let req = agentgrid_common::CreateAnnotationRequest {
+        comment: req.comment.trim().to_string(),
+        ..req
+    };
+    if req.comment.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    match state.store.add_annotation(&id, &req).await {
+        Ok(a) => Ok((StatusCode::CREATED, Json(a))),
+        Err(e) => {
+            tracing::error!("add_annotation failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Plan 1.6 (#3b): list an attempt's inline annotations.
+pub async fn list_annotations(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<agentgrid_common::PatchAnnotation>>, StatusCode> {
+    state
+        .store
+        .list_annotations(&id)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            tracing::error!("list_annotations failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// Plan 1.6 (#3b): "send for rework" — start a new task that re-runs the
+/// original work with the reviewer's inline annotations folded into the
+/// prompt. Returns the new task id.
+pub async fn rework_attempt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<agentgrid_common::ReworkResponse>), StatusCode> {
+    let origin = state
+        .store
+        .attempt_origin(&id)
+        .await
+        .map_err(|e| {
+            tracing::error!("attempt_origin failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let (prompt, repository, adapter) = origin;
+    let anns = state.store.list_annotations(&id).await.map_err(|e| {
+        tracing::error!("list_annotations (rework) failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let block = render_annotations_block(&anns);
+    let new_prompt = format!("{prompt}\n\n{block}");
+    let req = CreateTaskRequest {
+        prompt: new_prompt,
+        repository,
+        adapter,
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
+    };
+    match state.store.create_task(&req).await {
+        Ok(view) => Ok((
+            StatusCode::CREATED,
+            Json(agentgrid_common::ReworkResponse { task_id: view.id }),
+        )),
+        Err(e) => {
+            tracing::error!("rework create_task failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Plan 1.6 (#3b): compact `[ANNOTATIONS]` block appended to the prompt so the
+/// agent takes the reviewer's inline feedback in a retry. Each annotation is
+/// one line: `<file>[:L<L>-<L>] <comment>`.
+fn render_annotations_block(anns: &[agentgrid_common::PatchAnnotation]) -> String {
+    if anns.is_empty() {
+        return "[ANNOTATIONS] (none)".to_string();
+    }
+    let mut lines = vec!["[ANNOTATIONS] rework feedback from review:".to_string()];
+    for a in anns {
+        let loc = match (a.line_start, a.line_end) {
+            (Some(s), Some(e)) if s != e => format!("{}:L{}-{}", a.file, s, e),
+            (Some(s), _) => format!("{}:L{}", a.file, s),
+            _ => a.file.clone(),
+        };
+        lines.push(format!("- {loc} {}", a.comment));
+    }
+    lines.join("\n")
+}
+
 /// Plan 1.3 (#13): tag CRUD — `GET /v1/tasks/{id}/tags`,
 /// `POST /v1/tasks/{id}/tags/{tag}`, `DELETE /v1/tasks/{id}/tags/{tag}`.
 pub async fn list_task_tags(

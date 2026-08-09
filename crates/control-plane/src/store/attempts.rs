@@ -678,3 +678,82 @@ impl Store {
         }))
     }
 }
+
+impl Store {
+    /// Plan 1.6 (#3b): the owning task's `(prompt, repository, adapter)` for
+    /// an attempt, so "send for rework" can build a new task with the original
+    /// prompt + repo. Returns `None` if the attempt does not exist.
+    pub async fn attempt_origin(&self, id: &str) -> Result<Option<(String, String, String)>> {
+        let row = sqlx::query(
+            "SELECT tasks.prompt, tasks.repository, tasks.adapter \
+             FROM attempts JOIN tasks ON tasks.id = attempts.task_id \
+             WHERE attempts.id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| {
+            (
+                r.try_get::<String, _>("prompt").unwrap_or_default(),
+                r.try_get::<String, _>("repository").unwrap_or_default(),
+                r.try_get::<String, _>("adapter").unwrap_or_default(),
+            )
+        }))
+    }
+
+    pub async fn add_annotation(
+        &self,
+        attempt_id: &str,
+        req: &agentgrid_common::CreateAnnotationRequest,
+    ) -> Result<agentgrid_common::PatchAnnotation> {
+        let id = format!("anno-{}", uuid::Uuid::new_v4());
+        let created = now_iso();
+        sqlx::query(
+            "INSERT INTO patch_annotations (id, attempt_id, file, line_start, line_end, comment, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(attempt_id)
+        .bind(&req.file)
+        .bind(req.line_start)
+        .bind(req.line_end)
+        .bind(&req.comment)
+        .bind(&created)
+        .execute(&self.pool)
+        .await?;
+        Ok(agentgrid_common::PatchAnnotation {
+            id,
+            attempt_id: attempt_id.to_string(),
+            file: req.file.clone(),
+            line_start: req.line_start,
+            line_end: req.line_end,
+            comment: req.comment.clone(),
+            created_at: created,
+        })
+    }
+
+    pub async fn list_annotations(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<agentgrid_common::PatchAnnotation>> {
+        let rows = sqlx::query(
+            "SELECT id, attempt_id, file, line_start, line_end, comment, created_at \
+             FROM patch_annotations WHERE attempt_id = ? ORDER BY created_at ASC",
+        )
+        .bind(attempt_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| agentgrid_common::PatchAnnotation {
+                id: r.try_get("id").unwrap_or_default(),
+                attempt_id: r.try_get("attempt_id").unwrap_or_default(),
+                file: r.try_get("file").unwrap_or_default(),
+                line_start: r.try_get::<Option<i64>, _>("line_start").ok().flatten(),
+                line_end: r.try_get::<Option<i64>, _>("line_end").ok().flatten(),
+                comment: r.try_get("comment").unwrap_or_default(),
+                created_at: r.try_get("created_at").unwrap_or_default(),
+            })
+            .collect())
+    }
+}

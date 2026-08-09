@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.6)
+
+- **Inline plan/diff annotations (#3b):** reviewers leave comments pinned to a
+  file (and optional line range) on an attempt via
+  `GET/POST /v1/attempts/{id}/annotations` (SQLite `patch_annotations` table,
+  migration 0057). "Send for rework" (`POST /v1/attempts/{id}/rework`)
+  creates a new task whose prompt is the original prompt plus an
+  `[ANNOTATIONS]` block, so the agent takes the review feedback in a retry.
+
 ### Added (plan 1.5)
 
 - **Executor-verifier trust loop (#16):** a rejected verifier step (the

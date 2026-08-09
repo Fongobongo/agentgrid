@@ -3189,6 +3189,89 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
     );
 }
 
+/// Plan 1.6 (#3b): inline diff/plan annotations + "send for rework". A
+/// reviewer leaves a comment "diff too big; split" pinned to a file line;
+/// rework creates a NEW task whose prompt = original prompt + an
+/// `[ANNOTATIONS]` block carrying the feedback.
+#[tokio::test]
+async fn annotation_and_rework_fold_feedback_into_new_task() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "anno-node", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:big.rs:lots").await;
+
+    // Reviewer leaves an inline annotation pinned to line 42.
+    let tok = test_token(&app).await;
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/attempts/{}/annotations", assign.attempt_id),
+            serde_json::to_string(&serde_json::json!({
+                "file": "src/big.rs",
+                "line_start": 42,
+                "line_end": 42,
+                "comment": "diff too big; split"
+            }))
+            .unwrap(),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // List shows it back.
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/attempts/{}/annotations", assign.attempt_id),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    let anns: Vec<serde_json::Value> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(anns.len(), 1);
+    assert_eq!(anns[0].get("comment").unwrap(), "diff too big; split");
+
+    // Send for rework → a new task whose prompt carries the annotation.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/attempts/{}/rework", assign.attempt_id),
+            "{}".into(),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let rw: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let new_task_id = rw.get("task_id").unwrap().as_str().unwrap().to_string();
+    assert_ne!(new_task_id, assign.task_id, "rework must create a new task");
+
+    let tv = show_task_view(&app, &new_task_id).await;
+    assert!(
+        tv.prompt.contains("[ANNOTATIONS]"),
+        "rework prompt must carry the annotation block: {}",
+        tv.prompt
+    );
+    assert!(
+        tv.prompt.contains("diff too big; split"),
+        "rework prompt must carry the comment: {}",
+        tv.prompt
+    );
+    assert!(
+        tv.prompt.contains("src/big.rs:L42"),
+        "rework prompt must carry the file:line location: {}",
+        tv.prompt
+    );
+    assert!(
+        tv.prompt.contains("write:big.rs:lots"),
+        "rework prompt must keep the original prompt: {}",
+        tv.prompt
+    );
+}
+
 #[tokio::test]
 async fn policy_endpoint_classifies_commands() {
     let state = AppState::open_temp().await.unwrap();
