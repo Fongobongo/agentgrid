@@ -24,6 +24,26 @@ fn configured_secret() -> Option<String> {
     }
 }
 
+/// Verify the GitHub `X-Hub-Signature-256` HMAC against the raw body.
+/// Plan 1.10: shared by the issue / check_run / pull_request webhooks.
+/// Returns `Err(StatusCode)` suitable for the route.
+fn verify_github_sig(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCode> {
+    let Some(secret) = configured_secret() else {
+        return Err(StatusCode::NOT_FOUND); // webhook not enabled
+    };
+    let sig = headers
+        .get("x-hub-signature-256")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("sha256="))
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let expected = hmac_sha256(secret.as_bytes(), body);
+    let expected_hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
+    if !ct_eq(sig.as_bytes(), expected_hex.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
 /// Constant-time comparison of two byte slices.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -70,20 +90,7 @@ pub async fn github_issue_webhook(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    let Some(secret) = configured_secret() else {
-        return Err(StatusCode::NOT_FOUND); // webhook not enabled
-    };
-    // Verify signature: X-Hub-Signature-256: sha256=<hex>
-    let sig = headers
-        .get("x-hub-signature-256")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("sha256="))
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let expected = hmac_sha256(secret.as_bytes(), &body);
-    let expected_hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
-    if !ct_eq(sig.as_bytes(), expected_hex.as_bytes()) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    verify_github_sig(&headers, &body)?;
 
     // Parse the GitHub issue event.
     let v: serde_json::Value =
@@ -139,6 +146,133 @@ pub async fn github_issue_webhook(
     state
         .store
         .create_task(&req)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::OK)
+}
+
+/// Build a fire-and-forget CI-fix/PR-fix task. `adapter=mock` matches the
+/// issue webhook convention; nodes carrying a real adapter override it via
+/// `adapter` resolution. Repository `*` lets any registered node claim it.
+fn create_followup_task(prompt: String) -> agentgrid_common::CreateTaskRequest {
+    agentgrid_common::CreateTaskRequest {
+        prompt,
+        repository: "*".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
+    }
+}
+
+/// Plan 1.10 (#1): `POST /v1/webhooks/github/check_run`. GitHub fires this
+/// when a CI check finishes; `action=completed` + `conclusion=failure` means a
+/// failed check run. We spawn an autonomous fix task: the agent reads the
+/// failed check's log (via `gh`) and attempts the minimal fix. Only `failure`
+/// / `cancelled` conclusions count; `success`/`skipped` are acked silently.
+pub async fn github_check_run_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, StatusCode> {
+    verify_github_sig(&headers, &body)?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if v.get("action").and_then(|a| a.as_str()) != Some("completed") {
+        return Ok(StatusCode::OK);
+    }
+    let check_run = v.get("check_run").ok_or(StatusCode::BAD_REQUEST)?;
+    let conclusion = check_run
+        .get("conclusion")
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    if conclusion != "failure" && conclusion != "cancelled" {
+        return Ok(StatusCode::OK);
+    }
+    let name = check_run
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("check")
+        .to_string();
+    let html_url = check_run
+        .get("html_url")
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .to_string();
+    let repo = v
+        .get("repository")
+        .and_then(|r| r.get("full_name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+    let prompt = format!(
+        "GitHub CI check `{name}` on {repo} failed (conclusion: {conclusion}).\
+\n\
+\nRead the failed check's log and reproduce the failure, then apply the minimal \
+fix that makes it pass. Check details: {html_url}\
+\n\
+\nUseful: `gh run view` / the check log URL to find the failure. Keep the diff \
+minimal and match the existing style. Do not change unrelated code."
+    );
+    state
+        .store
+        .create_task(&create_followup_task(prompt))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::OK)
+}
+
+/// Plan 1.10 (#1): `POST /v1/webhooks/github/pull_request`. GitHub reports
+/// `mergeable_state=conflicting` when a PR can't be auto-merged. We spawn an
+/// autonomous rebase/resolve-fix task. Considered actions: `opened`,
+/// `synchronize`, `reopened`. A non-conflicting state is acked silently.
+pub async fn github_pull_request_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, StatusCode> {
+    verify_github_sig(&headers, &body)?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    if action != "opened" && action != "synchronize" && action != "reopened" {
+        return Ok(StatusCode::OK);
+    }
+    let pr = v.get("pull_request").ok_or(StatusCode::BAD_REQUEST)?;
+    if pr.get("mergeable_state").and_then(|m| m.as_str()) != Some("conflicting") {
+        return Ok(StatusCode::OK);
+    }
+    let number = pr.get("number").and_then(|n| n.as_i64()).unwrap_or(0);
+    let title = pr
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let url = pr
+        .get("html_url")
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .to_string();
+    let repo = v
+        .get("repository")
+        .and_then(|r| r.get("full_name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+    let prompt = format!(
+        "GitHub PR #{number} ({title}) on {repo} has merge conflicts.\
+\n\
+\nResolve them and make the PR mergeable. Rebase onto the target branch (do not \
+merge the target into a merge commit), pick the intent of both sides when they \
+conflict, and run the narrowest useful check to confirm. PR: {url}"
+    );
+    state
+        .store
+        .create_task(&create_followup_task(prompt))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
@@ -235,6 +369,165 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(state.store.list_tasks().await.unwrap().is_empty());
+    }
+
+    /// Plan 1.10 (#1): a failed check_run webhook spawns a CI-fix task whose
+    /// prompt names the failed check and points the agent at the log URL.
+    #[tokio::test]
+    async fn check_run_failed_webhook_spawns_ci_fix_task() {
+        std::env::set_var("AGENTGRID_GITHUB_WEBHOOK_SECRET", "test-secret");
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let state = crate::AppState::open_temp().await.unwrap();
+        let app = crate::build_router(state.clone());
+
+        let payload = serde_json::json!({
+            "action": "completed",
+            "check_run": {
+                "id": 99,
+                "name": "build",
+                "conclusion": "failure",
+                "html_url": "https://github.com/o/r/runs/99"
+            },
+            "repository": {"full_name": "o/r"}
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = sign("test-secret", &body);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/webhooks/github/check_run")
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", format!("sha256={sig}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let tasks = state.store.list_tasks().await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].prompt.contains("CI check `build`"));
+        assert!(tasks[0].prompt.contains("on o/r"));
+        assert!(tasks[0].prompt.contains("runs/99"));
+    }
+
+    /// A successful check run is acked silently (no task spawned).
+    #[tokio::test]
+    async fn check_run_success_webhook_spawns_no_task() {
+        std::env::set_var("AGENTGRID_GITHUB_WEBHOOK_SECRET", "test-secret");
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let state = crate::AppState::open_temp().await.unwrap();
+        let app = crate::build_router(state.clone());
+
+        let payload = serde_json::json!({
+            "action": "completed",
+            "check_run": {"id": 1, "name": "build", "conclusion": "success"},
+            "repository": {"full_name": "o/r"}
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = sign("test-secret", &body);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/webhooks/github/check_run")
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", format!("sha256={sig}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.store.list_tasks().await.unwrap().is_empty());
+    }
+
+    /// Plan 1.10 (#1): a conflicting `pull_request` webhook spawns a
+    /// merge-conflict resolve task.
+    #[tokio::test]
+    async fn pull_request_conflicting_webhook_spawns_resolve_task() {
+        std::env::set_var("AGENTGRID_GITHUB_WEBHOOK_SECRET", "test-secret");
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let state = crate::AppState::open_temp().await.unwrap();
+        let app = crate::build_router(state.clone());
+
+        let payload = serde_json::json!({
+            "action": "synchronize",
+            "pull_request": {
+                "number": 7,
+                "title": "Bump deps",
+                "html_url": "https://github.com/o/r/pull/7",
+                "mergeable_state": "conflicting"
+            },
+            "repository": {"full_name": "o/r"}
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = sign("test-secret", &body);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/webhooks/github/pull_request")
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", format!("sha256={sig}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let tasks = state.store.list_tasks().await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].prompt.contains("PR #7"));
+        assert!(tasks[0].prompt.contains("merge conflicts"));
+        assert!(tasks[0].prompt.contains("pull/7"));
+    }
+
+    /// A mergeable PR is acked silently (no task spawned).
+    #[tokio::test]
+    async fn pull_request_clean_webhook_spawns_no_task() {
+        std::env::set_var("AGENTGRID_GITHUB_WEBHOOK_SECRET", "test-secret");
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let state = crate::AppState::open_temp().await.unwrap();
+        let app = crate::build_router(state.clone());
+
+        let payload = serde_json::json!({
+            "action": "opened",
+            "pull_request": {
+                "number": 8,
+                "title": "x",
+                "html_url": "https://github.com/o/r/pull/8",
+                "mergeable_state": "clean"
+            },
+            "repository": {"full_name": "o/r"}
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = sign("test-secret", &body);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/webhooks/github/pull_request")
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", format!("sha256={sig}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
         assert!(state.store.list_tasks().await.unwrap().is_empty());
     }
 }

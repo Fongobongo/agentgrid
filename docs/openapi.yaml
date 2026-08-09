@@ -235,6 +235,25 @@ paths:
         signature against `AGENTGRID_GITHUB_WEBHOOK_SECRET`, then creates a
         task from the issue body when the issue carries the `agent` label.
         Disabled (404) when the secret is unset.
+  /v1/webhooks/github/check_run:
+    post:
+      summary: GitHub check_run webhook → spawn a CI-fix task
+      description: |
+        Plan 1.10 (#1): on `action=completed` + `conclusion in {failure,
+        cancelled}` spawns an autonomous CI-fix task — the agent reads the
+        failed check's log and attempts the minimal fix. Success/skipped
+        conclusions are acked silently. HMAC verified via
+        `AGENTGRID_GITHUB_WEBHOOK_SECRET`; disabled (404) when unset.
+  /v1/webhooks/github/pull_request:
+    post:
+      summary: GitHub pull_request webhook → spawn a conflict-resolve task
+      description: |
+        Plan 1.10 (#1): on `action in {opened, synchronize, reopened}` with
+        `pull_request.mergeable_state == "conflicting"` spawns an autonomous
+        merge-conflict resolve task — the agent rebases and resolves
+        conflicts to make the PR mergeable. Clean/blocked states are acked
+        silently. HMAC verified via `AGENTGRID_GITHUB_WEBHOOK_SECRET`;
+        disabled (404) when unset.
   /v1/tasks/{id}/events:
     get:
       summary: List task events (polling)

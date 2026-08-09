@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.10)
+
+- **Autonomous CI-fix / merge-conflict follow-ups (#1):** two GitHub
+  webhooks on top of the issue webhook. `POST /v1/webhooks/github/check_run`
+  spawns a CI-fix task when a check completes with `failure`/`cancelled` (the
+  prompt points the agent at the check log URL). `POST
+  /v1/webhooks/github/pull_request` spawns a merge-conflict resolve task
+  when `mergeable_state == "conflicting"` on `opened`/`synchronize`/
+  `reopened`. Both reuse the shared HMAC verifier
+  (`X-Hub-Signature-256` / `AGENTGRID_GITHUB_WEBHOOK_SECRET`) and are 404
+  when the secret is unset — no new config.
+
 ### Added (plan 1.9)
 
 - **YAML workflows as code (#17):** `WorkflowTemplate::read_workflow_yaml`
