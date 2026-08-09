@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.7)
+
+- **Token-budget compression (#14):** `agentgrid_common::compress` —
+  `dedup_lines` collapses runs of identical consecutive lines (noisy
+  stack-trace / tool-output repeats) into a `…×N` marker;
+  `smart_truncate` applies a hard byte cap on the last newline boundary;
+  `compress` chains both and reports `saved_bytes`. The rework prompt
+  pipeline (plan 1.6) now runs every annotation comment through
+  `compress(comment, 4096)`, so a pasted log/diff in a review comment no
+  longer blows the token budget.
+
 ### Added (plan 1.6)
 
 - **Inline plan/diff annotations (#3b):** reviewers leave comments pinned to a

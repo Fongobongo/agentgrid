@@ -244,7 +244,10 @@ pub async fn rework_attempt(
 
 /// Plan 1.6 (#3b): compact `[ANNOTATIONS]` block appended to the prompt so the
 /// agent takes the reviewer's inline feedback in a retry. Each annotation is
-/// one line: `<file>[:L<L>-<L>] <comment>`.
+/// one line: `<file>[:L<L>-<L>] <comment>`. Plan 1.7 (#14): each comment runs
+/// through the compress pipe (dedup consecutive identical lines + byte cap)
+/// before it lands in the prompt, so a pasted log/diff in a comment does not
+/// blow the token budget.
 fn render_annotations_block(anns: &[agentgrid_common::PatchAnnotation]) -> String {
     if anns.is_empty() {
         return "[ANNOTATIONS] (none)".to_string();
@@ -256,7 +259,9 @@ fn render_annotations_block(anns: &[agentgrid_common::PatchAnnotation]) -> Strin
             (Some(s), _) => format!("{}:L{}", a.file, s),
             _ => a.file.clone(),
         };
-        lines.push(format!("- {loc} {}", a.comment));
+        // 4096-byte cap per comment — pasted logs collapse via dedup + truncate.
+        let (comment, _) = agentgrid_common::compress::compress(&a.comment, 4096);
+        lines.push(format!("- {loc} {}", comment));
     }
     lines.join("\n")
 }

@@ -3272,6 +3272,62 @@ async fn annotation_and_rework_fold_feedback_into_new_task() {
     );
 }
 
+/// Plan 1.7 (#14): a review comment pasting a noisy log (10k identical
+/// stack-trace lines) must be compressed before it lands in the rework prompt
+/// — dedup collapses the run to a `…×N` marker, so the prompt stays small.
+#[tokio::test]
+async fn rework_compresses_noisy_comment_via_token_budget_pipe() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "comp-node", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:x.rs:y").await;
+    let tok = test_token(&app).await;
+
+    // Reviewer pastes a 10k-line stack-trace dump into the comment.
+    let noisy: String = "at com.Foo.bar(Foo.java:42)\n".repeat(10_000);
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/attempts/{}/annotations", assign.attempt_id),
+            serde_json::to_string(&serde_json::json!({
+                "file": "src/x.rs",
+                "comment": noisy
+            }))
+            .unwrap(),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/attempts/{}/rework", assign.attempt_id),
+            "{}".into(),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let rw: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let new_task_id = rw.get("task_id").unwrap().as_str().unwrap().to_string();
+    let tv = show_task_view(&app, &new_task_id).await;
+
+    assert!(
+        tv.prompt.contains("…×"),
+        "noisy run must be deduped into a marker: prompt len={}",
+        tv.prompt.len()
+    );
+    assert!(
+        tv.prompt.len() < noisy.len(),
+        "compressed prompt ({}) must be far smaller than the raw paste ({})",
+        tv.prompt.len(),
+        noisy.len()
+    );
+}
+
 #[tokio::test]
 async fn policy_endpoint_classifies_commands() {
     let state = AppState::open_temp().await.unwrap();

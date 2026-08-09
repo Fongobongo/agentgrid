@@ -1,3 +1,4 @@
+pub mod compress;
 pub mod policy;
 pub mod workflow;
 pub mod ws;
