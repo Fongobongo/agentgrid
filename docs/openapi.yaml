@@ -295,6 +295,13 @@ paths:
   /v1/tasks/{id}/eligibility:
     get:
       summary: Show scheduler eligibility reasoning for a task
+  /v1/tasks/{id}/artifacts:
+    get:
+      summary: List a task's artifacts (latest attempt) with metadata
+      description: |
+        Plan 1.11 (#8): names, sizes, media types and sha256 of the task's
+        artifacts on its latest attempt. Empty array when the task has no
+        attempts or none uploaded artifacts.
   /v1/tasks/{id}/artifacts/{name}:
     get:
       summary: Download a named artifact by content

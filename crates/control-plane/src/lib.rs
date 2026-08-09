@@ -514,6 +514,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::artifacts::upload_artifact_raw),
         )
         .route(
+            "/v1/tasks/{id}/artifacts",
+            get(routes::artifacts::list_artifacts),
+        )
+        .route(
             "/v1/tasks/{id}/artifacts/{name}",
             get(routes::artifacts::get_artifact),
         )

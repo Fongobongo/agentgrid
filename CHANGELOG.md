@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.11)
+
+- **Programmatic SDK (#8):** thin, dependency-free TypeScript
+  (`sdks/ts/index.ts`, Node >= 18 `fetch`) and Python (`sdks/python/`
+  `/agentgrid.py`, Python >= 3.9 stdlib) clients over the `/v1` API with a
+  minimal surface: `run | wait | status | cancel | artifacts | artifact |
+  login`. Auth is a JWT (`Authorization: Bearer`), from `ag login` or
+  `AGENTGRID_TOKEN`. `GET /v1/tasks/{id}/artifacts` (new) lists a task's
+  latest-attempt artifacts (`ArtifactMeta` gained a `name`); the SDK
+  downloads one by name. `tests/e2e/run-sdk.sh` exercises the Python SDK
+  end-to-end against a local control plane + mock node (no Docker).
+
 ### Added (plan 1.10)
 
 - **Autonomous CI-fix / merge-conflict follow-ups (#1):** two GitHub

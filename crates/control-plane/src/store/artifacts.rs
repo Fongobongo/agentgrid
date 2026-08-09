@@ -146,6 +146,31 @@ impl Store {
         })
     }
 
+    /// List a task's artifacts (latest attempt) with metadata. Empty when the
+    /// task has no attempts or none uploaded artifacts. Plan 1.11 (#8) SDK
+    /// `artifacts()` uses this.
+    pub async fn list_artifacts(&self, task_id: &str) -> Result<Vec<ArtifactMeta>> {
+        let Some(attempt_id) = self.latest_attempt_id(task_id).await? else {
+            return Ok(vec![]);
+        };
+        let rows = sqlx::query(
+            "SELECT name, size_bytes, media_type, sha256 FROM artifacts \
+             WHERE attempt_id = ? ORDER BY name",
+        )
+        .bind(&attempt_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ArtifactMeta {
+                name: r.try_get("name").unwrap_or_default(),
+                size_bytes: r.try_get::<i64, _>("size_bytes").unwrap_or(0),
+                media_type: r.try_get::<Option<String>, _>("media_type").ok().flatten(),
+                sha256: r.try_get::<Option<String>, _>("sha256").ok().flatten(),
+            })
+            .collect())
+    }
+
     /// Read a stored artifact's metadata by task id + name (latest attempt).
     pub async fn read_artifact_meta(
         &self,
@@ -163,6 +188,7 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| ArtifactMeta {
+            name: name.to_string(),
             size_bytes: r.try_get::<i64, _>("size_bytes").unwrap_or(0),
             media_type: r.try_get::<Option<String>, _>("media_type").ok().flatten(),
             sha256: r.try_get::<Option<String>, _>("sha256").ok().flatten(),

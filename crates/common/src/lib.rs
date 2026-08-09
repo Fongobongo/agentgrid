@@ -946,6 +946,8 @@ pub struct UploadArtifactRequest {
 /// the uploader provided one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactMeta {
+    #[serde(default)]
+    pub name: String,
     pub size_bytes: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,

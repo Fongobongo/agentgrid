@@ -2666,6 +2666,49 @@ mod workflow_tests {
     }
 
     #[tokio::test]
+    async fn artifact_list_returns_names_and_meta_in_order() {
+        // Plan 1.11 (#8): SDK `artifacts()` lists a task's artifact names +
+        // metadata via `list_artifacts` (latest attempt only).
+        let s = temp_store().await;
+        let (_node_id, task_id) = seed_task_attempt(&s, "task-list", "att-list").await;
+        s.save_artifact_bytes(
+            "att-list",
+            "changes.patch",
+            b"diff --git a/x b/x",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        s.save_artifact_bytes("att-list", "validation.log", b"all green\n", None, None)
+            .await
+            .unwrap();
+        let list = s.list_artifacts(&task_id).await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "changes.patch");
+        assert_eq!(list[0].size_bytes, 18);
+        assert_eq!(list[1].name, "validation.log");
+        assert_eq!(list[1].size_bytes, 10);
+        // A task with no attempts lists empty (no panic on missing latest).
+        let other = s
+            .create_task(&agentgrid_common::CreateTaskRequest {
+                prompt: "x".into(),
+                repository: "*".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+            })
+            .await
+            .unwrap();
+        assert!(s.list_artifacts(&other.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn budget_enforcement_parks_run_blocked_on_rounds_breach() {
         // Stage 13 Loop Engineering: a template with `max_rounds = 0` allows
         // zero step starts past the budget. The first tick starts both root

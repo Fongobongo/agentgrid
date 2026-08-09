@@ -15,6 +15,20 @@ use crate::auth::{fencing_token_header, AuthedNode};
 use crate::services::{ArtifactService, UploadArtifact};
 use crate::AppState;
 
+/// Plan 1.11 (#8): list a task's artifacts (latest attempt) with metadata —
+/// the SDK `artifacts()` surface. JSON array of `ArtifactMeta`.
+pub async fn list_artifacts(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Vec<agentgrid_common::ArtifactMeta>>, StatusCode> {
+    state
+        .store
+        .list_artifacts(&task_id)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub async fn get_artifact(
     State(state): State<Arc<AppState>>,
     Path((task_id, name)): Path<(String, String)>,

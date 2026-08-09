@@ -88,6 +88,10 @@ jobs:
         # process-based and quick.
       - name: slow-network failure injection
         run: bash tests/e2e/run-slow-net.sh
+      # Plan 1.11 (#8): SDK round-trip — CP + mock node + Python SDK
+      # (run/wait/artifacts/cancel). Same process-based, no-Docker class.
+      - name: SDK round-trip
+        run: bash tests/e2e/run-sdk.sh
 
   e2e:
     name: e2e (compose + 2 nodes + mock)
