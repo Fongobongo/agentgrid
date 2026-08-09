@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added (plan 1.2)
+
+- **Mobile notify webhook:** control-plane POSTs `AGENTGRID_NOTIFY_WEBHOOK` on
+  terminal task states. Success with a pending patch review reports
+  `awaiting_review` (not `completed`) so the operator gets a push to review.
+- **Deterministic pre-merge resolve:** `deploy/pre-merge-resolve.sh` resolves
+  trivial merge conflicts (both-add, import-both, formatting-only,
+  delete/modify) before the LLM path. Opt-in via `AGENTGRID_PRE_MERGE_RESOLVE`;
+  integrator cherry-pick/apply runs it when a conflict appears.
+
 ## [v0.3.1](https://github.com/earendil-works/agentgrid/tree/v0.3.1) - 2026-08-07
 
 ### Added (0.3 pass — final release artifacts)

@@ -67,8 +67,23 @@ impl TaskLifecycleService {
         if let Some(url) = &self.notify_webhook {
             if let Ok(Some(task)) = self.store.show_task(&task_id).await {
                 use agentgrid_common::TaskStatus::*;
+                // Plan 1.1 patch-review: a success creates a pending
+                // task_patch_review approval (operator must ack the patch).
+                // Surface that as `awaiting_review` for the webhook (competitor
+                // #22a) instead of `completed` so the operator gets a push
+                // to review, not a "done" notification.
+                let awaiting = self
+                    .store
+                    .find_pending_patch_review(&task_id)
+                    .await
+                    .unwrap_or(None)
+                    .is_some();
                 let status_str = match task.status {
-                    Succeeded => Some("completed"),
+                    Succeeded => Some(if awaiting {
+                        "awaiting_review"
+                    } else {
+                        "completed"
+                    }),
                     Failed => Some("failed"),
                     _ => None,
                 };
@@ -401,6 +416,52 @@ mod tests {
         (node_id, task_id, a.attempt_id)
     }
 
+    /// Competitor #22a: in-process loopback HTTP server that records the
+    /// body of the last POST it received. Returns `(url, last_body)`.
+    async fn mock_webhook() -> (String, std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let last = std::sync::Arc::new(tokio::sync::Mutex::new(None::<Vec<u8>>));
+        let last_c = last.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                let last = last_c.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let body = if let Some(i) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") {
+                        buf[i + 4..n].to_vec()
+                    } else {
+                        vec![]
+                    };
+                    if let Ok(mut g) = last.try_lock() {
+                        *g = Some(body);
+                    }
+                    sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await
+                        .ok();
+                });
+            }
+        });
+        (url, last)
+    }
+
+    async fn wait_for_body(last: &std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>) -> String {
+        for _ in 0..50 {
+            if let Some(b) = last.lock().await.as_ref() {
+                return String::from_utf8_lossy(b).to_string();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("webhook never received a POST");
+    }
+
     /// Plan 534 regression: completing a step's attempt must advance the
     /// owning workflow run automatically — no manual `/tick` required. Before
     /// the service layer, a run stalled after its first step finished until an
@@ -490,5 +551,134 @@ mod tests {
         let (degraded, assignments) = svc.poll(&req, 1).await.unwrap();
         assert!(degraded, "incompatible protocol must degrade the node");
         assert!(assignments.is_empty());
+    }
+
+    /// Competitor #22a: a successful attempt that created a pending
+    /// patch-review approval must notify the webhook with status
+    /// `awaiting_review` (not `completed`). Proves the notify wiring end-to-
+    /// end against an in-process loopback server.
+    #[tokio::test]
+    async fn completion_with_pending_patch_review_notifies_awaiting_review() {
+        let s = temp_store().await;
+        let (url, last) = mock_webhook().await;
+        let svc = TaskLifecycleService::new(s.clone(), Arc::new(Notify::new()), Some(url));
+
+        // Plain task (not workflow) so nothing else fires.
+        let t = s
+            .create_task(&agentgrid_common::CreateTaskRequest {
+                prompt: "build it".into(),
+                repository: "demo".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+            })
+            .await
+            .unwrap();
+        // Enroll + assign the new task (enroll_and_assign creates its own task).
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            agent_version: "test".into(),
+            protocol_version: None,
+            permission_interception: "wrapper".into(),
+        };
+        let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+        let assign = s.try_assign(&node_id).await.unwrap().expect("assign");
+        assert_eq!(assign.task_id, t.id);
+        s.ack_attempt(&assign.attempt_id).await.unwrap();
+
+        // Success + a changes.patch -> plan 1.1 creates a pending review.
+        let req = CompleteAttemptRequest {
+            exit_code: 0,
+            commit_sha: None,
+            error_code: None,
+            resolved_base_sha: None,
+            remote_head_at_start: None,
+            remote_head_at_finish: None,
+            acp_session_id: None,
+            provenance: None,
+            plan: None,
+            pending_artifacts: vec![],
+        };
+        assert!(svc
+            .complete_attempt(&assign.attempt_id, &req)
+            .await
+            .unwrap());
+
+        // Webhook must receive awaiting_review (review exists).
+        let body = wait_for_body(&last).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["task_id"], t.id);
+        assert_eq!(v["status"], "awaiting_review");
+    }
+
+    /// Competitor #22a: a failed attempt must notify the webhook with
+    /// status `failed`.
+    #[tokio::test]
+    async fn failed_completion_notifies_failed() {
+        let s = temp_store().await;
+        let (url, last) = mock_webhook().await;
+        let svc = TaskLifecycleService::new(s.clone(), Arc::new(Notify::new()), Some(url));
+
+        let t = s
+            .create_task(&agentgrid_common::CreateTaskRequest {
+                prompt: "boom".into(),
+                repository: "demo".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+            })
+            .await
+            .unwrap();
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            agent_version: "test".into(),
+            protocol_version: None,
+            permission_interception: "wrapper".into(),
+        };
+        let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+        let assign = s.try_assign(&node_id).await.unwrap().expect("assign");
+        assert_eq!(assign.task_id, t.id);
+        s.ack_attempt(&assign.attempt_id).await.unwrap();
+
+        let req = CompleteAttemptRequest {
+            exit_code: 1, // non-zero => failure
+            commit_sha: None,
+            error_code: None,
+            resolved_base_sha: None,
+            remote_head_at_start: None,
+            remote_head_at_finish: None,
+            acp_session_id: None,
+            provenance: None,
+            plan: None,
+            pending_artifacts: vec![],
+        };
+        assert!(svc
+            .complete_attempt(&assign.attempt_id, &req)
+            .await
+            .unwrap());
+
+        let body = wait_for_body(&last).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "failed");
     }
 }

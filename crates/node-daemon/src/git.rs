@@ -543,6 +543,12 @@ pub fn prepare_workspace(
                     .current_dir(ws_path)
                     .output()?;
                 if !cp.status.success() {
+                    // Plan 1.2 (#11): deterministic auto-resolve pass before
+                    // giving up. Only touches trivial patterns; anything still
+                    // conflicted keeps the old bail-out (LLM/manual path).
+                    if resolve_trivial_conflicts(ws_path)? {
+                        continue;
+                    }
                     let _ = Command::new("git")
                         .args(["cherry-pick", "--abort"])
                         .current_dir(ws_path)
@@ -578,6 +584,10 @@ pub fn prepare_workspace(
             }
             let out = ap.wait_with_output()?;
             if !out.status.success() {
+                // Plan 1.2 (#11): same deterministic pass as cherry-pick.
+                if resolve_trivial_conflicts(ws_path)? {
+                    continue;
+                }
                 anyhow::bail!(
                     "integrator `git apply` of upstream changes.patch ({sha}) \
                      conflicted: {}; merged branches need manual resolution or \
@@ -863,6 +873,47 @@ pub fn remote_head_at(repo_dir: &Path) -> Option<String> {
     // chars); any other output (e.g. a git error line) yields None.
     let valid = sha.len() >= 7 && sha.bytes().all(|b| b.is_ascii_hexdigit());
     valid.then_some(sha.to_string())
+}
+
+/// Plan 1.2 (#11): deterministic conflict-resolution pass. Runs the
+/// `deploy/pre-merge-resolve.sh` helper (if configured) against a worktree
+/// with unresolved conflicts; returns `true` when the pass resolved every
+/// conflict (or there were none), `false` when conflicts remain and the
+/// caller should escalate to the LLM/manual path.
+///
+/// The script path comes from `AGENTGRID_PRE_MERGE_RESOLVE` (absolute path).
+/// Unset/absent → no deterministic pass (old behavior, LLM only). The script
+/// is trusted static repo content, invoked without a shell; a crafted
+/// repository cannot inject arguments (each is a separate `arg`).
+fn resolve_trivial_conflicts(ws_path: &str) -> Result<bool> {
+    let script = match std::env::var("AGENTGRID_PRE_MERGE_RESOLVE") {
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return Ok(false),
+    };
+    if !Path::new(&script).exists() {
+        tracing::warn!(
+            script,
+            "AGENTGRID_PRE_MERGE_RESOLVE set but script missing; skipping deterministic resolve"
+        );
+        return Ok(false);
+    }
+    let out = Command::new(&script)
+        .arg(ws_path)
+        .current_dir(ws_path)
+        .output()
+        .map_err(|e| anyhow::anyhow!("pre-merge-resolve spawn: {e}"))?;
+    if !out.status.success() {
+        tracing::warn!(
+            "pre-merge-resolve: conflicts remain after deterministic pass: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return Ok(false);
+    }
+    tracing::info!(
+        "pre-merge-resolve: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1585,6 +1636,98 @@ mod tests {
             "flock is released by Drop; kernel auto-release"
         );
         drop(acquired.unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Plan 1.2 (#11): the deterministic pre-merge-resolve pass resolves a
+    /// both-add conflict (both branches appended a different import line) and
+    /// reports success; without the script configured it reports false (old
+    /// LLM-only path).
+    #[test]
+    fn resolve_trivial_conflicts_resolves_both_add() {
+        let dir = std::env::temp_dir().join(format!("ag-pmr-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]).unwrap();
+        git(
+            &dir,
+            &["-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"],
+        )
+        .unwrap();
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        )
+        .unwrap();
+        // Branch A appends import A.
+        git(&dir, &["checkout", "-q", "-b", "feat"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "line1\nimport A\n").unwrap();
+        git(&dir, &["add", "-A"]).unwrap();
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "feat",
+            ],
+        )
+        .unwrap();
+        // Branch B appends import B.
+        git(&dir, &["checkout", "-q", "main"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "line1\nimport B\n").unwrap();
+        git(&dir, &["add", "-A"]).unwrap();
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-q",
+                "-m",
+                "main",
+            ],
+        )
+        .unwrap();
+        // Merge leaves a conflict.
+        git(&dir, &["merge", "feat"]).ok();
+        let conflicted = git_out(&dir, &["diff", "--name-only", "--diff-filter=U"]).unwrap();
+        assert!(!conflicted.trim().is_empty(), "fixture must be conflicted");
+
+        // No script configured → old behavior (false).
+        std::env::remove_var("AGENTGRID_PRE_MERGE_RESOLVE");
+        assert!(!resolve_trivial_conflicts(dir.to_str().unwrap()).unwrap());
+
+        // Script configured → both-add resolved.
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("deploy/pre-merge-resolve.sh");
+        std::env::set_var("AGENTGRID_PRE_MERGE_RESOLVE", &script);
+        assert!(resolve_trivial_conflicts(dir.to_str().unwrap()).unwrap());
+        let out = git_out(&dir, &["diff", "--name-only", "--diff-filter=U"]).unwrap();
+        assert!(out.trim().is_empty(), "no conflicts must remain");
+        let content = std::fs::read_to_string(dir.join("f.txt")).unwrap();
+        assert!(content.contains("import A") && content.contains("import B"));
+
+        std::env::remove_var("AGENTGRID_PRE_MERGE_RESOLVE");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
