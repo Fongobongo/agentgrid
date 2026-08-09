@@ -2908,6 +2908,153 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
     assert!(steps_done, "every step should succeed: {rv}");
 }
 
+/// Plan 1.5 (#16): executor-verifier trust loop. A always-reject verifier
+/// (every verifier task exits non-zero) must re-run the upstream worker with
+/// verifier feedback on each rejection, until the loop budget (the worker's
+/// `max_attempts`) is exhausted — then the verifier step hard-fails and the
+/// run fails. This asserts the loop counter actually advances: with worker
+/// `max_attempts=3`, after the run settles the worker step has 3 attempts and
+/// the run is `failed`.
+#[tokio::test]
+async fn workflow_verifier_loop_reruns_worker_until_budget() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "vloop-node", vec!["mock".into()], vec!["*".into()]).await;
+    // Single login: the login endpoint is brute-force limited (10/60s) and
+    // this test ticks many times, each needing an auth token.
+    let tok = test_token(&app).await;
+
+    // worker is retryable with max_attempts=3 — that is the loop budget.
+    let steps = json!([
+        {"id":"work","prompt":"impl","role":"worker","depends_on":[],
+         "retryable":true,"max_attempts":3},
+        {"id":"ver","prompt":"verify","role":"verifier","depends_on":["work"]}
+    ]);
+    let tpl_body = json!({"name":"vloop","steps":steps}).to_string();
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/workflows", tpl_body, &tok))
+        .await
+        .unwrap();
+    let tpl: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let tid = tpl.get("id").unwrap().as_str().unwrap().to_string();
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/workflows/{tid}/runs"),
+            json!({"repository":"demo"}).to_string(),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let run: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let rid = run.get("id").unwrap().as_str().unwrap().to_string();
+
+    let poll_req = PollRequest {
+        node_id: node_id.clone(),
+        name: "vloop-node".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        protocol_version: None,
+    };
+
+    // Drive: tick → poll → complete. The mock adapter runs the SAME action for
+    // every task, so to force the verifier to always reject we complete worker
+    // tasks with exit 0 and verifier tasks with exit !=0. Identity the attempt's
+    // owning step via the task→role_runs lookup.
+    let mut ticks = 0;
+    loop {
+        ticks += 1;
+        assert!(ticks < 400, "run never settled: {rid}");
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                &format!("/v1/workflow-runs/{rid}/tick"),
+                "{}".into(),
+                &tok,
+            ))
+            .await
+            .unwrap();
+        let rv: serde_json::Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let status = rv
+            .get("run")
+            .and_then(|r| r.get("status"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("running");
+        if status == "failed" {
+            break;
+        }
+        // Drive one pending task to completion. Worker → success, verifier → fail.
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/node/poll",
+                serde_json::to_string(&poll_req).unwrap(),
+                &cred,
+            ))
+            .await
+            .unwrap();
+        let pr: PollResponse =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let Some(a) = pr.assignment else {
+            continue;
+        };
+        ack_attempt(&app, &a.attempt_id, &cred, &a.fencing_token).await;
+        // Which step owns this attempt?
+        let step_role = state.store.step_role_for_attempt(&a.task_id).await.unwrap();
+        let req = if step_role.as_deref() == Some("verifier") {
+            complete_fail_req()
+        } else {
+            complete_req()
+        };
+        let resp = app
+            .clone()
+            .oneshot(post_node(
+                &format!("/v1/node/attempts/{}/complete", a.attempt_id),
+                serde_json::to_string(&req).unwrap(),
+                &cred,
+                &a.fencing_token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // After settling: verifier step failed, worker step has exactly 3 attempts.
+    let rv = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/workflow-runs/{rid}"), &tok))
+        .await
+        .unwrap();
+    let rv: serde_json::Value =
+        serde_json::from_slice(&to_bytes(rv.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        rv.get("run").unwrap().get("status").unwrap(),
+        "failed",
+        "run should fail when verifier loop budget is exhausted"
+    );
+    let steps_arr = rv.get("steps").unwrap().as_array().unwrap();
+    let ver = steps_arr
+        .iter()
+        .find(|s| s.get("step_id").unwrap() == "ver")
+        .unwrap();
+    assert_eq!(ver.get("status").unwrap(), "failed");
+    let work = steps_arr
+        .iter()
+        .find(|s| s.get("step_id").unwrap() == "work")
+        .unwrap();
+    let attempts = work.get("attempts").unwrap().as_u64().unwrap();
+    assert_eq!(
+        attempts, 3,
+        "worker should be re-run exactly 3 times (the loop budget)"
+    );
+}
+
 #[tokio::test]
 async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
     let state = AppState::open_temp().await.unwrap();
@@ -4334,6 +4481,14 @@ fn complete_req() -> CompleteAttemptRequest {
         plan: None,
         pending_artifacts: vec![],
     }
+}
+
+/// Plan 1.5 (#16): a failed attempt (non-zero exit) — used by the
+/// verifier-loop test to simulate an always-reject verifier.
+fn complete_fail_req() -> CompleteAttemptRequest {
+    let mut r = complete_req();
+    r.exit_code = 1;
+    r
 }
 
 #[tokio::test]

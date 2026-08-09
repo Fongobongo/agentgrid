@@ -718,6 +718,21 @@ impl Store {
         Ok(row.and_then(|r| r.try_get::<Option<String>, _>("task_id").ok().flatten()))
     }
 
+    /// Plan 1.5 (#16): the role of the workflow step a task belongs to, so a
+    /// test driver can tell a worker attempt from a verifier attempt without
+    /// the node knowing. Returns `None` for plain (non-workflow) tasks.
+    pub async fn step_role_for_attempt(&self, attempt_task_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT ws.role FROM role_runs rr \
+             JOIN workflow_steps ws ON ws.id = rr.step_run_id \
+             WHERE rr.task_id = ? LIMIT 1",
+        )
+        .bind(attempt_task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| r.try_get::<Option<String>, _>("role").ok().flatten()))
+    }
+
     /// Stage 13: the most recent attempt's emitted plan (if any) for a task.
     /// Used to copy an architect's plan onto the run row when the step
     /// succeeds.
@@ -1469,6 +1484,131 @@ impl Store {
                                             WorkflowStepStatus::Blocked,
                                         )
                                         .await?;
+                                    } else if step.role == WorkflowRole::Verifier {
+                                        // Plan 1.5 (#16): executor-verifier
+                                        // trust loop. A rejected verdict (the
+                                        // verifier task failed) must not fail
+                                        // the run — it re-runs the upstream
+                                        // worker with the verifier's feedback
+                                        // appended to the prompt, then resets
+                                        // THIS verifier step to Pending so it
+                                        // re-activates once the worker
+                                        // succeeds again. Loop budget = the
+                                        // upstream worker's `max_attempts`;
+                                        // once exhausted the verifier failure
+                                        // becomes a hard step failure.
+                                        let upstream_id =
+                                            step.depends_on.first().cloned().unwrap_or_default();
+                                        let upstream =
+                                            steps.iter().find(|s| s.step_id == upstream_id);
+                                        let can_retry = upstream
+                                            .map(|u| {
+                                                u.retryable.unwrap_or(false)
+                                                    && u.attempts < u.max_attempts.unwrap_or(1)
+                                            })
+                                            .unwrap_or(false);
+                                        if can_retry {
+                                            let feedback = format!(
+                                                "Verifier rejected this change ({task_id}); "
+                                            );
+                                            // Re-run the upstream worker: bump
+                                            // its attempts, reset to running,
+                                            // create a new task with feedback.
+                                            let u = upstream.unwrap();
+                                            let new_attempts = u.attempts + 1;
+                                            let claimed = sqlx::query(
+                                                "UPDATE workflow_steps SET attempts = ? \
+                                                 WHERE id = ? AND attempts = ?",
+                                            )
+                                            .bind(new_attempts as i64)
+                                            .bind(&u.id)
+                                            .bind(u.attempts as i64)
+                                            .execute(&self.pool)
+                                            .await?
+                                            .rows_affected()
+                                                > 0;
+                                            if claimed {
+                                                let prompt = format!(
+                                                    "{}\n\n[verifier feedback] {}\n\nRe-run the task; the previous change was rejected by the verifier.\n",
+                                                    u.prompt, feedback
+                                                );
+                                                let req = CreateTaskRequest {
+                                                    prompt,
+                                                    repository: repo.clone(),
+                                                    adapter: u
+                                                        .adapter
+                                                        .clone()
+                                                        .filter(|a| !a.is_empty())
+                                                        .unwrap_or_else(|| "mock".to_string()),
+                                                    requested_node_id: u.requested_node_id.clone(),
+                                                    timeout_secs: None,
+                                                    validation_command: None,
+                                                    base_commit: u
+                                                        .base_commit
+                                                        .clone()
+                                                        .or_else(|| run.base_commit.clone()),
+                                                    parent_acp_session_id: None,
+                                                    security_profile: None,
+                                                    network_mode: None,
+                                                };
+                                                match self.create_task(&req).await {
+                                                    Ok(tv) => {
+                                                        self.set_role_run_task(&u.id, &tv.id)
+                                                            .await?;
+                                                        created.push(tv.id);
+                                                        status_by_id.insert(
+                                                            &u.step_id,
+                                                            WorkflowStepStatus::Running,
+                                                        );
+                                                        self.set_step_status(
+                                                            &u.id,
+                                                            WorkflowStepStatus::Running,
+                                                        )
+                                                        .await?;
+                                                        self.set_role_run_status_by_step(
+                                                            &u.id,
+                                                            WorkflowStepStatus::Running,
+                                                        )
+                                                        .await?;
+                                                        // Reset the verifier step
+                                                        // to Pending so it
+                                                        // re-activates when the
+                                                        // re-run worker succeeds.
+                                                        self.set_step_status(
+                                                            &step.id,
+                                                            WorkflowStepStatus::Pending,
+                                                        )
+                                                        .await?;
+                                                        self.set_role_run_status_by_step(
+                                                            &step.id,
+                                                            WorkflowStepStatus::Pending,
+                                                        )
+                                                        .await?;
+                                                    }
+                                                    Err(e) => {
+                                                        // Release the claimed
+                                                        // retry slot.
+                                                        let _ = self
+                                                            .set_step_attempts(&u.id, u.attempts)
+                                                            .await;
+                                                        return Err(e);
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // Loop budget exhausted: verifier
+                                            // rejection is a hard failure.
+                                            self.set_step_status(
+                                                &step.id,
+                                                WorkflowStepStatus::Failed,
+                                            )
+                                            .await?;
+                                            self.set_role_run_status_by_step(
+                                                &step.id,
+                                                WorkflowStepStatus::Failed,
+                                            )
+                                            .await?;
+                                        }
                                     } else {
                                         self.set_step_status(&step.id, WorkflowStepStatus::Failed)
                                             .await?;

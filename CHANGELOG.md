@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.5)
+
+- **Executor-verifier trust loop (#16):** a rejected verifier step (the
+  verifier task exits non-zero) no longer fails the run — it re-runs the
+  upstream worker task with the verifier's feedback appended to the prompt,
+  then resets the verifier to re-activate on the next worker success. The
+  loop budget is the upstream worker's `max_attempts`; once exhausted the
+  verifier rejection becomes a hard step failure. The worker step's
+  `attempts` counter (1 + verifier-reject retries) is the loop count,
+  exposed via `/v1/workflow-runs/{id}` `steps[].attempts`.
+
 ### Added (plan 1.4)
 
 - **Issue-as-task (#2b CLI):** `ag issue run <N> [repo]` creates a task from a
