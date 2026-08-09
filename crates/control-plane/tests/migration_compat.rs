@@ -86,6 +86,7 @@ async fn migrations_serve_legacy_happy_path() {
         repo_cache_bytes: 0,
         workspace_bytes: 0,
         network_mode: "none".into(),
+        account_usage: vec![],
     };
     assert!(s.heartbeat(&node_id, &hb).await.unwrap());
 
