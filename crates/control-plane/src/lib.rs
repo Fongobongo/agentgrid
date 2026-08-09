@@ -324,6 +324,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::tasks::create_task).get(routes::tasks::list_tasks),
         )
         .route("/v1/tasks/{id}", get(routes::tasks::show_task))
+        .route("/v1/attempts/{id}", get(routes::tasks::show_attempt))
+        .route("/v1/tasks/{id}/tags", get(routes::tasks::list_task_tags))
+        .route(
+            "/v1/tasks/{id}/tags/{tag}",
+            post(routes::tasks::add_task_tag).delete(routes::tasks::remove_task_tag),
+        )
+        .route("/v1/search", get(routes::tasks::search_tasks))
         .route("/v1/tasks/{id}/events", get(routes::events::get_events))
         .route(
             "/v1/tasks/{id}/events/stream",

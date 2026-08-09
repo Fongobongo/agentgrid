@@ -7338,3 +7338,163 @@ async fn rbac_operator_limited_to_view_and_approve() {
         .unwrap();
     assert!(resp.status().is_success());
 }
+
+/// Plan 1.3 (#6): FTS5 search finds a task by a word in its prompt.
+#[tokio::test]
+async fn search_finds_task_by_prompt_word() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Create a task with a distinctive prompt.
+    let req = CreateTaskRequest {
+        prompt: "fix the login bug on the dashboard".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let task: TaskView =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    // Search for a distinctive word.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/search?q=login%20bug", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hits: Vec<TaskView> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        hits.iter().any(|t| t.id == task.id),
+        "search must find the task by prompt word"
+    );
+
+    // A word that does not appear must yield no hits for this task.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/search?q=zebra", &token))
+        .await
+        .unwrap();
+    let hits: Vec<TaskView> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(!hits.iter().any(|t| t.id == task.id));
+}
+
+/// Plan 1.3 (#13): attempt detail + tag CRUD via the API.
+#[tokio::test]
+async fn attempt_detail_and_tag_crud() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Create + assign a task so an attempt exists.
+    let req = CreateTaskRequest {
+        prompt: "tag me please".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let task: TaskView =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let (node_id, _cred) = enroll(&app, "tag-node", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = state
+        .store
+        .try_assign(&node_id)
+        .await
+        .unwrap()
+        .expect("assign");
+    assert_eq!(assign.task_id, task.id);
+    state.store.ack_attempt(&assign.attempt_id).await.unwrap();
+
+    // Attempt detail includes the task prompt.
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/attempts/{}", assign.attempt_id),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let att: agentgrid_common::AttemptView =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(att.task_id, task.id);
+    assert_eq!(att.prompt, "tag me please");
+
+    // Tag CRUD.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/tasks/{}/tags/urgent", task.id),
+            "{}".into(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/tasks/{}/tags", task.id), &token))
+        .await
+        .unwrap();
+    let tags: Vec<String> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(tags, vec!["urgent"]);
+
+    // Remove.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/tasks/{}/tags/urgent", task.id))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/tasks/{}/tags", task.id), &token))
+        .await
+        .unwrap();
+    let tags: Vec<String> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(tags.is_empty());
+}

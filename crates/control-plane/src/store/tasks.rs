@@ -114,6 +114,67 @@ impl Store {
         Ok(rows.iter().map(row_to_task_view).collect())
     }
 
+    /// Plan 1.3 (#6): full-text search over task prompt/repository via the
+    /// FTS5 mirror (migration 0055), ranked by bm25, capped at 50 rows.
+    pub async fn search_tasks(&self, query: &str) -> Result<Vec<TaskView>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        // FTS5 query syntax: wrap the query in quotes so user punctuation
+        // does not break out of the tokenizer; a literal double quote inside
+        // the query is dropped (cannot be escaped in a quoted phrase).
+        let clean: String = q.chars().filter(|c| *c != '"').collect();
+        let fts = format!("\"{clean}\"");
+        let rows = sqlx::query(
+            "SELECT tasks.id, tasks.repository, tasks.prompt, tasks.adapter, tasks.status, tasks.created_at, tasks.finished_at, \
+                    tasks.assigned_attempt_id, tasks.validation_command, tasks.error_code, tasks.requested_node_id, \
+                    tasks.base_commit, tasks.parent_acp_session_id, tasks.network_mode, \
+                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
+             FROM tasks JOIN tasks_fts ON tasks_fts.rowid = tasks.rowid \
+             WHERE tasks_fts MATCH ? \
+             ORDER BY bm25(tasks_fts) LIMIT 50",
+        )
+        .bind(&fts)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_task_view).collect())
+    }
+
+    /// Plan 1.3 (#13): list tags for a task.
+    pub async fn list_tags(&self, task_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT tag FROM task_tags WHERE task_id = ? ORDER BY tag")
+            .bind(task_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().filter_map(|r| r.try_get("tag").ok()).collect())
+    }
+
+    /// Plan 1.3 (#13): add a tag (idempotent — UNIQUE(pk) makes re-add a no-op).
+    pub async fn add_tag(&self, task_id: &str, tag: &str) -> Result<()> {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            return Ok(());
+        }
+        sqlx::query("INSERT OR IGNORE INTO task_tags (task_id, tag, created_at) VALUES (?, ?, ?)")
+            .bind(task_id)
+            .bind(tag)
+            .bind(now_iso())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Plan 1.3 (#13): remove a tag. Returns whether it existed.
+    pub async fn remove_tag(&self, task_id: &str, tag: &str) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM task_tags WHERE task_id = ? AND tag = ?")
+            .bind(task_id)
+            .bind(tag)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
     pub async fn show_task(&self, id: &str) -> Result<Option<TaskView>> {
         let row = sqlx::query(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, \

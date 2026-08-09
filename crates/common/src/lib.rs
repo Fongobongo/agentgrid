@@ -338,6 +338,27 @@ pub struct TaskView {
     pub security_profile: Option<String>,
 }
 
+/// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
+/// Echoes the prompt from the owning task so a resumed attempt can inherit
+/// context without a second lookup.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttemptView {
+    pub id: String,
+    pub task_id: String,
+    pub number: u32,
+    pub node_id: String,
+    pub status: AttemptStatus,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub commit_sha: Option<String>,
+    pub exit_code: Option<i32>,
+    pub error_code: Option<String>,
+    /// The owning task's prompt (inherited context for `ag resume`).
+    pub prompt: String,
+    pub adapter: String,
+    pub parent_acp_session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeView {
     pub id: String,

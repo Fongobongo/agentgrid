@@ -170,6 +170,11 @@ export function listTasks(): Promise<TaskView[]> {
   return listGet<TaskView>('/v1/tasks');
 }
 
+/** Plan 1.3: FTS5 full-text search over tasks. */
+export function searchTasks(q: string): Promise<TaskView[]> {
+  return listGet<TaskView>(`/v1/search?q=${encodeURIComponent(q)}`);
+}
+
 export function listNodes(): Promise<NodeView[]> {
   return listGet<NodeView>('/v1/nodes');
 }

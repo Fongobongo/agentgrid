@@ -76,12 +76,49 @@ enum AgCommand {
     },
     /// Storage maintenance (artifact GC, disk status).
     Storage(StorageArgs),
+    /// Plan 1.3: full-text search over tasks (FTS5).
+    Search(SearchArgs),
+    /// Plan 1.3: resume a past attempt as a new attempt with inherited context.
+    Resume(ResumeArgs),
+    /// Plan 1.3: add/remove/list task tags.
+    Tag(TagArgs),
 }
 
 #[derive(Args)]
 struct StorageArgs {
     #[command(subcommand)]
     command: StorageSub,
+}
+
+/// Plan 1.3: FTS5 search over task prompt/repository.
+#[derive(Args)]
+struct SearchArgs {
+    /// Query text (words to match).
+    query: String,
+}
+
+/// Plan 1.3: resume an attempt — new attempt inheriting the task's prompt.
+#[derive(Args)]
+struct ResumeArgs {
+    /// Attempt id to resume.
+    attempt_id: String,
+}
+
+/// Plan 1.3: task tag management.
+#[derive(Args)]
+struct TagArgs {
+    #[command(subcommand)]
+    command: TagSub,
+}
+
+#[derive(Subcommand)]
+enum TagSub {
+    /// Add a tag to a task.
+    Add { task_id: String, tag: String },
+    /// Remove a tag from a task.
+    Remove { task_id: String, tag: String },
+    /// List a task's tags.
+    List { task_id: String },
 }
 
 #[derive(Subcommand)]
@@ -574,6 +611,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         AgCommand::Storage(a) => cmd_storage(&client, &base, a, cli.json).await,
+        AgCommand::Search(a) => cmd_search(&client, &base, a, cli.json).await,
+        AgCommand::Resume(a) => cmd_resume(&client, &base, a).await,
+        AgCommand::Tag(a) => cmd_tag(&client, &base, a, cli.json).await,
     }
 }
 
@@ -649,6 +689,138 @@ async fn cmd_storage(
         }
     }
     Ok(())
+}
+
+/// Plan 1.3: FTS5 task search (`ag search <query>`).
+async fn cmd_search(client: &reqwest::Client, base: &str, a: SearchArgs, json: bool) -> Result<()> {
+    let url = format!("{base}/v1/search?q={}", urlencode(&a.query));
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("search request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("search failed ({})", resp.status());
+    }
+    let hits: Vec<TaskView> = resp.json().await.context("parse search response")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("no tasks match '{}'", a.query);
+        return Ok(());
+    }
+    for t in &hits {
+        println!("{:>12}  {:>10}  {}", t.id, t.status, t.prompt);
+    }
+    Ok(())
+}
+
+/// Plan 1.3: resume an attempt — fetch its detail (prompt) and create a fresh
+/// task with the same prompt.
+async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Result<()> {
+    let resp = client
+        .get(format!("{base}/v1/attempts/{}", a.attempt_id))
+        .send()
+        .await
+        .context("attempt lookup failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("attempt not found ({})", resp.status());
+    }
+    let att: agentgrid_common::AttemptView = resp.json().await.context("parse attempt response")?;
+    let req = CreateTaskRequest {
+        prompt: att.prompt,
+        repository: "*".into(),
+        adapter: att.adapter,
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: att.parent_acp_session_id,
+        security_profile: None,
+        network_mode: None,
+    };
+    let resp = client
+        .post(format!("{base}/v1/tasks"))
+        .json(&req)
+        .send()
+        .await
+        .context("resume create failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("resume create failed ({})", resp.status());
+    }
+    let t: TaskView = resp.json().await.context("parse created task")?;
+    println!("resumed attempt {} as task {}", a.attempt_id, t.id);
+    Ok(())
+}
+
+/// Plan 1.3: tag add/remove/list.
+async fn cmd_tag(client: &reqwest::Client, base: &str, a: TagArgs, json: bool) -> Result<()> {
+    match a.command {
+        TagSub::Add { task_id, tag } => {
+            let resp = client
+                .post(format!(
+                    "{base}/v1/tasks/{task_id}/tags/{}",
+                    urlencode(&tag)
+                ))
+                .send()
+                .await
+                .context("tag add request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("tag add failed ({})", resp.status());
+            }
+            println!("tag '{tag}' added to {task_id}");
+        }
+        TagSub::Remove { task_id, tag } => {
+            let resp = client
+                .delete(format!(
+                    "{base}/v1/tasks/{task_id}/tags/{}",
+                    urlencode(&tag)
+                ))
+                .send()
+                .await
+                .context("tag remove request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("tag remove failed ({})", resp.status());
+            }
+            println!("tag '{tag}' removed from {task_id}");
+        }
+        TagSub::List { task_id } => {
+            let resp = client
+                .get(format!("{base}/v1/tasks/{task_id}/tags"))
+                .send()
+                .await
+                .context("tag list request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("tag list failed ({})", resp.status());
+            }
+            let tags: Vec<String> = resp.json().await.context("parse tags")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tags)?);
+            } else if tags.is_empty() {
+                println!("no tags on {task_id}");
+            } else {
+                for t in tags {
+                    println!("{t}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 async fn cmd_tui(client: &reqwest::Client, base: &str, a: TuiArgs) -> Result<()> {

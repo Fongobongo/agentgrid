@@ -104,6 +104,26 @@ pub async fn list_tasks(
     }
 }
 
+/// Plan 1.3 (#6): full-text search `GET /v1/search?q=...` — FTS5 bm25
+/// ranking, max 50 rows.
+#[derive(Debug, serde::Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+}
+
+pub async fn search_tasks(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<Vec<TaskView>>, StatusCode> {
+    match state.store.search_tasks(&q.q).await {
+        Ok(items) => Ok(Json(items)),
+        Err(e) => {
+            tracing::error!("search_tasks failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 pub async fn show_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -118,6 +138,57 @@ pub async fn show_task(
         })?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Plan 1.3 (#13): single-attempt detail (prompt included for `ag resume`).
+pub async fn show_attempt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<agentgrid_common::AttemptView>, StatusCode> {
+    state
+        .store
+        .show_attempt(&id)
+        .await
+        .map_err(|e| {
+            tracing::error!("show_attempt failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Plan 1.3 (#13): tag CRUD — `GET /v1/tasks/{id}/tags`,
+/// `POST /v1/tasks/{id}/tags/{tag}`, `DELETE /v1/tasks/{id}/tags/{tag}`.
+pub async fn list_task_tags(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    state.store.list_tags(&id).await.map(Json).map_err(|e| {
+        tracing::error!("list_tags failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+pub async fn add_task_tag(
+    State(state): State<Arc<AppState>>,
+    Path((id, tag)): Path<(String, String)>,
+) -> Result<StatusCode, StatusCode> {
+    state.store.add_tag(&id, &tag).await.map_err(|e| {
+        tracing::error!("add_tag failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn remove_task_tag(
+    State(state): State<Arc<AppState>>,
+    Path((id, tag)): Path<(String, String)>,
+) -> Result<StatusCode, StatusCode> {
+    state.store.remove_tag(&id, &tag).await.map_err(|e| {
+        tracing::error!("remove_tag failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn task_eligibility_handler(

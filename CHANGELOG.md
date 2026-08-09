@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.3)
+
+- **FTS5 task search:** `GET /v1/search?q=` (bm25-ranked, limit 50) over a
+  triggered FTS5 mirror; `ag search` CLI; search box in the web dashboard.
+- **Attempt detail + resume:** `GET /v1/attempts/{id}` returns the attempt
+  with the owning task's prompt; `ag resume <attempt_id>` creates a fresh
+  task inheriting that prompt/context.
+- **Task tags:** join table + `GET/POST/DELETE /v1/tasks/{id}/tags[/{tag}]`;
+  `ag tag add/remove/list`.
+
 ### Added (plan 1.2)
 
 - **Mobile notify webhook:** control-plane POSTs `AGENTGRID_NOTIFY_WEBHOOK` on

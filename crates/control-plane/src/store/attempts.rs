@@ -637,3 +637,44 @@ impl Store {
         Ok(false)
     }
 }
+
+impl Store {
+    /// Plan 1.3 (#13): fetch a single attempt with the owning task's prompt
+    /// (so `ag resume` can inherit context without a second query).
+    pub async fn show_attempt(&self, id: &str) -> Result<Option<agentgrid_common::AttemptView>> {
+        let row = sqlx::query(
+            "SELECT attempts.id, attempts.task_id, attempts.number, attempts.node_id, attempts.status, \
+                    attempts.started_at, attempts.finished_at, attempts.commit_sha, attempts.exit_code, \
+                    attempts.error_code, tasks.prompt, tasks.adapter, attempts.acp_session_id \
+             FROM attempts JOIN tasks ON tasks.id = attempts.task_id \
+             WHERE attempts.id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        use agentgrid_common::*;
+        let status: AttemptStatus =
+            from_snake(&row.try_get::<String, _>("status").unwrap_or_default())
+                .unwrap_or(AttemptStatus::Assigned);
+        Ok(Some(AttemptView {
+            id: row.try_get("id").unwrap_or_default(),
+            task_id: row.try_get("task_id").unwrap_or_default(),
+            number: row.try_get::<i64, _>("number").unwrap_or_default() as u32,
+            node_id: row.try_get("node_id").unwrap_or_default(),
+            status,
+            started_at: row.try_get("started_at").unwrap_or_default(),
+            finished_at: row.try_get("finished_at").ok().flatten(),
+            commit_sha: row.try_get("commit_sha").ok().flatten(),
+            exit_code: row
+                .try_get::<Option<i64>, _>("exit_code")
+                .ok()
+                .flatten()
+                .map(|v| v as i32),
+            error_code: row.try_get("error_code").ok().flatten(),
+            prompt: row.try_get("prompt").unwrap_or_default(),
+            adapter: row.try_get("adapter").unwrap_or_default(),
+            parent_acp_session_id: row.try_get("acp_session_id").ok().flatten(),
+        }))
+    }
+}

@@ -122,6 +122,63 @@ paths:
   /v1/tasks/{id}/retry:
     post:
       summary: Re-queue a failed/cancelled task
+  /v1/search:
+    get:
+      summary: Full-text search over tasks (FTS5)
+      description: |
+        Plan 1.3 (#6): matches the prompt/repository via the FTS5 mirror,
+        ranked by bm25, capped at 50 rows. `q` is tokenized; punctuation is
+        quoted so it does not break the query.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+  /v1/attempts/{id}:
+    get:
+      summary: Fetch a single attempt (prompt included)
+      description: |
+        Plan 1.3 (#13): attempt detail used by `ag resume` to inherit the
+        owning task's prompt/context without a second lookup.
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+  /v1/tasks/{id}/review-approval:
+    get:
+      summary: Fetch the pending patch-review approval for a task
+      description: |
+        Plan 1.1: a successful attempt creates a pending `task_patch_review`
+        approval. Returns it (or `null`) so the UI shows Accept / Reject /
+        Request rework.
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+  /v1/tasks/{id}/tags:
+    get:
+      summary: List a task's tags
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+  /v1/tasks/{id}/tags/{tag}:
+    post:
+      summary: Add a tag to a task (idempotent)
+    delete:
+      summary: Remove a tag from a task
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: tag
+        in: path
+        required: true
+        schema: { type: string }
   /v1/tasks/{id}/events:
     get:
       summary: List task events (polling)

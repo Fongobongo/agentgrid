@@ -131,6 +131,18 @@ button.link, a.link {
 .card-value { font-size: 28px; font-weight: 700; }
 .card-label { color: var(--muted); margin-top: 4px; }
 
+.search-input {
+  width: 100%;
+  max-width: 420px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 14px;
+}
+
 .grid {
   width: 100%;
   border-collapse: collapse;
