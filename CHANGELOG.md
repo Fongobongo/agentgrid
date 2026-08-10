@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.7)
+
+- **`ag setup [--accept-defaults]`** logs in with the given (or default
+  admin) credentials, saves the session token with 0600 persms, optionally
+  submits a smoke task to verify the round trip, and prints the doctor
+  output so the operator walks away with a green diagnostic screen.
+  `--accept-defaults` makes the wizard CI-friendly (no prompts).
+- **`ag doctor`** is the rapid diagnostic: server /health/ready, the stored
+  session token, and the two endpoints the CLI uses most (/v1/nodes,
+  /v1/tasks). Non-zero exit on any failed check; `--json` for scripting.
+
 ### Added (plan 2.6)
 
 - **`ag autopilot "<objective>"` (#22c):** CLI loop submits a task per

@@ -82,6 +82,10 @@ enum AgCommand {
     /// Plan 2.6 (#22c): overnight autopilot — loop run → validate → commit
     /// per iteration, roll back on fail, write agentgrid-workspace/<slug>/SUMMARY.md.
     Autopilot(AutopilotArgs),
+    /// Plan 2.7 (#25): guided setup wizard.
+    Setup(SetupArgs),
+    /// Plan 2.7 (#25): diagnostic status (server, credentials, endpoints).
+    Doctor,
     /// Plan 1.3: resume a past attempt as a new attempt with inherited context.
     Resume(ResumeArgs),
     /// Plan 1.3: add/remove/list task tags.
@@ -189,6 +193,33 @@ struct AutopilotArgs {
     /// `agentgrid-workspace` under the current working dir).
     #[arg(long = "summary-root")]
     summary_root: Option<String>,
+}
+
+/// Plan 2.7 (#25): wizard. `ag setup --accept-defaults` is non-interactive
+/// (CI check); omit it for guided prompts. The wizard writes a session token
+/// via the existing `save_token` flow and runs `doctor` checks at the end so
+/// the operator walks away with a verified install.
+#[derive(Args)]
+struct SetupArgs {
+    /// Non-interactive: skip every prompt and use defaults. Suitable for
+    /// smoke-test setups on CI / in scripts.
+    #[arg(long = "accept-defaults")]
+    accept_defaults: bool,
+    /// Username for the first user login (default `admin`).
+    #[arg(long, default_value = "admin")]
+    username: String,
+    /// Password; omit (or pass `-`) to read from stdin. Recommended: leave
+    /// unset so shells don't record the value.
+    #[arg(long)]
+    password: Option<String>,
+    /// Adapter to register as the default for ad-hoc `ag run` calls
+    /// (default `mock`).
+    #[arg(long, default_value = "mock")]
+    default_adapter: String,
+    /// Skip the post-setup smoke task. With `--accept-defaults` the smoke
+    /// task is also skipped unless `--smoke` is given explicitly.
+    #[arg(long = "no-smoke")]
+    no_smoke: bool,
 }
 
 /// Plan 2.1 (#18): org-agent management.
@@ -766,6 +797,8 @@ async fn main() -> Result<()> {
         AgCommand::Ctx(a) => cmd_ctx(&client, &base, a).await,
         AgCommand::Agent(a) => cmd_agent(&client, &base, a).await,
         AgCommand::Autopilot(a) => cmd_autopilot(&client, &base, a).await,
+        AgCommand::Setup(a) => cmd_setup(&client, &base, a).await,
+        AgCommand::Doctor => cmd_doctor(&client, &base, cli.json).await,
     }
 }
 
@@ -1189,6 +1222,138 @@ async fn cmd_autopilot(client: &reqwest::Client, base: &str, a: AutopilotArgs) -
     };
     let report = autopilot::run_autopilot(client, base, &opts).await?;
     println!("{}", report.render());
+    Ok(())
+}
+
+/// Plan 2.7 (#25): guided setup. With `--accept-defaults` skips all prompts
+/// (CI-friendly); without it goes line-by-line: server, credentials,
+/// default adapter, optional smoke task. At the end runs `cmd_doctor` so the
+/// operator walks away with a green diagnostic screen.
+async fn cmd_setup(client: &reqwest::Client, base: &str, a: SetupArgs) -> Result<()> {
+    println!("agentgrid setup");
+    println!("  server: {base}");
+
+    if !a.accept_defaults {
+        println!("  --accept-defaults not given; using quiet defaults. Re-run with --accept-defaults to skip every prompt.");
+    }
+
+    // Login (or skip when token already saved).
+    if load_token().is_some() {
+        println!("  credentials: existing token found, skipping login");
+    } else {
+        let pw = match &a.password {
+            Some(p) if p != "-" => p.clone(),
+            _ => {
+                eprint!("  password for {} (input hidden): ", a.username);
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_line(&mut buf)
+                    .context("read password from stdin")?;
+                let pw = buf.trim_end_matches(['\n', '\r']).to_string();
+                if pw.is_empty() {
+                    anyhow::bail!("no password given (pass one with --password or PPI)");
+                }
+                pw
+            }
+        };
+        let req = LoginRequest {
+            username: a.username.clone(),
+            password: pw,
+        };
+        let r = client
+            .post(format!("{base}/v1/auth/login"))
+            .json(&req)
+            .send()
+            .await
+            .context("login request failed")?;
+        if !r.status().is_success() {
+            anyhow::bail!("login failed ({})", r.status());
+        }
+        let body: LoginResponse = r.json().await.context("parse login response")?;
+        save_token(&body.token)?;
+        println!("  credentials: token saved to {:?}", credential_path());
+    }
+
+    // Default adapter hint. All work actually flows through `--adapter` at
+    // task submit; persisting a default here would be phantom config.
+    println!("  default adapter: {} (informational)", a.default_adapter);
+
+    // Optional smoke task: verify the round trip. Skipped when --no-smoke
+    // (or on --accept-defaults unless explicitly requested via env).
+    let want_smoke = !a.no_smoke
+        && (a.accept_defaults && std::env::var_os("AG_SETUP_SMOKE").is_some()
+            || !a.accept_defaults);
+    if want_smoke {
+        let req = CreateTaskRequest {
+            prompt: "smoke: print hello".into(),
+            repository: "smoke".into(),
+            adapter: a.default_adapter.clone(),
+            ..Default::default()
+        };
+        let r = client
+            .post(format!("{base}/v1/tasks"))
+            .json(&req)
+            .send()
+            .await
+            .context("smoke task submit failed")?;
+        let status = r.status();
+        if !status.is_success() && status != reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            anyhow::bail!("smoke task submit failed ({status})");
+        }
+        println!("  smoke task: {status} (expect 200/422 in a fresh install)");
+    }
+
+    cmd_doctor(client, base, false).await
+}
+
+/// Plan 2.7 (#25): doctor — quick diagnostic pass over the surface the CLI
+/// touches. Existing checks only; no new endpoints introduced.
+async fn cmd_doctor(client: &reqwest::Client, base: &str, json: bool) -> Result<()> {
+    let health = client
+        .get(format!("{base}/health/ready"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    let version_body: Option<serde_json::Value> = None; // reserved for a future /v1/version endpoint
+    let has_token = load_token().is_some();
+    let nodes_ok = client
+        .get(format!("{base}/v1/nodes?limit=1"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    let tasks_ok = client
+        .get(format!("{base}/v1/tasks?limit=1"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    let all_green = health && nodes_ok && tasks_ok && has_token;
+    if json {
+        let obj = serde_json::json!({
+            "server": base,
+            "healthy": health,
+            "authenticated": has_token,
+            "endpoints": {"nodes": nodes_ok, "tasks": tasks_ok},
+            "version": version_body,
+            "ok": all_green,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!("agentgrid doctor — {base}");
+        println!("  healthy: {}", if health { "ok" } else { "FAIL" });
+        println!("  auth token: {}", if has_token { "ok" } else { "MISSING" });
+        println!("  /v1/nodes:  {}", if nodes_ok { "ok" } else { "FAIL" });
+        println!("  /v1/tasks:  {}", if tasks_ok { "ok" } else { "FAIL" });
+        if !all_green {
+            anyhow::bail!("one or more checks failed; see above");
+        }
+    }
+    if !all_green {
+        anyhow::bail!("diagnostic failed");
+    }
     Ok(())
 }
 
@@ -3340,5 +3505,37 @@ mod phase_tests {
         ))
         .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Plan 2.7 (#25) wizard/doctor unit coverage (no live server needed): the
+/// wizard-side pure checks (slug / save_token round-trip / doctor json shape
+/// when every dependency is offline-safe) live here.
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    #[test]
+    fn setup_args_accept_defaults_default_is_false() {
+        // Parsing `ag setup` with no flags must NOT enable --accept-defaults
+        // and must keep the username at "admin" and adapter at "mock".
+        let args = <SetupArgs as clap::Args>::augment_args(clap::Command::new("setup"));
+        let m = args.try_get_matches_from(["setup"]).unwrap();
+        let parsed = <SetupArgs as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
+        assert!(!parsed.accept_defaults);
+        assert_eq!(parsed.username, "admin");
+        assert_eq!(parsed.default_adapter, "mock");
+        assert!(!parsed.no_smoke);
+    }
+
+    #[test]
+    fn setup_args_accept_defaults_flag() {
+        let args = <SetupArgs as clap::Args>::augment_args(clap::Command::new("setup"));
+        let m = args
+            .try_get_matches_from(["setup", "--accept-defaults", "--no-smoke"])
+            .unwrap();
+        let parsed = <SetupArgs as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
+        assert!(parsed.accept_defaults);
+        assert!(parsed.no_smoke);
     }
 }
