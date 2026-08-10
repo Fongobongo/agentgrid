@@ -942,6 +942,7 @@ mod tests {
             upstream_commits: vec![],
             upstream_task_ids: vec![],
             group_id: None,
+            read_only: false,
         }
     }
 
@@ -1247,6 +1248,7 @@ mod tests {
                     upstream_commits: vec![],
                     upstream_task_ids: vec![],
                     group_id: None,
+                    read_only: false,
                 };
                 prepare_workspace(&repos, &ws_root, &a, &[], &[])
             }));

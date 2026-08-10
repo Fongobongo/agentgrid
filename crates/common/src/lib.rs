@@ -530,6 +530,11 @@ pub struct Assignment {
     /// set, the node forwards it to the agent as `AG_GROUP_ID`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// Plan 2.4 (#22a): when true, the node makes the attempt's worktree
+    /// read-only (sandbox bind-mount gets `:ro`). Used for verifier steps so
+    /// a verifier cannot silently edit the code it is validating.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1250,6 +1255,7 @@ mod tests {
                 upstream_commits: vec![],
                 upstream_task_ids: vec![],
                 group_id: None,
+                read_only: false,
             }),
             assignments: vec![],
         };

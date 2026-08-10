@@ -104,6 +104,7 @@ async fn drive_acp_session(
         &args,
         ws_path,
         assignment.network_mode.as_deref(),
+        assignment.read_only,
     );
     let mut cmd = tokio::process::Command::new(&program);
     cmd.args(&args);
@@ -1174,6 +1175,7 @@ mod tests {
             upstream_commits: vec![],
             upstream_task_ids: vec![],
             group_id: None,
+            read_only: false,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1308,6 +1310,7 @@ mod tests {
             upstream_commits: vec![],
             upstream_task_ids: vec![],
             group_id: None,
+            read_only: false,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1456,6 +1459,7 @@ mod tests {
             upstream_commits: vec![],
             upstream_task_ids: vec![],
             group_id: None,
+            read_only: false,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1573,6 +1577,7 @@ mod tests {
             upstream_commits: vec![],
             upstream_task_ids: vec![],
             group_id: None,
+            read_only: false,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1751,6 +1756,7 @@ mod tests {
                 upstream_commits: vec![],
                 upstream_task_ids: vec![],
                 group_id: None,
+                read_only: false,
             };
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),

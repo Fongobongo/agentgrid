@@ -50,11 +50,12 @@ pub fn sandbox_prefix(
     workdir: &std::path::Path,
     program: &str,
     network_mode: Option<&str>,
+    read_only_worktree: bool,
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), vec![]),
         SandboxKind::Docker => {
-            let mut prefix = docker_run_head(workdir, network_mode);
+            let mut prefix = docker_run_head(workdir, network_mode, read_only_worktree);
             prefix.push(image_ref());
             prefix.push(program.into());
             ("docker".into(), prefix)
@@ -129,7 +130,11 @@ fn parse_ipv6(s: &str) -> bool {
 /// ponytail: limits come from env rather than SpawnRequest.limits so this
 /// wrapper need not change signature; plumbing ResourceLimits through is the
 /// upgrade path once a real DockerBackend trait owns spawn.
-fn docker_run_head(workdir: &std::path::Path, network_mode: Option<&str>) -> Vec<String> {
+fn docker_run_head(
+    workdir: &std::path::Path,
+    network_mode: Option<&str>,
+    read_only_worktree: bool,
+) -> Vec<String> {
     let mut v = vec![
         "run".to_string(),
         "--rm".to_string(),
@@ -205,7 +210,11 @@ fn docker_run_head(workdir: &std::path::Path, network_mode: Option<&str>) -> Vec
         }
     }
     v.push("-v".to_string());
-    v.push(format!("{}:/ag", workdir.display()));
+    // Plan 2.4 (#22a): workflow verifier steps get a read-only worktree
+    // mount so a verifier cannot silently edit the code it is supposed to
+    // validate. `:ro` uses the same bind, no second mount needed.
+    let suffix = if read_only_worktree { ":ro" } else { "" };
+    v.push(format!("{}:/ag{suffix}", workdir.display()));
     v.push("-w".to_string());
     v.push("/ag".to_string());
     v.push("--".to_string());
@@ -240,11 +249,12 @@ pub fn sandbox_command(
     args: &[String],
     workdir: &std::path::Path,
     network_mode: Option<&str>,
+    read_only_worktree: bool,
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), args.to_vec()),
         SandboxKind::Docker => {
-            let mut out = docker_run_head(workdir, network_mode);
+            let mut out = docker_run_head(workdir, network_mode, read_only_worktree);
             out.push(image_ref());
             out.push(program.to_string());
             out.extend(args.iter().cloned());
@@ -442,6 +452,7 @@ mod tests {
             &["--acp".into()],
             std::path::Path::new("/w"),
             None,
+            false,
         );
         assert_eq!(p, "claude");
         assert_eq!(a, vec!["--acp"]);
@@ -459,6 +470,7 @@ mod tests {
             &["--acp".into()],
             std::path::Path::new("/w"),
             None,
+            false,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -489,6 +501,7 @@ mod tests {
             std::path::Path::new("/w"),
             "adapter-x",
             None,
+            false,
         );
         assert_eq!(p, "adapter-x");
         assert!(a.is_empty());
@@ -506,6 +519,7 @@ mod tests {
             std::path::Path::new("/w"),
             "adapter-claude",
             None,
+            false,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -536,7 +550,13 @@ mod tests {
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE_DIGEST", "sha256:deadbeef");
-        let (p, a) = sandbox_prefix(SandboxKind::Docker, std::path::Path::new("/w"), "c", None);
+        let (p, a) = sandbox_prefix(
+            SandboxKind::Docker,
+            std::path::Path::new("/w"),
+            "c",
+            None,
+            false,
+        );
         clear_sandbox_env();
         assert_eq!(p, "docker");
         // image + program are the last two; image must carry the digest pin.
@@ -544,9 +564,56 @@ mod tests {
         assert_eq!(a[a.len() - 1], "c");
         // An already-digested ref is left untouched.
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1@sha256:f00d");
-        let (_, a2) = sandbox_prefix(SandboxKind::Docker, std::path::Path::new("/w"), "c", None);
+        let (_, a2) = sandbox_prefix(
+            SandboxKind::Docker,
+            std::path::Path::new("/w"),
+            "c",
+            None,
+            false,
+        );
         clear_sandbox_env();
         assert_eq!(a2[a2.len() - 2], "img:1@sha256:f00d");
+    }
+
+    #[test]
+    fn read_only_worktree_marks_mount_ro() {
+        // Plan 2.4 (#22a): when the assignment is flagged read-only (verifier
+        // step), the worktree bind-mount gets a `:ro` suffix so the agent in
+        // the sandbox cannot modify the code it is supposed to validate.
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        let (_p, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/work"),
+            None,
+            true,
+        );
+        clear_sandbox_env();
+        let vol = a
+            .iter()
+            .find(|x| x.starts_with("/work:/ag"))
+            .expect("worktree mount missing");
+        assert!(
+            vol.ends_with(":ro"),
+            "worktree mount must be :ro, got {vol}"
+        );
+        // And the default (non-verifier) path stays read-write.
+        let (_p2, a2) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/work"),
+            None,
+            false,
+        );
+        let vol2 = a2
+            .iter()
+            .find(|x| x.starts_with("/work:/ag"))
+            .expect("worktree mount missing");
+        assert!(vol2.ends_with(":/ag"), "default mount stays rw, got {vol2}");
     }
 
     #[test]
@@ -565,6 +632,7 @@ mod tests {
             &[],
             std::path::Path::new("/w"),
             None,
+            false,
         );
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
@@ -587,6 +655,7 @@ mod tests {
                 &[],
                 std::path::Path::new("/w"),
                 mode,
+                false,
             );
             let i = a.iter().position(|x| x == "--network").unwrap() + 1;
             a[i].clone()
@@ -646,6 +715,7 @@ mod tests {
             &[],
             std::path::Path::new("/w"),
             None,
+            false,
         );
         clear_sandbox_env();
         assert!(

@@ -109,6 +109,20 @@ impl Store {
             let network_mode: Option<String> = c.try_get("network_mode").ok().flatten();
             let group_id: Option<String> = c.try_get("group_id").ok().flatten();
 
+            // Plan 2.4 (#22a): if this task is a workflow step with role
+            // `verifier`, mark the assignment read-only so the node bind-
+            // mounts the worktree with `:ro`. A verifier validates; it must
+            // not silently edit the code it is checking.
+            let role = sqlx::query_scalar::<_, String>(
+                "SELECT ws.role FROM role_runs rr \
+                 JOIN workflow_steps ws ON ws.id = rr.step_run_id \
+                 WHERE rr.task_id = ? LIMIT 1",
+            )
+            .bind(&task_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let read_only = role.as_deref() == Some("verifier");
+
             // Resolve repository git info (absent for plain-dir tasks).
             let repo = sqlx::query(
                 "SELECT git_url, default_branch, validation_command FROM repositories WHERE name = ?",
@@ -192,6 +206,7 @@ impl Store {
                     upstream_commits: Vec::new(),
                     upstream_task_ids: Vec::new(),
                     group_id,
+                    read_only,
                 },
                 created_at,
             });

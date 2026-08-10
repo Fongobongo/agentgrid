@@ -82,7 +82,8 @@ pub async fn run_validation(
     let kind = sandbox_kind();
     let (program, prefix_args) = crate::sandbox::sandbox_prefix(
         kind, workdir, "sh",
-        None, // validation has no task network_mode; sandbox env default applies
+        None,  // validation has no task network_mode; sandbox env default applies
+        false, // validation must be able to write (test fixtures)
     );
     let mut cmd = tokio::process::Command::new(&program);
     cmd.args(prefix_args)

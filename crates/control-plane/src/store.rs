@@ -3500,3 +3500,101 @@ mod agent_tests {
             .is_empty());
     }
 }
+
+#[cfg(test)]
+mod verifier_ro_tests {
+    use super::*;
+    use agentgrid_common::{EnrollRequest, WorkflowRole, WorkflowStep};
+
+    fn step(id: &str, deps: &[&str], role: WorkflowRole) -> WorkflowStep {
+        WorkflowStep {
+            id: id.into(),
+            prompt: format!("do {id}"),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            role,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: None,
+            max_attempts: None,
+            expandable: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn verifier_assignment_is_read_only() {
+        // Plan 2.4 (#22a): a workflow step with `role: verifier` assigns the
+        // task to the node with `read_only = true`, so the node bind-mounts
+        // the worktree `:ro`.
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("ag-vro-{nanos}.db"));
+        let _ = std::fs::remove_file(&path);
+        let s = Store::open(path.to_str().unwrap()).await.unwrap();
+
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "n1".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 4,
+            agent_version: "test".into(),
+            protocol_version: None,
+            permission_interception: "wrapper".into(),
+        };
+        let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+
+        let steps = vec![
+            step("w", &[], WorkflowRole::Worker),
+            step("v", &["w"], WorkflowRole::Verifier),
+        ];
+        let tpl = s
+            .create_workflow_template("x", &steps, &None)
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, Some("demo"), None)
+            .await
+            .unwrap();
+        let _ = s.tick_workflow_run(&run.id).await.unwrap();
+
+        // Worker assigns first; NOT read-only.
+        let worker = s
+            .try_assign(&node_id)
+            .await
+            .unwrap()
+            .expect("worker assign");
+        assert!(!worker.read_only, "worker assignment is NOT read-only");
+        s.ack_attempt(&worker.attempt_id).await.unwrap();
+        s.complete_attempt(
+            &worker.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+                resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
+                acp_session_id: None,
+                plan: None,
+                provenance: None,
+                pending_artifacts: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let _ = s.tick_workflow_run(&run.id).await.unwrap();
+
+        // The verifier step task now assigns read-only.
+        let verifier = s
+            .try_assign(&node_id)
+            .await
+            .unwrap()
+            .expect("verifier assign");
+        assert!(verifier.read_only, "verifier assignment must be read-only");
+    }
+}

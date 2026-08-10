@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.4)
+
+- **Read-only verifier worktree (#22a):** a workflow step declared
+  `role: verifier` now lands on the node with `Assignment.read_only = true`
+  and the node bind-mounts its worktree as `<workdir>:/ag:ro` when sandboxed,
+  so a verifier cannot silently modify the code it is supposed to validate.
+  `AGENTGRID_SANDBOX_RO_HINT=true` is exported on verifier attempts so a
+  verifier-aware adapter can also revert any accidental workspace writes
+  (the sandbox-level `:ro` is the enforced check). Worker/integrator tasks
+  remain read-write; validation continues to run read-write.
+
 ### Added (plan 2.3)
 
 - **Sandbox cold-start benchmark (#9):** `deploy/sandbox-benchmark.sh`

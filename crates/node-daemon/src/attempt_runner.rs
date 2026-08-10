@@ -443,6 +443,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         &ws.path,
         &bin,
         assignment.network_mode.as_deref(),
+        assignment.read_only,
     );
     // Plan §27: egress audit — log the effective isolation applied to this
     // attempt (task mode + resolved docker network) so operators can verify
