@@ -151,10 +151,35 @@ pub async fn list_mcp_servers_handler(
 }
 
 /// Stage 13: register (or replace) an MCP server in the operator registry.
+/// Plan 2.2 (#5): the command/args are statically scanned for known
+/// malicious patterns; a `Critical` finding rejects registration (400) with
+/// the finding list in the body, so a compromised third-party server cannot
+/// be registered silently.
 pub async fn create_mcp_server_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<McpServerCreate>,
 ) -> Result<Json<McpServer>, StatusCode> {
+    // Scan the command line the node would spawn (command + args).
+    use agentgrid_skills::scanner::{render_findings, scan_content, Severity};
+    let mut text = req.command.clone();
+    for a in &req.args {
+        text.push(' ');
+        text.push_str(a);
+    }
+    let findings = scan_content(&text);
+    let critical: Vec<_> = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Critical)
+        .collect();
+    if !critical.is_empty() {
+        tracing::warn!(
+            "mcp server {:?} blocked: {} critical finding(s): {}",
+            req.name,
+            critical.len(),
+            render_findings(findings.as_slice()).trim()
+        );
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
     state
         .store
         .upsert_mcp_server(&req)

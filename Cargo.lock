@@ -32,6 +32,7 @@ name = "agentgrid-cli"
 version = "0.1.0"
 dependencies = [
  "agentgrid-common",
+ "agentgrid-skills",
  "anyhow",
  "clap",
  "clap_complete",
@@ -62,6 +63,7 @@ name = "agentgrid-control-plane"
 version = "0.1.0"
 dependencies = [
  "agentgrid-common",
+ "agentgrid-skills",
  "anyhow",
  "argon2",
  "async-stream",
@@ -143,6 +145,7 @@ dependencies = [
 name = "agentgrid-skills"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "sha2",

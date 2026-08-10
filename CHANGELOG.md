@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.2)
+
+- **Skill/MCP security scanning (#5):** new `agentgrid-skills::scanner`
+  module — a static regex catalog (17 patterns) over exfiltration sinks
+  (webhooks/paste/IP-echo), instruction-override prompt injection, hidden
+  shell execution (`curl|sh`, eval, base64 pipes, reverse shells,
+  persistence hooks) and hard-coded secrets. Severities: Warning/Critical.
+  CLI: `ag skill scan <path>` (walks a dir for `SKILL.md`, exits 1 on
+  critical findings) and `ag mcp scan <id>`. Registration-time enforcement:
+  `POST /v1/mcp-servers` scans the command line and rejects (422) a
+  Critical finding, so a compromised third-party MCP server cannot be
+  registered silently.
+
 ### Added (plan 2.1)
 
 - **Org agents / budgets / heartbeats (#18):** long-lived agent identities

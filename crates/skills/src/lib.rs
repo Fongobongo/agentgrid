@@ -11,6 +11,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+pub mod scanner;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

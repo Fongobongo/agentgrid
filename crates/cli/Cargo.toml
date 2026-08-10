@@ -19,6 +19,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing-subscriber.workspace = true
 agentgrid-common.workspace = true
+agentgrid-skills.workspace = true
 # Stage 11.5 TUI
 ratatui.workspace = true
 crossterm.workspace = true

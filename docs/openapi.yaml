@@ -619,6 +619,11 @@ paths:
       summary: List MCP server registry entries
     post:
       summary: Create an MCP server registry entry
+      description: |
+        Plan 2.2 (#5): the command line is statically scanned for known
+        malicious patterns (exfiltration sinks, instruction override, hidden
+        shell, hard-coded secrets). A Critical finding rejects registration
+        with 422; warnings are allowed.
   /v1/mcp-servers/{id}:
     delete:
       summary: Delete an MCP server registry entry

@@ -32,6 +32,7 @@ password-hash.workspace = true
 jsonwebtoken.workspace = true
 rand.workspace = true
 agentgrid-common.workspace = true
+agentgrid-skills.workspace = true
 thiserror.workspace = true
 
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
