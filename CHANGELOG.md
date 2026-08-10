@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 1.12)
+
+- **Shared context / memory (#7):** flat per-group notes for parallel
+  attempts. `shared_context(task_group_id, key, value, updated_at)` table
+  (migration 0058) with a (group, key) PK and upsert. Tasks opt in with a
+  `group_id` (`ag run --group <id>`, `CreateTaskRequest.group_id`); the node
+  forwards it to the agent as `AG_GROUP_ID`. REST surface:
+  `GET/PUT/DELETE /v1/task-groups/{id}/context/{key}` and
+  `GET /v1/task-groups/{id}/context` (list); CLI `ag ctx set/get/ls/del`.
+  One attempt writes a note, a sibling attempt of the same group reads it;
+  other groups are isolated.
+
 ### Added (plan 1.11)
 
 - **Programmatic SDK (#8):** thin, dependency-free TypeScript

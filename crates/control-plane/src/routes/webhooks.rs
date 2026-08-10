@@ -142,6 +142,7 @@ pub async fn github_issue_webhook(
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     state
         .store
@@ -166,6 +167,7 @@ fn create_followup_task(prompt: String) -> agentgrid_common::CreateTaskRequest {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     }
 }
 

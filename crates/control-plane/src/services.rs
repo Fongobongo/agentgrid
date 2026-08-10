@@ -576,6 +576,7 @@ mod tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();
@@ -641,6 +642,7 @@ mod tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();

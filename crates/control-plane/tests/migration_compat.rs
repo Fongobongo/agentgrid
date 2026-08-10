@@ -103,6 +103,7 @@ async fn migrations_serve_legacy_happy_path() {
             parent_acp_session_id: None,
             security_profile: None,
             network_mode: None,
+            group_id: None,
         })
         .await
         .unwrap();
@@ -201,6 +202,7 @@ async fn foreign_keys_enforced_after_migration_0040() {
             parent_acp_session_id: None,
             security_profile: None,
             network_mode: None,
+            group_id: None,
         })
         .await
         .unwrap();

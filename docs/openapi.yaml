@@ -254,6 +254,57 @@ paths:
         conflicts to make the PR mergeable. Clean/blocked states are acked
         silently. HMAC verified via `AGENTGRID_GITHUB_WEBHOOK_SECRET`;
         disabled (404) when unset.
+  /v1/task-groups/{id}/context:
+    get:
+      summary: List shared-context notes for a task group
+      description: |
+        Plan 1.12 (#7): all notes written by attempts of a logical task
+        group (flat key→value, ordered by key). Empty array when none.
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+  /v1/task-groups/{id}/context/{key}:
+    get:
+      summary: Read one shared-context note's value
+      description: |
+        Plan 1.12 (#7): returns the raw value string; 404 when the key is
+        not set for the group.
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: key
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      summary: Set (upsert) a shared-context note
+      description: |
+        Plan 1.12 (#7): overwrites the value for (group, key) and bumps
+        updated_at. 204 on success. Keys must be path-safe alphanumerics /
+        `-` / `_` / `.`; group ids validated as opaque ids.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: string }
+    delete:
+      summary: Delete a shared-context note (no-op when absent)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
   /v1/tasks/{id}/events:
     get:
       summary: List task events (polling)

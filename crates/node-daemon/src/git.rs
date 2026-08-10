@@ -941,6 +941,7 @@ mod tests {
             provenance: None,
             upstream_commits: vec![],
             upstream_task_ids: vec![],
+            group_id: None,
         }
     }
 
@@ -1245,6 +1246,7 @@ mod tests {
                     provenance: None,
                     upstream_commits: vec![],
                     upstream_task_ids: vec![],
+                    group_id: None,
                 };
                 prepare_workspace(&repos, &ws_root, &a, &[], &[])
             }));

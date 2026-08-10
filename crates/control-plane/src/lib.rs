@@ -347,6 +347,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::tasks::add_task_tag).delete(routes::tasks::remove_task_tag),
         )
         .route(
+            "/v1/task-groups/{id}/context",
+            get(routes::shared_context::list_context),
+        )
+        .route(
+            "/v1/task-groups/{id}/context/{key}",
+            get(routes::shared_context::get_context)
+                .put(routes::shared_context::set_context)
+                .delete(routes::shared_context::delete_context),
+        )
+        .route(
             "/v1/webhooks/github/issues",
             post(routes::webhooks::github_issue_webhook),
         )

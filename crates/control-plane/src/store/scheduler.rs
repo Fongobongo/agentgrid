@@ -58,7 +58,7 @@ impl Store {
         }
         let mut tx = self.write_txn().await?;
         let cands = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC",
         )
@@ -107,6 +107,7 @@ impl Store {
             let created_at: String = c.try_get("created_at")?;
             let security_profile: Option<String> = c.try_get("security_profile").ok().flatten();
             let network_mode: Option<String> = c.try_get("network_mode").ok().flatten();
+            let group_id: Option<String> = c.try_get("group_id").ok().flatten();
 
             // Resolve repository git info (absent for plain-dir tasks).
             let repo = sqlx::query(
@@ -190,6 +191,7 @@ impl Store {
                     provenance: None,
                     upstream_commits: Vec::new(),
                     upstream_task_ids: Vec::new(),
+                    group_id,
                 },
                 created_at,
             });

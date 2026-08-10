@@ -84,6 +84,8 @@ enum AgCommand {
     Tag(TagArgs),
     /// Plan 1.4: GitHub issues as tasks (#2b) via the `gh` CLI.
     Issue(IssueArgs),
+    /// Plan 1.12: read/write shared context notes for a task group (#7).
+    Ctx(CtxArgs),
 }
 
 #[derive(Args)]
@@ -130,6 +132,29 @@ struct IssueArgs {
     command: IssueSub,
 }
 
+/// Plan 1.12 (#7): shared context notes for a task group.
+#[derive(Args)]
+struct CtxArgs {
+    #[command(subcommand)]
+    command: CtxSub,
+}
+
+#[derive(Subcommand)]
+enum CtxSub {
+    /// Set (or overwrite) one note: `ag ctx set <group> <key> <value>`.
+    Set {
+        group: String,
+        key: String,
+        value: String,
+    },
+    /// Read one note's value: `ag ctx get <group> <key>`.
+    Get { group: String, key: String },
+    /// List all notes for a group.
+    Ls { group: String },
+    /// Delete one note.
+    Del { group: String, key: String },
+}
+
 #[derive(Subcommand)]
 enum IssueSub {
     /// Create a task from a GitHub issue (`gh issue view <N>` under the hood).
@@ -173,6 +198,10 @@ struct RunArgs {
     /// it is used. Setting this ignores `prompt`/`adapter`.
     #[arg(long, conflicts_with = "prompt")]
     workflow: Option<String>,
+    /// Plan 1.12 (#7): shared-context task group id — parallel runs in the
+    /// same group share `ag ctx` notes and get `AG_GROUP_ID` on the node.
+    #[arg(long)]
+    group: Option<String>,
 }
 
 #[derive(Args)]
@@ -653,6 +682,7 @@ async fn main() -> Result<()> {
         AgCommand::Resume(a) => cmd_resume(&client, &base, a).await,
         AgCommand::Tag(a) => cmd_tag(&client, &base, a, cli.json).await,
         AgCommand::Issue(a) => cmd_issue(&client, &base, a).await,
+        AgCommand::Ctx(a) => cmd_ctx(&client, &base, a).await,
     }
 }
 
@@ -779,6 +809,7 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         parent_acp_session_id: att.parent_acp_session_id,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -928,6 +959,7 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -968,6 +1000,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: a.group,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -979,6 +1012,69 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
     println!("task {} created (status: {})", task.id, task.status);
     println!("{}", task.id);
     Ok(())
+}
+
+async fn cmd_ctx(client: &reqwest::Client, base: &str, a: CtxArgs) -> Result<()> {
+    match a.command {
+        CtxSub::Set { group, key, value } => {
+            let resp = client
+                .put(format!("{base}/v1/task-groups/{group}/context/{key}"))
+                .json(&serde_json::json!({ "value": value }))
+                .send()
+                .await
+                .context("set context request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("set context failed ({})", resp.status());
+            }
+            Ok(())
+        }
+        CtxSub::Get { group, key } => {
+            let resp = client
+                .get(format!("{base}/v1/task-groups/{group}/context/{key}"))
+                .send()
+                .await
+                .context("get context request failed")?;
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                anyhow::bail!("context key {key} not set for group {group}");
+            }
+            if !resp.status().is_success() {
+                anyhow::bail!("get context failed ({})", resp.status());
+            }
+            let value: String = resp.json().await.context("parse context response")?;
+            println!("{value}");
+            Ok(())
+        }
+        CtxSub::Ls { group } => {
+            let resp = client
+                .get(format!("{base}/v1/task-groups/{group}/context"))
+                .send()
+                .await
+                .context("list context request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("list context failed ({})", resp.status());
+            }
+            let entries: Vec<agentgrid_common::SharedContextEntry> =
+                resp.json().await.context("parse context response")?;
+            if entries.is_empty() {
+                println!("(no context for group {group})");
+            }
+            for e in &entries {
+                println!("{} = {}", e.key, e.value);
+            }
+            Ok(())
+        }
+        CtxSub::Del { group, key } => {
+            let resp = client
+                .delete(format!("{base}/v1/task-groups/{group}/context/{key}"))
+                .send()
+                .await
+                .context("delete context request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("delete context failed ({})", resp.status());
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_show(client: &reqwest::Client, base: &str, a: ShowArgs, json: bool) -> Result<()> {

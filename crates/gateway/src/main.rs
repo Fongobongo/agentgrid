@@ -208,6 +208,7 @@ impl<'a> ControlPlane<'a> {
             parent_acp_session_id: None,
             security_profile: None,
             network_mode: None,
+            group_id: None,
         };
         let r = self.post("/v1/tasks").json(&req).send().await?;
         let status = r.status();

@@ -188,6 +188,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -447,6 +448,7 @@ async fn validation_failure_must_not_report_success() {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -562,6 +564,7 @@ async fn cancel_queued_marks_cancelled() {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -1007,6 +1010,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .unwrap(),
             None,
@@ -1074,6 +1078,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .unwrap(),
             None,
@@ -1102,6 +1107,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .unwrap(),
             Some(&token),
@@ -1123,6 +1129,7 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -1219,6 +1226,7 @@ async fn login_sets_cookie_and_cookie_auths() {
                         parent_acp_session_id: None,
                         security_profile: None,
                         network_mode: None,
+                        group_id: None,
                     })
                     .unwrap(),
                 ))
@@ -1336,6 +1344,7 @@ async fn oversized_prompt_returns_413() {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -1362,6 +1371,7 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -2079,6 +2089,7 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let created = app
         .clone()
@@ -3730,6 +3741,7 @@ async fn artifact_get_rejects_traversal_name() {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -4570,6 +4582,7 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -6155,6 +6168,7 @@ async fn list_tasks_filters_by_status_repository_node() {
             parent_acp_session_id: None,
             security_profile: None,
             network_mode: None,
+            group_id: None,
         })
         .unwrap()
     };
@@ -6891,6 +6905,7 @@ async fn list_tasks_keyset_pagination() {
             parent_acp_session_id: None,
             security_profile: None,
             network_mode: None,
+            group_id: None,
         })
         .unwrap()
     };
@@ -7051,6 +7066,7 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             parent_acp_session_id: None,
             security_profile: None,
             network_mode: None,
+            group_id: None,
         })
         .unwrap();
         let r = app
@@ -7231,6 +7247,7 @@ async fn approvals_keyset_pagination() {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let created = app
         .clone()
@@ -7418,6 +7435,7 @@ async fn strict_profile_refuses_wrapper_adapter() {
         parent_acp_session_id: None,
         security_profile: Some("default-strict".into()),
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -7727,6 +7745,7 @@ async fn search_finds_task_by_prompt_word() {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -7785,6 +7804,7 @@ async fn attempt_detail_and_tag_crud() {
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     let resp = app
         .clone()
@@ -7866,4 +7886,129 @@ async fn attempt_detail_and_tag_crud() {
     let tags: Vec<String> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert!(tags.is_empty());
+}
+
+/// Plan 1.12 (#7): two tasks in the same group share `shared_context` notes
+/// over the HTTP API — one writes, the other (later) reads. A different group
+/// stays isolated.
+#[tokio::test]
+async fn shared_context_api_two_tasks_same_group_share_notes() {
+    use agentgrid_common::CreateTaskRequest;
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+
+    // Task A (group grp-api) writes a note for its group.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&CreateTaskRequest {
+                prompt: "attempt one".into(),
+                repository: "*".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+                group_id: Some("grp-api".into()),
+            })
+            .unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "create task: {:?}",
+        resp.status()
+    );
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let t1: TaskView = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        t1.group_id.as_deref(),
+        Some("grp-api"),
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/task-groups/grp-api/context/module")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({ "value": "auth.rs" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "put context: {:?}",
+        resp.status()
+    );
+
+    // Task B (same group) reads the note back.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/task-groups/grp-api/context/module", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let value: String =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(value, "auth.rs");
+
+    // Listing shows the note with its key.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/task-groups/grp-api/context", &token))
+        .await
+        .unwrap();
+    let entries: Vec<agentgrid_common::SharedContextEntry> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, "module");
+    assert_eq!(entries[0].value, "auth.rs");
+
+    // A different group is isolated: key absent.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/task-groups/grp-other/context/module", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Delete removes it.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/task-groups/grp-api/context/module")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(""))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/task-groups/grp-api/context", &token))
+        .await
+        .unwrap();
+    let entries: Vec<agentgrid_common::SharedContextEntry> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(entries.is_empty());
 }

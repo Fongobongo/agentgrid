@@ -165,6 +165,11 @@ async fn drive_acp_session(
             rate_limited: false,
         });
     }
+    // Plan 1.12 (#7): shared-context group id — the agent gets AG_GROUP_ID so
+    // it can `ag ctx set/get` against its group's shared notes.
+    if let Some(gid) = &assignment.group_id {
+        cmd.env("AG_GROUP_ID", gid);
+    }
     // Stage 13 capability check: the profile's declared adapter_version must
     // be compatible with the installed adapter (cached probe from startup).
     if let Some(code) = check_adapter_compatibility(
@@ -1168,6 +1173,7 @@ mod tests {
             provenance: None,
             upstream_commits: vec![],
             upstream_task_ids: vec![],
+            group_id: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1301,6 +1307,7 @@ mod tests {
             provenance: None,
             upstream_commits: vec![],
             upstream_task_ids: vec![],
+            group_id: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1448,6 +1455,7 @@ mod tests {
             provenance: None,
             upstream_commits: vec![],
             upstream_task_ids: vec![],
+            group_id: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1564,6 +1572,7 @@ mod tests {
             provenance: None,
             upstream_commits: vec![],
             upstream_task_ids: vec![],
+            group_id: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1741,6 +1750,7 @@ mod tests {
                 provenance: None,
                 upstream_commits: vec![],
                 upstream_task_ids: vec![],
+                group_id: None,
             };
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),

@@ -298,6 +298,11 @@ pub struct CreateTaskRequest {
     /// assigned to nodes with structured permission interception (not wrapper).
     #[serde(default)]
     pub security_profile: Option<String>,
+    /// Plan 1.12 (#7): optional shared-context task group id — parallel
+    /// attempts in the same group share `shared_context` notes and get the
+    /// `AG_GROUP_ID` env var on the node.
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -337,6 +342,11 @@ pub struct TaskView {
     /// see which policy the agent ran under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_profile: Option<String>,
+    /// Plan 1.12 (#7): shared-context task group id, if the creator set one.
+    /// Parallel attempts in the same group share `shared_context` notes and
+    /// get the `AG_GROUP_ID` env var on the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 /// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
@@ -509,6 +519,10 @@ pub struct Assignment {
     /// without a shared remote). Empty for non-integrator steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upstream_task_ids: Vec<String>,
+    /// Plan 1.12 (#7): shared-context task group id (from the task). When
+    /// set, the node forwards it to the agent as `AG_GROUP_ID`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -955,6 +969,14 @@ pub struct ArtifactMeta {
     pub sha256: Option<String>,
 }
 
+/// Plan 1.12 (#7): one shared-context note for a task group (flat key→value).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedContextEntry {
+    pub key: String,
+    pub value: String,
+    pub updated_at: String,
+}
+
 /// Hardening P0 item 3: the upload response carries back the artifact name,
 /// stored size, media type and the server-computed SHA-256 so a client can
 /// verify integrity without a separate GET. (Supersedes the old bare `200`.)
@@ -1124,6 +1146,7 @@ mod tests {
             parent_acp_session_id: None,
             security_profile: None,
             network_mode: None,
+            group_id: None,
         };
         assert_eq!(round_trip(&req), req);
 
@@ -1162,6 +1185,7 @@ mod tests {
                 provenance: None,
                 upstream_commits: vec![],
                 upstream_task_ids: vec![],
+                group_id: None,
             }),
             assignments: vec![],
         };

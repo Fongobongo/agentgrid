@@ -229,6 +229,7 @@ pub async fn rework_attempt(
         parent_acp_session_id: None,
         security_profile: None,
         network_mode: None,
+        group_id: None,
     };
     match state.store.create_task(&req).await {
         Ok(view) => Ok((

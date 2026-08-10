@@ -29,6 +29,7 @@ mod nodes;
 mod profiles;
 mod repositories;
 mod scheduler;
+mod shared_context;
 mod skills;
 mod tasks;
 mod users;
@@ -687,6 +688,7 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         parent_acp_session_id: r.try_get("parent_acp_session_id").unwrap_or_default(),
         network_mode: r.try_get("network_mode").unwrap_or_default(),
         security_profile,
+        group_id: r.try_get("group_id").unwrap_or_default(),
     }
 }
 
@@ -2054,6 +2056,7 @@ mod workflow_tests {
             parent_acp_session_id: None,
             security_profile: None,
             network_mode: None,
+            group_id: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -2100,6 +2103,7 @@ mod workflow_tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();
@@ -2232,6 +2236,7 @@ mod workflow_tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();
@@ -2283,6 +2288,7 @@ mod workflow_tests {
                 parent_acp_session_id: parent,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();
@@ -2413,6 +2419,7 @@ mod workflow_tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();
@@ -2521,6 +2528,7 @@ mod workflow_tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();
@@ -2702,10 +2710,94 @@ mod workflow_tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();
         assert!(s.list_artifacts(&other.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shared_context_round_trip_and_group_isolation() {
+        // Plan 1.12 (#7): two attempts of one task group share a note via
+        // set/get/list; a different group cannot see it.
+        let s = temp_store().await;
+        s.set_shared_context("grp-a", "module", "auth.rs")
+            .await
+            .unwrap();
+        s.set_shared_context("grp-a", "convention", "tabs")
+            .await
+            .unwrap();
+
+        // Second attempt (same group) reads what the first wrote.
+        let v = s.get_shared_context("grp-a", "module").await.unwrap();
+        assert_eq!(v.as_deref(), Some("auth.rs"));
+
+        // List returns both, ordered by key.
+        let all = s.list_shared_context("grp-a").await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].key, "convention");
+        assert_eq!(all[1].key, "module");
+
+        // A different group starts empty (isolation).
+        assert!(s.list_shared_context("grp-b").await.unwrap().is_empty());
+        assert!(s
+            .get_shared_context("grp-b", "module")
+            .await
+            .unwrap()
+            .is_none());
+
+        // Overwrite upserts; delete removes.
+        s.set_shared_context("grp-a", "module", "auth2.rs")
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_shared_context("grp-a", "module")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("auth2.rs")
+        );
+        s.delete_shared_context("grp-a", "module").await.unwrap();
+        assert!(s
+            .get_shared_context("grp-a", "module")
+            .await
+            .unwrap()
+            .is_none());
+
+        // Invalid keys / groups are rejected, not silently stored.
+        assert!(s
+            .set_shared_context("grp-a", "bad key!", "x")
+            .await
+            .is_err());
+        assert!(s.set_shared_context("../esc", "k", "x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn task_group_id_persists_through_create_and_assignment() {
+        // Plan 1.12 (#7): group_id set at task creation survives the create
+        // view and the fresh-read path.
+        let s = temp_store().await;
+        let task = s
+            .create_task(&agentgrid_common::CreateTaskRequest {
+                prompt: "do x".into(),
+                repository: "*".into(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+                group_id: Some("grp-x".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(task.group_id.as_deref(), Some("grp-x"));
+
+        let view = s.show_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(view.group_id.as_deref(), Some("grp-x"));
     }
 
     #[tokio::test]
@@ -3195,6 +3287,7 @@ mod workflow_tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();
@@ -3238,6 +3331,7 @@ mod workflow_tests {
                 parent_acp_session_id: None,
                 security_profile: None,
                 network_mode: None,
+                group_id: None,
             })
             .await
             .unwrap();

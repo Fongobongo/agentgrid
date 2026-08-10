@@ -10,6 +10,7 @@ pub mod maintenance;
 pub mod nodes;
 pub mod profiles;
 pub mod repositories;
+pub mod shared_context;
 pub mod tasks;
 pub mod users;
 pub mod webhooks;

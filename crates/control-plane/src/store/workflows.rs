@@ -1441,6 +1441,7 @@ impl Store {
                                             parent_acp_session_id: None,
                                             security_profile: None,
                                             network_mode: None,
+                                            group_id: None,
                                         };
                                         let tv = match self.create_task(&req).await {
                                             Ok(tv) => tv,
@@ -1550,6 +1551,7 @@ impl Store {
                                                     parent_acp_session_id: None,
                                                     security_profile: None,
                                                     network_mode: None,
+                                                    group_id: None,
                                                 };
                                                 match self.create_task(&req).await {
                                                     Ok(tv) => {
@@ -1682,6 +1684,7 @@ impl Store {
                             parent_acp_session_id: None,
                             security_profile: None,
                             network_mode: None,
+                            group_id: None,
                         };
                         // Claim the pending→running transition before creating
                         // the task: the background ticker and the
