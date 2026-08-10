@@ -86,6 +86,8 @@ enum AgCommand {
     Setup(SetupArgs),
     /// Plan 2.7 (#25): diagnostic status (server, credentials, endpoints).
     Doctor,
+    /// Plan 2.8 (#19): per-repo learnings (`ag learn list/add/approve/remove`).
+    Learn(LearnArgs),
     /// Plan 1.3: resume a past attempt as a new attempt with inherited context.
     Resume(ResumeArgs),
     /// Plan 1.3: add/remove/list task tags.
@@ -220,6 +222,42 @@ struct SetupArgs {
     /// task is also skipped unless `--smoke` is given explicitly.
     #[arg(long = "no-smoke")]
     no_smoke: bool,
+}
+
+/// Plan 2.8 (#19): per-repo learning management.
+#[derive(Args)]
+struct LearnArgs {
+    #[command(subcommand)]
+    action: LearnAction,
+}
+
+#[derive(Subcommand)]
+enum LearnAction {
+    /// `ag learn list <repo> [--approved-only]`
+    List {
+        repo: String,
+        #[arg(long = "approved-only", default_value_t = false)]
+        approved_only: bool,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// `ag learn add <repo> "<statement>" [--confidence 0.7] [--from-attempt <id>]`
+    Add {
+        repo: String,
+        statement: String,
+        #[arg(long, default_value_t = 0.5)]
+        confidence: f64,
+        #[arg(long = "from-attempt")]
+        source_attempt_id: Option<String>,
+    },
+    /// `ag learn approve <id>` or `ag learn approve <id> --unapprove`
+    Approve {
+        id: String,
+        #[arg(long = "unapprove", default_value_t = false)]
+        unapprove: bool,
+    },
+    /// `ag learn remove <id>`
+    Remove { id: String },
 }
 
 /// Plan 2.1 (#18): org-agent management.
@@ -799,6 +837,7 @@ async fn main() -> Result<()> {
         AgCommand::Autopilot(a) => cmd_autopilot(&client, &base, a).await,
         AgCommand::Setup(a) => cmd_setup(&client, &base, a).await,
         AgCommand::Doctor => cmd_doctor(&client, &base, cli.json).await,
+        AgCommand::Learn(a) => cmd_learn(&client, &base, a).await,
     }
 }
 
@@ -1355,6 +1394,101 @@ async fn cmd_doctor(client: &reqwest::Client, base: &str, json: bool) -> Result<
         anyhow::bail!("diagnostic failed");
     }
     Ok(())
+}
+
+/// Plan 2.8 (#19): repo learnings CLI.
+async fn cmd_learn(client: &reqwest::Client, base: &str, a: LearnArgs) -> Result<()> {
+    match a.action {
+        LearnAction::List {
+            repo,
+            approved_only,
+            limit,
+        } => {
+            let url = if approved_only {
+                format!("{base}/v1/repos/{repo}/learnings?approved=true&limit={limit}")
+            } else {
+                format!("{base}/v1/repos/{repo}/learnings?limit={limit}")
+            };
+            let r = client.get(&url).send().await.context("list learnings")?;
+            if !r.status().is_success() {
+                anyhow::bail!("list learnings failed ({})", r.status());
+            }
+            let rows: Vec<agentgrid_common::RepoLearning> =
+                r.json().await.context("parse learnings response")?;
+            if rows.is_empty() {
+                println!("(no learnings for repo {repo})");
+                return Ok(());
+            }
+            for r in rows {
+                let flag = if r.approved { "A" } else { " " };
+                let stop = r.source_attempt_id.as_deref().unwrap_or("");
+                println!(
+                    "{} {} [{:.2}] {} {}",
+                    flag,
+                    r.id,
+                    r.confidence,
+                    &stop[..8.min(stop.len())],
+                    r.statement
+                );
+            }
+            Ok(())
+        }
+        LearnAction::Add {
+            repo,
+            statement,
+            confidence,
+            source_attempt_id,
+        } => {
+            let body = serde_json::json!({
+                "repository": repo, "statement": statement, "confidence": confidence,
+                "source_attempt_id": source_attempt_id,
+            });
+            let r = client
+                .post(format!("{base}/v1/repos/{repo}/learnings"))
+                .json(&body)
+                .send()
+                .await
+                .context("add learning")?;
+            if !r.status().is_success() {
+                anyhow::bail!("add learning failed ({})", r.status());
+            }
+            let row: agentgrid_common::RepoLearning = r.json().await.context("parse")?;
+            println!("added learning {} (pending approval)", row.id);
+            Ok(())
+        }
+        LearnAction::Approve { id, unapprove } => {
+            let body = serde_json::json!({ "approved": !unapprove });
+            let r = client
+                .post(format!("{base}/v1/learnings/{id}/approve"))
+                .json(&body)
+                .send()
+                .await
+                .context("approve learning")?;
+            match r.status() {
+                s if s.is_success() => {
+                    println!("learning {id} approved={}", !unapprove);
+                    Ok(())
+                }
+                reqwest::StatusCode::NOT_FOUND => anyhow::bail!("learning {id} not found"),
+                s => anyhow::bail!("approve learning failed ({s})"),
+            }
+        }
+        LearnAction::Remove { id } => {
+            let r = client
+                .delete(format!("{base}/v1/learnings/{id}"))
+                .send()
+                .await
+                .context("remove learning")?;
+            match r.status() {
+                s if s.is_success() => {
+                    println!("learning {id} removed");
+                    Ok(())
+                }
+                reqwest::StatusCode::NOT_FOUND => anyhow::bail!("learning {id} not found"),
+                s => anyhow::bail!("remove learning failed ({s})"),
+            }
+        }
+    }
 }
 
 /// Plan 2.1 (#18): org agents via the control-plane API.

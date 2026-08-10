@@ -262,6 +262,19 @@ impl Store {
                 upstream_refs.into_iter().unzip();
             assignment.upstream_commits = upstream_commits;
             assignment.upstream_task_ids = upstream_task_ids;
+            // Plan 2.8 (#19): prepend the top approved repo-learnings to the
+            // attempt prompt. Small cap keeps the prompt from drowning; all
+            // rows are `approved = 1` because the human-review gate lives in
+            // the store query.
+            if let Ok(learnings) = self.top_approved_for_repo(&assignment.repository, 5).await {
+                if !learnings.is_empty() {
+                    let mut block = String::from("\n\n## Repository instincts (human-approved)\n");
+                    for l in &learnings {
+                        block.push_str(&format!("- (conf {:.2}) {}\n", l.confidence, l.statement));
+                    }
+                    assignment.prompt.push_str(&block);
+                }
+            }
             out.push(assignment);
         }
         Ok(out)

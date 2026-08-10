@@ -25,6 +25,7 @@ mod artifacts;
 mod attempts;
 mod conversations;
 mod events;
+mod learnings;
 mod maintenance;
 mod nodes;
 mod profiles;

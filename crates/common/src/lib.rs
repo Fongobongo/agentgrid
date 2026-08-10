@@ -1097,6 +1097,36 @@ impl<T> ListResponse<T> {
 /// Plan 1.6 (#3b): an inline annotation a reviewer left on an attempt's
 /// diff/plan. `file` is the file path ("" for a whole-patch or plan-level
 /// comment); `line_start`/`line_end` are 1-based and inclusibe, `None` for a
+/// Plan 2.8 (#19): one repo-level learning row ("instinct"). Rows land as
+/// `approved = 0` when nobody has verified them; only `approved = 1` rows
+/// are ever injected into an attempt prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoLearning {
+    pub id: String,
+    pub repository: String,
+    pub statement: String,
+    pub confidence: f64,
+    pub source_attempt_id: Option<String>,
+    pub approved: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Plan 2.8 (#19): `ag learn add` payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddLearningRequest {
+    pub repository: String,
+    pub statement: String,
+    #[serde(default = "default_learning_confidence")]
+    pub confidence: f64,
+    #[serde(default)]
+    pub source_attempt_id: Option<String>,
+}
+
+fn default_learning_confidence() -> f64 {
+    0.5
+}
+
 /// whole-file comment. Aggregated into a rework task prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchAnnotation {

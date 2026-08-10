@@ -8277,3 +8277,79 @@ async fn self_healing_eval_case_stamped_and_shipped_on_retry() {
         a2.eval_cases
     );
 }
+
+/// Plan 2.8 (#19): add → list → approve → scheduler injects learning;
+/// reject unapproved injection.
+#[tokio::test]
+async fn repo_learnings_top_approved_reaches_prompt() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+
+    // Two learnings, one approved, one not.
+    let pending_id = state
+        .store
+        .add_learning("demo", "agents prefer yaml examples over json", 0.6, None)
+        .await
+        .unwrap();
+    let _approved_id = state
+        .store
+        .add_learning("demo", "always run cargo fmt before commit", 0.9, None)
+        .await
+        .unwrap();
+    let approved_view: Vec<_> = state.store.list_learnings("demo", true, 5).await.unwrap();
+    assert_eq!(
+        approved_view.len(),
+        0,
+        "approvals gate: pending rows stay out"
+    );
+
+    state
+        .store
+        .approve_learning(&_approved_id, true)
+        .await
+        .unwrap();
+
+    // Scheduler must inject only the approved statement.
+    let app = build_router(state.clone());
+    let (node_id, _cred) = enroll(&app, "n-learn", vec!["mock".into()], vec!["demo".into()]).await;
+    let task_id = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "Say OK".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let assignment = state
+        .store
+        .try_assign(&node_id)
+        .await
+        .unwrap()
+        .expect("assign");
+    assert!(
+        assignment
+            .prompt
+            .contains("always run cargo fmt before commit"),
+        "approved learning must reach prompt, got: {}",
+        assignment.prompt
+    );
+    assert!(
+        !assignment
+            .prompt
+            .contains("agents prefer yaml examples over json"),
+        "unapproved learning must NOT reach prompt"
+    );
+    drop(pending_id);
+    drop(task_id);
+}

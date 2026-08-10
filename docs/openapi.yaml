@@ -636,6 +636,69 @@ paths:
   /v1/skills/{name}:
     get:
       summary: Fetch a single skill's trust state
+  /v1/repos/{repo}/learnings:
+    get:
+      summary: List repo learnings (Plan 2.8 #19)
+      description: |
+        Returns every learning for the repository, ordered by confidence
+        DESC, updated_at DESC. `?approved=true|false` filters by the review
+        flag; `?limit=N` caps the page (default 100).
+      parameters:
+        - name: repo
+          in: path
+          required: true
+          schema: { type: string }
+        - name: approved
+          in: query
+          schema: { type: boolean }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100 }
+    post:
+      summary: Add a repo learning (starts pending approval)
+      parameters:
+        - name: repo
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repository, statement]
+              properties:
+                repository: { type: string }
+                statement: { type: string }
+                confidence: { type: number, default: 0.5, minimum: 0, maximum: 1 }
+                source_attempt_id: { type: string, nullable: true }
+  /v1/learnings/{id}/approve:
+    post:
+      summary: Approve (or demote) a repo learning
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                approved: { type: boolean, default: true }
+  /v1/learnings/{id}:
+    delete:
+      summary: Remove a repo learning
+      responses:
+        '204': { description: Removed }
+        '404': { description: Not found }
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
   /v1/skills/{name}/trust:
     post:
       summary: Trust a skill

@@ -357,6 +357,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .delete(routes::shared_context::delete_context),
         )
         .route(
+            "/v1/repos/{repo}/learnings",
+            get(routes::learnings::list_learnings).post(routes::learnings::add_learning),
+        )
+        .route(
+            "/v1/learnings/{id}/approve",
+            post(routes::learnings::approve_learning),
+        )
+        .route(
+            "/v1/learnings/{id}",
+            axum::routing::delete(routes::learnings::delete_learning),
+        )
+        .route(
             "/v1/agents",
             post(routes::agents::create_agent).get(routes::agents::list_agents),
         )

@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.8)
+
+- **Repo learnings (#19):** short factual statements per repository
+  persisted to `repo_learnings`. New rows start `approved = 0`. The
+  scheduler injects the top-5 approved rows into every attempt prompt for
+  the repo. Operators manage them via `ag learn list/add/approve/remove`
+  (the CLI hits `POST/GET /v1/repos/{repo}/learnings`,
+  `POST /v1/learnings/{id}/approve`, `DELETE /v1/learnings/{id}`).
+
 ### Added (plan 2.7)
 
 - **`ag setup [--accept-defaults]`** logs in with the given (or default
