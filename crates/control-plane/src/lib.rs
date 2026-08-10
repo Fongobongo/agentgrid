@@ -357,6 +357,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .delete(routes::shared_context::delete_context),
         )
         .route(
+            "/v1/agents",
+            post(routes::agents::create_agent).get(routes::agents::list_agents),
+        )
+        .route(
+            "/v1/agents/{id}/actions",
+            get(routes::agents::agent_actions),
+        )
+        .route(
+            "/v1/agents/{id}/tasks",
+            post(routes::agents::create_agent_task),
+        )
+        .route(
             "/v1/webhooks/github/issues",
             post(routes::webhooks::github_issue_webhook),
         )
@@ -633,6 +645,7 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
     // Stage 13 / line 487: re-advance in-flight workflow runs so a CP restart
     // does not strand them; idempotent, best-effort per run.
     state.store.start_workflow_ticker();
+    state.store.start_agent_heartbeat_ticker();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let app = build_router(state.clone());
     match (

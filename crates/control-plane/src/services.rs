@@ -577,6 +577,7 @@ mod tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -643,6 +644,7 @@ mod tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();

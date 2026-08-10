@@ -86,6 +86,8 @@ enum AgCommand {
     Issue(IssueArgs),
     /// Plan 1.12: read/write shared context notes for a task group (#7).
     Ctx(CtxArgs),
+    /// Plan 2.1: manage org agents (identity, role, budget, heartbeats) (#18).
+    Agent(AgentArgs),
 }
 
 #[derive(Args)]
@@ -153,6 +155,44 @@ enum CtxSub {
     Ls { group: String },
     /// Delete one note.
     Del { group: String, key: String },
+}
+
+/// Plan 2.1 (#18): org-agent management.
+#[derive(Args)]
+struct AgentArgs {
+    #[command(subcommand)]
+    command: AgentSub,
+}
+
+#[derive(Subcommand)]
+enum AgentSub {
+    /// Register a long-lived org agent: `ag agent add <name> [--role R] [--prompt P] [--skills s1,s2] [--max-tasks N] [--budget-usd F] [--heartbeat SECS]`.
+    Add {
+        /// Unique path-safe name (used as the agent id key for references).
+        name: String,
+        /// Org role tag (display/org-chart only for now).
+        #[arg(long)]
+        role: Option<String>,
+        /// Agent prompt template (used for heartbeat-spawned tasks; `{objective}` is not substituted yet).
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Comma-separated skill names to attach.
+        #[arg(long)]
+        skills: Option<String>,
+        /// Hard-stop: max tasks this agent may spawn (NULL = unlimited).
+        #[arg(long)]
+        max_tasks: Option<i64>,
+        /// Display budget in USD (no enforcement yet; max_tasks is the hard stop).
+        #[arg(long)]
+        budget_usd: Option<f64>,
+        /// Heartbeat interval in seconds: spawn the prompt task on this cadence (NULL = no heartbeat).
+        #[arg(long)]
+        heartbeat: Option<i64>,
+    },
+    /// List org agents with current spend.
+    List,
+    /// Show one agent's immutable action trail.
+    Actions { agent_id: String },
 }
 
 #[derive(Subcommand)]
@@ -683,6 +723,7 @@ async fn main() -> Result<()> {
         AgCommand::Tag(a) => cmd_tag(&client, &base, a, cli.json).await,
         AgCommand::Issue(a) => cmd_issue(&client, &base, a).await,
         AgCommand::Ctx(a) => cmd_ctx(&client, &base, a).await,
+        AgCommand::Agent(a) => cmd_agent(&client, &base, a).await,
     }
 }
 
@@ -810,6 +851,7 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -960,6 +1002,7 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1001,6 +1044,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         security_profile: None,
         network_mode: None,
         group_id: a.group,
+        agent_id: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1071,6 +1115,95 @@ async fn cmd_ctx(client: &reqwest::Client, base: &str, a: CtxArgs) -> Result<()>
                 .context("delete context request failed")?;
             if !resp.status().is_success() {
                 anyhow::bail!("delete context failed ({})", resp.status());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Plan 2.1 (#18): org agents via the control-plane API.
+async fn cmd_agent(client: &reqwest::Client, base: &str, a: AgentArgs) -> Result<()> {
+    match a.command {
+        AgentSub::Add {
+            name,
+            role,
+            prompt,
+            skills,
+            max_tasks,
+            budget_usd,
+            heartbeat,
+        } => {
+            let body = serde_json::json!({
+                "name": name,
+                "role": role.unwrap_or_else(|| "worker".into()),
+                "prompt": prompt.unwrap_or_default(),
+                "skills": skills
+                    .map(|s| s.split(',').map(|x| x.trim().to_string()).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                "budget_usd": budget_usd.unwrap_or(0.0),
+                "max_tasks": max_tasks,
+                "heartbeat_interval_secs": heartbeat,
+            });
+            let resp = client
+                .post(format!("{base}/v1/agents"))
+                .json(&body)
+                .send()
+                .await
+                .context("create agent request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("create agent failed ({})", resp.status());
+            }
+            let agent: agentgrid_common::Agent =
+                resp.json().await.context("parse agent response")?;
+            println!("agent {} created (id {})", agent.name, agent.id);
+            Ok(())
+        }
+        AgentSub::List => {
+            let resp = client
+                .get(format!("{base}/v1/agents"))
+                .send()
+                .await
+                .context("list agents request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("list agents failed ({})", resp.status());
+            }
+            let agents: Vec<agentgrid_common::Agent> =
+                resp.json().await.context("parse agents response")?;
+            if agents.is_empty() {
+                println!("(no agents registered)");
+            }
+            for a in &agents {
+                let hb = a
+                    .heartbeat_interval_secs
+                    .map(|s| format!("{s}s"))
+                    .unwrap_or_else(|| "-".into());
+                let spend = match a.max_tasks {
+                    Some(max) => format!("{}/{max}", a.tasks_spent),
+                    None => format!("{}", a.tasks_spent),
+                };
+                println!(
+                    "{}  role={}  budget=${:.2}  tasks={spend}  heartbeat={hb}  (id {})",
+                    a.name, a.role, a.budget_usd, a.id
+                );
+            }
+            Ok(())
+        }
+        AgentSub::Actions { agent_id } => {
+            let resp = client
+                .get(format!("{base}/v1/agents/{agent_id}/actions"))
+                .send()
+                .await
+                .context("agent actions request failed")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("agent actions failed ({})", resp.status());
+            }
+            let actions: Vec<agentgrid_common::AgentAction> =
+                resp.json().await.context("parse actions response")?;
+            if actions.is_empty() {
+                println!("(no actions recorded)");
+            }
+            for x in &actions {
+                println!("{} [{}] {}", x.created_at, x.action, x.detail);
             }
             Ok(())
         }

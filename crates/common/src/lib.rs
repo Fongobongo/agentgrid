@@ -303,6 +303,10 @@ pub struct CreateTaskRequest {
     /// `AG_GROUP_ID` env var on the node.
     #[serde(default)]
     pub group_id: Option<String>,
+    /// Plan 2.1 (#18): optional org-agent attribution. When set, the task
+    /// counts against the agent's budget (hard-stop when exhausted).
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,6 +351,9 @@ pub struct TaskView {
     /// get the `AG_GROUP_ID` env var on the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// Plan 2.1 (#18): org-agent attribution, if the task is agent-managed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 /// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
@@ -977,6 +984,62 @@ pub struct SharedContextEntry {
     pub updated_at: String,
 }
 
+/// Plan 2.1 (#18): a long-lived org agent — identity, role, prompt template,
+/// attached skills, and a budget (max tasks + optional USD display).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Agent {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub budget_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tasks: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_interval_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<String>,
+    pub created_at: String,
+    /// Task count so far (computed at read time). NULL/0 when unmanaged.
+    #[serde(default)]
+    pub tasks_spent: i64,
+}
+
+/// Plan 2.1 (#18): create-an-agent request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentCreate {
+    pub name: String,
+    #[serde(default = "default_agent_role")]
+    pub role: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub budget_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tasks: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_interval_secs: Option<i64>,
+}
+
+fn default_agent_role() -> String {
+    "worker".into()
+}
+
+/// Plan 2.1 (#18): one immutable row of the agent audit trail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAction {
+    pub id: String,
+    pub agent_id: String,
+    pub action: String,
+    pub detail: String,
+    pub created_at: String,
+}
+
 /// Hardening P0 item 3: the upload response carries back the artifact name,
 /// stored size, media type and the server-computed SHA-256 so a client can
 /// verify integrity without a separate GET. (Supersedes the old bare `200`.)
@@ -1147,6 +1210,7 @@ mod tests {
             security_profile: None,
             network_mode: None,
             group_id: None,
+            agent_id: None,
         };
         assert_eq!(round_trip(&req), req);
 

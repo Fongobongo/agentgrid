@@ -183,6 +183,56 @@ impl Store {
         });
     }
 
+    /// Plan 2.1 (#18): background agent-heartbeat ticker — every interval,
+    /// spawn the scheduled task (agent's `prompt`) for each agent whose
+    /// heartbeat is due. Budget enforcement runs inside
+    /// `create_agent_task` (a `budget_exceeded` trail row is written and the
+    /// fire is skipped); the heartbeat timestamp advances regardless so an
+    /// exhausted agent stops being retried each tick. Best-effort: one bad
+    /// agent does not stall the loop.
+    pub fn start_agent_heartbeat_ticker(&self) {
+        let store = self.clone();
+        let secs = std::env::var("AGENTGRID_AGENT_TICK_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5);
+        tokio::spawn(async move {
+            loop {
+                let now_unix = chrono::Utc::now().timestamp();
+                let due = match store.due_agents(now_unix).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!("agent heartbeat ticker listing due agents failed: {e}");
+                        Vec::new()
+                    }
+                };
+                for a in due {
+                    let req = agentgrid_common::CreateTaskRequest {
+                        repository: "*".into(),
+                        prompt: a.prompt.clone(),
+                        adapter: "mock".into(),
+                        requested_node_id: None,
+                        timeout_secs: None,
+                        base_commit: None,
+                        parent_acp_session_id: None,
+                        network_mode: None,
+                        validation_command: None,
+                        security_profile: None,
+                        group_id: None,
+                        agent_id: Some(a.id.clone()),
+                    };
+                    if let Err(e) = store.create_agent_task(&a.id, &req).await {
+                        tracing::warn!("agent {} heartbeat spawn failed: {e}", a.id);
+                    }
+                    if let Err(e) = store.record_agent_heartbeat(&a.id).await {
+                        tracing::warn!("agent {} heartbeat record failed: {e}", a.id);
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+            }
+        });
+    }
+
     /// Startup reconcile (durable execution): on cp boot, immediately revert
     /// expired leases and mark silent nodes offline so the scheduler starts
     /// from a consistent state instead of waiting for the first background

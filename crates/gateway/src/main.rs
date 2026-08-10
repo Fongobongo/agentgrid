@@ -209,6 +209,7 @@ impl<'a> ControlPlane<'a> {
             security_profile: None,
             network_mode: None,
             group_id: None,
+            agent_id: None,
         };
         let r = self.post("/v1/tasks").json(&req).send().await?;
         let status = r.status();

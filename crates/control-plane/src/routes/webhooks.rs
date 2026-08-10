@@ -143,6 +143,7 @@ pub async fn github_issue_webhook(
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     state
         .store
@@ -168,6 +169,7 @@ fn create_followup_task(prompt: String) -> agentgrid_common::CreateTaskRequest {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     }
 }
 

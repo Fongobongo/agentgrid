@@ -265,6 +265,84 @@ paths:
         in: path
         required: true
         schema: { type: string }
+  /v1/agents:
+    post:
+      summary: Register an org agent (plan 2.1 #18)
+      description: |
+        Long-lived agent identity with a role, prompt template, attached
+        skills, a display budget (USD) and an optional hard task stop
+        (max_tasks). Heartbeat interval (seconds) enables scheduled task
+        spawning. 400 on invalid name/role; 409 on duplicate name.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                role: { type: string, default: worker }
+                prompt: { type: string, default: "" }
+                skills: { type: array, items: { type: string } }
+                budget_usd: { type: number, default: 0 }
+                max_tasks: { type: integer, nullable: true }
+                heartbeat_interval_secs: { type: integer, nullable: true }
+      responses:
+        "201":
+          description: Agent created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+    get:
+      summary: List org agents with current task spend
+      responses:
+        "200":
+          description: Agents
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Agent" }
+  /v1/agents/{id}/actions:
+    get:
+      summary: An agent's immutable action trail (plan 2.1 #18)
+      description: Newest first, capped at 500 rows.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Trail rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AgentAction" }
+  /v1/agents/{id}/tasks:
+    post:
+      summary: Create a task attributed to an agent (plan 2.1 #18)
+      description: |
+        Counts against the agent's max_tasks budget; 409 when exhausted or
+        the agent is unknown. Body is a normal create-task request.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTaskRequest" }
+      responses:
+        "201":
+          description: Task created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskView" }
+        "409":
+          description: Budget exhausted or unknown agent
   /v1/task-groups/{id}/context/{key}:
     get:
       summary: Read one shared-context note's value
@@ -560,6 +638,29 @@ paths:
     post:
       summary: Untrust a skill (fail-closed)
 components:
+  schemas:
+    Agent:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        role: { type: string }
+        prompt: { type: string }
+        skills: { type: array, items: { type: string } }
+        budget_usd: { type: number }
+        max_tasks: { type: integer, nullable: true }
+        heartbeat_interval_secs: { type: integer, nullable: true }
+        last_heartbeat_at: { type: string, nullable: true }
+        created_at: { type: string }
+        tasks_spent: { type: integer }
+    AgentAction:
+      type: object
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        action: { type: string }
+        detail: { type: string }
+        created_at: { type: string }
   securitySchemes:
     bearerAuth:
       type: http

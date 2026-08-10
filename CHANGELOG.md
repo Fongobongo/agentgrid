@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.1)
+
+- **Org agents / budgets / heartbeats (#18):** long-lived agent identities
+  with a role, prompt template, attached skills, a display USD budget and a
+  hard task stop (`max_tasks`). Attribution flows through
+  `CreateTaskRequest.agent_id` → `tasks.agent_id` (migration 0059). REST:
+  `POST/GET /v1/agents`, `GET /v1/agents/{id}/actions` (immutable trail),
+  `POST /v1/agents/{id}/tasks` (409 on exhausted budget). CLI:
+  `ag agent add/list/actions`. Heartbeat ticker spawns the agent's prompt
+  task on `heartbeat_interval_secs` (env `AGENTGRID_AGENT_TICK_SECS`,
+  default 5s); every lifecycle event lands in `agent_actions`.
+
 ### Added (plan 1.12)
 
 - **Shared context / memory (#7):** flat per-group notes for parallel

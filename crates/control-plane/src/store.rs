@@ -19,6 +19,7 @@ use sqlx::sqlite::{
 };
 use sqlx::Row;
 
+mod agents;
 mod approvals;
 mod artifacts;
 mod attempts;
@@ -689,6 +690,7 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         network_mode: r.try_get("network_mode").unwrap_or_default(),
         security_profile,
         group_id: r.try_get("group_id").unwrap_or_default(),
+        agent_id: r.try_get("agent_id").unwrap_or_default(),
     }
 }
 
@@ -2057,6 +2059,7 @@ mod workflow_tests {
             security_profile: None,
             network_mode: None,
             group_id: None,
+            agent_id: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -2104,6 +2107,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -2237,6 +2241,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -2289,6 +2294,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -2420,6 +2426,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -2529,6 +2536,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -2711,6 +2719,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -2791,6 +2800,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: Some("grp-x".into()),
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -3288,6 +3298,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -3332,6 +3343,7 @@ mod workflow_tests {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .await
             .unwrap();
@@ -3346,5 +3358,145 @@ mod workflow_tests {
         assert_eq!(rejs[0].actor_type, "task");
         assert_eq!(rejs[0].actor_id.as_deref(), Some(task.id.as_str()));
         assert_eq!(rejs[0].subject.as_deref(), Some("queued"));
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+    use agentgrid_common::{AgentCreate, CreateTaskRequest};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    async fn temp_store() -> Store {
+        // Disable critical disk watermark for tests (temp fs often has < 512 MB free).
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ag-agent-test-{n}-{nanos}.db"));
+        let _ = std::fs::remove_file(&dir);
+        Store::open(dir.to_str().unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_budget_hard_stop_rejects_exhausted() {
+        // Plan 2.1 (#18): max_tasks=1 — first attributed task passes, the
+        // second is rejected with a budget_exceeded trail row.
+        let s = temp_store().await;
+        let agent = s
+            .create_agent(&AgentCreate {
+                name: "nightly-build".into(),
+                role: "maintainer".into(),
+                prompt: "run nightly checks".into(),
+                skills: vec![],
+                budget_usd: 10.0,
+                max_tasks: Some(1),
+                heartbeat_interval_secs: None,
+            })
+            .await
+            .unwrap();
+
+        let base = CreateTaskRequest {
+            prompt: "x".into(),
+            repository: "*".into(),
+            adapter: "mock".into(),
+            requested_node_id: None,
+            timeout_secs: None,
+            validation_command: None,
+            base_commit: None,
+            parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
+            group_id: None,
+            agent_id: None,
+        };
+        s.create_agent_task(&agent.id, &base).await.unwrap();
+        let err = s.create_agent_task(&agent.id, &base).await.unwrap_err();
+        assert!(err.to_string().contains("budget exhausted"));
+
+        // Spend is counted; the trail recorded both creations + the rejection.
+        let fresh = s.get_agent(&agent.id).await.unwrap().unwrap();
+        assert_eq!(fresh.tasks_spent, 1);
+        let actions = s.agent_actions(&agent.id).await.unwrap();
+        let kinds: Vec<_> = actions.iter().map(|a| a.action.as_str()).collect();
+        assert!(kinds.contains(&"task_created"));
+        assert!(kinds.contains(&"budget_exceeded"));
+
+        // Unknown agent attribution is rejected too.
+        assert!(s.create_agent_task("nope", &base).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_heartbeat_due_and_fire_creates_task() {
+        // Plan 2.1 (#18): an agent with a heartbeat interval is due when
+        // last_heartbeat_at is NULL; firing records the heartbeat and the
+        // spawned task is attributed to the agent.
+        let s = temp_store().await;
+        let agent = s
+            .create_agent(&AgentCreate {
+                name: "scout".into(),
+                role: "worker".into(),
+                prompt: "check the queue".into(),
+                skills: vec![],
+                budget_usd: 0.0,
+                max_tasks: None,
+                heartbeat_interval_secs: Some(60),
+            })
+            .await
+            .unwrap();
+
+        let due = s
+            .due_agents(chrono::Utc::now().timestamp() + 1)
+            .await
+            .unwrap();
+        assert_eq!(due.len(), 1, "fresh agent with interval is due");
+
+        let req = CreateTaskRequest {
+            prompt: agent.prompt.clone(),
+            repository: "*".into(),
+            adapter: "mock".into(),
+            requested_node_id: None,
+            timeout_secs: None,
+            validation_command: None,
+            base_commit: None,
+            parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
+            group_id: None,
+            agent_id: None,
+        };
+        let task = s.create_agent_task(&agent.id, &req).await.unwrap();
+        assert_eq!(task.agent_id.as_deref(), Some(agent.id.as_str()));
+        s.record_agent_heartbeat(&agent.id).await.unwrap();
+
+        // Not due again until the interval passes.
+        let due2 = s
+            .due_agents(chrono::Utc::now().timestamp() + 1)
+            .await
+            .unwrap();
+        assert_eq!(due2.len(), 0);
+
+        // A non-heartbeat agent is never due.
+        s.create_agent(&AgentCreate {
+            name: "plain".into(),
+            role: "worker".into(),
+            prompt: "".into(),
+            skills: vec![],
+            budget_usd: 0.0,
+            max_tasks: None,
+            heartbeat_interval_secs: None,
+        })
+        .await
+        .unwrap();
+        assert!(s
+            .due_agents(chrono::Utc::now().timestamp() + 1)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

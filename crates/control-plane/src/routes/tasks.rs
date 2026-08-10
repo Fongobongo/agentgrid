@@ -230,6 +230,7 @@ pub async fn rework_attempt(
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     match state.store.create_task(&req).await {
         Ok(view) => Ok((

@@ -189,6 +189,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -449,6 +450,7 @@ async fn validation_failure_must_not_report_success() {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -565,6 +567,7 @@ async fn cancel_queued_marks_cancelled() {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -1011,6 +1014,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .unwrap(),
             None,
@@ -1079,6 +1083,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .unwrap(),
             None,
@@ -1108,6 +1113,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 security_profile: None,
                 network_mode: None,
                 group_id: None,
+                agent_id: None,
             })
             .unwrap(),
             Some(&token),
@@ -1130,6 +1136,7 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -1227,6 +1234,7 @@ async fn login_sets_cookie_and_cookie_auths() {
                         security_profile: None,
                         network_mode: None,
                         group_id: None,
+                        agent_id: None,
                     })
                     .unwrap(),
                 ))
@@ -1345,6 +1353,7 @@ async fn oversized_prompt_returns_413() {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -1372,6 +1381,7 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -2090,6 +2100,7 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let created = app
         .clone()
@@ -3742,6 +3753,7 @@ async fn artifact_get_rejects_traversal_name() {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -4583,6 +4595,7 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -6169,6 +6182,7 @@ async fn list_tasks_filters_by_status_repository_node() {
             security_profile: None,
             network_mode: None,
             group_id: None,
+            agent_id: None,
         })
         .unwrap()
     };
@@ -6906,6 +6920,7 @@ async fn list_tasks_keyset_pagination() {
             security_profile: None,
             network_mode: None,
             group_id: None,
+            agent_id: None,
         })
         .unwrap()
     };
@@ -7067,6 +7082,7 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             security_profile: None,
             network_mode: None,
             group_id: None,
+            agent_id: None,
         })
         .unwrap();
         let r = app
@@ -7248,6 +7264,7 @@ async fn approvals_keyset_pagination() {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let created = app
         .clone()
@@ -7436,6 +7453,7 @@ async fn strict_profile_refuses_wrapper_adapter() {
         security_profile: Some("default-strict".into()),
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -7746,6 +7764,7 @@ async fn search_finds_task_by_prompt_word() {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -7805,6 +7824,7 @@ async fn attempt_detail_and_tag_crud() {
         security_profile: None,
         network_mode: None,
         group_id: None,
+        agent_id: None,
     };
     let resp = app
         .clone()
@@ -7915,6 +7935,7 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
                 security_profile: None,
                 network_mode: None,
                 group_id: Some("grp-api".into()),
+                agent_id: None,
             })
             .unwrap(),
             &token,
@@ -8011,4 +8032,102 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
     let entries: Vec<agentgrid_common::SharedContextEntry> =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert!(entries.is_empty());
+}
+
+#[tokio::test]
+async fn agent_api_budget_stop_and_trail() {
+    use agentgrid_common::CreateTaskRequest;
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+
+    // Create an agent with a 1-task hard stop.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/agents",
+            serde_json::json!({
+                "name": "api-budget",
+                "role": "maintainer",
+                "prompt": "maintain",
+                "skills": [],
+                "budget_usd": 5.0,
+                "max_tasks": 1,
+                "heartbeat_interval_secs": null
+            })
+            .to_string(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", resp.status());
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let agent: agentgrid_common::Agent = serde_json::from_slice(&body).unwrap();
+    assert_eq!(agent.name, "api-budget");
+    assert_eq!(agent.max_tasks, Some(1));
+
+    // Attributed task passes.
+    let task_req = serde_json::to_string(&CreateTaskRequest {
+        prompt: "do work".into(),
+        repository: "*".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
+        group_id: None,
+        agent_id: None,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/agents/{}/tasks", agent.id),
+            task_req.clone(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", resp.status());
+
+    // Second attributed task hits the hard stop -> 409.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/agents/{}/tasks", agent.id),
+            task_req,
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "{:?}", resp.status());
+
+    // List shows spend; actions trail records creation + rejection.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/agents", &token))
+        .await
+        .unwrap();
+    let agents: Vec<agentgrid_common::Agent> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let found = agents.iter().find(|a| a.id == agent.id).unwrap();
+    assert_eq!(found.tasks_spent, 1);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/agents/{}/actions", agent.id),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let actions: Vec<agentgrid_common::AgentAction> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let kinds: Vec<_> = actions.iter().map(|a| a.action.as_str()).collect();
+    assert!(kinds.contains(&"created"));
+    assert!(kinds.contains(&"task_created"));
+    assert!(kinds.contains(&"budget_exceeded"));
 }

@@ -104,6 +104,7 @@ async fn migrations_serve_legacy_happy_path() {
             security_profile: None,
             network_mode: None,
             group_id: None,
+            agent_id: None,
         })
         .await
         .unwrap();
@@ -203,6 +204,7 @@ async fn foreign_keys_enforced_after_migration_0040() {
             security_profile: None,
             network_mode: None,
             group_id: None,
+            agent_id: None,
         })
         .await
         .unwrap();
