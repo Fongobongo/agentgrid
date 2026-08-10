@@ -11,6 +11,7 @@ use agentgrid_common::{
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
+mod autopilot;
 mod phase;
 mod tui;
 use phase::Phase;
@@ -78,6 +79,9 @@ enum AgCommand {
     Storage(StorageArgs),
     /// Plan 1.3: full-text search over tasks (FTS5).
     Search(SearchArgs),
+    /// Plan 2.6 (#22c): overnight autopilot — loop run → validate → commit
+    /// per iteration, roll back on fail, write agentgrid-workspace/<slug>/SUMMARY.md.
+    Autopilot(AutopilotArgs),
     /// Plan 1.3: resume a past attempt as a new attempt with inherited context.
     Resume(ResumeArgs),
     /// Plan 1.3: add/remove/list task tags.
@@ -155,6 +159,36 @@ enum CtxSub {
     Ls { group: String },
     /// Delete one note.
     Del { group: String, key: String },
+}
+
+/// Plan 2.6 (#22c): overnight autopilot driver.
+#[derive(Args)]
+struct AutopilotArgs {
+    /// Objective (free text, rendered into every iteration prompt).
+    objective: String,
+    /// Repository name the task runs against (must be registered).
+    #[arg(long)]
+    repository: String,
+    /// Adapter to drive (default mock).
+    #[arg(long, default_value = "mock")]
+    adapter: String,
+    /// Validation command every iteration must exit 0 against.
+    #[arg(long)]
+    validate: Option<String>,
+    /// Local checkout the node lands diffs into; iterations commit and roll
+    /// back against this path. Required — the loop refuses without it.
+    #[arg(long)]
+    local_path: String,
+    /// Max iterations before stopping (default 3).
+    #[arg(long = "max-iterations", default_value_t = 3)]
+    max_iterations: u32,
+    /// Wall-clock ceiling in seconds (default 28800 = 8h).
+    #[arg(long = "max-duration", default_value_t = 28800)]
+    max_duration: u64,
+    /// Directory under which `<slug>/SUMMARY.md` is written (default:
+    /// `agentgrid-workspace` under the current working dir).
+    #[arg(long = "summary-root")]
+    summary_root: Option<String>,
 }
 
 /// Plan 2.1 (#18): org-agent management.
@@ -731,6 +765,7 @@ async fn main() -> Result<()> {
         AgCommand::Issue(a) => cmd_issue(&client, &base, a).await,
         AgCommand::Ctx(a) => cmd_ctx(&client, &base, a).await,
         AgCommand::Agent(a) => cmd_agent(&client, &base, a).await,
+        AgCommand::Autopilot(a) => cmd_autopilot(&client, &base, a).await,
     }
 }
 
@@ -1126,6 +1161,35 @@ async fn cmd_ctx(client: &reqwest::Client, base: &str, a: CtxArgs) -> Result<()>
             Ok(())
         }
     }
+}
+
+/// Plan 2.6 (#22c): overnight autopilot — loops `run`→`validate`→`commit`
+/// per iteration against the CP. Rollback on fail; writes
+/// `<summary-root>/<objective-slug>/SUMMARY.md` at the end so the operator has
+/// the full trail next morning.
+async fn cmd_autopilot(client: &reqwest::Client, base: &str, a: AutopilotArgs) -> Result<()> {
+    let root = std::path::PathBuf::from(&a.local_path);
+    if !root.join(".git").exists() {
+        anyhow::bail!("--local-path must be a git checkout (has .git): {:?}", root);
+    }
+    let summary_root = a
+        .summary_root
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("agentgrid-workspace"));
+    let opts = autopilot::AutopilotOpts {
+        objective: &a.objective,
+        repository: &a.repository,
+        adapter: &a.adapter,
+        validate: a.validate.as_deref(),
+        local_path: &root,
+        max_iterations: a.max_iterations,
+        max_duration: std::time::Duration::from_secs(a.max_duration),
+        summary_root: &summary_root,
+    };
+    let report = autopilot::run_autopilot(client, base, &opts).await?;
+    println!("{}", report.render());
+    Ok(())
 }
 
 /// Plan 2.1 (#18): org agents via the control-plane API.

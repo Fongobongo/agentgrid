@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.6)
+
+- **`ag autopilot "<objective>"` (#22c):** CLI loop submits a task per
+  iteration, waits for terminal status, commits the local checkout on
+  success and hard-resets on failure. Bounded by `--max-iterations`,
+  `--max-duration` (8h default) and the first terminal failure. After the
+  loop, `<summary-root>/<objective-slug>/SUMMARY.md` lists every iteration
+  plus the final known-good commit so the morning-standup has a single
+  file to scan.
+
 ### Added (plan 2.5)
 
 - **Self-healing eval suite (#22b):** when a task has a

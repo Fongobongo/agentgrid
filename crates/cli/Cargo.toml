@@ -20,6 +20,9 @@ anyhow.workspace = true
 tracing-subscriber.workspace = true
 agentgrid-common.workspace = true
 agentgrid-skills.workspace = true
+# Plan 2.6 (#22c): autopilot timestamps
+chrono.workspace = true
+uuid = { version = "1", features = ["v4"] }
 # Stage 11.5 TUI
 ratatui.workspace = true
 crossterm.workspace = true

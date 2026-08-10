@@ -269,7 +269,7 @@ fn default_sandbox_backend() -> String {
 
 // ----- API DTOs -----
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreateTaskRequest {
     pub prompt: String,
     pub repository: String,
