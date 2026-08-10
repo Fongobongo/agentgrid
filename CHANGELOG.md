@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.3)
+
+- **Sandbox cold-start benchmark (#9):** `deploy/sandbox-benchmark.sh`
+  drives a control plane + node through N task iterations per sandbox
+  mode (`none`/`docker`, Podman-compatible via the same docker CLI) and
+  prints per-iteration submit→running ms plus a per-mode average.
+  `docs/deploy/sandbox-benchmark.md` documents the method, a hand-measured
+  Docker baseline (alpine `docker run` ≈0.9–1.8 s warm pull, hardened
+  `--network none --read-only --cap-drop=ALL` ≈0.46 s — under the 5 s
+  pool-trigger threshold), how to isolate container-start from CP tick
+  cadence, and the conditional follow-up: only build a pre-warm pool if a
+  production image pushes the sandbox delta past 5 s.
+
 ### Added (plan 2.2)
 
 - **Skill/MCP security scanning (#5):** new `agentgrid-skills::scanner`
