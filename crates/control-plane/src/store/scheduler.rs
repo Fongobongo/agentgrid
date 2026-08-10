@@ -123,6 +123,26 @@ impl Store {
             .await?;
             let read_only = role.as_deref() == Some("verifier");
 
+            // Plan 2.5 (#22b): on retry (attempt number > 1) ship every
+            // eval-case artifact the previous attempts landed so the node
+            // can probe the new fix against the accumulated suite. Naming
+            // `eval-case-<attempt>-<n>.yaml` is deterministic, set by the CP
+            // when it records a passed attempt.
+            let next_number = self.attempt_count(&mut tx, &task_id).await? + 1;
+            let eval_cases: Vec<String> = if next_number > 1 {
+                sqlx::query_scalar(
+                    "SELECT a.name FROM artifacts a \
+                     JOIN attempts at ON at.id = a.attempt_id \
+                     WHERE at.task_id = ? AND a.name LIKE 'eval-case-%' \
+                     ORDER BY a.name",
+                )
+                .bind(&task_id)
+                .fetch_all(&mut *tx)
+                .await?
+            } else {
+                Vec::new()
+            };
+
             // Resolve repository git info (absent for plain-dir tasks).
             let repo = sqlx::query(
                 "SELECT git_url, default_branch, validation_command FROM repositories WHERE name = ?",
@@ -207,6 +227,7 @@ impl Store {
                     upstream_task_ids: Vec::new(),
                     group_id,
                     read_only,
+                    eval_cases,
                 },
                 created_at,
             });

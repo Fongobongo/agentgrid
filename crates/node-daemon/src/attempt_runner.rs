@@ -16,6 +16,7 @@ use crate::artifact_spool;
 use crate::capabilities::resolve_adapter_bin;
 use crate::completion::{ack_attempt, create_agent_session, report_complete};
 use crate::config::Config;
+use crate::evals;
 use crate::event_sink::EventSink;
 use crate::git;
 use crate::outbox;
@@ -152,8 +153,34 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         }
     }
 
-    // Stage 5: ACP adapters are driven over JSON-RPC 2.0 (stdio), not stdout
-    // parsing. Everything below that point lives in drive_acp_session.
+    // Plan 2.5 (#22b): on a retry the CP ships `eval_cases` on the assignment.
+    // Materialise them into `<worktree>/.agentgrid/evals/` *before* the agent
+    // starts so the agent sees the obligation list when reading the worktree
+    // (the verifier reads, not writes), and so the post-agent probe can just
+    // shell-probe every `*.yaml` under the dir.
+    if !assignment.eval_cases.is_empty() && !assignment.read_only {
+        let materialized = evals::materialize_eval_cases(
+            &ws.path,
+            &assignment.task_id,
+            &assignment.eval_cases,
+            &cfg.server,
+            &assignment.fencing_token,
+            &client,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(attempt_id = %assignment.attempt_id, "eval-case materialize failed: {e}");
+            Vec::new()
+        });
+        if !materialized.is_empty() {
+            tracing::info!(
+                attempt_id = %assignment.attempt_id,
+                n = materialized.len(),
+                "materialised eval suite into worktree"
+            );
+        }
+    }
+
     if cfg
         .adapters
         .iter()
@@ -278,6 +305,33 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                         error_code = Some("validation_failed".into());
                     }
                     _ => {}
+                }
+            }
+        }
+        // Plan 2.5 (#22b): eval suite probe for retry attempts (cases were
+        // materialised into the worktree at attempt start). Runs after the
+        // ACP-loop validation so a passing fix must also re-prove every
+        // accumulated eval case.
+        if exit_code == 0 && !assignment.eval_cases.is_empty() {
+            match evals::probe_evals(&workdir, evals::EVAL_TIMEOUT).await {
+                Ok(o) if o.ok => {}
+                Ok(o) => {
+                    sink.push(
+                        EventKind::Log.to_event_type(),
+                        json!({ "kind": "eval_fail", "log": o.log }),
+                    )
+                    .await;
+                    exit_code = 1;
+                    error_code = Some("eval_failed".into());
+                }
+                Err(e) => {
+                    sink.push(
+                        EventKind::Log.to_event_type(),
+                        json!({ "kind": "eval_fail", "log": format!("eval probe error: {e}") }),
+                    )
+                    .await;
+                    exit_code = 1;
+                    error_code = Some("eval_failed".into());
                 }
             }
         }
@@ -460,7 +514,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // Hardening P0/P1 item 5: never let the agent run unsafe-unattended in an
     // unsandboxed environment unless the operator explicitly opted in.
     let env_remove = sandbox::unsafe_env_guard(cfg.sandbox);
-    let validation_passed = loop {
+    let mut validation_passed = loop {
         // Hardening P1 item 27: forward profile-declared secrets explicitly —
         // ProcessBackend env_clears the child, so daemon-env secrets must be
         // allowlisted here.
@@ -618,6 +672,49 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         break true;
     };
     // ponytail: flusher kept alive through finalize/artifacts/report_complete so
+    // events buffered during a CP outage keep being retried and are delivered
+    // once the CP recovers (the durable outbox also retains them). Aborted
+    // after report_complete so a terminal attempt doesn't leak the task.
+    // (was: flusher.abort() here, before the post-adapter sends.)
+
+    // Plan 2.5 (#22b): when this retry carries an accumulated eval suite
+    // (fetched at attempt start), probe every case after the agent +
+    // validation_command pass. A failing eval flips the terminal outcome:
+    // we report exit=1 with error_code `eval_failed` so the CP marks the
+    // task failed (and the retry loop has the eval log in events).
+    if validation_passed && !assignment.eval_cases.is_empty() {
+        match evals::probe_evals(&workdir, evals::EVAL_TIMEOUT).await {
+            Ok(o) if o.ok => {}
+            Ok(o) => {
+                sink.push(
+                    EventKind::Log.to_event_type(),
+                    json!({ "kind": "eval_fail", "log": o.log }),
+                )
+                .await;
+                tracing::warn!(
+                    attempt_id = %assignment.attempt_id,
+                    "eval suite failed on retry; reporting failure"
+                );
+                last_code = 1;
+                validation_verdict = Some("eval_failed");
+                // Force validation_passed off so the terminal code path
+                // treats this as a failure, not a clean pass.
+                validation_passed = false;
+            }
+            Err(e) => {
+                sink.push(
+                    EventKind::Log.to_event_type(),
+                    json!({ "kind": "eval_fail", "log": format!("eval probe error: {e}") }),
+                )
+                .await;
+                last_code = 1;
+                validation_verdict = Some("eval_failed");
+                validation_passed = false;
+            }
+        }
+    }
+    let _ = validation_passed;
+
     // events buffered during a CP outage keep being retried and are delivered
     // once the CP recovers (the durable outbox also retains them). Aborted
     // after report_complete so a terminal attempt doesn't leak the task.

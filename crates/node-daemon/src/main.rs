@@ -25,6 +25,7 @@ mod command_guard;
 mod completion;
 mod config;
 mod enrollment;
+pub mod evals;
 mod event_sink;
 mod git;
 mod heartbeat;
@@ -1176,6 +1177,7 @@ mod tests {
             upstream_task_ids: vec![],
             group_id: None,
             read_only: false,
+            eval_cases: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1311,6 +1313,7 @@ mod tests {
             upstream_task_ids: vec![],
             group_id: None,
             read_only: false,
+            eval_cases: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1460,6 +1463,7 @@ mod tests {
             upstream_task_ids: vec![],
             group_id: None,
             read_only: false,
+            eval_cases: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1578,6 +1582,7 @@ mod tests {
             upstream_task_ids: vec![],
             group_id: None,
             read_only: false,
+            eval_cases: vec![],
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1757,6 +1762,7 @@ mod tests {
                 upstream_task_ids: vec![],
                 group_id: None,
                 read_only: false,
+                eval_cases: vec![],
             };
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),

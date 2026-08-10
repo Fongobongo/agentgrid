@@ -287,7 +287,28 @@ impl Store {
         // accepted. The task status stays `succeeded`; the approval records
         // the human decision separately. 24h TTL keeps the page from
         // accumulating zombie reviews.
+        // Plan 2.5 (#22b): eval-case capture. Read the task's
+        // validation_command inside the txn (pre-commit) and stamp the
+        // artifact AFTER commit — `save_artifact_bytes` uses `self.pool`
+        // (a separate connection) and would block-deadlock on the open
+        // `BEGIN IMMEDIATE` write txn otherwise.
+        let mut eval_stamp_cmd: Option<String> = None;
+        let mut eval_stamp_sha: Option<String> = None;
         if task_target == TaskStatus::Succeeded {
+            if let Ok(row) = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT validation_command FROM tasks WHERE id = ?",
+            )
+            .bind(&task_id)
+            .fetch_optional(&mut *tx)
+            .await
+            {
+                if let Some(Some(cmd)) =
+                    row.filter(|c| c.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+                {
+                    eval_stamp_cmd = Some(cmd);
+                    eval_stamp_sha = req.commit_sha.clone();
+                }
+            }
             let approval_id = Uuid::new_v4().to_string();
             let approval_now = now_iso();
             // 24h=86400s — reviews are not safety-critical, just human gates.
@@ -312,6 +333,30 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
+
+        // Plan 2.5 (#22b): stamp the eval-case artifact on a free pool
+        // connection AFTER commit so a failed case write can never wedge
+        // the state transition above.
+        if let Some(cmd) = eval_stamp_cmd {
+            let case = format!(
+                "id: eval-case-{attempt_id}\ncreated_by: attempt\nattempt_id: {attempt_id}\ncommit_sha: {}\ncommand: |\n  {}\n",
+                eval_stamp_sha.as_deref().unwrap_or(""),
+                cmd.replace('\n', "\n  ")
+            );
+            let name = format!("eval-case-{attempt_id}-0.yaml");
+            if let Err(e) = self
+                .save_artifact_bytes(
+                    attempt_id,
+                    &name,
+                    case.as_bytes(),
+                    Some("application/x-yaml"),
+                    None,
+                )
+                .await
+            {
+                tracing::warn!("eval-case stamp failed for {attempt_id}: {e}");
+            }
+        }
         Ok(true)
     }
 

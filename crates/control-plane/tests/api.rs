@@ -8194,3 +8194,86 @@ async fn agent_api_budget_stop_and_trail() {
     assert!(kinds.contains(&"task_created"));
     assert!(kinds.contains(&"budget_exceeded"));
 }
+
+#[tokio::test]
+async fn self_healing_eval_case_stamped_and_shipped_on_retry() {
+    // Plan 2.5 (#22b): passing an attempt with a `validation_command` stamps
+    // an `eval-case-<attempt>-0.yaml` artifact; retrying the task ships the
+    // accumulated suite on the next Assignment via `Assignment.eval_cases`.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, _cred) = enroll(&app, "evals-node", vec!["mock".into()], vec!["*".into()]).await;
+
+    let body = json!({
+        "prompt":"fix bug","repository":"demo","adapter":"mock",
+        "validation_command":"grep OK validation.txt"
+    })
+    .to_string();
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/tasks", body, &test_token(&app).await))
+        .await
+        .unwrap();
+    let t: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let task_id = t.get("id").unwrap().as_str().unwrap().to_string();
+
+    // Attempt 1 passes; the CP stamps an eval-case artifact.
+    let a1 = state
+        .store
+        .try_assign(&node_id)
+        .await
+        .unwrap()
+        .expect("assign 1");
+    state.store.ack_attempt(&a1.attempt_id).await.unwrap();
+    state
+        .store
+        .complete_attempt(
+            &a1.attempt_id,
+            &CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                error_code: None,
+                resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
+                acp_session_id: None,
+                plan: None,
+                provenance: None,
+                pending_artifacts: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let eval_name = format!("eval-case-{}-0.yaml", a1.attempt_id);
+    let stamped = state
+        .store
+        .read_artifact_for_attempt(&a1.attempt_id, &eval_name)
+        .await
+        .unwrap()
+        .expect("eval case stamped on passed attempt");
+    assert!(
+        stamped.contains("command: |"),
+        "case carries the probe command"
+    );
+    assert!(stamped.contains("grep OK validation.txt"));
+
+    // Force a task-level retry and re-assign; the eval suite ships with it.
+    sqlx::query("UPDATE tasks SET status = 'failed' WHERE id = ?")
+        .bind(&task_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    assert!(state.store.retry_task(&task_id).await.unwrap());
+    let a2 = state
+        .store
+        .try_assign(&node_id)
+        .await
+        .unwrap()
+        .expect("assign 2");
+    assert!(
+        a2.eval_cases.contains(&eval_name),
+        "retry assignment ships the accumulated eval cases: {:?}",
+        a2.eval_cases
+    );
+}

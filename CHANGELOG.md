@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.5)
+
+- **Self-healing eval suite (#22b):** when a task has a
+  `validation_command` and a run passes, the CP persists an
+  `eval-case-<attempt>-0.yaml` artifact. Any task-level retry ships the
+  accumulated suite to the node (`Assignment.eval_cases`); the node
+  materialises them into the worktree at `.agentgrid/evals/` before the
+  agent starts so the agent sees the obligation list, and probes every
+  case through the same sandbox after the fix validates. A failing case
+  flips the attempt to `eval_failed` and feeds the case log back into the
+  prompt. Verifier (read-only) assignments skip materialise+probe — they
+  are the enforcement side, not the producer.
+
 ### Added (plan 2.4)
 
 - **Read-only verifier worktree (#22a):** a workflow step declared

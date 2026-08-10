@@ -226,10 +226,19 @@ impl Store {
         let Some(attempt_id) = self.latest_attempt_id(task_id).await? else {
             return Ok(None);
         };
-        let path = match self.artifact_path(&attempt_id, name) {
+        self.read_artifact_for_attempt(&attempt_id, name).await
+    }
+
+    /// Read a stored artifact's content by exact attempt id + name (any
+    /// attempt, not just the latest). Plan 2.5 (#22b) needs this to fetch
+    /// eval-case contents for historical attempts when a retry runs.
+    pub async fn read_artifact_for_attempt(
+        &self,
+        attempt_id: &str,
+        name: &str,
+    ) -> Result<Option<String>> {
+        let path = match self.artifact_path(attempt_id, name) {
             Ok(p) => p,
-            // Invalid/traversal name: treat as absent rather than erroring,
-            // so a crafted request cannot distinguish a valid artifact.
             Err(_) => return Ok(None),
         };
         match tokio::fs::read_to_string(&path).await {

@@ -535,6 +535,15 @@ pub struct Assignment {
     /// a verifier cannot silently edit the code it is validating.
     #[serde(default)]
     pub read_only: bool,
+    /// Plan 2.5 (#22b): self-healing eval cases for retry attempts. After a
+    /// passed attempt the CP persists the winning change as
+    /// `eval-case-<attempt>-<n>.yaml`; when the task is retried (task-level
+    /// retry), the accumulated suite is shipped here, the node materialises
+    /// them into the worktree at `.agentgrid/evals/` and the node probes
+    /// them after the first successful validation — any failure regenerates
+    /// the fix loop with the eval output as feedback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eval_cases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1256,6 +1265,7 @@ mod tests {
                 upstream_task_ids: vec![],
                 group_id: None,
                 read_only: false,
+                eval_cases: vec![],
             }),
             assignments: vec![],
         };

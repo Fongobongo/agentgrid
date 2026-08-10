@@ -943,6 +943,7 @@ mod tests {
             upstream_task_ids: vec![],
             group_id: None,
             read_only: false,
+            eval_cases: vec![],
         }
     }
 
@@ -1249,6 +1250,7 @@ mod tests {
                     upstream_task_ids: vec![],
                     group_id: None,
                     read_only: false,
+                    eval_cases: vec![],
                 };
                 prepare_workspace(&repos, &ws_root, &a, &[], &[])
             }));
