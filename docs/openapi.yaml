@@ -474,19 +474,49 @@ paths:
         Body `{ "profile_id": "..." }` assigns; `{ "profile_id": null }`
         clears. Pushes `config_update` to the node when it's connected so
         the change applies immediately.
+  /v1/node/opencode-config/active:
+    get:
+      summary: "Node pulls its assigned opencode profile"
+      tags: [opencode]
+      security:
+        - nodeAuth: []
+      responses:
+        '200':
+          description: Active profile for the node (config + hash + profile_id), or 404.
+        '401':
+          description: Node auth required.
+        '404':
+          description: No opencode profile assigned to this node.
+  /v1/node/opencode-config/audit:
+    post:
+      summary: "Node records an opencode-config apply event"
+      tags: [opencode]
+      security:
+        - nodeAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hash, trigger]
+              properties:
+                hash: { type: string }
+                trigger: { type: string, enum: [ws_push, error_threshold, interval, startup] }
+                profile_id: { type: string, nullable: true }
+      responses:
+        '204':
+          description: Audit recorded.
+        '400':
+          description: Bad trigger vocabulary or hash shape.
+        '401':
+          description: Node auth required.
   /v1/nodes/{id}/opencode-audit:
     get:
       summary: Recent opencode-config apply events for this node
       description: |
         One row per apply (ws_push | error_threshold | interval | startup).
         Useful for the dashboard "who's on which profile" view.
-  /v1/node/opencode-config/active:
-    get:
-      summary: Node pull — returns the profile assigned to the calling node
-      description: |
-        Authenticated by bearer node credential (same middleware as the
-        rest of /v1/node/*). Response is empty when no profile is assigned;
-        the node treats that as "no sync".
   /v1/nodes/{id}/drain:
     post:
       summary: Drain / undrain a node for maintenance

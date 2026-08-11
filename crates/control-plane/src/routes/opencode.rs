@@ -190,6 +190,48 @@ pub async fn list_audit(
     }
 }
 
+/// `POST /v1/node/opencode-config/audit` — node records that an apply just
+/// happened. The body carries the hash + trigger vocabulary used by the node;
+/// the CP inserts it (after basic trigger validation) keyed by AuthedNode.
+#[derive(Deserialize)]
+pub struct AuditPostBody {
+    /// sha256 of the config currently active on the node.
+    pub hash: String,
+    /// Trigger vocabulary: ws_push | error_threshold | interval | startup.
+    pub trigger: String,
+    /// Profile id the apply was attributed to (None when the node has no profile).
+    #[serde(default)]
+    pub profile_id: Option<String>,
+}
+
+pub async fn record_audit(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedNode>,
+    Json(body): Json<AuditPostBody>,
+) -> Result<StatusCode, StatusCode> {
+    const VALID: &[&str] = &["ws_push", "error_threshold", "interval", "startup"];
+    if !VALID.contains(&body.trigger.as_str()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if body.hash.len() > 128 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    state
+        .store
+        .record_opencode_apply(
+            &auth.node_id,
+            body.profile_id.as_deref(),
+            &body.hash,
+            &body.trigger,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("record_opencode_apply: {e}");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `GET /v1/opencode-config/active` — node pulls its assigned profile. Sits
 /// behind `AuthedNode` (Bearer node credential) so a non-node caller gets
 /// 401.

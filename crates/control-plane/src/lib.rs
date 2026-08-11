@@ -525,6 +525,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(routes::opencode::get_active_config),
         )
         .route(
+            "/v1/node/opencode-config/audit",
+            post(routes::opencode::record_audit),
+        )
+        .route(
             "/v1/nodes/{id}/accounts/usage",
             get(routes::nodes::node_account_usage),
         )

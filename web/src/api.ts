@@ -43,6 +43,8 @@ export interface NodeView {
   artifact_spool_bytes?: number;
   // Hardening P2 item 37: maintenance drain — no NEW assignments.
   drained?: boolean;
+  // Feature "opencode profiles": the opencode profile this node applies.
+  opencode_profile_id?: string | null;
 }
 
 export interface RepositoryView {
@@ -488,4 +490,32 @@ export function streamChanges(onChange: () => void): StreamHandle {
       if (timer) clearTimeout(timer);
     },
   };
+}
+
+
+// Feature "opencode profiles": control-plane-managed opencode config.
+export interface OpencodeProfile {
+  id: string;
+  name: string;
+  hash: string;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OpencodeAuditEntry {
+  id: string;
+  node_id: string;
+  profile_id: string | null;
+  hash: string;
+  trigger: string;
+  at: string;
+}
+
+export function listOpencodeProfiles(): Promise<OpencodeProfile[]> {
+  return listGet<OpencodeProfile>('/v1/opencode-profiles');
+}
+
+export function getOpencodeAudit(nodeId: string): Promise<OpencodeAuditEntry[]> {
+  return listGet<OpencodeAuditEntry>(`/v1/nodes/${nodeId}/opencode-audit`);
 }

@@ -8797,6 +8797,64 @@ async fn opencode_profiles_crud_and_node_pull() {
     );
 }
 
+/// Feature "opencode profiles": nodes publish apply events through
+/// `POST /v1/node/opencode-config/audit` (auth = node bearer). An operator
+/// can then read them through the audited GET under `/v1/nodes/{id}`.
+#[tokio::test]
+async fn opencode_audit_post_and_read() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Enroll a node + mint a profile + assign.
+    let (node_id, node_cred) =
+        enroll(&app, "opencode-audit-node", vec!["mock".into()], vec![]).await;
+    let put_cfg = serde_json::json!({ "config": { "model": "test/model" } }).to_string();
+    let put_req = put_auth("/v1/opencode-profiles/audit-target", put_cfg, &token);
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let get_req = get_auth("/v1/opencode-profiles/audit-target", &token);
+    let get_resp = app.clone().oneshot(get_req).await.unwrap();
+    let profile: serde_json::Value =
+        serde_json::from_slice(&to_bytes(get_resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let profile_id = profile["id"].as_str().unwrap();
+
+    let assign_req = post_auth(
+        &format!("/v1/nodes/{node_id}/opencode-profile"),
+        serde_json::json!({ "profile_id": profile_id }).to_string(),
+        &token,
+    );
+    let assign_resp = app.clone().oneshot(assign_req).await.unwrap();
+    assert_eq!(assign_resp.status(), StatusCode::NO_CONTENT);
+
+    // Node records an apply.
+    let audit_body = serde_json::json!({
+        "hash": "ab".repeat(32),
+        "trigger": "ws_push",
+        "profile_id": profile_id,
+    })
+    .to_string();
+    let audit_req = post_auth("/v1/node/opencode-config/audit", audit_body, &node_cred);
+    let audit_resp = app.clone().oneshot(audit_req).await.unwrap();
+    assert_eq!(audit_resp.status(), StatusCode::NO_CONTENT);
+
+    // Operator reads the audit.
+    let lv_req = get_auth(&format!("/v1/nodes/{node_id}/opencode-audit"), &token);
+    let lv_resp = app.clone().oneshot(lv_req).await.unwrap();
+    let list: serde_json::Value =
+        serde_json::from_slice(&to_bytes(lv_resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["trigger"], "ws_push");
+    assert_eq!(items[0]["hash"], "ab".repeat(32));
+
+    // Bad trigger rejected.
+    let bad_body = serde_json::json!({ "hash": "ab".repeat(32), "trigger": "h4x0r" }).to_string();
+    let bad_req = post_auth("/v1/node/opencode-config/audit", bad_body, &node_cred);
+    let bad_resp = app.oneshot(bad_req).await.unwrap();
+    assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+}
 /// Feature "opencode profiles": the allowlist gates the keys a client can
 /// push into a profile. Unknown keys are dropped silently so a typo cannot
 /// wedge every node on a parsing error.
