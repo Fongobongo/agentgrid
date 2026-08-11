@@ -285,6 +285,30 @@ impl Store {
                     assignment.prompt.push_str(&block);
                 }
             }
+            // Plan 2.10 (#21): on a retry (number > 1), the previous attempt
+            // has already baked the BM25 resume digest as
+            // `resume-context-<task>.md` via retry_task → bake_resume_digest.
+            // Ship its name with the assignment; the node's runner pulls the
+            // bytes via /v1/node/tasks/{t}/artifacts/{name} at start and
+            // inlines them into the agent prompt. Name-only keeps the
+            // scheduler payload tiny; bytes are fetched on demand.
+            if assignment.number > 1 {
+                let resume_name = format!("resume-context-{}.md", assignment.task_id);
+                let exists: bool = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM artifacts a JOIN attempts at ON at.id = a.attempt_id \
+                     WHERE at.task_id = ? AND a.name = ?",
+                )
+                .bind(&assignment.task_id)
+                .bind(&resume_name)
+                .fetch_one(&self.pool)
+                .await?
+                    > 0;
+                if exists {
+                    assignment.prompt.push_str(&format!(
+                        "\n\n## Resume digest\nFetch `{resume_name}` via the artifacts endpoint and inline it. Top-3 BM25 extracts from the previous attempt's events.\n"
+                    ));
+                }
+            }
             out.push(assignment);
         }
         Ok(out)

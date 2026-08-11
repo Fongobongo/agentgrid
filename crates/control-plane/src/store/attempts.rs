@@ -737,7 +737,7 @@ impl Store {
 
     pub async fn retry_task(&self, task_id: &str) -> Result<bool> {
         let mut tx = self.write_txn().await?;
-        let row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
+        let row = sqlx::query("SELECT status, prompt FROM tasks WHERE id = ?")
             .bind(task_id)
             .fetch_optional(&mut *tx)
             .await?;
@@ -746,6 +746,7 @@ impl Store {
             return Ok(false);
         };
         let status: String = row.try_get("status")?;
+        let prompt: String = row.try_get("prompt")?;
         if status == "failed" || status == "cancelled" {
             sqlx::query(
                 "UPDATE tasks SET status = 'queued', finished_at = NULL, assigned_attempt_id = NULL WHERE id = ?",
@@ -754,6 +755,14 @@ impl Store {
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
+            // Plan 2.10 (#21): build the "context ejector" digest — top-3 BM25
+            // snippets from the previous attempt's events relevant to the
+            // original prompt. Builder runs outside the write txn (read-only
+            // pool query) so the retry assignment itself never blocks on the
+            // FTS scan.
+            if let Err(e) = self.bake_resume_digest(task_id, &prompt).await {
+                tracing::warn!("resume digest bake failed: {e}");
+            }
             return Ok(true);
         }
         let _ = tx.rollback().await;
@@ -770,6 +779,98 @@ impl Store {
             )
             .await;
         Ok(false)
+    }
+
+    /// Plan 2.10 (#21): scan `task_events` for the rows most relevant to the
+    /// original prompt (BM25 over events_fts) and persist the digest as a
+    /// `resume-context-<task_id>.md` artifact on the LATEST attempt so the
+    /// retry assignment can fetch it without recomputing at poll time. The
+    /// tracked metric (`tokens_avoided_bytes`) is the delta between the
+    /// previous attempt's full event byte count and the size of the digest.
+    /// When no events match yet (first try), no artifact is written.
+    async fn bake_resume_digest(&self, task_id: &str, prompt: &str) -> Result<()> {
+        let latest: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM attempts WHERE task_id = ? ORDER BY number DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(attempt_id) = latest else {
+            return Ok(());
+        };
+
+        // Total bytes of the previous attempt's task events (pre-ejection).
+        let full_bytes: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM task_events WHERE attempt_id = ?",
+        )
+        .bind(&attempt_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Top-3 BM25 fragments. Porter stemming + fold handles case folding;
+        // quote the prompt tokens so FTS doesn't split on spaces.
+        let query = prompt
+            .split_whitespace()
+            .take(10)
+            .map(|t| format!("\"{}\"", t.trim_matches(|c: char| !c.is_alphanumeric())))
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if query.is_empty() {
+            return Ok(());
+        }
+        // Top-3 BM25 fragments scoped to the previous attempt. FTS5
+        // column-scoped MATCH — `events_fts.attempt_id = ?` triggers the
+        // T.payload_text lookup on the content table (it failed when our
+        // migration used content = 'task_events'), but `attempt_id : 'foo'`
+        // against events_fts alone uses only the index-side rows. Two legs:
+        // MATCH for the ranking, then a JOIN-less WHERE on
+        // events_fts.attempt_id for the attempt filter.
+        //
+        // Note `attempt_id` is a reserved column on events_fts — FTS5
+        let rows: Vec<(String, f64)> = sqlx::query_as(
+            "SELECT payload_text, bm25(events_fts) AS score \
+             FROM events_fts \
+             WHERE events_fts.attempt_id = ? AND payload_text MATCH ? \
+             ORDER BY score LIMIT 3",
+        )
+        .bind(&attempt_id)
+        .bind(&query)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut digest = String::from("# Resume digest (BM25 top-3)\n\n");
+        for (frag, _score) in &rows {
+            // Cap each fragment at 1 KiB so pathological events cannot blow
+            // the retry prompt past the validation budget.
+            let frag = if frag.len() > 1024 {
+                &frag[..1024]
+            } else {
+                frag
+            };
+            digest.push_str("---\n");
+            digest.push_str(frag);
+            digest.push('\n');
+        }
+        let digest_bytes = digest.len() as i64;
+        let avoided = full_bytes.saturating_sub(digest_bytes);
+        let name = format!("resume-context-{task_id}.md");
+        self.save_artifact_bytes(
+            &attempt_id,
+            &name,
+            digest.as_bytes(),
+            Some("text/markdown"),
+            None,
+        )
+        .await?;
+        sqlx::query("UPDATE attempts SET tokens_avoided_bytes = ? WHERE id = ?")
+            .bind(avoided)
+            .bind(&attempt_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
 

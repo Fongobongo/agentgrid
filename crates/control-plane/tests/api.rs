@@ -8535,3 +8535,112 @@ async fn consensus_disagreement_creates_human_review_approval() {
         "2 members disagree → 1 human-review approval expected"
     );
 }
+
+/// Plan 2.10 (#21): context ejector — events-FTS + BM25 against the original
+/// prompt + persist as a resume-context artifact; retry ships its name with
+/// the assignment so the next attempt can fetch it.
+#[tokio::test]
+async fn resume_digest_bm25_after_failure() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let (node_id, _cred) = enroll(&app, "n-ctx", vec!["mock".into()], vec!["demo".into()]).await;
+
+    let task_view = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "fix network race in server".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let a1 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a1.attempt_id).await.unwrap();
+
+    // Ingest three events; one matches the prompt keywords ("network race"),
+    // the others should rank below.
+    let events: Vec<agentgrid_common::IncomingEvent> = vec![
+        agentgrid_common::IncomingEvent {
+            sequence: 1,
+            r#type: agentgrid_common::EventType::Stdout,
+            payload: serde_json::json!({"text": "INFO pulling deps"}),
+        },
+        agentgrid_common::IncomingEvent {
+            sequence: 2,
+            r#type: agentgrid_common::EventType::Error,
+            payload: serde_json::json!({"text": "ERROR network race between node-A and node-B"}),
+        },
+        agentgrid_common::IncomingEvent {
+            sequence: 3,
+            r#type: agentgrid_common::EventType::Stdout,
+            payload: serde_json::json!({"text": "INFO checkpoint saved"}),
+        },
+    ];
+    state
+        .store
+        .ingest_events(
+            &a1.attempt_id,
+            &agentgrid_common::IngestEventsRequest { events },
+        )
+        .await
+        .unwrap();
+    let _ = state
+        .store
+        .complete_attempt(
+            &a1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 1,
+                commit_sha: None,
+                resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
+                error_code: Some("validation_failed".into()),
+                acp_session_id: None,
+                plan: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(state.store.retry_task(&task_view.id).await.unwrap());
+
+    // The resume-context artifact must exist on attempt 1, BM25-tagged.
+    let name = format!("resume-context-{}.md", task_view.id);
+    let artifact = state
+        .store
+        .read_artifact_for_attempt(&a1.attempt_id, &name)
+        .await
+        .unwrap()
+        .expect("resume digest artifact must land after retry_task");
+    assert!(
+        artifact.contains("network race"),
+        "BM25 surface: ranked fragment must be in the digest, got: {artifact}"
+    );
+    let avoided: Option<i64> =
+        sqlx::query_scalar("SELECT tokens_avoided_bytes FROM attempts WHERE id = ?")
+            .bind(&a1.attempt_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+    assert!(avoided.is_some(), "tokens_avoided_bytes must be recorded");
+
+    // The next assignment must mention the digest name in the prompt.
+    let a2 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    assert!(
+        a2.prompt
+            .contains(&format!("resume-context-{}.md", task_view.id)),
+        "retry prompt cites the digest; got: {}",
+        a2.prompt
+    );
+}

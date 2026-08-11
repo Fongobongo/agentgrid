@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.10)
+
+- **Context ejector (#21):** contentless FTS5 index over task_events
+  (migration 0063). On `retry_task` the CP runs BM25 against the original
+  prompt, picks top-3 relevant event fragments (1 KiB cap each), writes
+  them as a `resume-context-<task>.md` artifact on the previous attempt,
+  and records `tokens_avoided_bytes` = full event-bytes minus digest size.
+  The retry assignment prompt cites the digest name; the node fetches the
+  bytes via the existing artifacts endpoint when it starts the new attempt.
+
 ### Added (plan 2.9)
 
 - **Consensus run (#20):** `ag run --consensus 3 --models claude,codex,opencode`
