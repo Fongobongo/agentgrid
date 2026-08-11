@@ -91,7 +91,10 @@ impl WsRegistry {
         }
     }
 
-    async fn send(&self, node_id: &str, msg: &NodeWsMsg) {
+    /// Send a control message to a connected node. Best-effort: a full
+    /// outbound channel drops the message and logs a warning; the 1s pump
+    /// tick + reconnect pull covers the occasional drop.
+    pub async fn send(&self, node_id: &str, msg: &NodeWsMsg) {
         if let Ok(text) = serde_json::to_string(msg) {
             let conns = self.conns.lock().await;
             if let Some(c) = conns.get(node_id) {

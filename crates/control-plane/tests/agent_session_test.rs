@@ -124,6 +124,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()

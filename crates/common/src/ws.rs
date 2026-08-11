@@ -53,6 +53,14 @@ pub enum NodeWsMsg {
     CancelAck { attempt_id: String },
     /// Node → CP: free slots changed; the CP may push more work.
     Heartbeat { free_slots: u32 },
+    /// CP → node: an opencode profile relevant to this node changed (or was
+    /// assigned). The node pulls `/v1/opencode-config/active` when its
+    /// current profile+hash differ (feature "opencode profiles"); the node
+    /// never trusts the push blindly — the hash round-trips from the pull.
+    ConfigUpdate {
+        profile_id: Option<String>,
+        hash: Option<String>,
+    },
 }
 
 /// WS close codes for the node channel (docs/node-ws-protocol.md).

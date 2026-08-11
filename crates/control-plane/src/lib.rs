@@ -503,6 +503,28 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::nodes::drain_node_handler),
         )
         .route(
+            "/v1/opencode-profiles",
+            get(routes::opencode::list_profiles),
+        )
+        .route(
+            "/v1/opencode-profiles/{name}",
+            get(routes::opencode::get_profile)
+                .put(routes::opencode::upsert_profile)
+                .delete(routes::opencode::delete_profile),
+        )
+        .route(
+            "/v1/nodes/{id}/opencode-profile",
+            post(routes::opencode::assign_node_profile),
+        )
+        .route(
+            "/v1/nodes/{id}/opencode-audit",
+            get(routes::opencode::list_audit),
+        )
+        .route(
+            "/v1/node/opencode-config/active",
+            get(routes::opencode::get_active_config),
+        )
+        .route(
             "/v1/nodes/{id}/accounts/usage",
             get(routes::nodes::node_account_usage),
         )

@@ -316,6 +316,12 @@ pub struct CreateTaskRequest {
     /// counts against the agent's budget (hard-stop when exhausted).
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Feature "opencode profiles": per-task override merged over the node's
+    /// active profile and injected via OPENCODE_CONFIG_CONTENT (env, dies
+    /// with the process). None = adapter runs purely under profiled local
+    /// config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_override: Option<OpencodeOverride>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -370,6 +376,11 @@ pub struct TaskView {
     pub consensus_group_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consensus_member: Option<String>,
+    /// Feature "opencode profiles": the per-task override attached to this
+    /// task (echoed from CreateTaskRequest). Not part of scheduling
+    /// semantics — informational for dashboards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_override: Option<OpencodeOverride>,
 }
 
 /// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
@@ -574,6 +585,12 @@ pub struct Assignment {
     /// adapter produced which patch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consensus_member: Option<String>,
+    /// Feature "opencode profiles": per-attempt override merged over the
+    /// node's active profile and injected via OPENCODE_CONFIG_CONTENT for
+    /// the `opencode` adaptaer. The env var dies with the process — an
+    /// override can never leak into later attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_override: Option<OpencodeOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1195,6 +1212,86 @@ pub struct ReworkResponse {
     pub task_id: String,
 }
 
+/// ── opencode-config management (feature "opencode profiles") ──────────
+///
+/// The control plane is the source of truth for per-node opencode
+/// configuration. A profile is a named bundle of opencode settings stored
+/// as opaque JSON — the schema belongs to opencode, not to us; the CP
+/// validates syntax + a small key allowlist and lets the node-side
+/// `opencode debug config` be the final oracle. Secrets stay out: API keys
+/// are referenced as `{env:VAR}` placeholders inside the config.
+///
+/// Delivery: CP pushes `NodeWsMsg::ConfigUpdate` on profile change; the
+/// node applies when the assignment matches its rated profile and the hash
+/// differs. A node may also self-heal pull after N consecutive
+/// config-class errors (default 3), and an opt-in interval pull is
+/// available but OFF by default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpencodeProfile {
+    pub id: String,
+    pub name: String,
+    /// Opaque opencode config object (JSON). Unknown fields to us are passed
+    /// through untouched.
+    pub config: serde_json::Value,
+    /// sha256 hex of the canonical JSON; compared by nodes to skip no-change
+    /// writes. Bumped by the server on every write.
+    pub hash: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `PUT /v1/opencode-profiles/{name}` body — create-or-replace (PUT, not
+/// PATCH: profiles are small and the client always knows the full desired
+/// state; merge-on-server would hide drift).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpsertOpencodeProfileRequest {
+    pub config: serde_json::Value,
+}
+
+/// `POST /v1/nodes/{id}/opencode-profile` body — assign (or clear with
+/// `null`) the profile a node should apply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignOpencodeProfileRequest {
+    pub profile_id: Option<String>,
+}
+
+/// Node pull response: the profile assigned to the calling node, or empty
+/// when none is. Served from a small in-memory cache on the CP — this is a
+/// hot path on error-threshold self-healing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveOpencodeConfigResponse {
+    pub profile_id: Option<String>,
+    pub hash: Option<String>,
+    pub config: Option<serde_json::Value>,
+}
+
+/// One row of the per-node apply audit (`GET /v1/nodes/{id}/opencode-audit`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpencodeConfigAuditEntry {
+    pub at: String,
+    pub profile_id: Option<String>,
+    pub hash: String,
+    /// 'ws_push' | 'error_threshold' | 'interval' | 'startup'
+    pub trigger: String,
+}
+
+/// Per-attempt opencode override (plan C #4): the caller can pin a model /
+/// small_model and/or pass an inline partial config for ONE task. The node
+/// merges it over the profiled config and injects via
+/// `OPENCODE_CONFIG_CONTENT`; the env var dies with the process, so the
+/// override cannot leak into later attempts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpencodeOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
+    /// Partial opencode config object — merged shallowly over the node's
+    /// active profile (override keys win).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1287,6 +1384,7 @@ mod tests {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         };
         assert_eq!(round_trip(&req), req);
 
@@ -1330,6 +1428,7 @@ mod tests {
                 eval_cases: vec![],
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             }),
             assignments: vec![],
         };

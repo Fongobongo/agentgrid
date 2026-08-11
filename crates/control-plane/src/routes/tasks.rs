@@ -233,6 +233,7 @@ pub async fn rework_attempt(
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     match state.store.create_task(&req).await {
         Ok(view) => Ok((

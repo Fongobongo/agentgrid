@@ -98,6 +98,9 @@ enum AgCommand {
     Ctx(CtxArgs),
     /// Plan 2.1: manage org agents (identity, role, budget, heartbeats) (#18).
     Agent(AgentArgs),
+    /// Feature "opencode profiles": CP-hosted opencode configuration — list,
+    /// show, set, delete; assign a profile to a node.
+    Opencode(OpencodeArgs),
 }
 
 #[derive(Args)]
@@ -356,6 +359,14 @@ struct RunArgs {
     /// cmd_run for the exact validation).
     #[arg(long = "models", value_delimiter = ',')]
     models: Option<Vec<String>>,
+    /// Feature "opencode profiles": per-task model override, merged over
+    /// whatever profile the node has applied. Only forwarded when the
+    /// assigned adapter starts with "opencode".
+    #[arg(long = "opencode-model")]
+    opencode_model: Option<String>,
+    /// Feature "opencode profiles": per-task small-model override.
+    #[arg(long = "opencode-small-model")]
+    opencode_small_model: Option<String>,
 }
 
 #[derive(Args)]
@@ -845,6 +856,7 @@ async fn main() -> Result<()> {
         AgCommand::Issue(a) => cmd_issue(&client, &base, a).await,
         AgCommand::Ctx(a) => cmd_ctx(&client, &base, a).await,
         AgCommand::Agent(a) => cmd_agent(&client, &base, a).await,
+        AgCommand::Opencode(a) => cmd_opencode(&client, &base, a).await,
         AgCommand::Autopilot(a) => cmd_autopilot(&client, &base, a).await,
         AgCommand::Setup(a) => cmd_setup(&client, &base, a).await,
         AgCommand::Doctor => cmd_doctor(&client, &base, cli.json).await,
@@ -979,6 +991,7 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1132,6 +1145,7 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1190,6 +1204,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 agent_id: None,
                 consensus_group_id: Some(group.clone()),
                 consensus_member: Some(member.clone()),
+                opencode_override: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1210,6 +1225,15 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         );
         return Ok(());
     }
+    let opencode_override = if a.opencode_model.is_some() || a.opencode_small_model.is_some() {
+        Some(agentgrid_common::OpencodeOverride {
+            model: a.opencode_model.clone(),
+            small_model: a.opencode_small_model.clone(),
+            config: None,
+        })
+    } else {
+        None
+    };
     let req = CreateTaskRequest {
         prompt: a.prompt,
         repository: a.repository,
@@ -1225,6 +1249,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -3709,6 +3734,188 @@ mod phase_tests {
 }
 
 /// Plan 2.7 (#25) wizard/doctor unit coverage (no live server needed): the
+
+// ── Feature "opencode profiles": CLI for opencode-config management ──────
+#[derive(Args)]
+struct OpencodeArgs {
+    #[command(subcommand)]
+    action: OpencodeAction,
+}
+
+#[derive(Subcommand)]
+enum OpencodeAction {
+    /// List all stored profiles.
+    List,
+    /// Show one profile by name (with the config payload).
+    Show { name: String },
+    /// Create or replace a profile from a JSON file (`-` for stdin).
+    Set {
+        name: String,
+        #[arg(long, value_name = "FILE")]
+        config: String,
+    },
+    /// Delete a profile. Nodes keep their last-applied on-disk config.
+    Delete { name: String },
+    /// Assign (or `--clear`) the profile a node applies.
+    Assign {
+        node_id: String,
+        /// Profile name; omit with `--clear` to detach.
+        #[arg(long, conflicts_with = "clear")]
+        profile: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Show recent apply events for a node.
+    Audit { node_id: String },
+}
+
+async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) -> Result<()> {
+    use agentgrid_common::{ListResponse, OpencodeProfile};
+    let base = _base; // keep the conventional arg name out of shadowing trouble
+    match a.action {
+        OpencodeAction::List => {
+            let resp = client
+                .get(format!("{base}/v1/opencode-profiles"))
+                .send()
+                .await
+                .context("list opencode profiles")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("list failed: {}", resp.status());
+            }
+            let items: ListResponse<OpencodeProfile> = resp.json().await?;
+            for p in &items.items {
+                println!(
+                    "{:<16} {} {} {} bytes",
+                    p.name,
+                    &p.hash[..12],
+                    p.updated_at,
+                    p.config.to_string().len()
+                );
+            }
+            Ok(())
+        }
+        OpencodeAction::Show { name } => {
+            let resp = client
+                .get(format!("{base}/v1/opencode-profiles/{name}"))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("not found");
+            }
+            let p: OpencodeProfile = resp.json().await?;
+            println!("{}", serde_json::to_string_pretty(&p)?);
+            Ok(())
+        }
+        OpencodeAction::Set { name, config } => {
+            let content = if config == "-" {
+                use tokio::io::AsyncReadExt;
+                let mut b = String::new();
+                tokio::io::stdin().read_to_string(&mut b).await?;
+                b
+            } else {
+                std::fs::read_to_string(&config).context("read config file")?
+            };
+            let cfg: serde_json::Value = serde_json::from_str(&content).context("invalid JSON")?;
+            let resp = client
+                .put(format!("{base}/v1/opencode-profiles/{name}"))
+                .json(&serde_json::json!({ "config": cfg }))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!(
+                    "upsert failed: {} {}",
+                    resp.status(),
+                    resp.text().await.unwrap_or_default()
+                );
+            }
+            let p: OpencodeProfile = resp.json().await?;
+            println!(
+                "profile {} hash={} updated_at={}",
+                p.name,
+                &p.hash[..12],
+                p.updated_at
+            );
+            Ok(())
+        }
+        OpencodeAction::Delete { name } => {
+            let resp = client
+                .delete(format!("{base}/v1/opencode-profiles/{name}"))
+                .send()
+                .await?;
+            match resp.status() {
+                reqwest::StatusCode::NO_CONTENT => {
+                    println!("deleted {name}");
+                    Ok(())
+                }
+                other => anyhow::bail!("delete failed: {other}"),
+            }
+        }
+        OpencodeAction::Assign {
+            node_id,
+            profile,
+            clear,
+        } => {
+            let profile_id = if clear {
+                None
+            } else {
+                let Some(name) = profile else {
+                    anyhow::bail!("pass --profile <name> or --clear");
+                };
+                // Resolve the profile id.
+                let resp = client
+                    .get(format!("{base}/v1/opencode-profiles/{name}"))
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("profile {name} not found");
+                }
+                let p: OpencodeProfile = resp.json().await?;
+                Some(p.id)
+            };
+            let body = serde_json::json!({ "profile_id": profile_id });
+            let resp = client
+                .post(format!("{base}/v1/nodes/{node_id}/opencode-profile"))
+                .json(&body)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("assign failed: {}", resp.status());
+            }
+            if clear {
+                println!("cleared profile for node {node_id}");
+            } else {
+                println!(
+                    "assigned profile {} to node {}",
+                    profile_id.as_deref().unwrap_or("?"),
+                    node_id
+                );
+            }
+            Ok(())
+        }
+        OpencodeAction::Audit { node_id } => {
+            let resp = client
+                .get(format!("{base}/v1/nodes/{node_id}/opencode-audit"))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("audit failed: {}", resp.status());
+            }
+            let audits: ListResponse<agentgrid_common::OpencodeConfigAuditEntry> =
+                resp.json().await?;
+            for a in &audits.items {
+                println!(
+                    "{} profile={} hash={} trigger={}",
+                    a.at,
+                    a.profile_id.as_deref().unwrap_or("-"),
+                    &a.hash[..12.min(a.hash.len())],
+                    a.trigger
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 /// wizard-side pure checks (slug / save_token round-trip / doctor json shape
 /// when every dependency is offline-safe) live here.
 #[cfg(test)]

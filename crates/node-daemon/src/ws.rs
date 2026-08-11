@@ -67,6 +67,7 @@ async fn run_session(
     cfg: &Config,
     client: &Client,
     sem: &Arc<Semaphore>,
+    cred: &SavedCredential,
 ) -> Result<()> {
     tracing::info!("ws control channel connected to {}", cfg.server);
     let mut hb = tokio::time::interval(Duration::from_secs(WS_HEARTBEAT_INTERVAL_SECS));
@@ -80,7 +81,7 @@ async fn run_session(
             msg = sock.next() => {
                 let Some(msg) = msg else { return Ok(()) };
                 match msg? {
-                    Message::Text(t) => handle_msg(&t, cfg, client, sem, &mut sock).await?,
+                    Message::Text(t) => handle_msg(&t, cfg, client, sem, &mut sock, cred).await?,
                     Message::Ping(p) => sock.send(Message::Pong(p)).await?,
                     Message::Close(cf) => {
                         tracing::info!("ws closed by control plane: {cf:?}");
@@ -99,6 +100,7 @@ async fn handle_msg(
     client: &Client,
     sem: &Arc<Semaphore>,
     sock: &mut WsStream,
+    cred: &SavedCredential,
 ) -> Result<()> {
     let send =
         |msg: &NodeWsMsg| -> Result<Message> { Ok(Message::Text(serde_json::to_string(msg)?)) };
@@ -128,6 +130,23 @@ async fn handle_msg(
                 .await?;
         }
         Ok(NodeWsMsg::HelloOk { .. }) => {}
+        // Feature "opencode profiles": the CP nudges us when the assigned
+        // profile changed. We do the authoritative pull ourselves — the push
+        // only carries the hash so a node never trusts a man-in-the-middle
+        // (best-effort; the pull is a bit of JSON over the same channel).
+        Ok(NodeWsMsg::ConfigUpdate { hash, .. }) => {
+            if let Err(e) = crate::opencode_config::pull_and_apply(
+                cfg,
+                client,
+                cred,
+                "ws_push",
+                hash.as_deref(),
+            )
+            .await
+            {
+                tracing::warn!("opencode config apply on ws_push failed: {e}");
+            }
+        }
         Ok(other) => tracing::debug!("unexpected ws message: {other:?}"),
         Err(e) => tracing::warn!("bad ws message: {e}"),
     }
@@ -147,7 +166,7 @@ pub async fn ws_loop(
         match connect_once(&cfg, &cred).await {
             Ok(sock) => {
                 backoff = Duration::from_secs(1);
-                if let Err(e) = run_session(sock, &cfg, &client, &sem).await {
+                if let Err(e) = run_session(sock, &cfg, &client, &sem, &cred).await {
                     tracing::warn!("ws session ended: {e}");
                 }
             }
@@ -175,7 +194,7 @@ pub async fn auto_loop(
             Ok(sock) => {
                 consecutive_failures = 0;
                 backoff = Duration::from_secs(1);
-                if let Err(e) = run_session(sock, &cfg, &client, &sem).await {
+                if let Err(e) = run_session(sock, &cfg, &client, &sem, &cred).await {
                     tracing::warn!("ws session ended: {e}");
                 }
                 // Reconnect promptly after a mid-session drop.

@@ -58,7 +58,7 @@ impl Store {
         }
         let mut tx = self.write_txn().await?;
         let cands = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id, consensus_group_id, consensus_member FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id, consensus_group_id, consensus_member, opencode_override FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC",
         )
@@ -169,6 +169,9 @@ impl Store {
             // adapter claude" without an extra query.
             let consensus_group_id: Option<String> = c.try_get("consensus_group_id").ok().flatten();
             let consensus_member: Option<String> = c.try_get("consensus_member").ok().flatten();
+            // Feature "opencode profiles": stored JSON text → typed override;
+            // parse failure => None (malformed JSON degrades to no override,
+            // the assignment path stays alive).
 
             // Plan 2.5 (#22b): on retry (attempt number > 1) ship every
             // eval-case artifact the previous attempts landed so the node
@@ -277,6 +280,13 @@ impl Store {
                     eval_cases,
                     consensus_group_id,
                     consensus_member,
+                    opencode_override: c
+                        .try_get::<Option<String>, _>("opencode_override")
+                        .ok()
+                        .flatten()
+                        .and_then(|s| {
+                            serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()
+                        }),
                 },
                 created_at,
             });

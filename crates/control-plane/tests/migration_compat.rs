@@ -107,6 +107,7 @@ async fn migrations_serve_legacy_happy_path() {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         })
         .await
         .unwrap();
@@ -209,6 +210,7 @@ async fn foreign_keys_enforced_after_migration_0040() {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         })
         .await
         .unwrap();

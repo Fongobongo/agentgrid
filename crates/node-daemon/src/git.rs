@@ -946,6 +946,7 @@ mod tests {
             eval_cases: vec![],
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         }
     }
 
@@ -1255,6 +1256,7 @@ mod tests {
                     eval_cases: vec![],
                     consensus_group_id: None,
                     consensus_member: None,
+                    opencode_override: None,
                 };
                 prepare_workspace(&repos, &ws_root, &a, &[], &[])
             }));

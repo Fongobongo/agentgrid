@@ -588,6 +588,7 @@ mod tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -657,6 +658,7 @@ mod tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();

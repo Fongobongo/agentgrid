@@ -24,12 +24,14 @@ mod capabilities;
 mod command_guard;
 mod completion;
 mod config;
+mod config_error;
 mod enrollment;
 pub mod evals;
 mod event_sink;
 mod git;
 mod heartbeat;
 mod mcp;
+mod opencode_config;
 mod outbox;
 mod polling;
 mod process_supervisor;
@@ -613,7 +615,30 @@ async fn main() -> Result<()> {
         }
     }
     let cred = load_or_enroll(&cfg).await?;
+    crate::config::stash_credential(&cred);
     sandbox::set_node_id(&cred.node_id);
+
+    // Feature "opencode profiles": initial application at startup, so a node
+    // that came online during a CP outage converges to the profiled state.
+    // Errors are logged, never fatal — the node still needs to run.
+    {
+        let cfg_init = cfg.clone();
+        let cred_init = cred.clone();
+        let client_init = reqwest::Client::new();
+        tokio::spawn(async move {
+            if let Err(e) = crate::opencode_config::pull_and_apply(
+                &cfg_init,
+                &client_init,
+                &cred_init,
+                "startup",
+                None,
+            )
+            .await
+            {
+                tracing::warn!("startup opencode-config sync failed: {e}");
+            }
+        });
+    }
     // Plan §25: a hard-crashed daemon can strand attached containers; clean
     // this daemon's orphans before polling so slots aren't leaked.
     if matches!(cfg.sandbox, sandbox::SandboxKind::Docker) {
@@ -1180,6 +1205,7 @@ mod tests {
             eval_cases: vec![],
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1318,6 +1344,7 @@ mod tests {
             eval_cases: vec![],
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1470,6 +1497,7 @@ mod tests {
             eval_cases: vec![],
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1591,6 +1619,7 @@ mod tests {
             eval_cases: vec![],
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1773,6 +1802,7 @@ mod tests {
                 eval_cases: vec![],
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             };
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),

@@ -28,6 +28,7 @@ mod events;
 mod learnings;
 mod maintenance;
 mod nodes;
+mod opencode_profiles;
 mod profiles;
 mod repositories;
 mod scheduler;
@@ -702,6 +703,14 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
             .try_get::<Option<String>, _>("consensus_member")
             .ok()
             .flatten(),
+        // Feature "opencode profiles": stored as JSON text; parse failures
+        // are tolerated as None (a dashboard cannot render a malformed blob,
+        // but the assignment path re-reads it fresh).
+        opencode_override: r
+            .try_get::<Option<String>, _>("opencode_override")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()),
     }
 }
 
@@ -2073,6 +2082,7 @@ mod workflow_tests {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -2123,6 +2133,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -2259,6 +2270,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -2314,6 +2326,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -2448,6 +2461,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -2560,6 +2574,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -2745,6 +2760,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -2828,6 +2844,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -3328,6 +3345,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -3375,6 +3393,7 @@ mod workflow_tests {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .await
             .unwrap();
@@ -3447,6 +3466,7 @@ mod agent_tests {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         };
         s.create_agent_task(&agent.id, &base).await.unwrap();
         let err = s.create_agent_task(&agent.id, &base).await.unwrap_err();
@@ -3504,6 +3524,7 @@ mod agent_tests {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         };
         let task = s.create_agent_task(&agent.id, &req).await.unwrap();
         assert_eq!(task.agent_id.as_deref(), Some(agent.id.as_str()));

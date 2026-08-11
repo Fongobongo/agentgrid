@@ -39,6 +39,16 @@ fn post_auth(uri: &str, body: String, cred: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn put_auth(uri: &str, body: String, cred: &str) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {cred}"))
+        .body(Body::from(body))
+        .unwrap()
+}
+
 /// Hardening P0 item 8: a node mutates its own attempt with its fenced token
 /// (the same one returned in its assignment). Use for /events, /complete,
 /// /ack, /session and /artifacts so the CP fence check passes.
@@ -192,6 +202,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -455,6 +466,7 @@ async fn validation_failure_must_not_report_success() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -574,6 +586,7 @@ async fn cancel_queued_marks_cancelled() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -1023,6 +1036,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .unwrap(),
             None,
@@ -1094,6 +1108,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .unwrap(),
             None,
@@ -1126,6 +1141,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .unwrap(),
             Some(&token),
@@ -1151,6 +1167,7 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -1251,6 +1268,7 @@ async fn login_sets_cookie_and_cookie_auths() {
                         agent_id: None,
                         consensus_group_id: None,
                         consensus_member: None,
+                        opencode_override: None,
                     })
                     .unwrap(),
                 ))
@@ -1372,6 +1390,7 @@ async fn oversized_prompt_returns_413() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -1402,6 +1421,7 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -2123,6 +2143,7 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let created = app
         .clone()
@@ -3778,6 +3799,7 @@ async fn artifact_get_rejects_traversal_name() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -4685,6 +4707,7 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -6274,6 +6297,7 @@ async fn list_tasks_filters_by_status_repository_node() {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         })
         .unwrap()
     };
@@ -7014,6 +7038,7 @@ async fn list_tasks_keyset_pagination() {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         })
         .unwrap()
     };
@@ -7178,6 +7203,7 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             agent_id: None,
             consensus_group_id: None,
             consensus_member: None,
+            opencode_override: None,
         })
         .unwrap();
         let r = app
@@ -7362,6 +7388,7 @@ async fn approvals_keyset_pagination() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let created = app
         .clone()
@@ -7553,6 +7580,7 @@ async fn strict_profile_refuses_wrapper_adapter() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -7866,6 +7894,7 @@ async fn search_finds_task_by_prompt_word() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -7928,6 +7957,7 @@ async fn attempt_detail_and_tag_crud() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     let resp = app
         .clone()
@@ -8041,6 +8071,7 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
                 agent_id: None,
                 consensus_group_id: None,
                 consensus_member: None,
+                opencode_override: None,
             })
             .unwrap(),
             &token,
@@ -8187,6 +8218,7 @@ async fn agent_api_budget_stop_and_trail() {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     })
     .unwrap();
     let resp = app
@@ -8642,5 +8674,157 @@ async fn resume_digest_bm25_after_failure() {
             .contains(&format!("resume-context-{}.md", task_view.id)),
         "retry prompt cites the digest; got: {}",
         a2.prompt
+    );
+}
+
+/// Feature "opencode profiles": PUT creates, GET returns, DELETE removes,
+/// and a node with an assigned profile picks it up via the pull endpoint.
+/// The audit row lands when the node reports the apply (via
+/// `record_opencode_apply` — the route under test only logs storage-facing
+/// rows; the node-side caller asserts the audit row exists after its own
+/// apply).
+#[tokio::test]
+async fn opencode_profiles_crud_and_node_pull() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // 1. Create a profile via PUT (create-or-replace).
+    let cfg = serde_json::json!({
+        "model": "anthropic/claude-sonnet-4-5",
+        "small_model": "anthropic/claude-haiku-4-5",
+        "provider": {
+            "anthropic": {
+                "options": { "timeout": 600000 }
+            }
+        }
+    });
+    let resp = app
+        .clone()
+        .oneshot(put_auth(
+            "/v1/opencode-profiles/sonnet",
+            serde_json::to_string(&serde_json::json!({ "config": cfg })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let profile: agentgrid_common::OpencodeProfile =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(profile.name, "sonnet");
+    assert!(!profile.hash.is_empty());
+
+    // Idempotent re-PUT with the same body keeps the same hash.
+    let resp = app
+        .clone()
+        .oneshot(put_auth(
+            "/v1/opencode-profiles/sonnet",
+            serde_json::to_string(&serde_json::json!({ "config": cfg })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let profile2: agentgrid_common::OpencodeProfile =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        profile.hash, profile2.hash,
+        "idempotent upsert must not bump the hash"
+    );
+    assert_eq!(profile.id, profile2.id, "PK must be stable across updates");
+
+    // 2. GET by name returns the same row.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/opencode-profiles/sonnet", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. Enroll a node and assign the profile, then pull.
+    let (node_id, cred) = enroll(&app, "n1", vec!["mock".into()], vec!["*".into()]).await;
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/nodes/{node_id}/opencode-profile"),
+            serde_json::to_string(&serde_json::json!({ "profile_id": profile.id })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/node/opencode-config/active", &cred))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let active: agentgrid_common::ActiveOpencodeConfigResponse =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(active.profile_id.as_deref(), Some(profile.id.as_str()));
+    assert_eq!(active.hash.as_deref(), Some(profile.hash.as_str()));
+
+    // 4. Assigning a missing profile id is a 404.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/nodes/{node_id}/opencode-profile"),
+            serde_json::to_string(&serde_json::json!({ "profile_id": "does-not-exist" })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 5. DELETE frees the slot; subsequent pull is empty.
+    let resp = app
+        .clone()
+        .oneshot(delete_auth("/v1/opencode-profiles/sonnet", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/node/opencode-config/active", &cred))
+        .await
+        .unwrap();
+    let active: agentgrid_common::ActiveOpencodeConfigResponse =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        active.profile_id.is_none(),
+        "deleted profile must clear the assignment"
+    );
+}
+
+/// Feature "opencode profiles": the allowlist gates the keys a client can
+/// push into a profile. Unknown keys are dropped silently so a typo cannot
+/// wedge every node on a parsing error.
+#[tokio::test]
+async fn opencode_profile_allowlist_strips_unknown_keys() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+    let cfg = serde_json::json!({
+        "model": "anthropic/claude-sonnet-4-5",
+        "definitely_not_a_key": { "no": "way" }
+    });
+    let resp = app
+        .clone()
+        .oneshot(put_auth(
+            "/v1/opencode-profiles/allowlist-check",
+            serde_json::to_string(&serde_json::json!({ "config": cfg })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let profile: agentgrid_common::OpencodeProfile =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let cfg: serde_json::Value = profile.config;
+    assert!(cfg.get("model").is_some());
+    assert!(
+        cfg.get("definitely_not_a_key").is_none(),
+        "allowlist must strip unknown keys, got: {cfg}"
     );
 }

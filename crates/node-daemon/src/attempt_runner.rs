@@ -335,6 +335,17 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 }
             }
         }
+        // Feature "opencode profiles": error-threshold self-heal. On a
+        // successful attempt reset the streak; on a config-class error
+        // (invalid model, provider deny, missing credentials) count it and
+        // trigger a pulled refresh when the streak crosses the threshold.
+        // The pull itself is best-effort: a CP outage leaves the daemon
+        // running under its on-disk config.
+        let config_err_payload = serde_json::json!({
+            "exit_code": exit_code,
+            "error_code": error_code.as_deref().unwrap_or(""),
+            "adapter": assignment.adapter,
+        });
         report_complete(
             &client,
             &cfg.server,
@@ -353,6 +364,29 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             &assignment.fencing_token,
         )
         .await;
+        if exit_code == 0 {
+            crate::config_error::note_attempt_succeeded();
+        } else {
+            if crate::config_error::note_config_error(&config_err_payload) {
+                let cfg_cl = cfg.clone();
+                let client_cl = client.clone();
+                if let Some(cred_cl) = crate::config::process_credential() {
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::opencode_config::pull_and_apply(
+                            &cfg_cl,
+                            &client_cl,
+                            &cred_cl,
+                            "error_threshold",
+                            None,
+                        )
+                        .await
+                        {
+                            tracing::warn!("error-triggered opencode-config pull failed: {e}");
+                        }
+                    });
+                }
+            }
+        }
         // Stage 2.3: reclaim the per-attempt worktree and branch now the attempt
         // is terminal (prevents long-lived worktree/branch retention leaking disk).
         tokio::task::spawn_blocking(move || {
@@ -524,6 +558,18 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 if let Some(v) = std::env::var_os(&req.env) {
                     spawn_env.push((req.env.clone(), v.to_string_lossy().to_string()));
                 }
+            }
+        }
+        // Feature "opencode profiles": per-attempt override merged over the
+        // node's on-disk profile and injected via OPENCODE_CONFIG_CONTENT
+        // (env-only; the variable dies with the child process so it cannot
+        // leak into later attempts on the same node).
+        if assignment.adapter == "opencode" || assignment.adapter.starts_with("opencode:") {
+            if let Some(merged) =
+                crate::opencode_config::build_override_env(assignment.opencode_override.as_ref())
+                    .await
+            {
+                spawn_env.push(("OPENCODE_CONFIG_CONTENT".to_string(), merged));
             }
         }
         let req = SpawnRequest {

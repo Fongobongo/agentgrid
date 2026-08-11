@@ -74,8 +74,21 @@ pub fn parse_adapters(s: &str) -> Vec<AdapterSpec> {
         .collect()
 }
 
+/// SavedCredential for the running process, stashed once at startup by
+/// `load_or_enroll`. Needed by code paths (error threshold, per-attempt
+/// overrides) that don't take the credential through their hot loop.
+static PROCESS_CRED: std::sync::RwLock<Option<SavedCredential>> = std::sync::RwLock::new(None);
+
+pub fn stash_credential(cred: &SavedCredential) {
+    *PROCESS_CRED.write().unwrap() = Some(cred.clone());
+}
+
+pub fn process_credential() -> Option<SavedCredential> {
+    PROCESS_CRED.read().unwrap().clone()
+}
+
 /// Node identity persisted to disk after enrollment (never re-sent in plaintext).
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SavedCredential {
     pub node_id: String,
     pub credential: String,

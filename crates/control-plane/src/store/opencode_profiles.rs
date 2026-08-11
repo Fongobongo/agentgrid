@@ -1,0 +1,270 @@
+//! opencode-config profiles (feature "opencode profiles").
+//!
+//! A profile is a named bundle of opencode settings (model, small_model,
+//! provider blocks, plugin npm refs, inline skills). Stored as opaque JSON —
+//! the config schema belongs to opencode, not to us; the CP validates
+//! syntax + a small key allowlist and lets node-side `opencode debug config`
+//! be the final oracle.
+//!
+//! Hot paths:
+//!   1. PUT/POST routes write rows + bump `hash` (sha256 of canonical JSON)
+//!      and multicast `NodeWsMsg::ConfigUpdate` to every node subscribed to
+//!      that profile (or every connected node on profile rename/delete where
+//!      assignment state changed).
+//!   2. Node pulls `active_config(node_id)` on `config_update` push or after
+//!      `AGENTGRID_CONFIG_PULL_AFTER_ERRORS` (default 3) config-class errors;
+//!      the response is cached server-side since the error path is hot.
+//!   3. `apply_audit` records each application (ws_push / error_threshold /
+//!      interval / startup) so dashboards can answer "who's on which
+//!      profile" and "when did node X last apply".
+
+use anyhow::Result;
+use sqlx::Row;
+use uuid::Uuid;
+
+use super::{now_iso, Store};
+use agentgrid_common::{OpencodeConfigAuditEntry, OpencodeProfile};
+
+/// Feature "opencode profiles": allowlist of top-level keys accepted into a
+/// stored profile. Intentionally conservative — anything outside the list is
+/// dropped server-side rather than letting a buggy client persist garbage
+/// the node later fails to parse. The node-side `OPENCODE_CONFIG_CONTENT`
+/// merge keeps the escape hatch: anything not in this list can still be
+/// injected per-attempt (it never lands on disk).
+const ALLOWED_TOP_LEVEL: &[&str] = &[
+    "model",
+    "small_model",
+    "default_agent",
+    "provider",
+    "plugin",
+    "mcp",
+    "agent",
+    "permission",
+    "enabled_providers",
+    "disabled_providers",
+    "share",
+    "snapshot",
+    "autoupdate",
+];
+
+/// Strip config keys outside the allowlist. Returns the canonical JSON
+/// string (sorted-within-object via serde's deterministic order) so two
+/// uploads with the same semantics produce the same hash.
+fn normalize_config(v: serde_json::Value) -> Result<(String, String)> {
+    let mut v = v;
+    if !v.is_object() {
+        anyhow::bail!("profile config must be a JSON object");
+    }
+    if let Some(obj) = v.as_object_mut() {
+        obj.retain(|k, _| ALLOWED_TOP_LEVEL.contains(&k.as_str()));
+    }
+    let json = serde_json::to_string(&v)?;
+    let hash = {
+        use sha2::Digest;
+        format!("{:x}", sha2::Sha256::digest(json.as_bytes()))
+    };
+    Ok((json, hash))
+}
+
+pub struct OpencodeProfileRow {
+    pub id: String,
+    pub name: String,
+    pub config_json: String,
+    pub hash: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn row_to_profile(r: &sqlx::sqlite::SqliteRow) -> OpencodeProfileRow {
+    OpencodeProfileRow {
+        id: r.get("id"),
+        name: r.get("name"),
+        config_json: r.get("config_json"),
+        hash: r.get("hash"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+    }
+}
+
+impl OpencodeProfileRow {
+    pub fn into_view(self) -> Result<OpencodeProfile> {
+        let config = serde_json::from_str(&self.config_json)?;
+        Ok(OpencodeProfile {
+            id: self.id,
+            name: self.name,
+            config,
+            hash: self.hash,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+impl Store {
+    pub async fn list_opencode_profiles(&self) -> Result<Vec<OpencodeProfile>> {
+        let rows = sqlx::query(
+            "SELECT id, name, config_json, hash, created_at, updated_at
+             FROM opencode_profiles ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| row_to_profile(&r).into_view())
+            .collect()
+    }
+
+    pub async fn get_opencode_profile(&self, name: &str) -> Result<Option<OpencodeProfile>> {
+        let row = sqlx::query(
+            "SELECT id, name, config_json, hash, created_at, updated_at
+             FROM opencode_profiles WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_profile(&r).into_view()).transpose()
+    }
+
+    /// PUT semantics: create-or-replace. Returns the final row (with the
+    /// recomputed hash). Existing nodes currently assigned to the old row
+    /// keep their `opencode_profile_id` (same primary key when the update
+    /// was by-name; new row only when it was a fresh insert).
+    pub async fn upsert_opencode_profile(
+        &self,
+        name: &str,
+        config: serde_json::Value,
+    ) -> Result<OpencodeProfile> {
+        let (json, hash) = normalize_config(config)?;
+        let now = now_iso();
+        // UPSERT on the unique `name`. The id is stable across updates so
+        // foreign keys (nodes.opencode_profile_id) survive.
+        let row = sqlx::query(
+            "INSERT INTO opencode_profiles (id, name, config_json, hash, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(name) DO UPDATE SET
+                config_json = excluded.config_json,
+                hash = excluded.hash,
+                updated_at = excluded.updated_at
+             RETURNING id, name, config_json, hash, created_at, updated_at",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(name)
+        .bind(&json)
+        .bind(&hash)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+        row_to_profile(&row).into_view()
+    }
+
+    pub async fn delete_opencode_profile(&self, name: &str) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM opencode_profiles WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Resolve the profile assigned to a node (or None if unassigned / the
+    /// profile was deleted and ON DELETE SET NULL fired).
+    pub async fn node_opencode_profile(&self, node_id: &str) -> Result<Option<OpencodeProfile>> {
+        let row = sqlx::query(
+            "SELECT p.id, p.name, p.config_json, p.hash, p.created_at, p.updated_at
+             FROM opencode_profiles p
+             JOIN nodes n ON n.opencode_profile_id = p.id
+             WHERE n.id = ?",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_profile(&r).into_view()).transpose()
+    }
+
+    /// Assign (`Some(id)`) or clear (`None`) the profile applied by a node.
+    /// Returns (applied, profile_id, hash) — the caller uses the tuple to
+    /// build the ConfigUpdate push. `applied=false` when the node id does
+    /// not exist.
+    pub async fn assign_opencode_profile(
+        &self,
+        node_id: &str,
+        profile_id: Option<&str>,
+    ) -> Result<(bool, Option<String>, Option<String>)> {
+        let r = sqlx::query("UPDATE nodes SET opencode_profile_id = ? WHERE id = ?")
+            .bind(profile_id)
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        if r.rows_affected() == 0 {
+            return Ok((false, None, None));
+        }
+        if let Some(pid) = profile_id {
+            let row = sqlx::query("SELECT hash FROM opencode_profiles WHERE id = ?")
+                .bind(pid)
+                .fetch_optional(&self.pool)
+                .await?;
+            let hash: Option<String> = row.and_then(|r| r.try_get("hash").ok());
+            Ok((true, Some(pid.to_string()), hash))
+        } else {
+            Ok((true, None, None))
+        }
+    }
+
+    pub async fn list_nodes_for_profile(&self, profile_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT id FROM nodes WHERE opencode_profile_id = ?")
+            .bind(profile_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get("id")).collect())
+    }
+
+    /// Record an application. Trigger vocabulary: ws_push | error_threshold
+    /// | interval | startup. Best-effort; callers log the error, never fail
+    /// the apply path on audit failure.
+    pub async fn record_opencode_apply(
+        &self,
+        node_id: &str,
+        profile_id: Option<&str>,
+        hash: &str,
+        trigger: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO opencode_config_audit (at, node_id, profile_id, hash, trigger)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(now_iso())
+        .bind(node_id)
+        .bind(profile_id)
+        .bind(hash)
+        .bind(trigger)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_opencode_audit(
+        &self,
+        node_id: &str,
+        limit: u32,
+    ) -> Result<Vec<OpencodeConfigAuditEntry>> {
+        let rows = sqlx::query(
+            "SELECT at, profile_id, hash, trigger
+             FROM opencode_config_audit
+             WHERE node_id = ?
+             ORDER BY at DESC
+             LIMIT ?",
+        )
+        .bind(node_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| OpencodeConfigAuditEntry {
+                at: r.get("at"),
+                profile_id: r.get("profile_id"),
+                hash: r.get("hash"),
+                trigger: r.get("trigger"),
+            })
+            .collect())
+    }
+}

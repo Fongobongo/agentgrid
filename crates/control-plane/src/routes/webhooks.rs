@@ -146,6 +146,7 @@ pub async fn github_issue_webhook(
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     };
     state
         .store
@@ -174,6 +175,7 @@ fn create_followup_task(prompt: String) -> agentgrid_common::CreateTaskRequest {
         agent_id: None,
         consensus_group_id: None,
         consensus_member: None,
+        opencode_override: None,
     }
 }
 

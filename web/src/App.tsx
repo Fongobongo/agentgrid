@@ -10,6 +10,7 @@ import Audit from './components/Audit';
 import Skills from './components/Skills';
 import { WorkflowsList, WorkflowDetails } from './components/Workflows';
 import Background from './components/Background';
+import OpencodeProfiles from './components/OpencodeProfiles';
 
 function parseHash(): { name: string; id?: string } {
   const h = window.location.hash.replace(/^#\/?/, '');
@@ -19,6 +20,7 @@ function parseHash(): { name: string; id?: string } {
   if (parts[0] === 'audit') return { name: 'audit' };
   if (parts[0] === 'skills') return { name: 'skills' };
   if (parts[0] === 'background') return { name: 'background' };
+  if (parts[0] === 'opencode') return { name: 'opencode' };
   if (parts[0] === 'new') return { name: 'new' };
   if (parts[0] === 'workflows') return { name: 'workflows' };
   if (parts[0] === 'workflow' && parts[1]) return { name: 'workflow', id: parts[1] };
@@ -65,6 +67,7 @@ export default function App() {
           <button className={cls('audit')} onClick={nav('#/audit')}>Audit</button>
           <button className={cls('skills')} onClick={nav('#/skills')}>Skills</button>
           <button className={cls('background')} onClick={nav('#/background')}>Background</button>
+          <button className={cls('opencode')} onClick={nav('#/opencode')}>Opencode</button>
           <button className={cls('workflows')} onClick={nav('#/workflows')}>Workflows</button>
           <button className={cls('new')} onClick={nav('#/new')}>New Task</button>
         </nav>
@@ -77,6 +80,7 @@ export default function App() {
         {route.name === 'audit' && <Audit />}
         {route.name === 'skills' && <Skills />}
         {route.name === 'background' && <Background />}
+        {route.name === 'opencode' && <OpencodeProfiles />}
         {route.name === 'workflows' && <WorkflowsList onOpen={(id) => (window.location.hash = `#/workflow/${id}`)} />}
         {route.name === 'workflow' && route.id && <WorkflowDetails key={route.id} runId={route.id} />}
         {route.name === 'new' && (

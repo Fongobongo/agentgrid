@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **Feature "opencode profiles"**: control-plane-hosted opencode configuration.
+  Named profiles live on the CP (`opencode_profiles` migration 0066); 6 REST
+  routes CRUD them (`GET/PUT/DELETE /v1/opencode-profiles[/{name}]`), assign one
+  to a node (`POST /v1/nodes/{id}/opencode-profile`, flags unknown values 404),
+  audit apply events (`GET /v1/nodes/{id}/opencode-audit`), and let a node pull
+  its active config (`GET /v1/node/opencode-config/active`). Per-attempt model
+  overrides ride `CreateTaskRequest.opencode_override` into
+  `Assignment::opencode_override` and are materialised as a
+  `OPENCODE_CONFIG_CONTENT` env var for `adapter = "opencode"` spawns, merged
+  over whatever profile the node last applied. Node side: WS push
+  (`NodeWsMsg::ConfigUpdate { profile_id, hash }` over the existing control
+  channel) triggers an atomic apply + backup; an error-threshold counter
+  (config-class stderr substrings, `AGENTGRID_CONFIG_PULL_AFTER_ERRORS=3`) does
+  the same as self-heal when three config errors land back-to-back. UI
+  `/#/opencode` page for view/upsert/assign/delete; `ag opencode` CLI for the
+  same plus per-attempt `--opencode-model/--opencode-small-model` flags on
+  `ag run`. Config payload is normalised server-side through a strict
+  top-level allowlist; hash-string idempotent (idempotent apply on repeat
+  upsert); revision blobs stay out for now (YAGNI).
+
 All notable changes to this project are documented in this file.
 
 ## [Unreleased]

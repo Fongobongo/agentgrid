@@ -10,6 +10,7 @@ pub mod events;
 pub mod learnings;
 pub mod maintenance;
 pub mod nodes;
+pub mod opencode;
 pub mod profiles;
 pub mod repositories;
 pub mod shared_context;
