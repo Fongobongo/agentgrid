@@ -208,6 +208,29 @@ button.link, a.link {
 .cols { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; align-items: start; }
 @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
 
+/* Plan 2.11 (#23a): approve-on-go (mobile-first). The approvals table
+   reflows into a stacked card grid below 480 px so thumbs reach the
+   Allow/Deny buttons without horizontal scroll. Focus rings are thicker;
+   tap targets stay >= 44x44 CSS pixels per WCAG touch-target guidance. */
+@media (max-width: 480px) {
+  .approvals-table thead { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  .approvals-table tbody tr {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    background: var(--panel);
+  }
+  .approvals-table tbody td { display: block; padding: 4px 0; }
+  .approvals-table td::before { content: attr(data-h); color: var(--muted, #888); font-size: 11px; display: block; text-transform: uppercase; letter-spacing: 0.06em; }
+  .approvals-actions button { min-width: 44px; min-height: 44px; padding: 10px 18px; font-size: 15px; }
+  .approvals-actions button + button { margin-left: 10px; }
+}
+/* Larger tap targets + a clearer focus ring everywhere (Plan 2.11). */
+button { min-height: 36px; padding: 8px 16px; }
+button:focus-visible, a:focus-visible { outline: 3px solid var(--accent, #4af); outline-offset: 2px; border-radius: 4px; }
+
 .log-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
 .log {
   background: #0a0c10;

@@ -59,7 +59,7 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
       {items.length === 0 ? (
         <div className="muted">No {filter} approvals.</div>
       ) : (
-        <table className="grid">
+        <table className="grid approvals-table">
           <thead>
             <tr>
               <th>Status</th>
@@ -76,20 +76,30 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
           <tbody>
             {items.map((a) => (
               <tr key={a.id}>
-                <td><StatusBadge status={a.status} /></td>
-                <td>{a.scope}</td>
-                <td className="mono">{a.permission}</td>
-                <td className="mono"><a href={`#/task/${a.task_id}`}>{a.task_id.slice(0, 8)}</a></td>
-                <td className="mono">{a.attempt_id.slice(0, 8)}</td>
-                <td>{fmtTime(a.created_at)}</td>
-                <td>{fmtTime(a.expires_at)}</td>
-                <td>{a.reason || '—'}</td>
-                <td>
+                <td data-h="Status"><StatusBadge status={a.status} /></td>
+                <td data-h="Scope">{a.scope}</td>
+                <td data-h="Permission" className="mono">{a.permission}</td>
+                <td data-h="Task" className="mono"><a href={`#/task/${a.task_id}`}>{a.task_id.slice(0, 8)}</a></td>
+                <td data-h="Attempt" className="mono">{a.attempt_id.slice(0, 8)}</td>
+                <td data-h="Created">{fmtTime(a.created_at)}</td>
+                <td data-h="Expires">{fmtTime(a.expires_at)}</td>
+                <td data-h="Reason">{a.reason || '—'}</td>
+                <td data-h="Action">
                   {a.status === 'pending' && (
-                    <>
-                      <button className="ok" disabled={busy === a.id} onClick={() => setPending({ a, decision: 'allow' })}>Allow</button>{' '}
-                      <button className="danger" disabled={busy === a.id} onClick={() => setPending({ a, decision: 'deny' })}>Deny</button>
-                    </>
+                    <div className="approvals-actions">
+                      <button
+                        className="ok"
+                        disabled={busy === a.id}
+                        aria-label={`Allow ${a.permission}`}
+                        onClick={() => setPending({ a, decision: 'allow' })}
+                      >Allow</button>{' '}
+                      <button
+                        className="danger"
+                        disabled={busy === a.id}
+                        aria-label={`Deny ${a.permission}`}
+                        onClick={() => setPending({ a, decision: 'deny' })}
+                      >Deny</button>
+                    </div>
                   )}
                 </td>
               </tr>

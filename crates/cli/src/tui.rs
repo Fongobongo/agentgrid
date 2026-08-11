@@ -122,6 +122,13 @@ struct AppState {
     follow: bool,
     no_color: bool,
     last_error: Option<String>,
+    /// Plan 2.11 (#23a): a key-driven approve/deny has been pressed. The
+    /// next tick-or-explicit-handle drains this and POSTs the decision, so
+    /// the synchronous `handle_key` function never blocks on HTTP.
+    pending_decide: Option<(
+        String,       /* task_id */
+        &'static str, /* allow|deny */
+    )>,
 }
 
 impl AppState {
@@ -130,6 +137,7 @@ impl AppState {
             server,
             no_color,
             follow: true,
+            pending_decide: None,
             ..Default::default()
         }
     }
@@ -235,6 +243,21 @@ async fn dashboard_loop(
 
         tokio::select! {
             _ = tick.tick() => {
+                // Plan 2.11 (#23a): drain any pending approve/deny decision
+                // armed by a hotkey before touching the list — we want the
+                // answer to land before the next poll-batch pulls new state.
+                if let Some((task_id, decision)) = state.pending_decide.take() {
+                    if let Err(e) = decide_pending_approvals(
+                        &client,
+                        &base,
+                        &task_id,
+                        decision,
+                    )
+                    .await
+                    {
+                        state.last_error = Some(format!("decide failed: {e}"));
+                    }
+                }
                 refresh_list(&mut state, &client, &base).await;
                 if let Some(id) = state.selected_task().map(|t| t.id.clone()) {
                     if state.follow {
@@ -325,6 +348,19 @@ fn handle_key(state: &mut AppState, ev: Option<Event>) -> bool {
                 _ => Modal::TaskDetail,
             };
         }
+        Action::ApprovePending | Action::DenyPending => {
+            // The async work runs in the poll tick — handle_key sees only that
+            // a decision request is pending. We arm the flag; the outer loop
+            // resolves the in-flight HTTP call before the next render.
+            let decision = if matches!(action, Action::ApprovePending) {
+                "allow"
+            } else {
+                "deny"
+            };
+            if let Some(t) = state.selected_task() {
+                state.pending_decide = Some((t.id.clone(), decision));
+            }
+        }
     }
     true
 }
@@ -342,6 +378,13 @@ enum Action {
     ToggleFollow,
     ToggleHelp,
     ToggleTaskDetail,
+    // Plan 2.11 (#23a): approve/deny the latest pending approval attached to
+    // the focused task. `a` = allow, `d` = deny. Reason is left blank —
+    // the loop captures the operator's intent in two keystrokes instead of
+    // blocking on a reason prompt; the server falls back to 'denied by
+    // operator' when the field is omitted on denial.
+    ApprovePending,
+    DenyPending,
 }
 
 fn map_key(ev: KeyEvent) -> Action {
@@ -368,6 +411,8 @@ fn map_key(ev: KeyEvent) -> Action {
         KeyCode::Char('f') => Action::ToggleFollow,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('i') => Action::ToggleTaskDetail,
+        KeyCode::Char('a') => Action::ApprovePending,
+        KeyCode::Char('d') => Action::DenyPending,
         _ => Action::Nothing,
     }
 }
@@ -818,6 +863,38 @@ async fn pending_approval_for_task(
     Ok(views
         .iter()
         .any(|v| v.get("task_id").and_then(|t| t.as_str()) == Some(task_id)))
+}
+
+/// Plan 2.11 (#23a): decide every pending approval attached to `task_id`.
+/// `decision` is "allow" or "deny". Reason is intentionally blank — TUI
+/// is terse; the operator's keystroke IS the reason. Serde skips an absent
+/// body and the server falls back to its defensive default (`denied by
+/// operator`) on the deny path.
+async fn decide_pending_approvals(
+    client: &Client,
+    base: &str,
+    task_id: &str,
+    decision: &'static str,
+) -> anyhow::Result<usize> {
+    let resp = client
+        .get(format!("{base}/v1/approvals"))
+        .query(&[("status", "pending")])
+        .send()
+        .await?;
+    let v: serde_json::Value = resp.json().await?;
+    let views = crate::list_items(&v);
+    let targets: Vec<String> = views
+        .iter()
+        .filter(|v| v.get("task_id").and_then(|t| t.as_str()) == Some(task_id))
+        .filter_map(|v| v.get("id").and_then(|i| i.as_str()).map(str::to_string))
+        .collect();
+    for id in &targets {
+        let _ = client
+            .post(format!("{base}/v1/approvals/{id}/{decision}"))
+            .send()
+            .await;
+    }
+    Ok(targets.len())
 }
 
 #[cfg(test)]

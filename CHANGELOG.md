@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.11)
+
+- **Approve-on-go UI (#23a):** web approvals view reflows into stacked
+  cards below 480 px (WCAG-friendly 44x44 px tap targets, focus rings,
+  `data-h` cell labels, aria-label on every action). The operator TUI
+  gains `a`/`d` hotkeys that arm an Approve/Deny decision against the
+  newest pending approval for the focused task; the next poll tick drains
+  the buffer HTTP-side so the sync `handle_key` never blocks. Swipe
+  gestures and an opentui rewrite stay deferred until a real mobile
+  workflow demands them.
+
 ### Added (plan 2.10)
 
 - **Context ejector (#21):** contentless FTS5 index over task_events
