@@ -190,6 +190,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -451,6 +453,8 @@ async fn validation_failure_must_not_report_success() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -568,6 +572,8 @@ async fn cancel_queued_marks_cancelled() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -1015,6 +1021,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .unwrap(),
             None,
@@ -1084,6 +1092,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .unwrap(),
             None,
@@ -1114,6 +1124,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .unwrap(),
             Some(&token),
@@ -1137,6 +1149,8 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -1235,6 +1249,8 @@ async fn login_sets_cookie_and_cookie_auths() {
                         network_mode: None,
                         group_id: None,
                         agent_id: None,
+                        consensus_group_id: None,
+                        consensus_member: None,
                     })
                     .unwrap(),
                 ))
@@ -1354,6 +1370,8 @@ async fn oversized_prompt_returns_413() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -1382,6 +1400,8 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -2101,6 +2121,8 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let created = app
         .clone()
@@ -3754,6 +3776,8 @@ async fn artifact_get_rejects_traversal_name() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -4659,6 +4683,8 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -6246,6 +6272,8 @@ async fn list_tasks_filters_by_status_repository_node() {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         })
         .unwrap()
     };
@@ -6984,6 +7012,8 @@ async fn list_tasks_keyset_pagination() {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         })
         .unwrap()
     };
@@ -7146,6 +7176,8 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         })
         .unwrap();
         let r = app
@@ -7328,6 +7360,8 @@ async fn approvals_keyset_pagination() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let created = app
         .clone()
@@ -7517,6 +7551,8 @@ async fn strict_profile_refuses_wrapper_adapter() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -7828,6 +7864,8 @@ async fn search_finds_task_by_prompt_word() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -7888,6 +7926,8 @@ async fn attempt_detail_and_tag_crud() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()
@@ -7999,6 +8039,8 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
                 network_mode: None,
                 group_id: Some("grp-api".into()),
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .unwrap(),
             &token,
@@ -8143,6 +8185,8 @@ async fn agent_api_budget_stop_and_trail() {
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     })
     .unwrap();
     let resp = app
@@ -8352,4 +8396,142 @@ async fn repo_learnings_top_approved_reaches_prompt() {
     );
     drop(pending_id);
     drop(task_id);
+}
+
+/// Plan 2.9 (#20): two consensus adapters produce different patches → one
+/// human-review approval row is created on the group task.
+#[tokio::test]
+async fn consensus_disagreement_creates_human_review_approval() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+
+    let app = build_router(state.clone());
+    let (node_id, _cred) = enroll(
+        &app,
+        "n-cons",
+        vec!["mock".into(), "claude".into(), "codex".into()],
+        vec!["demo".into()],
+    )
+    .await;
+
+    let group = uuid::Uuid::new_v4().to_string();
+    let mut task_ids: Vec<String> = Vec::new();
+    for member in ["claude", "codex"] {
+        let id = state
+            .store
+            .create_task(&agentgrid_common::CreateTaskRequest {
+                prompt: "fix the bug".into(),
+                repository: "demo".into(),
+                adapter: member.into(),
+                consensus_group_id: Some(group.clone()),
+                consensus_member: Some(member.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        task_ids.push(id.id);
+    }
+
+    // Complete member 1 with a patch. Consensus collapse should NOT fire
+    // because member 2 is still queued.
+    let a1 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a1.attempt_id).await.unwrap();
+    let _ = state
+        .store
+        .complete_attempt(
+            &a1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
+                error_code: None,
+                acp_session_id: None,
+                plan: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // Drop a deterministic artifact for the member-1 attempt so the sha
+    // differs across members.
+    state
+        .store
+        .save_artifact_bytes(
+            &a1.attempt_id,
+            "changes.patch",
+            b"diff --git a/x b/x\n+claude\n",
+            Some("text/x-diff"),
+            None,
+        )
+        .await
+        .unwrap();
+    state
+        .store
+        .maybe_collapse_consensus(&a1.task_id)
+        .await
+        .unwrap();
+    let approvals_mid: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM approvals WHERE scope = 'consensus_disagreement' AND permission LIKE ?"
+    ).bind(format!("%{group}%")).fetch_one(&state.store.pool).await.unwrap();
+    assert_eq!(
+        approvals_mid, 0,
+        "consensus must not collapse until every member is terminal"
+    );
+
+    // Complete member 2 with a DIFFERENT patch → collapse fires → approval row.
+    let a2 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a2.attempt_id).await.unwrap();
+    let _ = state
+        .store
+        .complete_attempt(
+            &a2.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: None,
+                resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
+                error_code: None,
+                acp_session_id: None,
+                plan: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .store
+        .save_artifact_bytes(
+            &a2.attempt_id,
+            "changes.patch",
+            b"diff --git a/x b/x\n+codex\n",
+            Some("text/x-diff"),
+            None,
+        )
+        .await
+        .unwrap();
+    state
+        .store
+        .maybe_collapse_consensus(&a2.task_id)
+        .await
+        .unwrap();
+
+    let approvals_final: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM approvals WHERE scope = 'consensus_disagreement' AND permission LIKE ?"
+    ).bind(format!("%{group}%")).fetch_one(&state.store.pool).await.unwrap();
+    assert_eq!(
+        approvals_final, 1,
+        "2 members disagree → 1 human-review approval expected"
+    );
 }

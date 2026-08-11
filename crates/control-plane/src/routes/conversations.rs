@@ -121,6 +121,8 @@ pub async fn append_conversation_message(
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let task = state.store.create_task(&task_req).await.map_err(|e| {
         tracing::error!("create_task for conversation failed: {e}");

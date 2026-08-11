@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.9)
+
+- **Consensus run (#20):** `ag run --consensus 3 --models claude,codex,opencode`
+  submits the same prompt to N adapters as one batch (`consensus_group_id`
+  links them; each task carries its `consensus_member` = adapter name).
+  When every member reaches a terminal state the CP compares the
+  `changes.patch` SHA256s: agree → done; disagree → a `human-review`
+  approval (scope `consensus_disagreement`) sits on one of the tasks so
+  the operator picks the winning patch.
+
 ### Added (plan 2.8)
 
 - **Repo learnings (#19):** short factual statements per repository

@@ -105,6 +105,8 @@ async fn migrations_serve_legacy_happy_path() {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         })
         .await
         .unwrap();
@@ -205,6 +207,8 @@ async fn foreign_keys_enforced_after_migration_0040() {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         })
         .await
         .unwrap();

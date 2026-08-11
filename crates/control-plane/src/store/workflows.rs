@@ -1443,6 +1443,8 @@ impl Store {
                                             network_mode: None,
                                             group_id: None,
                                             agent_id: None,
+                                            consensus_group_id: None,
+                                            consensus_member: None,
                                         };
                                         let tv = match self.create_task(&req).await {
                                             Ok(tv) => tv,
@@ -1554,6 +1556,8 @@ impl Store {
                                                     network_mode: None,
                                                     group_id: None,
                                                     agent_id: None,
+                                                    consensus_group_id: None,
+                                                    consensus_member: None,
                                                 };
                                                 match self.create_task(&req).await {
                                                     Ok(tv) => {
@@ -1688,6 +1692,8 @@ impl Store {
                             network_mode: None,
                             group_id: None,
                             agent_id: None,
+                            consensus_group_id: None,
+                            consensus_member: None,
                         };
                         // Claim the pending→running transition before creating
                         // the task: the background ticker and the

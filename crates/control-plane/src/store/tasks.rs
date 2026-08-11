@@ -12,8 +12,8 @@ impl Store {
         let now = now_iso();
         let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
         sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&req.repository)
@@ -29,6 +29,8 @@ impl Store {
         .bind(&req.security_profile)
         .bind(&req.group_id)
         .bind(&req.agent_id)
+        .bind(&req.consensus_group_id)
+        .bind(&req.consensus_member)
         .execute(&self.pool)
         .await?;
         Ok(TaskView {
@@ -49,6 +51,8 @@ impl Store {
             security_profile: req.security_profile.clone(),
             group_id: req.group_id.clone(),
             agent_id: req.agent_id.clone(),
+            consensus_group_id: None,
+            consensus_member: None,
         })
     }
 
@@ -83,7 +87,8 @@ impl Store {
         // subquery on `assigned_attempt_id`.
         let mut sql = String::from(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, network_mode, group_id, agent_id, \
-                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
+                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
+                    consensus_group_id, consensus_member \
              FROM tasks WHERE 1=1",
         );
         if after.is_some() {
@@ -134,7 +139,8 @@ impl Store {
             "SELECT tasks.id, tasks.repository, tasks.prompt, tasks.adapter, tasks.status, tasks.created_at, tasks.finished_at, \
                     tasks.assigned_attempt_id, tasks.validation_command, tasks.error_code, tasks.requested_node_id, \
                     tasks.base_commit, tasks.parent_acp_session_id, tasks.network_mode, tasks.group_id, tasks.agent_id, \
-                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
+                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
+                    tasks.consensus_group_id, tasks.consensus_member \
              FROM tasks JOIN tasks_fts ON tasks_fts.rowid = tasks.rowid \
              WHERE tasks_fts MATCH ? \
              ORDER BY bm25(tasks_fts) LIMIT 50",
@@ -182,7 +188,8 @@ impl Store {
     pub async fn show_task(&self, id: &str) -> Result<Option<TaskView>> {
         let row = sqlx::query(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, network_mode, group_id, agent_id, \
-                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance \
+                    (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
+                    consensus_group_id, consensus_member \
              FROM tasks WHERE id = ?",
         )
         .bind(id)

@@ -122,6 +122,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = app
         .clone()

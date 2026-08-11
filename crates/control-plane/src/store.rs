@@ -692,6 +692,16 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         security_profile,
         group_id: r.try_get("group_id").unwrap_or_default(),
         agent_id: r.try_get("agent_id").unwrap_or_default(),
+        // Plan 2.9 (#20): consensus-run tag (None when this task is not part
+        // of a consensus batch — older rows never saw the columns).
+        consensus_group_id: r
+            .try_get::<Option<String>, _>("consensus_group_id")
+            .ok()
+            .flatten(),
+        consensus_member: r
+            .try_get::<Option<String>, _>("consensus_member")
+            .ok()
+            .flatten(),
     }
 }
 
@@ -2061,6 +2071,8 @@ mod workflow_tests {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -2109,6 +2121,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -2243,6 +2257,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -2296,6 +2312,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -2428,6 +2446,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -2538,6 +2558,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -2721,6 +2743,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -2802,6 +2826,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: Some("grp-x".into()),
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -3300,6 +3326,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -3345,6 +3373,8 @@ mod workflow_tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -3415,6 +3445,8 @@ mod agent_tests {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         };
         s.create_agent_task(&agent.id, &base).await.unwrap();
         let err = s.create_agent_task(&agent.id, &base).await.unwrap_err();
@@ -3470,6 +3502,8 @@ mod agent_tests {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         };
         let task = s.create_agent_task(&agent.id, &req).await.unwrap();
         assert_eq!(task.agent_id.as_deref(), Some(agent.id.as_str()));

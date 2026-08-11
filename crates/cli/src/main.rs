@@ -345,6 +345,17 @@ struct RunArgs {
     /// same group share `ag ctx` notes and get `AG_GROUP_ID` on the node.
     #[arg(long)]
     group: Option<String>,
+    /// Plan 2.9 (#20): fire `ag run` as a consensus vote. With `--consensus N`
+    /// the CLI submits N identical tasks, one per adapter, each marked with
+    /// the same consensus group id. The CP collapses the group when every
+    /// member lands; disagreement produces a human-review approval.
+    #[arg(long = "consensus", requires = "models")]
+    consensus: Option<u32>,
+    /// Plan 2.9 (#20): comma-separated adapter names for the vote. Length
+    /// must equal `--consensus`; a short list is a CONF (see
+    /// cmd_run for the exact validation).
+    #[arg(long = "models", value_delimiter = ',')]
+    models: Option<Vec<String>>,
 }
 
 #[derive(Args)]
@@ -966,6 +977,8 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         network_mode: None,
         group_id: None,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1117,6 +1130,8 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1146,6 +1161,55 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         let repo = a.repository;
         return cmd_run_workflow(client, base, repo, &wf).await;
     }
+    // Plan 2.9 (#20): --consensus N --models a,b,c fans the prompt out as N
+    // tasks, one per model, stamped with ONE consensus group id. Aggregation
+    // happens on the CP side when the last member lands.
+    if let (Some(n), Some(models)) = (a.consensus, a.models.clone()) {
+        let n = n as usize;
+        if models.len() != n {
+            anyhow::bail!(
+                "--consensus {n} requires exactly {n} --models entries (got {})",
+                models.len()
+            );
+        }
+        let group = uuid::Uuid::new_v4().to_string();
+        let mut task_ids = Vec::new();
+        for member in &models {
+            let req = CreateTaskRequest {
+                prompt: a.prompt.clone(),
+                repository: a.repository.clone(),
+                adapter: member.clone(),
+                requested_node_id: None,
+                timeout_secs: a.timeout,
+                validation_command: a.validate.clone(),
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+                group_id: None,
+                agent_id: None,
+                consensus_group_id: Some(group.clone()),
+                consensus_member: Some(member.clone()),
+            };
+            let resp = client
+                .post(format!("{base}/v1/tasks"))
+                .json(&req)
+                .send()
+                .await
+                .context("create consensus task")?;
+            if !resp.status().is_success() {
+                anyhow::bail!("consensus task submit failed ({})", resp.status());
+            }
+            let task: TaskView = resp.json().await.context("parse")?;
+            task_ids.push(task.id);
+        }
+        println!(
+            "consensus group {group}: {} tasks → {:?}",
+            task_ids.len(),
+            task_ids
+        );
+        return Ok(());
+    }
     let req = CreateTaskRequest {
         prompt: a.prompt,
         repository: a.repository,
@@ -1159,6 +1223,8 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         network_mode: None,
         group_id: a.group,
         agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))

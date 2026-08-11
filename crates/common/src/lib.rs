@@ -289,6 +289,15 @@ pub struct CreateTaskRequest {
     /// Optional ACP session id to resume (Stage 11.5). `None` => fresh session.
     #[serde(default)]
     pub parent_acp_session_id: Option<String>,
+    /// Plan 2.9 (#20): consensus run. When set (`--consensus N` with
+    /// `--models m1,m2,...`), the CP stamps one consensus_group_id across N
+    /// tasks (one per adapter), each marked with `consensus_member =
+    /// adapter name`. Aggregation on complete collapses the group; SHAs
+    /// disagreeing → human-review approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_member: Option<String>,
     /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
     /// Node policy sets max allowed mode; task requests a mode <= node max.
     #[serde(default)]
@@ -354,6 +363,13 @@ pub struct TaskView {
     /// Plan 2.1 (#18): org-agent attribution, if the task is agent-managed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Plan 2.9 (#20): consensus-run tag — sibling tasks fired as one vote
+    /// share consensus_group_id; the member name is the adapter. Aggregated
+    /// on complete; independent tasks carry None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_member: Option<String>,
 }
 
 /// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
@@ -544,6 +560,20 @@ pub struct Assignment {
     /// the fix loop with the eval output as feedback.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub eval_cases: Vec<String>,
+    /// Plan 2.9 (#20): consensus-run tag — a `consensus_group_id` ties
+    /// sibling attempts that all ran the same prompt across different
+    /// adapters (e.g. `claude,codex,opencode`). The CP stamps one group id
+    /// per consensus batch; the assignment echoes it back so the node can
+    /// emit provenance (`AG_CONSENSUS_GROUP=<id>`). Aggregation happens on
+    /// complete: the last finisher collapse-evaluates the patch SHAs and
+    /// creates a human-review approval when the SHAs disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_group_id: Option<String>,
+    /// Plan 2.9 (#20): adapter name for THIS member — informative only;
+    /// drives nothing decision-wise but helps the reviewer spot which
+    /// adapter produced which patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_member: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1255,6 +1285,8 @@ mod tests {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         };
         assert_eq!(round_trip(&req), req);
 
@@ -1296,6 +1328,8 @@ mod tests {
                 group_id: None,
                 read_only: false,
                 eval_cases: vec![],
+                consensus_group_id: None,
+                consensus_member: None,
             }),
             assignments: vec![],
         };

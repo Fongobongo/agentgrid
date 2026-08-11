@@ -944,6 +944,8 @@ mod tests {
             group_id: None,
             read_only: false,
             eval_cases: vec![],
+            consensus_group_id: None,
+            consensus_member: None,
         }
     }
 
@@ -1251,6 +1253,8 @@ mod tests {
                     group_id: None,
                     read_only: false,
                     eval_cases: vec![],
+                    consensus_group_id: None,
+                    consensus_member: None,
                 };
                 prepare_workspace(&repos, &ws_root, &a, &[], &[])
             }));

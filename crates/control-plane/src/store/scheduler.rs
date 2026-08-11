@@ -58,7 +58,7 @@ impl Store {
         }
         let mut tx = self.write_txn().await?;
         let cands = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id, consensus_group_id, consensus_member FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC",
         )
@@ -122,6 +122,14 @@ impl Store {
             .fetch_optional(&mut *tx)
             .await?;
             let read_only = role.as_deref() == Some("verifier");
+
+            // Plan 2.9 (#20): consensus run tag — when the task was created
+            // as part of an `--consensus N --models ...` batch the columns
+            // carry the batch id + this member's adapter so downstream
+            // observability (assignment payload) can show "vote 2/3 from
+            // adapter claude" without an extra query.
+            let consensus_group_id: Option<String> = c.try_get("consensus_group_id").ok().flatten();
+            let consensus_member: Option<String> = c.try_get("consensus_member").ok().flatten();
 
             // Plan 2.5 (#22b): on retry (attempt number > 1) ship every
             // eval-case artifact the previous attempts landed so the node
@@ -228,6 +236,8 @@ impl Store {
                     group_id,
                     read_only,
                     eval_cases,
+                    consensus_group_id,
+                    consensus_member,
                 },
                 created_at,
             });

@@ -220,6 +220,8 @@ impl Store {
                         security_profile: None,
                         group_id: None,
                         agent_id: Some(a.id.clone()),
+                        consensus_group_id: None,
+                        consensus_member: None,
                     };
                     if let Err(e) = store.create_agent_task(&a.id, &req).await {
                         tracing::warn!("agent {} heartbeat spawn failed: {e}", a.id);

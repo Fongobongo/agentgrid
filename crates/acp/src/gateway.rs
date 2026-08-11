@@ -266,6 +266,8 @@ impl AcpAgent for GatewayAgent {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         };
         let task_id = self.create_task(&req).await?;
         if let Some(m) = self.sessions.lock().unwrap().get_mut(&p.session_id) {

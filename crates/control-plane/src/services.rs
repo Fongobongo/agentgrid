@@ -99,6 +99,14 @@ impl TaskLifecycleService {
                 }
             }
         }
+        // Plan 2.9 (#20): consensus collapse — when the task was part of a
+        // consensus batch and every member task has reached a terminal state,
+        // reconcile patch SHAs and emit a human-review approval on
+        // disagreement. Idempotent, runs once per member that lands its
+        // completion.
+        if let Err(e) = self.store.maybe_collapse_consensus(&task_id).await {
+            tracing::warn!(task_id, error = %e, "consensus collapse failed");
+        }
         let Some(run_id) = self.store.workflow_run_id_for_task(&task_id).await? else {
             return Ok(true); // plain (non-workflow) task
         };
@@ -578,6 +586,8 @@ mod tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();
@@ -645,6 +655,8 @@ mod tests {
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
             })
             .await
             .unwrap();

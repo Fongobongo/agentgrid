@@ -210,6 +210,8 @@ impl<'a> ControlPlane<'a> {
             network_mode: None,
             group_id: None,
             agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
         };
         let r = self.post("/v1/tasks").json(&req).send().await?;
         let status = r.status();

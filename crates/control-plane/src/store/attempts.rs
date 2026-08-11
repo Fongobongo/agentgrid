@@ -360,6 +360,96 @@ impl Store {
         Ok(true)
     }
 
+    /// Plan 2.9 (#20): consensus collapse. After a member attempt succeeds,
+    /// check if every task in the consensus group has reached a terminal
+    /// state. When they have, hash each successful member's `changes.patch`
+    /// artifact and compare: agreement is a no-op; disagreement creates a
+    /// `human-review` approval row pinned to one task id.
+    /// Idempotent — already-collapsed groups are skipped. Caller must call
+    /// AFTER the member transition committed (the helper queries the pool).
+    pub async fn maybe_collapse_consensus(&self, task_id: &str) -> Result<()> {
+        let Some(group_id): Option<String> = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT consensus_group_id FROM tasks WHERE id = ?",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten() else {
+            return Ok(());
+        };
+        let rows = sqlx::query(
+            "SELECT id, status, consensus_member FROM tasks \
+             WHERE consensus_group_id = ? ORDER BY id",
+        )
+        .bind(&group_id)
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        for r in &rows {
+            let st: String = r.try_get("status")?;
+            if !matches!(st.as_str(), "succeeded" | "failed" | "cancelled") {
+                return Ok(());
+            }
+        }
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM approvals WHERE task_id = ? AND permission LIKE '%' || ? || '%'",
+        )
+        .bind(task_id)
+        .bind(&group_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if existing > 0 {
+            return Ok(());
+        }
+        let mut patch_shas: Vec<(String, String)> = Vec::new();
+        for r in &rows {
+            let st: String = r.try_get("status")?;
+            if st != "succeeded" {
+                continue;
+            }
+            let member: Option<String> = r.try_get("consensus_member")?;
+            let member_task_id: String = r.try_get("id")?;
+            if let Some(meta) = self
+                .read_artifact_meta(&member_task_id, "changes.patch")
+                .await?
+            {
+                if let Some(sha) = meta.sha256 {
+                    patch_shas.push((member.unwrap_or_default(), sha));
+                }
+            }
+        }
+        if patch_shas.len() < 2 {
+            return Ok(());
+        }
+        let first_sha = patch_shas[0].1.clone();
+        if !patch_shas.iter().any(|(_, s)| *s != first_sha) {
+            return Ok(());
+        }
+        let approval_id = Uuid::new_v4().to_string();
+        let now = now_iso();
+        let expires = iso_plus_secs(86400);
+        let perm = serde_json::json!({
+            "kind": "consensus_disagreement",
+            "group": group_id,
+            "members": patch_shas.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>(),
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO approvals (id, task_id, attempt_id, session_id, permission, status, created_at, expires_at, step_run_id, scope) \
+             VALUES (?, ?, NULL, NULL, ?, 'pending', ?, ?, NULL, 'consensus_disagreement')",
+        )
+        .bind(&approval_id)
+        .bind(task_id)
+        .bind(&perm)
+        .bind(&now)
+        .bind(&expires)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn create_agent_session(&self, attempt_id: &str, adapter: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();

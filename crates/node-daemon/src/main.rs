@@ -1178,6 +1178,8 @@ mod tests {
             group_id: None,
             read_only: false,
             eval_cases: vec![],
+            consensus_group_id: None,
+            consensus_member: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1314,6 +1316,8 @@ mod tests {
             group_id: None,
             read_only: false,
             eval_cases: vec![],
+            consensus_group_id: None,
+            consensus_member: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1464,6 +1468,8 @@ mod tests {
             group_id: None,
             read_only: false,
             eval_cases: vec![],
+            consensus_group_id: None,
+            consensus_member: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1583,6 +1589,8 @@ mod tests {
             group_id: None,
             read_only: false,
             eval_cases: vec![],
+            consensus_group_id: None,
+            consensus_member: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1763,6 +1771,8 @@ mod tests {
                 group_id: None,
                 read_only: false,
                 eval_cases: vec![],
+                consensus_group_id: None,
+                consensus_member: None,
             };
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),
