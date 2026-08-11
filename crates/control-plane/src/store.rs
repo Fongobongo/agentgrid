@@ -2104,6 +2104,10 @@ mod workflow_tests {
     // transaction (was: one BEGIN IMMEDIATE per assignment).
     #[tokio::test]
     async fn assign_batch_hundred_tasks_one_write_txn() {
+        // Plan 2.14 (#27) pressure-gate would refuse 100 concurrent attempts
+        // (100 × 256 MiB forecast > 1 GiB default ceiling); the test rigs the
+        // scenario by disabling the gate locally.
+        std::env::set_var("AGENTGRID_CAPACITY_PRESSURE", "0");
         let s = temp_store().await;
         let (token, _) = s.create_enrollment_token().await.unwrap();
         let node = EnrollRequest {

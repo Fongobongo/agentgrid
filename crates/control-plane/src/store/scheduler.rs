@@ -83,7 +83,12 @@ impl Store {
         // 256` exceeds its `max_rss_mib` (a hard ceiling with a sane 1 GiB
         // default). The 256 MiB per-attempt forecast is a conservative
         // floor covering an LLM stream + adapter + git worktree.
-        {
+        // Env `AGENTGRID_CAPACITY_PRESSURE=0` disables the gate — test rigs
+        // and tiny dev machines may need to bypass it; production keeps it on.
+        let gate_on = std::env::var("AGENTGRID_CAPACITY_PRESSURE")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if gate_on {
             let active_rss: i64 = node.try_get("active_rss_mib").unwrap_or(0);
             let max_rss: i64 = node.try_get("max_rss_mib").unwrap_or(1024);
             let forecast_per_attempt: i64 = 256; // MiB
