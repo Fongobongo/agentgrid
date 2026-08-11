@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (plan 2.14)
+
+- **Capacity pressure gate (scheduler):** nodes gained `rss_mib /
+  cpu_load_pct / active_rss_mib / max_rss_mib` columns; before assigning
+  a batch `try_assign` projects `active_rss + free_slots * 256 MiB` and
+  rejects when it exceeds `max_rss_mib`. Each refusal lands in the
+  append-only `metrics_capacity_pressure` table (timestamped, includes
+  threshold + projected) so dashboards can chart "how often did we drop
+  work because the node couldn't take it".
+
+### Added (plan 2.13)
+
+- **Background specialists panel (#26):** new `/background` route renders
+  a card grid of specialist tags (`security-review`, `eval-case`,
+  `consensus`, `autopilot`), each card showing count + up to three active
+  attempts. Filters by capability, active/terminal status, and repo
+  substring. Shares the Approvals mobile stylesheet: 44 px tap targets,
+  stacked cards below 480 px.
+
+### Added (plan 2.12)
+
+- **Termux edge node (#24):** `deploy/install-node-termux.sh` +
+  `docs/deploy-termux.md`. Prefix-based install (no systemd, no root),
+  hard low-power defaults (256 MiB max_rss, 1 parallel attempt), and
+  `termux-services` instructions for auto-restart.
+
 ### Added (plan 2.11)
 
 - **Approve-on-go UI (#23a):** web approvals view reflows into stacked

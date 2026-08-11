@@ -391,3 +391,34 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--accent, #4af); 
 }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--border); }
+
+/* Plan 2.13 (#26): Background-specialist HUD cards. */
+.filter-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; margin-bottom: 14px; }
+.filter-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.filter-row select, .filter-row input {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 6px 10px;
+  border-radius: 6px;
+  min-width: 160px;
+}
+.cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.card h3 { margin: 0 0 8px; font-size: 15px; }
+.card .badge {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+.card ul { list-style: none; padding: 0; margin: 0; }
+.card li { padding: 4px 0; font-size: 13px; }
+.card li > * + * { margin-left: 6px; }

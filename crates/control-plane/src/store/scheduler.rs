@@ -78,6 +78,45 @@ impl Store {
             return Ok(Vec::new());
         };
         let nv = row_to_node_view(&node);
+        // Plan 2.14 (#27): capacity-pressure gate. The scheduler refuses to
+        // assign when the node reports `active_rss_mib + active_attempts *
+        // 256` exceeds its `max_rss_mib` (a hard ceiling with a sane 1 GiB
+        // default). The 256 MiB per-attempt forecast is a conservative
+        // floor covering an LLM stream + adapter + git worktree.
+        {
+            let active_rss: i64 = node.try_get("active_rss_mib").unwrap_or(0);
+            let max_rss: i64 = node.try_get("max_rss_mib").unwrap_or(1024);
+            let forecast_per_attempt: i64 = 256; // MiB
+                                                 // Use `min(limit, free_slots)` — that's the number of attempts
+                                                 // we'd actually ship; we only need to back out if shipping them
+                                                 // would exceed the node's hard memory ceiling.
+            let free_slots_early = nv
+                .max_concurrency
+                .saturating_sub(nv.active_attempts)
+                .min(limit as u32) as i64;
+            let projected = active_rss + free_slots_early * forecast_per_attempt;
+            if projected > max_rss {
+                tx.commit().await?; // close the txn before logging
+                sqlx::query(
+                    "INSERT INTO metrics_capacity_pressure (at, node_id, threshold_mib, active_mib, forecast_mib) \
+                     VALUES (datetime('now'), ?, ?, ?, ?)",
+                )
+                .bind(node_id)
+                .bind(max_rss)
+                .bind(active_rss)
+                .bind(projected)
+                .execute(&self.pool)
+                .await?;
+                tracing::info!(
+                    node_id,
+                    active_rss,
+                    max_rss,
+                    projected,
+                    "rejected_due_to_pressure"
+                );
+                return Ok(Vec::new());
+            }
+        }
         // Batch cap: the node's free concurrency slots (plan 0.3 1.2).
         let free_slots = nv.max_concurrency.saturating_sub(nv.active_attempts) as usize;
         let cap = limit.min(free_slots);
