@@ -639,6 +639,47 @@ async fn main() -> Result<()> {
             }
         });
     }
+    // Feature "opencode profiles": interval pull — OFF by default
+    // (`AGENTGRID_CONFIG_PULL_INTERVAL_SECS=0` or unset). Only for paranoid
+    // deploys that want the node to re-converge even when the WS push channel
+    // is healthy but the operator distrusts its delivery (e.g. aggressive proxy
+    // in front of the CP). Constant: when enabled, ticks every N seconds and
+    // applies iff the on-disk hash drifted.
+    if let Ok(ivstr) = std::env::var("AGENTGRID_CONFIG_PULL_INTERVAL_SECS") {
+        if let Ok(secs) = ivstr.parse::<u64>() {
+            if secs >= 30 {
+                let cfg_i = cfg.clone();
+                // The credential is refreshed per tick via process_credential —
+                // enrol-side restores after a CP restart deliver a fresh bearer
+                // without restarting the daemon.
+                let client_i = reqwest::Client::new();
+                tracing::info!(
+                    interval_secs = secs,
+                    "opencode-config interval pull enabled"
+                );
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(secs));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tick.tick().await;
+                        if let Some(cred) = crate::config::process_credential() {
+                            if let Err(e) = crate::opencode_config::pull_and_apply(
+                                &cfg_i, &client_i, &cred, "interval", None,
+                            )
+                            .await
+                            {
+                                tracing::warn!("interval opencode-config pull failed: {e}");
+                            }
+                        }
+                    }
+                });
+            } else if secs > 0 {
+                tracing::warn!(
+                    "AGENTGRID_CONFIG_PULL_INTERVAL_SECS pinned below 30 s — ignored (guard rail)"
+                );
+            }
+        }
+    }
     // Plan §25: a hard-crashed daemon can strand attached containers; clean
     // this daemon's orphans before polling so slots aren't leaked.
     if matches!(cfg.sandbox, sandbox::SandboxKind::Docker) {

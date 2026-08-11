@@ -37,6 +37,10 @@ ag run --adapter opencode --opencode-small-model anthropic/claude-haiku -- repos
 
 The node daemon counts consecutive config-class errors (invalid model, 401/403 on the provider, `model_not_found`, missing API key) on its stderr stream. When the streak crosses `AGENTGRID_CONFIG_PULL_AFTER_ERRORS` (default 3), the node pulls its active profile itself — recovering from a rolled-out model deprecation or a revoked credential without operator intervention. A successful completion resets the streak.
 
+### Interval pull (off by default)
+
+For paranoid deploys, `AGENTGRID_CONFIG_PULL_INTERVAL_SECS=<seconds>` turns on a dumb interval poll. The daemon pulls its active profile every N seconds and applies iff the hash drifted. **Default is off** — the WS push channel is healthy in practice and hash-drift convergence from heartbeats already covers the rare missed push. Use only when a *very* aggressive proxy in front of the CP makes websocket pushes unreliable. Enforced guard-rail: values below 30 s are ignored (tick frequency below that is just spam).
+
 ## Allowlist
 
 Only these top-level keys are forwarded to the daemon:
