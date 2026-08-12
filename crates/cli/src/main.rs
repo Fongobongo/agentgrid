@@ -3753,6 +3753,10 @@ enum OpencodeAction {
         name: String,
         #[arg(long, value_name = "FILE")]
         config: String,
+        /// Optional absolute expiry (RFC3339 UTC, e.g. 2026-01-01T00:00:00Z);
+        /// the profile is auto-deleted after this. Absent = never expires.
+        #[arg(long, value_name = "RFC3339")]
+        expires_at: Option<String>,
     },
     /// Delete a profile. Nodes keep their last-applied on-disk config,
     /// unless `--fallback <name>` re-points them onto another profile first.
@@ -3820,7 +3824,11 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
             println!("{}", serde_json::to_string_pretty(&p)?);
             Ok(())
         }
-        OpencodeAction::Set { name, config } => {
+        OpencodeAction::Set {
+            name,
+            config,
+            expires_at,
+        } => {
             let content = if config == "-" {
                 use tokio::io::AsyncReadExt;
                 let mut b = String::new();
@@ -3832,7 +3840,10 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
             let cfg: serde_json::Value = serde_json::from_str(&content).context("invalid JSON")?;
             let resp = client
                 .put(format!("{base}/v1/opencode-profiles/{name}"))
-                .json(&serde_json::json!({ "config": cfg }))
+                .json(&serde_json::json!({
+                    "config": cfg,
+                    "expires_at": expires_at,
+                }))
                 .send()
                 .await?;
             if !resp.status().is_success() {

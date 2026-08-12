@@ -688,6 +688,37 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
     // does not strand them; idempotent, best-effort per run.
     state.store.start_workflow_ticker();
     state.store.start_agent_heartbeat_ticker();
+    // Configurator polish: opencode-profile TTL janitor — every 15 s sweep
+    // expired profiles (same semantics as a manual DELETE) and wake their
+    // nodes with a ConfigUpdate clear push so they drop the profile.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                match state.store.expire_opencode_profiles().await {
+                    Ok(expired) => {
+                        for (name, nodes) in expired {
+                            tracing::info!(profile = %name, nodes = nodes.len(), "opencode profile expired");
+                            for node_id in &nodes {
+                                state
+                                    .ws_registry
+                                    .send(
+                                        node_id,
+                                        &agentgrid_common::ws::NodeWsMsg::ConfigUpdate {
+                                            profile_id: None,
+                                            hash: None,
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    Err(e) => tracing::warn!("opencode profile expiry sweep failed: {e}"),
+                }
+            }
+        });
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let app = build_router(state.clone());
     match (

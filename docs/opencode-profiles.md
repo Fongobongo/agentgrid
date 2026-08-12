@@ -17,7 +17,9 @@ ag opencode profile list                         # all profiles (id, name, hash)
 ag opencode profile show <name>                  # one profile with full config (includes `prev` if a rollback
 target exists)
 ag opencode profile set  <name> --config <file>  # upsert from JSON file (or `-` for stdin)
+ag opencode profile set  <name> --config <file> --expires-at 2026-01-01T00:00:00Z  # auto-expire
 ag opencode profile delete <name>
+ag opencode profile delete <name> --fallback <other>  # move assigned nodes onto <other> first
 ag opencode profile rollback <name>              # swap back one revision
 ag opencode profile assign <node-id> --profile <name>   # bind node → profile
 ag opencode profile assign <node-id> --clear            # detach
@@ -46,6 +48,21 @@ The node daemon counts consecutive config-class errors (invalid model, 401/403 o
 ### Interval pull (off by default)
 
 For paranoid deploys, `AGENTGRID_CONFIG_PULL_INTERVAL_SECS=<seconds>` turns on a dumb interval poll. The daemon pulls its active profile every N seconds and applies iff the hash drifted. **Default is off** — the WS push channel is healthy in practice and hash-drift convergence from heartbeats already covers the rare missed push. Use only when a *very* aggressive proxy in front of the CP makes websocket pushes unreliable. Enforced guard-rail: values below 30 s are ignored (tick frequency below that is just spam).
+
+## TTL (auto-expire)
+
+A profile can carry an absolute expiry (`expires_at`, RFC3339 UTC). When the
+janitor ticks past it the profile is deleted exactly like a manual DELETE
+(nodes are re-pointed off via `ON DELETE SET NULL` and woken with a
+ConfigUpdate clear push; their last-applied on-disk config stays).
+
+- Set: `ag opencode profile set <name> --config file.json \
+  --expires-at 2026-01-01T00:00:00Z`, or the web upsert form's
+  "expires at" field. Absent/empty = never expires; a PUT without
+  `expires_at` clears a previous TTL.
+- Sweep cadence: 15 s, same maintenance loop that reverts leases.
+- `expires_at` is validated as RFC3339 on upsert — a typo fails loudly
+  instead of silently never expiring.
 
 ## Allowlist
 

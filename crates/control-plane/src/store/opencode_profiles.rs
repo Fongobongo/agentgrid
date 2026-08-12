@@ -148,6 +148,7 @@ pub struct OpencodeProfileRow {
     pub hash: String,
     pub prev_config_json: Option<String>,
     pub prev_hash: Option<String>,
+    pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -160,6 +161,7 @@ fn row_to_profile(r: &sqlx::sqlite::SqliteRow) -> OpencodeProfileRow {
         hash: r.get("hash"),
         prev_config_json: r.get("prev_config_json"),
         prev_hash: r.get("prev_hash"),
+        expires_at: r.get("expires_at"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     }
@@ -185,6 +187,7 @@ impl OpencodeProfileRow {
             config,
             hash: self.hash,
             prev,
+            expires_at: self.expires_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -194,7 +197,7 @@ impl OpencodeProfileRow {
 impl Store {
     pub async fn list_opencode_profiles(&self) -> Result<Vec<OpencodeProfile>> {
         let rows = sqlx::query(
-            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, created_at, updated_at
+            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, expires_at, created_at, updated_at
              FROM opencode_profiles ORDER BY name",
         )
         .fetch_all(&self.pool)
@@ -206,7 +209,7 @@ impl Store {
 
     pub async fn get_opencode_profile(&self, name: &str) -> Result<Option<OpencodeProfile>> {
         let row = sqlx::query(
-            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, created_at, updated_at
+            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, expires_at, created_at, updated_at
              FROM opencode_profiles WHERE name = ?",
         )
         .bind(name)
@@ -223,26 +226,30 @@ impl Store {
         &self,
         name: &str,
         config: serde_json::Value,
+        expires_at: Option<String>,
     ) -> Result<OpencodeProfile> {
         let (json, hash) = normalize_config(config)?;
         let now = now_iso();
         // UPSERT on the unique `name`. The id is stable across updates so
-        // foreign keys (nodes.opencode_profile_id) survive.
+        // foreign keys (nodes.opencode_profile_id) survive. `expires_at` is
+        // replaced wholesale (None clears a previous TTL).
         let row = sqlx::query(
-            "INSERT INTO opencode_profiles (id, name, config_json, hash, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO opencode_profiles (id, name, config_json, hash, expires_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(name) DO UPDATE SET
                 prev_config_json = opencode_profiles.config_json,
                 prev_hash = opencode_profiles.hash,
                 config_json = excluded.config_json,
                 hash = excluded.hash,
+                expires_at = excluded.expires_at,
                 updated_at = excluded.updated_at
-             RETURNING id, name, config_json, hash, prev_config_json, prev_hash, created_at, updated_at",
+             RETURNING id, name, config_json, hash, prev_config_json, prev_hash, expires_at, created_at, updated_at",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(name)
         .bind(&json)
         .bind(&hash)
+        .bind(&expires_at)
         .bind(&now)
         .bind(&now)
         .fetch_one(&self.pool)
@@ -364,6 +371,37 @@ impl Store {
         Ok(r.rows_affected() > 0)
     }
 
+    /// Janitor sweep: delete every profile whose `expires_at` has passed.
+    /// Behaves exactly like a manual DELETE — nodes are re-pointed off via
+    /// ON DELETE SET NULL; the caller wakes them with a ConfigUpdate clear
+    /// push. Returns `(profile_name, affected_node_ids)` per expired profile
+    /// so the caller can push + the audit can stay honest.
+    pub async fn expire_opencode_profiles(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let now = now_iso();
+        let expired = sqlx::query(
+            "SELECT id, name FROM opencode_profiles WHERE expires_at IS NOT NULL AND expires_at <= ?",
+        )
+        .bind(&now)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in &expired {
+            let id: String = row.get("id");
+            let name: String = row.get("name");
+            let nodes = self.list_nodes_for_profile(&id).await.unwrap_or_default();
+            if let Err(e) = self.delete_opencode_profile(&name).await {
+                tracing::warn!("opencode profile {name} expire delete failed: {e}");
+                continue;
+            }
+            let detail = serde_json::json!({ "profile_name": name }).to_string();
+            let _ = self
+                .audit("system", None, "opencode.expire", None, Some(&detail))
+                .await;
+            out.push((name, nodes));
+        }
+        Ok(out)
+    }
+
     /// Delete a profile while atomically re-pointing every node currently
     /// assigned to it onto a fallback profile. Single txn, so a node can't
     /// observe a half-state (reassigned but profile still alive / profile
@@ -395,7 +433,7 @@ impl Store {
     /// profile was deleted and ON DELETE SET NULL fired).
     pub async fn node_opencode_profile(&self, node_id: &str) -> Result<Option<OpencodeProfile>> {
         let row = sqlx::query(
-            "SELECT p.id, p.name, p.config_json, p.hash, p.prev_config_json, p.prev_hash, p.created_at, p.updated_at
+            "SELECT p.id, p.name, p.config_json, p.hash, p.prev_config_json, p.prev_hash, p.expires_at, p.created_at, p.updated_at
              FROM opencode_profiles p
              JOIN nodes n ON n.opencode_profile_id = p.id
              WHERE n.id = ?",

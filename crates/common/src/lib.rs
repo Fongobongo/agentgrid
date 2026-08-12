@@ -1249,6 +1249,12 @@ pub struct OpencodeProfile {
     /// swap to every assigned node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev: Option<Box<OpencodeProfileRevision>>,
+    /// Optional absolute expiry (RFC3339 UTC). The control-plane janitor
+    /// deletes the profile once this timestamp passes — same semantics as a
+    /// manual DELETE (assigned nodes drop it, last-applied config stays on
+    /// disk). NULL = never expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1268,6 +1274,10 @@ pub struct OpencodeProfileRevision {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpsertOpencodeProfileRequest {
     pub config: serde_json::Value,
+    /// Optional absolute expiry (RFC3339 UTC); the janitor deletes the
+    /// profile once this passes. `null`/absent clears any previous expiry.
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 /// `POST /v1/nodes/{id}/opencode-profile` body — assign (or clear with

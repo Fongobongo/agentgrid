@@ -13,6 +13,7 @@ interface OpencodeProfile {
   hash: string;
   config: Record<string, unknown>;
   prev?: { hash: string; config: Record<string, unknown> } | null;
+  expires_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -84,6 +85,7 @@ export default function OpencodeProfiles() {
   const [error, setError] = useState<unknown>(null);
   const [editName, setEditName] = useState('');
   const [editBody, setEditBody] = useState('');
+  const [editExpires, setEditExpires] = useState('');
   const [msg, setMsg] = useState('');
 
   const load = () => {
@@ -120,13 +122,17 @@ export default function OpencodeProfiles() {
     }
     try {
       const cfg = JSON.parse(editBody);
+      const body = JSON.stringify({
+        config: cfg,
+        expires_at: editExpires.trim() ? editExpires.trim() : null,
+      });
       const r = await fetch(
         `/v1/opencode-profiles/${encodeURIComponent(editName.trim())}?dry_run=true`,
         {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ config: cfg }),
+          body,
         },
       );
       const data = await r.json();
@@ -151,16 +157,21 @@ export default function OpencodeProfiles() {
     }
     try {
       const cfg = JSON.parse(editBody);
+      const body = JSON.stringify({
+        config: cfg,
+        expires_at: editExpires.trim() ? editExpires.trim() : null,
+      });
       const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(editName.trim())}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ config: cfg }),
+        body,
       });
       if (!r.ok) throw new Error(`upsert failed: ${r.status}`);
       setMsg('profile saved');
       setEditBody('');
       setEditName('');
+      setEditExpires('');
       setDryResult(null);
       load();
     } catch (e) {
@@ -240,6 +251,9 @@ export default function OpencodeProfiles() {
               {v.small_model && <div className="muted">small {String(v.small_model)}</div>}
               <div className="muted">snapshot {v.snapshot ? 'on' : 'off'} · share {v.share ? 'on' : 'off'}</div>
               <div className="muted">updated {fmtTime(p.updated_at)}</div>
+              {p.expires_at && (
+                <div className="muted">expires {fmtTime(p.expires_at)}</div>
+              )}
               <details>
                 <summary>config</summary>
                 <pre>{JSON.stringify(p.config, null, 2)}</pre>
@@ -288,6 +302,12 @@ export default function OpencodeProfiles() {
           value={editBody}
           onChange={(e) => setEditBody(e.target.value)}
           style={{ width: '100%', fontFamily: 'monospace', marginTop: 8 }}
+        />
+        <input
+          placeholder="expires at (RFC3339, optional — e.g. 2026-01-01T00:00:00Z)"
+          value={editExpires}
+          onChange={(e) => setEditExpires(e.target.value)}
+          style={{ width: '100%', marginTop: 8 }}
         />
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
           <button onClick={formatBody} disabled={!editBody.trim()} title="Pretty-print the JSON body">

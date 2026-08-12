@@ -8905,6 +8905,81 @@ async fn opencode_delete_with_fallback_reassigns_nodes() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Feature "opencode profiles": TTL — a profile with an `expires_at` in
+/// the past is swept by the janitor exactly like a manual delete (nodes
+/// re-pointed off, profile gone).
+#[tokio::test]
+async fn opencode_profile_ttl_janitor_expires() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Create with a TTL in the past.
+    let resp = app
+        .clone()
+        .oneshot(put_auth(
+            "/v1/opencode-profiles/tmp",
+            serde_json::to_string(&serde_json::json!({
+                "config": { "model": "model-x" },
+                "expires_at": "2000-01-01T00:00:00Z",
+            }))
+            .unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (node_id, _cred) = enroll(&app, "n1", vec!["mock".into()], vec!["*".into()]).await;
+    let p: agentgrid_common::OpencodeProfile = serde_json::from_slice(
+        &to_bytes(
+            app.clone()
+                .oneshot(get_auth("/v1/opencode-profiles/tmp", &token))
+                .await
+                .unwrap()
+                .into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/nodes/{node_id}/opencode-profile"),
+            serde_json::to_string(&serde_json::json!({ "profile_id": p.id })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Janitor sweep: expired profile is deleted, node assignment freed.
+    let expired = state.store.expire_opencode_profiles().await.unwrap();
+    assert_eq!(expired.len(), 1, "one profile should expire");
+    assert_eq!(expired[0].0, "tmp");
+    assert_eq!(expired[0].1, vec![node_id.clone()]);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/opencode-profiles/tmp", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/node/opencode-config/active", &_cred))
+        .await
+        .unwrap();
+    let active: agentgrid_common::ActiveOpencodeConfigResponse =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        active.profile_id.is_none(),
+        "expired profile must clear assignment"
+    );
+}
+
 /// Feature "opencode profiles": nodes publish apply events through
 /// `POST /v1/node/opencode-config/audit` (auth = node bearer). An operator
 /// can then read them through the audited GET under `/v1/nodes/{id}`.

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Profile TTL / auto-expire.** A profile can carry an absolute
+  `expires_at` (RFC3339, validated loudly on upsert). A janitor on the same
+  15 s maintenance cadence deletes expired profiles exactly like a manual
+  DELETE — nodes are re-pointed off via `ON DELETE SET NULL` and woken by a
+  ConfigUpdate clear push, last-applied on-disk config stays. CLI:
+  `ag opencode profile set <name> --config f.json --expires-at …`; web:
+  "expires at" field in the upsert form + muted line on each card.
+
 - **Delete-with-fallback for profiles.** `DELETE
   /v1/opencode-profiles/{name}?fallback=<other>` re-points every node
   currently assigned to the profile onto `<other>` in the same transaction
