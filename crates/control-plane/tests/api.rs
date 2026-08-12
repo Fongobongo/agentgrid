@@ -9205,6 +9205,53 @@ async fn opencode_profile_pinned_skills_flow() {
     );
 }
 
+/// Hardening guard: `/v1/node/skills-trust` is the node-auth'd mirror of the
+/// operator trust ledger (added so a node daemon holding only its long-lived
+/// credential can read trust verdicts without a user JWT). A valid node
+/// credential reads it; a user JWT does NOT (node routes reject user tokens)
+/// and no auth is 401.
+#[tokio::test]
+async fn node_skills_trust_requires_node_credential() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (_, cred) = enroll(&app, "n-skills", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Node credential → 200 + JSON list.
+    let ok = app
+        .clone()
+        .oneshot(get_auth("/v1/node/skills-trust", &cred))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let rows: Vec<agentgrid_common::SkillTrustView> =
+        serde_json::from_slice(&to_bytes(ok.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(rows.is_empty(), "fresh ledger starts empty");
+
+    // No auth → 401.
+    let none = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/node/skills-trust")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(none.status(), StatusCode::UNAUTHORIZED);
+
+    // User JWT → NOT a node credential → 401 (operator routes and node
+    // routes are separate trust domains).
+    let token = test_token(&app).await;
+    let user = app
+        .clone()
+        .oneshot(get_auth("/v1/node/skills-trust", &token))
+        .await
+        .unwrap();
+    assert_eq!(user.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// Feature "opencode profiles": the list route attaches per-profile apply
 /// counts from the audit feed (item 6 of the configurator polish list).
 #[tokio::test]
