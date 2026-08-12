@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Bundle-pinned skills (item 10).** A profile can declare a set of
+  agentgrid skill names (`pinned_skills`, migration 0071); on apply the
+  node reconciles them against the trust ledger and reports any untrusted
+  pins in the apply audit (`pinned_untrusted`), fail-loud without blocking
+  the config write. CLI: `ag opencode profile set --pin <name>` (repeatable);
+  web: pinned-skills field + per-card line.
+
+- **Node-readable skill-trust mirror.** `GET /v1/node/skills-trust` serves
+  the operator trust ledger behind node auth. The node daemon's skill
+  composition and pin reconcile use it — previously the bare `/v1/skills`
+  GET from a node 401'd (it is user-JWT-only), silently emptying the
+  "approved skills" prompt block and the pin reconcile.
+
 - **Multi-node opencode-profile smoke (`tests/e2e/run-opencode-smoke.sh`).**
   A self-contained loopback smoke: temp control plane + two temp node
   daemons, one profile assigned to both, assert two apply-audit rows.

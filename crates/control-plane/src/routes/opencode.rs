@@ -155,7 +155,7 @@ pub async fn upsert_profile(
     }
     let profile = state
         .store
-        .upsert_opencode_profile(&name, body.config, body.expires_at)
+        .upsert_opencode_profile(&name, body.config, body.expires_at, body.pinned_skills)
         .await
         .map_err(|e| {
             tracing::warn!("opencode upsert validation failed: {e}");
@@ -427,6 +427,9 @@ pub struct AuditPostBody {
     /// verified | skipped_no_binary | verify_failed | unknown.
     #[serde(default)]
     pub verify: Option<String>,
+    /// Bundle-pinned skill names the node found untrusted this apply (item 10).
+    #[serde(default)]
+    pub pinned_untrusted: Option<Vec<String>>,
 }
 
 pub async fn record_audit(
@@ -455,6 +458,7 @@ pub async fn record_audit(
             &body.hash,
             &body.trigger,
             body.verify.as_deref(),
+            body.pinned_untrusted.as_deref(),
         )
         .await
         .map_err(|e| {
@@ -484,11 +488,13 @@ pub async fn get_active_config(
             profile_id: Some(p.id),
             hash: Some(p.hash),
             config: Some(p.config),
+            pinned_skills: p.pinned_skills,
         },
         None => ActiveOpencodeConfigResponse {
             profile_id: None,
             hash: None,
             config: None,
+            pinned_skills: None,
         },
     };
     Ok(Json(resp))
@@ -582,6 +588,21 @@ pub async fn assign_percent(
         "other_id": other.id,
         "keep_percent": body.percent,
     })))
+}
+
+/// `GET /v1/node/skills-trust` — node-readable copy of the operator skill
+/// trust ledger (the same rows `GET /v1/skills` returns, but behind node
+/// auth so a node daemon holding only its long-lived credential can read it).
+/// Used by the node to compose the agent's "approved skills" block and to
+/// reconcile bundle-pinned skills (item 10) against the trust verdicts.
+pub async fn node_skills_trust(
+    State(state): State<Arc<AppState>>,
+    Extension(_auth): Extension<crate::auth::AuthedNode>,
+) -> Result<Json<Vec<agentgrid_common::SkillTrustView>>, StatusCode> {
+    state.store.list_skill_trust().await.map(Json).map_err(|e| {
+        tracing::error!("node list_skill_trust failed: {e}");
+        StatusCode::SERVICE_UNAVAILABLE
+    })
 }
 
 /// Internal: multicast `NodeWsMsg::ConfigUpdate` to a list of node ids.

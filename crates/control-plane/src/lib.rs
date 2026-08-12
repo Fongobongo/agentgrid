@@ -537,6 +537,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::opencode::record_audit),
         )
         .route(
+            "/v1/node/skills-trust",
+            get(routes::opencode::node_skills_trust),
+        )
+        .route(
             "/v1/nodes/{id}/accounts/usage",
             get(routes::nodes::node_account_usage),
         )

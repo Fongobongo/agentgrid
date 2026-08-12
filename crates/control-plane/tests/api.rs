@@ -9048,6 +9048,112 @@ async fn opencode_assign_percent_splits_nodes_between_two_profiles() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// Feature "opencode profiles": bundle-pinned skills (item 10) — a profile
+/// carries a pinned skills set that `GET active` returns, and the node-side
+/// reconcile surfaces untrusted pins through the apply audit.
+#[tokio::test]
+async fn opencode_profile_pinned_skills_flow() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Create with two pinned skills (canonicalization dedups/sorts).
+    let resp = app
+        .clone()
+        .oneshot(put_auth(
+            "/v1/opencode-profiles/pinned",
+            serde_json::to_string(&serde_json::json!({
+                "config": { "model": "m" },
+                "pinned_skills": ["ponytail", "caveman", "ponytail"],
+            }))
+            .unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let p: agentgrid_common::OpencodeProfile =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        p.pinned_skills.as_deref(),
+        Some(["caveman".to_string(), "ponytail".to_string()].as_slice())
+    );
+
+    // Enroll a node, assign, and `GET active` returns the pin set.
+    let (node_id, cred) = enroll(&app, "n1", vec!["mock".into()], vec!["*".into()]).await;
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/nodes/{node_id}/opencode-profile"),
+            serde_json::to_string(&serde_json::json!({ "profile_id": p.id })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/node/opencode-config/active", &cred))
+        .await
+        .unwrap();
+    let active: agentgrid_common::ActiveOpencodeConfigResponse =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        active.pinned_skills.as_deref(),
+        Some(["caveman".to_string(), "ponytail".to_string()].as_slice())
+    );
+
+    // The node reports one of the two pins untrusted.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/opencode-config/audit",
+            serde_json::to_string(&serde_json::json!({
+                "profile_id": p.id,
+                "hash": p.hash,
+                "trigger": "startup",
+                "pinned_untrusted": ["ponytail"],
+            }))
+            .unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/nodes/{node_id}/opencode-audit"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let list: ListResponse<agentgrid_common::OpencodeConfigAuditEntry> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(list.items.len(), 1);
+    assert_eq!(
+        list.items[0].pinned_untrusted.as_deref(),
+        Some(["ponytail".to_string()].as_slice())
+    );
+
+    // Re-PUT without pinned_skills clears the pin set (None).
+    let resp = app
+        .clone()
+        .oneshot(put_auth(
+            "/v1/opencode-profiles/pinned",
+            serde_json::to_string(&serde_json::json!({ "config": { "model": "m" } })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let p: agentgrid_common::OpencodeProfile =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        p.pinned_skills.is_none(),
+        "a PUT without pinned_skills must clear the pin set"
+    );
+}
+
 /// Feature "opencode profiles": the list route attaches per-profile apply
 /// counts from the audit feed (item 6 of the configurator polish list).
 #[tokio::test]

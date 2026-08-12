@@ -29,9 +29,17 @@ pub async fn compose_skills_block(client: &Client, server: &str, ws_path: &Path)
     if discovered.is_empty() {
         return String::new();
     }
-    // Fetch the full trust ledger; untrusted/absent entries are dropped.
-    let trusted_name: HashSet<(String, String)> =
-        match client.get(format!("{server}/v1/skills")).send().await {
+    // Fetch the trust ledger; untrusted/absent entries are dropped.
+    // Uses the node-authenticated `/v1/node/skills-trust` mirror with the
+    // process-stashed node credential (the operator `/v1/skills` is user-JWT
+    // only; a bare GET 401s and the block would silently stay empty).
+    let trusted_name: HashSet<(String, String)> = {
+        let req = client.get(format!("{server}/v1/node/skills-trust"));
+        let req = match crate::config::process_credential() {
+            Some(c) => req.bearer_auth(&c.credential),
+            None => req,
+        };
+        match req.send().await {
             Ok(r) if r.status().is_success() => {
                 match r.json::<Vec<agentgrid_common::SkillTrustView>>().await {
                     Ok(rows) => rows
@@ -43,7 +51,8 @@ pub async fn compose_skills_block(client: &Client, server: &str, ws_path: &Path)
                 }
             }
             _ => return String::new(), // skills are a hint; don't block the task
-        };
+        }
+    };
     render_trusted_skills_block(&discovered, &trusted_name)
 }
 

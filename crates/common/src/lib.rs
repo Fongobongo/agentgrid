@@ -1259,6 +1259,11 @@ pub struct OpencodeProfile {
     /// (populated by the list route; None elsewhere).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apply_count: Option<i64>,
+    /// Bundle-pinned agentgrid skill names (item 10). The node reconcile
+    /// these against the trust ledger on apply and reports untrusted pins in
+    /// the apply audit. NULL/empty = no pin set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_skills: Option<Vec<String>>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1282,6 +1287,10 @@ pub struct UpsertOpencodeProfileRequest {
     /// profile once this passes. `null`/absent clears any previous expiry.
     #[serde(default)]
     pub expires_at: Option<String>,
+    /// Optional set of agentgrid skill names pinned to this profile; the node
+    /// reconcile these against the trust ledger on apply.
+    #[serde(default)]
+    pub pinned_skills: Option<Vec<String>>,
 }
 
 /// `POST /v1/nodes/{id}/opencode-profile` body — assign (or clear with
@@ -1299,6 +1308,10 @@ pub struct ActiveOpencodeConfigResponse {
     pub profile_id: Option<String>,
     pub hash: Option<String>,
     pub config: Option<serde_json::Value>,
+    /// Bundle-pinned skill names for the node to reconcile against the trust
+    /// ledger (absent/empty when no profile is assigned or none pinned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_skills: Option<Vec<String>>,
 }
 
 /// One row of the per-node apply audit (`GET /v1/nodes/{id}/opencode-audit`).
@@ -1313,6 +1326,10 @@ pub struct OpencodeConfigAuditEntry {
     /// 0069). Absent on pre-oracle nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<String>,
+    /// Pinned skill names the node found untrusted this apply (item 10).
+    /// Absent when the profile had no pins or the node did not reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_untrusted: Option<Vec<String>>,
 }
 
 /// Per-attempt opencode override (plan C #4): the caller can pin a model /

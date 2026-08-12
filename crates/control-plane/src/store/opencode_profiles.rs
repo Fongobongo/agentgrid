@@ -66,6 +66,23 @@ fn check_shape(key: &str, v: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// Canonical JSON encoding of a pinned-skills set: a sorted JSON array of
+/// strings (dedup). `None`/empty -> `None` (stored as SQL NULL, surfaces as
+/// an empty pin set in the view). Two runs with the same names hash the same.
+fn canonicalize_pinned(names: &[String]) -> Option<String> {
+    let mut s: Vec<String> = names
+        .iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    s.sort();
+    s.dedup();
+    if s.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&s).ok()
+}
+
 /// Strip config keys outside the allowlist. Returns the canonical JSON
 /// string (sorted-within-object via serde's deterministic order) so two
 /// uploads with the same semantics produce the same hash.
@@ -149,6 +166,7 @@ pub struct OpencodeProfileRow {
     pub prev_config_json: Option<String>,
     pub prev_hash: Option<String>,
     pub expires_at: Option<String>,
+    pub pinned_skills_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -162,6 +180,7 @@ fn row_to_profile(r: &sqlx::sqlite::SqliteRow) -> OpencodeProfileRow {
         prev_config_json: r.get("prev_config_json"),
         prev_hash: r.get("prev_hash"),
         expires_at: r.get("expires_at"),
+        pinned_skills_json: r.get("pinned_skills_json"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     }
@@ -189,6 +208,10 @@ impl OpencodeProfileRow {
             prev,
             expires_at: self.expires_at,
             apply_count: None,
+            pinned_skills: self
+                .pinned_skills_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok()),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -198,7 +221,7 @@ impl OpencodeProfileRow {
 impl Store {
     pub async fn list_opencode_profiles(&self) -> Result<Vec<OpencodeProfile>> {
         let rows = sqlx::query(
-            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, expires_at, created_at, updated_at,
+            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, expires_at, pinned_skills_json, created_at, updated_at,
                     (SELECT COUNT(*) FROM opencode_config_audit a WHERE a.profile_id = opencode_profiles.id) AS apply_count
              FROM opencode_profiles ORDER BY name",
         )
@@ -215,7 +238,7 @@ impl Store {
 
     pub async fn get_opencode_profile(&self, name: &str) -> Result<Option<OpencodeProfile>> {
         let row = sqlx::query(
-            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, expires_at, created_at, updated_at
+            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, expires_at, pinned_skills_json, created_at, updated_at
              FROM opencode_profiles WHERE name = ?",
         )
         .bind(name)
@@ -233,29 +256,33 @@ impl Store {
         name: &str,
         config: serde_json::Value,
         expires_at: Option<String>,
+        pinned_skills: Option<Vec<String>>,
     ) -> Result<OpencodeProfile> {
         let (json, hash) = normalize_config(config)?;
         let now = now_iso();
+        let pinned_json = canonicalize_pinned(pinned_skills.as_deref().unwrap_or(&[]));
         // UPSERT on the unique `name`. The id is stable across updates so
         // foreign keys (nodes.opencode_profile_id) survive. `expires_at` is
         // replaced wholesale (None clears a previous TTL).
         let row = sqlx::query(
-            "INSERT INTO opencode_profiles (id, name, config_json, hash, expires_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO opencode_profiles (id, name, config_json, hash, expires_at, pinned_skills_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(name) DO UPDATE SET
                 prev_config_json = opencode_profiles.config_json,
                 prev_hash = opencode_profiles.hash,
                 config_json = excluded.config_json,
                 hash = excluded.hash,
                 expires_at = excluded.expires_at,
+                pinned_skills_json = excluded.pinned_skills_json,
                 updated_at = excluded.updated_at
-             RETURNING id, name, config_json, hash, prev_config_json, prev_hash, expires_at, created_at, updated_at",
+             RETURNING id, name, config_json, hash, prev_config_json, prev_hash, expires_at, pinned_skills_json, created_at, updated_at",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(name)
         .bind(&json)
         .bind(&hash)
         .bind(&expires_at)
+        .bind(&pinned_json)
         .bind(&now)
         .bind(&now)
         .fetch_one(&self.pool)
@@ -476,7 +503,7 @@ impl Store {
     /// profile was deleted and ON DELETE SET NULL fired).
     pub async fn node_opencode_profile(&self, node_id: &str) -> Result<Option<OpencodeProfile>> {
         let row = sqlx::query(
-            "SELECT p.id, p.name, p.config_json, p.hash, p.prev_config_json, p.prev_hash, p.expires_at, p.created_at, p.updated_at
+            "SELECT p.id, p.name, p.config_json, p.hash, p.prev_config_json, p.prev_hash, p.expires_at, p.pinned_skills_json, p.created_at, p.updated_at
              FROM opencode_profiles p
              JOIN nodes n ON n.opencode_profile_id = p.id
              WHERE n.id = ?",
@@ -534,10 +561,15 @@ impl Store {
         hash: &str,
         trigger: &str,
         verify: Option<&str>,
+        pinned_untrusted: Option<&[String]>,
     ) -> Result<()> {
+        let pinned_json = match pinned_untrusted {
+            Some(names) => canonicalize_pinned(names),
+            None => None,
+        };
         sqlx::query(
-            "INSERT INTO opencode_config_audit (at, node_id, profile_id, hash, trigger, verify)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO opencode_config_audit (at, node_id, profile_id, hash, trigger, verify, pinned_untrusted_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(now_iso())
         .bind(node_id)
@@ -545,6 +577,7 @@ impl Store {
         .bind(hash)
         .bind(trigger)
         .bind(verify)
+        .bind(&pinned_json)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -556,7 +589,7 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<OpencodeConfigAuditEntry>> {
         let rows = sqlx::query(
-            "SELECT at, profile_id, hash, trigger, verify
+            "SELECT at, profile_id, hash, trigger, verify, pinned_untrusted_json
              FROM opencode_config_audit
              WHERE node_id = ?
              ORDER BY at DESC
@@ -568,12 +601,20 @@ impl Store {
         .await?;
         Ok(rows
             .iter()
-            .map(|r| OpencodeConfigAuditEntry {
-                at: r.get("at"),
-                profile_id: r.get("profile_id"),
-                hash: r.get("hash"),
-                trigger: r.get("trigger"),
-                verify: r.get("verify"),
+            .map(|r| {
+                let pinned_untrusted: Option<Vec<String>> = r
+                    .try_get::<Option<String>, _>("pinned_untrusted_json")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok());
+                OpencodeConfigAuditEntry {
+                    at: r.get("at"),
+                    profile_id: r.get("profile_id"),
+                    hash: r.get("hash"),
+                    trigger: r.get("trigger"),
+                    verify: r.get("verify"),
+                    pinned_untrusted,
+                }
             })
             .collect())
     }

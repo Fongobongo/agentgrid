@@ -3757,6 +3757,10 @@ enum OpencodeAction {
         /// the profile is auto-deleted after this. Absent = never expires.
         #[arg(long, value_name = "RFC3339")]
         expires_at: Option<String>,
+        /// Pin agentgrid skill names to this profile; on apply the node
+        /// reconciles them against the trust ledger (repeatable).
+        #[arg(long = "pin", value_name = "NAME")]
+        pinned_skills: Vec<String>,
     },
     /// Delete a profile. Nodes keep their last-applied on-disk config,
     /// unless `--fallback <name>` re-points them onto another profile first.
@@ -3841,6 +3845,7 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
             name,
             config,
             expires_at,
+            pinned_skills,
         } => {
             let content = if config == "-" {
                 use tokio::io::AsyncReadExt;
@@ -3856,6 +3861,7 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 .json(&serde_json::json!({
                     "config": cfg,
                     "expires_at": expires_at,
+                    "pinned_skills": pinned_skills,
                 }))
                 .send()
                 .await?;
@@ -3966,12 +3972,24 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
             let audits: ListResponse<agentgrid_common::OpencodeConfigAuditEntry> =
                 resp.json().await?;
             for a in &audits.items {
+                let pin = a
+                    .pinned_untrusted
+                    .as_deref()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.join(","))
+                    .unwrap_or_default();
                 println!(
-                    "{} profile={} hash={} trigger={}",
+                    "{} profile={} hash={} trigger={}{}{}",
                     a.at,
                     a.profile_id.as_deref().unwrap_or("-"),
                     &a.hash[..12.min(a.hash.len())],
-                    a.trigger
+                    a.trigger,
+                    if pin.is_empty() {
+                        String::new()
+                    } else {
+                        " untrusted_pins=".to_string()
+                    },
+                    pin,
                 );
             }
             Ok(())

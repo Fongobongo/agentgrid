@@ -169,3 +169,31 @@ if [ "$applies" -ne 2 ]; then
 fi
 
 echo "  PASS: 2 nodes, 1 profile — both applied (audit rows match the profile hash)"
+
+# ── bundle-pinned skills (item 10): untrusted pins surface in the audit ──
+echo "  verifying bundle-pinned skills reconcile"
+PIN_CFG='{"model":"anthropic/claude-sonnet-4.5"}'
+curl -fsS -X PUT "$BASE/v1/opencode-profiles/pinned" \
+  -H "authorization: Bearer $jwt" -H 'content-type: application/json' \
+  -d "{\"config\":$PIN_CFG,\"pinned_skills\":[\"pleft\",\"ponytail\"]}" >/dev/null
+
+# No trust decisions exist -> both pins are untrusted. Assign the first
+# node, wait for its apply, and check the audit reports both pins untrusted.
+FIRST_NODE=$(echo "$NIDS" | head -1)
+curl -fsS -X POST "$BASE/v1/nodes/$FIRST_NODE/opencode-profile" \
+  -H "authorization: Bearer $jwt" -H 'content-type: application/json' \
+  -d "{\"profile_id\":\"$(curl -fsS "$BASE/v1/opencode-profiles/pinned" -H "authorization: Bearer $jwt" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')\"}" >/dev/null
+
+pin_untrusted=""
+for _ in $(seq 1 60); do
+  pin_untrusted=$(curl -fsS "$BASE/v1/nodes/$FIRST_NODE/opencode-audit" -H "authorization: Bearer $jwt" \
+    | python3 -c 'import sys,json
+rows=json.load(sys.stdin)["items"]
+from json import loads as L
+ps=[r.get("pinned_untrusted") for r in rows if r.get("pinned_untrusted")]
+print("|".join(sorted(ps[0])) if ps else "")' 2>/dev/null || echo "")
+  [ -n "$pin_untrusted" ] && break
+  sleep 1
+done
+[ "$pin_untrusted" = "pleft|ponytail" ] || { echo "  FAIL: pinned-reconcile expected pleft|ponytail, got '$pin_untrusted'"; tail -20 "$TMP/n1.log" || true; exit 1; }
+echo "  PASS: untrusted pinned skills ([pleft, ponytail]) surfaced in the apply audit"

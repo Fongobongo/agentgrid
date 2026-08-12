@@ -1697,8 +1697,8 @@ mod tests {
         std::fs::remove_dir_all(&ws).ok();
     }
 
-    /// A dummy CP that serves a fixed JSON body for `GET /v1/skills` and 200
-    /// OK (empty) for everything else. Used to exercise the
+    /// A dummy CP that serves a fixed JSON body for `GET /v1/node/skills-trust`
+    /// and 200 OK (empty) for everything else. Used to exercise the
     /// `compose_skills_block` → `session/prompt` wiring inside
     /// `drive_acp_session` without a real control plane.
     async fn dummy_skills_server(skills_body: &'static str) -> String {
@@ -1714,7 +1714,7 @@ mod tests {
                     let mut buf = [0u8; 1024];
                     let _ = s.read(&mut buf).await;
                     let req = String::from_utf8_lossy(&buf);
-                    if req.starts_with("GET /v1/skills") {
+                    if req.starts_with("GET /v1/node/skills-trust") {
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                             skills_body.len(),

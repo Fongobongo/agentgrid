@@ -59,6 +59,40 @@ pub fn opencode_config_path() -> PathBuf {
     Path::new(&home).join(".config/opencode/opencode.json")
 }
 
+/// Item 10 (bundle-pinned skills): which of the profile's pinned skill names
+/// are NOT in the operator trust ledger. The node-side skill discovery
+/// already finds skills on disk; here we only need the trust verdict, so we
+/// `GET /v1/node/skills-trust` (the node-auth'd mirror of the ledger) and
+/// drop pinned names the operator has marked trusted. Best-effort: on any
+/// lookup error, no subset is reported (a transient CP outage should not
+/// burn a cycle), so the resulting apply audit just omits the field.
+async fn reconcile_pinned_skills(
+    client: &reqwest::Client,
+    cfg: &crate::config::Config,
+    cred: &crate::config::SavedCredential,
+    pinned: &[String],
+) -> Vec<String> {
+    let url = format!("{}/v1/node/skills-trust", cfg.server);
+    let rows: Vec<agentgrid_common::SkillTrustView> =
+        match client.get(&url).bearer_auth(&cred.credential).send().await {
+            Ok(r) if r.status().is_success() => match r.json().await {
+                Ok(v) => v,
+                Err(_) => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        };
+    let trusted: std::collections::HashSet<(String, String)> = rows
+        .into_iter()
+        .filter(|v| v.trusted)
+        .map(|v| (v.name, v.source))
+        .collect();
+    pinned
+        .iter()
+        .filter(|n| !trusted.iter().any(|(name, _)| name == *n))
+        .cloned()
+        .collect()
+}
+
 /// Fetch the node's active opencode profile from the CP and apply it when
 /// the hash differs from the on-disk copy. `trigger` labels the audit row
 /// (ws_push | error_threshold | interval | startup). The pushed hash (when
@@ -82,6 +116,15 @@ pub async fn pull_and_apply(
         return Ok(());
     }
     let active: agentgrid_common::ActiveOpencodeConfigResponse = resp.json().await?;
+    // Reconcile bundle-pinned skills against the trust ledger (item 10):
+    // fail-loud, not fail-stop — untrusted pins are reported in the audit, the
+    // config still writes (pins are a hint about expected operator trust).
+    let pinned_untrusted = match &active.pinned_skills {
+        Some(pins) if !pins.is_empty() => {
+            Some(reconcile_pinned_skills(client, cfg, cred, pins).await)
+        }
+        _ => None,
+    };
     let target_hash = active.hash.as_deref();
     if current_hash().await.as_deref() == target_hash {
         return Ok(()); // already applied; no-op
@@ -112,6 +155,7 @@ pub async fn pull_and_apply(
         "hash": new_hash,
         "trigger": trigger,
         "verify": oracle_flag_for_audit(),
+        "pinned_untrusted": pinned_untrusted,
     });
     let _ = client
         .post(&audit_url)

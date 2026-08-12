@@ -15,6 +15,7 @@ interface OpencodeProfile {
   prev?: { hash: string; config: Record<string, unknown> } | null;
   expires_at?: string | null;
   apply_count?: number | null;
+  pinned_skills?: string[] | null;
   created_at: string;
   updated_at: string;
 }
@@ -87,6 +88,7 @@ export default function OpencodeProfiles() {
   const [editName, setEditName] = useState('');
   const [editBody, setEditBody] = useState('');
   const [editExpires, setEditExpires] = useState('');
+  const [editPins, setEditPins] = useState('');
   const [msg, setMsg] = useState('');
 
   const load = () => {
@@ -126,6 +128,7 @@ export default function OpencodeProfiles() {
       const body = JSON.stringify({
         config: cfg,
         expires_at: editExpires.trim() ? editExpires.trim() : null,
+        pinned_skills: editPins.split(',').map((s) => s.trim()).filter(Boolean),
       });
       const r = await fetch(
         `/v1/opencode-profiles/${encodeURIComponent(editName.trim())}?dry_run=true`,
@@ -161,6 +164,7 @@ export default function OpencodeProfiles() {
       const body = JSON.stringify({
         config: cfg,
         expires_at: editExpires.trim() ? editExpires.trim() : null,
+        pinned_skills: editPins.split(',').map((s) => s.trim()).filter(Boolean),
       });
       const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(editName.trim())}`, {
         method: 'PUT',
@@ -173,6 +177,7 @@ export default function OpencodeProfiles() {
       setEditBody('');
       setEditName('');
       setEditExpires('');
+      setEditPins('');
       setDryResult(null);
       load();
     } catch (e) {
@@ -276,6 +281,9 @@ export default function OpencodeProfiles() {
                 <div className="muted">expires {fmtTime(p.expires_at)}</div>
               )}
               <div className="muted">{p.apply_count ?? 0} applies</div>
+              {p.pinned_skills && p.pinned_skills.length > 0 && (
+                <div className="muted">pinned: {p.pinned_skills.join(', ')}</div>
+              )}
               <details>
                 <summary>config</summary>
                 <pre>{JSON.stringify(p.config, null, 2)}</pre>
@@ -332,6 +340,12 @@ export default function OpencodeProfiles() {
           placeholder="expires at (RFC3339, optional — e.g. 2026-01-01T00:00:00Z)"
           value={editExpires}
           onChange={(e) => setEditExpires(e.target.value)}
+          style={{ width: '100%', marginTop: 8 }}
+        />
+        <input
+          placeholder="pinned skills (comma-sep, optional — verified against the trust ledger on apply)"
+          value={editPins}
+          onChange={(e) => setEditPins(e.target.value)}
           style={{ width: '100%', marginTop: 8 }}
         />
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
