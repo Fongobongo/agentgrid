@@ -3785,6 +3785,16 @@ enum OpencodeAction {
     },
     /// Show recent apply events for a node.
     Audit { node_id: String },
+    /// A/B split: move the nodes on either <name> or <other> so N% land
+    /// on <name> and the rest on <other>.
+    Ab {
+        name: String,
+        #[arg(long, value_name = "NAME")]
+        other: String,
+        /// Share of nodes for <name> (0-100).
+        #[arg(long)]
+        percent: u8,
+    },
 }
 
 async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) -> Result<()> {
@@ -3964,6 +3974,28 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                     a.trigger
                 );
             }
+            Ok(())
+        }
+        OpencodeAction::Ab {
+            name,
+            other,
+            percent,
+        } => {
+            let resp = client
+                .post(format!("{base}/v1/opencode-profiles/{name}/assign-percent"))
+                .json(&serde_json::json!({ "other": other, "percent": percent }))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!(
+                    "A/B failed: {} {}",
+                    resp.status(),
+                    resp.text().await.unwrap_or_default()
+                );
+            }
+            let v: serde_json::Value = resp.json().await?;
+            let moved = v.get("moved").and_then(|m| m.as_u64()).unwrap_or(0);
+            println!("A/B {name} vs {other}: {moved} nodes split ({percent}% on {name})");
             Ok(())
         }
     }

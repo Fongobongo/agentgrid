@@ -135,6 +135,22 @@ async fn test_token(app: &Router) -> String {
 }
 
 /// Create an enrollment token, enroll a node, return (node_id, credential).
+/// Fetch a profile's id via the operator route (used by a few opencode tests).
+async fn fetch_profile_id(app: &Router, name: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/opencode-profiles/{name}"),
+            &test_token(app).await,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let p: agentgrid_common::OpencodeProfile =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    p.id
+}
+
 async fn enroll(
     app: &Router,
     name: &str,
@@ -8903,6 +8919,133 @@ async fn opencode_delete_with_fallback_reassigns_nodes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Feature "opencode profiles": A/B percent split — nodes on either arm are
+/// redistributed between the two profiles by percent (deterministic, only
+/// the two arms move).
+#[tokio::test]
+async fn opencode_assign_percent_splits_nodes_between_two_profiles() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    for name in ["a", "b"] {
+        let resp = app
+            .clone()
+            .oneshot(put_auth(
+                &format!("/v1/opencode-profiles/{name}"),
+                serde_json::to_string(&serde_json::json!({"config": {"model": name}})).unwrap(),
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let a_id = fetch_profile_id(&app, "a").await;
+    let b_id = fetch_profile_id(&app, "b").await;
+
+    // Enroll 4 nodes, 2 on each arm.
+    for i in 0..4 {
+        let (node_id, _cred) = enroll(
+            &app,
+            &format!("n{i}"),
+            vec!["mock".into()],
+            vec!["*".into()],
+        )
+        .await;
+        let pid = if i < 2 { &a_id } else { &b_id };
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                &format!("/v1/nodes/{node_id}/opencode-profile"),
+                serde_json::to_string(&serde_json::json!({"profile_id": pid})).unwrap(),
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(
+        state
+            .store
+            .list_nodes_for_profile(&a_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        state
+            .store
+            .list_nodes_for_profile(&b_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // percent=25 -> 1 node on `a`, 3 on `b` (floor(4*25/100) = 1).
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/opencode-profiles/a/assign-percent",
+            serde_json::to_string(&serde_json::json!({"other": "b", "percent": 25})).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .store
+            .list_nodes_for_profile(&a_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        state
+            .store
+            .list_nodes_for_profile(&b_id)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // Bad inputs.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/opencode-profiles/a/assign-percent",
+            serde_json::to_string(&serde_json::json!({"other": "a", "percent": 50})).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/opencode-profiles/a/assign-percent",
+            serde_json::to_string(&serde_json::json!({"other": "b", "percent": 200})).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/opencode-profiles/none/assign-percent",
+            serde_json::to_string(&serde_json::json!({"other": "b", "percent": 50})).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 /// Feature "opencode profiles": the list route attaches per-profile apply

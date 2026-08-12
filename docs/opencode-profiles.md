@@ -23,6 +23,7 @@ ag opencode profile delete <name> --fallback <other>  # move assigned nodes onto
 ag opencode profile rollback <name>              # swap back one revision
 ag opencode profile assign <node-id> --profile <name>   # bind node → profile
 ag opencode profile assign <node-id> --clear            # detach
+ag opencode profile ab <name> --other <other> --percent N   # A/B split nodes on either arm
 ag opencode node audit    <node-id>              # apply history
 ```
 
@@ -63,6 +64,16 @@ ConfigUpdate clear push; their last-applied on-disk config stays).
 - Sweep cadence: 15 s, same maintenance loop that reverts leases.
 - `expires_at` is validated as RFC3339 on upsert — a typo fails loudly
   instead of silently never expiring.
+
+## A/B percent assign
+
+`POST /v1/opencode-profiles/{name}/assign-percent` (body `{ other, percent }`)
+redistributes the nodes currently on either arm — `{name}` and `other` — so
+that `percent`% land on `{name}` and the rest on `other`. Deterministic
+(ordered by node id), so re-running with the same percent is stable; only
+nodes already on one of the two arms move, the rest of the fleet is left
+alone. Each moved node gets a ConfigUpdate push with its arm's hash. CLI:
+`ag opencode profile ab <name> --other <other> --percent N`.
 
 ## Allowlist
 

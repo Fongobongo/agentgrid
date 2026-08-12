@@ -494,6 +494,96 @@ pub async fn get_active_config(
     Ok(Json(resp))
 }
 
+/// `POST /v1/opencode-profiles/{name}/assign-percent` — A/B split. Moves
+/// the nodes currently on either arm (`{name}` and the body's `other`) so
+/// that `percent`% land on `{name}` and the rest on `other`. Deterministic
+/// (ordered by node id) so re-running with the same percent is stable;
+/// only nodes already on one of the two arms move, the rest of the fleet
+/// is left alone.
+#[derive(Deserialize)]
+pub struct AssignPercentBody {
+    pub other: String,
+    /// Share of nodes for the path-side profile (0-100).
+    pub percent: u8,
+}
+
+pub async fn assign_percent(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<crate::auth::AuthedUser>,
+    Path(name): Path<String>,
+    Json(body): Json<AssignPercentBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if body.other == name {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if body.percent > 100 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let keep = state
+        .store
+        .get_opencode_profile(&name)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let other = state
+        .store
+        .get_opencode_profile(&body.other)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let moves = state
+        .store
+        .assign_percent_between(&keep.id, &other.id, body.percent)
+        .await
+        .map_err(|e| {
+            tracing::error!("assign_percent_between: {e}");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+    // Push the matching hash to every moved node so it applies its arm.
+    for (node_id, profile_id) in &moves {
+        let (pid, hash) = if profile_id == &keep.id {
+            (Some(keep.id.clone()), Some(keep.hash.clone()))
+        } else {
+            (Some(other.id.clone()), Some(other.hash.clone()))
+        };
+        state
+            .ws_registry
+            .send(
+                node_id,
+                &NodeWsMsg::ConfigUpdate {
+                    profile_id: pid,
+                    hash,
+                },
+            )
+            .await;
+    }
+    let detail = serde_json::json!({
+        "profile_name": name,
+        "other": body.other,
+        "percent": body.percent,
+        "moved": moves.len(),
+    })
+    .to_string();
+    let _ = state
+        .store
+        .audit(
+            "user",
+            Some(&auth.username),
+            "opencode.assign_percent",
+            None,
+            Some(&detail),
+        )
+        .await;
+    Ok(Json(serde_json::json!({
+        "moved": moves.len(),
+        "keep_id": keep.id,
+        "other_id": other.id,
+        "keep_percent": body.percent,
+    })))
+}
+
 /// Internal: multicast `NodeWsMsg::ConfigUpdate` to a list of node ids.
 /// This is also the integration point for the poll fallback: when the node
 /// heartbeats next it will re-read its profile (poll nodes pick the change

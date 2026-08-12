@@ -517,6 +517,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::opencode::rollback_profile),
         )
         .route(
+            "/v1/opencode-profiles/{name}/assign-percent",
+            post(routes::opencode::assign_percent),
+        )
+        .route(
             "/v1/nodes/{id}/opencode-profile",
             post(routes::opencode::assign_node_profile),
         )

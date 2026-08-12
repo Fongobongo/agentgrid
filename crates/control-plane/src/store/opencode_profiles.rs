@@ -377,6 +377,43 @@ impl Store {
         Ok(r.rows_affected() > 0)
     }
 
+    /// A/B percent split: redistribute the nodes currently on either arm
+    /// (`keep_id` / `other_id`) so that `percent`% of them land on `keep_id`
+    /// and the rest on `other_id`. Deterministic (ordered by node id) so
+    /// re-running with the same percent is stable. Returns the per-node
+    /// `(node_id, profile_id)` so the route can push the matching hash and
+    /// stretch — only nodes on the two arms move, the rest of the fleet is
+    /// left untouched.
+    pub async fn assign_percent_between(
+        &self,
+        keep_id: &str,
+        other_id: &str,
+        percent: u8,
+    ) -> Result<Vec<(String, String)>> {
+        let rows =
+            sqlx::query("SELECT id FROM nodes WHERE opencode_profile_id IN (?, ?) ORDER BY id")
+                .bind(keep_id)
+                .bind(other_id)
+                .fetch_all(&self.pool)
+                .await?;
+        let node_ids: Vec<String> = rows.iter().map(|r| r.get("id")).collect();
+        let total = node_ids.len();
+        let keep_n = total * percent as usize / 100;
+        let mut out = Vec::with_capacity(node_ids.len());
+        let mut tx = self.pool.begin().await?;
+        for (i, node_id) in node_ids.iter().enumerate() {
+            let target = if i < keep_n { keep_id } else { other_id };
+            sqlx::query("UPDATE nodes SET opencode_profile_id = ? WHERE id = ?")
+                .bind(target)
+                .bind(node_id)
+                .execute(&mut *tx)
+                .await?;
+            out.push((node_id.clone(), target.to_string()));
+        }
+        tx.commit().await?;
+        Ok(out)
+    }
+
     /// Janitor sweep: delete every profile whose `expires_at` has passed.
     /// Behaves exactly like a manual DELETE — nodes are re-pointed off via
     /// ON DELETE SET NULL; the caller wakes them with a ConfigUpdate clear

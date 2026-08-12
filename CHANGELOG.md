@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A/B percent assign.** `POST /v1/opencode-profiles/{name}/assign-percent`
+  (body `{ other, percent }`) redistributes the nodes currently on either
+  arm so that `percent`% land on `{name}` and the rest on `other`.
+  Deterministic (ordered by node id, so re-runs are stable), only the two
+  arms move, each moved node gets a ConfigUpdate push with its arm's hash.
+  CLI: `ag opencode profile ab <name> --other <other> --percent N`.
+
 - **Per-profile apply metrics.** The list route attaches an `apply_count`
   from the opencode audit feed (`SELECT COUNT(*) FROM
   opencode_config_audit WHERE profile_id = …`); the web shows it per card
