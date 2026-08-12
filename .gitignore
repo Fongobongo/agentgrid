@@ -63,6 +63,8 @@ cp-test.db*
 # Local competitor research notes
 /docs/plans/competitor-features-roadmap.md
 /docs/plans/competitor-features-implementation-plan.md
+# Local planning notes (deliberately unpublished)
+/docs/plans/configurator-polish-roadmap.md
 
 # Python SDK test artifacts
 __pycache__/
