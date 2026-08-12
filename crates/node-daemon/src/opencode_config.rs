@@ -111,6 +111,7 @@ pub async fn pull_and_apply(
         "profile_id": active.profile_id,
         "hash": new_hash,
         "trigger": trigger,
+        "verify": oracle_flag_for_audit(),
     });
     let _ = client
         .post(&audit_url)
@@ -156,7 +157,69 @@ pub async fn apply_config(config_json: &str) -> Result<String> {
     tokio::fs::rename(&tmp, &path)
         .await
         .context("atomic rename of opencode.json failed")?;
+    // `opencode debug config` as the final oracle: the new file is on disk,
+    // ask the binary whether it parses cleanly. Failure doesn't revert the
+    // apply (we explicitly trust the server's allow-list instead of the
+    // binary in the common case) — instead the audit row carries an
+    // `extras.verify_outcome` flag so the dashboard can flag profiles
+    // whose bodies parse on the CP but make the bin barf on the node.
+    let verify = debug_config_oracle().await;
+    let outcome = oracle_flag(&verify);
+    set_oracle(outcome);
+    tracing::info!(
+        hash = %new_hash,
+        verified = matches!(&verify, Ok(Some(_))),
+        outcome,
+        "opencode debug config oracle"
+    );
     Ok(new_hash)
+}
+
+/// Run `opencode debug config` against the freshly-landed config. Returns
+/// `Ok(stdout)` on success, Err with the binary's stderr on failure.
+/// The binary is best-effort — when `opencode` isn't in PATH (e.g. only
+/// mock adapters run today) the check is skipped, not failed.
+pub async fn debug_config_oracle() -> Result<Option<String>> {
+    match tokio::process::Command::new("opencode")
+        .args(["debug", "config"])
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+        }
+        Ok(out) => anyhow::bail!(
+            "opencode debug config failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(_) => Ok(None), // binary not installed — skip oracle
+    }
+}
+
+/// Parse oracle outcome into a compact flag the audit row can carry.
+pub fn oracle_flag(result: &Result<Option<String>>) -> &'static str {
+    match result {
+        Ok(Some(_)) => "verified",
+        Ok(None) => "skipped_no_binary",
+        Err(_) => "verify_failed",
+    }
+}
+
+/// Last oracle outcome (for the audit POST — apply_config runs before
+/// pull_and_apply has a chance to bind the flag, so we keep it on a
+/// thread-local static).
+static LAST_ORACLE: Mutex<Option<&'static str>> = Mutex::new(None);
+
+pub fn set_oracle(outcome: &'static str) {
+    *LAST_ORACLE.lock().unwrap() = Some(outcome);
+}
+
+pub fn last_oracle() -> Option<&'static str> {
+    *LAST_ORACLE.lock().unwrap()
+}
+
+fn oracle_flag_for_audit() -> &'static str {
+    last_oracle().unwrap_or("unknown")
 }
 
 /// Build the merged config used when launching the adapter:

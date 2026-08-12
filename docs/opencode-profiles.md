@@ -77,10 +77,11 @@ Anything else is stripped server-side before hashing, so a typo adds no entropy 
   shape on an allowed key fails the PUT loudly instead of silently
   shipping the broken profile to every node.
 - Drift detector: daemons report their applied on-disk hash on every
-  heartbeat; the CP compares with the assigned profile's hash and writes
-  an `opencode.drift` audit row when they diverge. The web dashboard
-  surfacing for it is still TODO — today you grep the audit table or
-  query `/v1/audit?action=opencode.drift`.
+  heartbeat; the CP compares with the assigned profile's hash, writes an
+  `opencode.drift` audit row, AND pushes a ConfigUpdate over the ws channel
+  so the next tick converges the on-disk file. Self-healing within one
+  heartbeat — a per-node UI "drift" badge was deliberately dropped because
+  the auto-heal makes it nearly always transient.
 - Multi-node: an assignment is per-node; a fleet without profiles continues as before (nodes start with no override and opencode behaves per its own fallback chain).
 - Revision history: `opencode_profile_revisions` keeps every pre-PUT body; a walk-back of N steps is supported via `?steps=N`. The profile row's `prev_*` columns are the fast path for the most recent rollback target.
 - Backup: `.agentgrid.bak` sits next to `opencode.json`; manual `mv` restores the previous profile instantly if the new one misbehaves.

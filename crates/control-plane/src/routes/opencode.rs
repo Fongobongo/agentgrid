@@ -98,14 +98,52 @@ fn dry_run_response(config: serde_json::Value) -> Result<Json<UpsertDryRun>, Sta
 
 /// `PUT /v1/opencode-profiles/{name}` — create-or-replace. On successful
 /// write the CP pushes ConfigUpdate to every node currently subscribed.
+///
+/// `If-Match` (or `x-expected-hash` for clients that don't speak RFC 9110):
+/// when present, the PUT refuses to commit unless the profile's current
+/// hash equals the header's value. Two operators racing on the same profile
+/// get a 409 + the current hash back, the loser has to re-fetch.
 pub async fn upsert_profile(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Query(q): Query<UpsertQuery>,
+    Extension(auth): Extension<crate::auth::AuthedUser>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<UpsertOpencodeProfileRequest>,
 ) -> Result<Response, StatusCode> {
     if q.dry_run {
         return dry_run_response(body.config).map(|j| j.into_response());
+    }
+    // Optimistic-concurrency: when the client sent If-Match we check the
+    // profile's current hash before writing.
+    let expected = headers
+        .get(axum::http::header::IF_MATCH)
+        .or_else(|| headers.get("x-expected-hash"))
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.trim().trim_matches('"').to_string());
+    if let Some(expected) = expected {
+        let current = state
+            .store
+            .get_opencode_profile(&name)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.hash);
+        match current {
+            Some(current) if current == expected => {}
+            Some(current) => {
+                let mut resp = Json(serde_json::json!({
+                    "error": "the profile changed since your last read",
+                    "current_hash": current
+                }))
+                .into_response();
+                *resp.status_mut() = StatusCode::CONFLICT;
+                return Ok(resp);
+            }
+            None => {
+                // PUT-against-nonexistent: pass (the upsert creates).
+            }
+        }
     }
     let profile = state
         .store
@@ -128,6 +166,23 @@ pub async fn upsert_profile(
         Some(profile.hash.clone()),
     )
     .await;
+    // Operator attribution: each PUT lands an audit row keyed by user.
+    let detail = serde_json::json!({
+        "profile_id": profile.id,
+        "hash": profile.hash,
+        "prev_hash": profile.prev.as_ref().map(|p| p.hash.clone()),
+    })
+    .to_string();
+    let _ = state
+        .store
+        .audit(
+            "user",
+            Some(&auth.username),
+            "opencode.upsert",
+            None,
+            Some(&detail),
+        )
+        .await;
     Ok(Json(profile).into_response())
 }
 
@@ -136,6 +191,7 @@ pub async fn upsert_profile(
 /// via ON DELETE SET NULL.
 pub async fn delete_profile(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<crate::auth::AuthedUser>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     // Snapshot the affected nodes BEFORE the delete so the push can wake
@@ -151,6 +207,21 @@ pub async fn delete_profile(
     match state.store.delete_opencode_profile(&name).await {
         Ok(true) => {
             push_config_update(&state, &affected, None, None).await;
+            let detail = serde_json::json!({
+                "profile_name": name,
+                "affected_nodes": affected.len(),
+            })
+            .to_string();
+            let _ = state
+                .store
+                .audit(
+                    "user",
+                    Some(&auth.username),
+                    "opencode.delete",
+                    None,
+                    Some(&detail),
+                )
+                .await;
             Ok(StatusCode::NO_CONTENT)
         }
         Ok(false) => Err(StatusCode::NOT_FOUND),
@@ -213,6 +284,7 @@ fn default_steps() -> u32 {
 
 pub async fn rollback_profile(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<crate::auth::AuthedUser>,
     Path(name): Path<String>,
     Query(q): Query<RollbackQuery>,
 ) -> Result<Json<OpencodeProfile>, StatusCode> {
@@ -225,6 +297,25 @@ pub async fn rollback_profile(
             StatusCode::SERVICE_UNAVAILABLE
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
+    // Operator attribution for the rollback — the existing generic audit
+    // feed records who swivelled the profile so a multi-operator shop can
+    // diff "I was testing" from "colleague reverted me".
+    let detail = serde_json::json!({
+        "profile_id": profile.id,
+        "hash": profile.hash,
+        "steps": q.steps,
+    })
+    .to_string();
+    let _ = state
+        .store
+        .audit(
+            "user",
+            Some(&auth.username),
+            "opencode.rollback",
+            None,
+            Some(&detail),
+        )
+        .await;
     // Push the swap out to every node assigned to this profile.
     let affected = state
         .store
@@ -284,6 +375,10 @@ pub struct AuditPostBody {
     /// Profile id the apply was attributed to (None when the node has no profile).
     #[serde(default)]
     pub profile_id: Option<String>,
+    /// Outcome of the node-side `opencode debug config` oracle:
+    /// verified | skipped_no_binary | verify_failed | unknown.
+    #[serde(default)]
+    pub verify: Option<String>,
 }
 
 pub async fn record_audit(
@@ -292,11 +387,17 @@ pub async fn record_audit(
     Json(body): Json<AuditPostBody>,
 ) -> Result<StatusCode, StatusCode> {
     const VALID: &[&str] = &["ws_push", "error_threshold", "interval", "startup"];
+    const VALID_VERIFY: &[&str] = &["verified", "skipped_no_binary", "verify_failed", "unknown"];
     if !VALID.contains(&body.trigger.as_str()) {
         return Err(StatusCode::BAD_REQUEST);
     }
     if body.hash.len() > 128 {
         return Err(StatusCode::BAD_REQUEST);
+    }
+    if let Some(v) = &body.verify {
+        if !VALID_VERIFY.contains(&v.as_str()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
     }
     state
         .store
@@ -305,6 +406,7 @@ pub async fn record_audit(
             body.profile_id.as_deref(),
             &body.hash,
             &body.trigger,
+            body.verify.as_deref(),
         )
         .await
         .map_err(|e| {

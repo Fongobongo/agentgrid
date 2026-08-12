@@ -1295,6 +1295,10 @@ pub struct OpencodeConfigAuditEntry {
     pub hash: String,
     /// 'ws_push' | 'error_threshold' | 'interval' | 'startup'
     pub trigger: String,
+    /// Outcome of the node-side `opencode debug config` oracle (migration
+    /// 0069). Absent on pre-oracle nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<String>,
 }
 
 /// Per-attempt opencode override (plan C #4): the caller can pin a model /

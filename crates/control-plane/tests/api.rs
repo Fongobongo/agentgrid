@@ -751,7 +751,7 @@ async fn revoked_node_gets_401() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: None,
-};
+    };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -1812,8 +1812,8 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 workspace_bytes: 0,
                 network_mode: "none".into(),
                 account_usage: vec![],
-        applied_opencode_hash: None,
-},
+                applied_opencode_hash: None,
+            },
         )
         .await
         .unwrap();
@@ -1869,7 +1869,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: None,
-};
+    };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -4216,7 +4216,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: None,
-};
+    };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -6737,7 +6737,7 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: None,
-};
+    };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -6812,7 +6812,7 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
             rate_limited: 2,
         }],
         applied_opencode_hash: None,
-};
+    };
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -8908,12 +8908,8 @@ async fn opencode_profile_rollback() {
         &token,
     );
     let rb_resp = app.clone().oneshot(rb).await.unwrap();
-    let after: serde_json::Value = serde_json::from_slice(
-        &to_bytes(rb_resp.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&to_bytes(rb_resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(after["config"]["model"], "a/one");
     // Top of stack is v2 (the last thing PUT before rollback); it sits in
     // `prev` so a follow-up rollback lands there next.
@@ -8934,12 +8930,8 @@ async fn opencode_profile_rollback() {
         &token,
     );
     let rb1_resp = app.clone().oneshot(rb1).await.unwrap();
-    let after1: serde_json::Value = serde_json::from_slice(
-        &to_bytes(rb1_resp.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let after1: serde_json::Value =
+        serde_json::from_slice(&to_bytes(rb1_resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(after1["config"]["model"], "a/one");
 }
 
@@ -8976,9 +8968,10 @@ async fn opencode_upsert_dry_run_returns_stripped_keys_and_hash() {
     assert!(json.get("would_set_hash").is_some());
     assert!(json["would_set_hash"].as_str().unwrap().len() == 64);
     assert_eq!(json["effective_config"]["model"], "a/one");
-    assert!(json["effective_config"].get("malicious-not-allowed").is_none());
-    let mut dropped: Vec<String> =
-        serde_json::from_value(json["dropped_keys"].clone()).unwrap();
+    assert!(json["effective_config"]
+        .get("malicious-not-allowed")
+        .is_none());
+    let mut dropped: Vec<String> = serde_json::from_value(json["dropped_keys"].clone()).unwrap();
     dropped.sort();
     assert_eq!(dropped, vec!["malicious-not-allowed", "unknown-as-well"]);
 }
@@ -9053,6 +9046,46 @@ async fn opencode_heartbeat_drift_audit() {
     );
     let resp = app.clone().oneshot(hb_req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn opencode_put_if_match_conflicts_on_stale_hash() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Seed profile.
+    let body = serde_json::json!({"config":{"model":"a/one"}});
+    let put = put_auth("/v1/opencode-profiles/ifmatch", body.to_string(), &token);
+    let resp = app.clone().oneshot(put).await.unwrap();
+    let init: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let hash = init["hash"].as_str().unwrap().to_string();
+
+    // Stale-hash PUT → 409.
+    let stale = serde_json::json!({"config":{"model":"a/two"}});
+    let wrong = Request::builder()
+        .method("PUT")
+        .uri("/v1/opencode-profiles/ifmatch")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .header("if-match", "\"0000\"")
+        .body(Body::from(stale.to_string()))
+        .unwrap();
+    let resp_wrong = app.clone().oneshot(wrong).await.unwrap();
+    assert_eq!(resp_wrong.status(), StatusCode::CONFLICT);
+
+    // Match-hash PUT → 200.
+    let ok = Request::builder()
+        .method("PUT")
+        .uri("/v1/opencode-profiles/ifmatch")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .header("if-match", format!("\"{hash}\""))
+        .body(Body::from(stale.to_string()))
+        .unwrap();
+    let resp_ok = app.clone().oneshot(ok).await.unwrap();
+    assert_eq!(resp_ok.status(), StatusCode::OK);
 }
 
 #[tokio::test]

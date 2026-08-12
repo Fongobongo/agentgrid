@@ -116,8 +116,7 @@ pub fn sanitize_config(v: &serde_json::Value) -> Result<serde_json::Value> {
             }
         }
         let mut dropped: Vec<String> = Vec::new();
-        let allowed: std::collections::HashSet<&str> =
-            ALLOWED_TOP_LEVEL.iter().copied().collect();
+        let allowed: std::collections::HashSet<&str> = ALLOWED_TOP_LEVEL.iter().copied().collect();
         let keys: Vec<String> = obj.keys().cloned().collect();
         for k in keys {
             if !allowed.contains(k.as_str()) {
@@ -426,16 +425,18 @@ impl Store {
         profile_id: Option<&str>,
         hash: &str,
         trigger: &str,
+        verify: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO opencode_config_audit (at, node_id, profile_id, hash, trigger)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO opencode_config_audit (at, node_id, profile_id, hash, trigger, verify)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(now_iso())
         .bind(node_id)
         .bind(profile_id)
         .bind(hash)
         .bind(trigger)
+        .bind(verify)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -447,7 +448,7 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<OpencodeConfigAuditEntry>> {
         let rows = sqlx::query(
-            "SELECT at, profile_id, hash, trigger
+            "SELECT at, profile_id, hash, trigger, verify
              FROM opencode_config_audit
              WHERE node_id = ?
              ORDER BY at DESC
@@ -464,6 +465,7 @@ impl Store {
                 profile_id: r.get("profile_id"),
                 hash: r.get("hash"),
                 trigger: r.get("trigger"),
+                verify: r.get("verify"),
             })
             .collect())
     }

@@ -2,7 +2,31 @@
 
 ## Unreleased
 
-- **Feature "opencode profiles" one-step rollback** (migration 0067): each
+- **Auto-heal on opencode drift.** When the heartbeat-reported
+  `applied_opencode_hash` mismatches the assigned profile's hash, the CP now
+  (a) writes the `opencode.drift` audit row, and (b) immediately pushes a
+  `ConfigUpdate` over the ws channel so the next tick rewrites the on-disk
+  file. Combined with the idempotent apply this converges within one
+  heartbeat and makes a UI "drift" badge nearly always transient — which
+  is why the badge itself stays unimplemented.
+
+- **Optimistic concurrency on profile PUT.** `If-Match` (or
+  `X-Expected-Hash` for clients that don't speak RFC 9110) makes two
+  operators racing the same profile get a 409 with the current hash back;
+  without the header the PUT remains last-write-wins.
+
+- **`opencode debug config` oracle.** After every atomic apply the node
+  shells out to `opencode debug config` and forwards the outcome
+  (`verified | skipped_no_binary | verify_failed`) on the audit POST. The
+  CP's `opencode_config_audit` rows now carry a `verify` column so the
+  operator sees for each apply whether the binary could grep the file
+  structurally rather than only "did the pull succeed".
+
+- **Operator attribution on profile mutations.** Every `upsert` / `delete`
+  / `rollback` of a profile now writes an `opencode.{action}` row in the
+  generic audit feed keyed by the JWT `username` (so the dashboard's
+  "who touched the stealvie" question has a name attached).
+
   profile row keeps the previous body next to the current one. `POST
   /v1/opencode-profiles/{name}/rollback` swaps cur↔prev, drops the far-older
   snapshot and pushes the new hash to every assigned node over the existing

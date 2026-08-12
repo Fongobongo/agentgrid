@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use agentgrid_common::{
-    EnrollRequest, EnrollResponse, EnrollTokenResponse, HeartbeatRequest, ListResponse, NodeView,
+    ws::NodeWsMsg, EnrollRequest, EnrollResponse, EnrollTokenResponse, HeartbeatRequest,
+    ListResponse, NodeView,
 };
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -130,6 +131,32 @@ pub async fn heartbeat(
                 if let Err(e) = state.store.upsert_discovered_skills(&discovered).await {
                     // Discovery is best-effort; never fail the heartbeat on it.
                     tracing::warn!("skill discovery upsert failed: {e}");
+                }
+            }
+            // Opencode-config drift auto-heal: the store side already wrote
+            // the audit row; here we push a ConfigUpdate over the ws channel
+            // so the node converges on the assigned hash.
+            if let Some(applied) = &req.applied_opencode_hash {
+                if let Ok(Some(profile_row)) =
+                    state.store.node_opencode_profile(&auth.node_id).await
+                {
+                    if applied != &profile_row.hash {
+                        state
+                            .ws_registry
+                            .send(
+                                &auth.node_id,
+                                &NodeWsMsg::ConfigUpdate {
+                                    profile_id: Some(profile_row.id.clone()),
+                                    hash: Some(profile_row.hash.clone()),
+                                },
+                            )
+                            .await;
+                        tracing::info!(
+                            node_id = %auth.node_id,
+                            profile_id = %profile_row.id,
+                            "auto-heal push for opencode drift"
+                        );
+                    }
                 }
             }
             StatusCode::OK
