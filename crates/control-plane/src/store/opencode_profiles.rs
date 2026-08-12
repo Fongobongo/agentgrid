@@ -71,6 +71,8 @@ pub struct OpencodeProfileRow {
     pub name: String,
     pub config_json: String,
     pub hash: String,
+    pub prev_config_json: Option<String>,
+    pub prev_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -81,6 +83,8 @@ fn row_to_profile(r: &sqlx::sqlite::SqliteRow) -> OpencodeProfileRow {
         name: r.get("name"),
         config_json: r.get("config_json"),
         hash: r.get("hash"),
+        prev_config_json: r.get("prev_config_json"),
+        prev_hash: r.get("prev_hash"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     }
@@ -89,11 +93,23 @@ fn row_to_profile(r: &sqlx::sqlite::SqliteRow) -> OpencodeProfileRow {
 impl OpencodeProfileRow {
     pub fn into_view(self) -> Result<OpencodeProfile> {
         let config = serde_json::from_str(&self.config_json)?;
+        let prev = match (self.prev_config_json, self.prev_hash) {
+            (Some(json), Some(hash)) => {
+                let prev_config = serde_json::from_str(&json)?;
+                Some(Box::new(agentgrid_common::OpencodeProfileRevision {
+                    hash,
+                    config: prev_config,
+                    updated_at: String::new(), // populated by rollback when the swap fires
+                }))
+            }
+            _ => None,
+        };
         Ok(OpencodeProfile {
             id: self.id,
             name: self.name,
             config,
             hash: self.hash,
+            prev,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -103,7 +119,7 @@ impl OpencodeProfileRow {
 impl Store {
     pub async fn list_opencode_profiles(&self) -> Result<Vec<OpencodeProfile>> {
         let rows = sqlx::query(
-            "SELECT id, name, config_json, hash, created_at, updated_at
+            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, created_at, updated_at
              FROM opencode_profiles ORDER BY name",
         )
         .fetch_all(&self.pool)
@@ -115,7 +131,7 @@ impl Store {
 
     pub async fn get_opencode_profile(&self, name: &str) -> Result<Option<OpencodeProfile>> {
         let row = sqlx::query(
-            "SELECT id, name, config_json, hash, created_at, updated_at
+            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, created_at, updated_at
              FROM opencode_profiles WHERE name = ?",
         )
         .bind(name)
@@ -141,10 +157,12 @@ impl Store {
             "INSERT INTO opencode_profiles (id, name, config_json, hash, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(name) DO UPDATE SET
+                prev_config_json = opencode_profiles.config_json,
+                prev_hash = opencode_profiles.hash,
                 config_json = excluded.config_json,
                 hash = excluded.hash,
                 updated_at = excluded.updated_at
-             RETURNING id, name, config_json, hash, created_at, updated_at",
+             RETURNING id, name, config_json, hash, prev_config_json, prev_hash, created_at, updated_at",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(name)
@@ -155,6 +173,33 @@ impl Store {
         .fetch_one(&self.pool)
         .await?;
         row_to_profile(&row).into_view()
+    }
+
+    /// Roll the profile one step back: swap cur→prev, drop the old prev.
+    /// Nodes holding the profile pick the new hash over the next WS push
+    /// (`ConfigUpdate` ships after commit). The audit route's trigger
+    /// vocabulary accepts "rollback" so the node-side entry stays honest
+    /// about why the file turned.
+    ///
+    /// Returns None when there is no previous revision to swap with.
+    pub async fn rollback_opencode_profile(&self, name: &str) -> Result<Option<OpencodeProfile>> {
+        let now = now_iso();
+        let row = sqlx::query(
+            "UPDATE opencode_profiles
+             SET config_json = prev_config_json,
+                 hash        = prev_hash,
+                 prev_config_json = NULL,
+                 prev_hash        = NULL,
+                 updated_at       = ?
+             WHERE name = ? AND prev_hash IS NOT NULL
+             RETURNING id, name, config_json, hash, prev_config_json, prev_hash,
+                       created_at, updated_at",
+        )
+        .bind(&now)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| row_to_profile(&r).into_view()).transpose()
     }
 
     pub async fn delete_opencode_profile(&self, name: &str) -> Result<bool> {
@@ -169,7 +214,7 @@ impl Store {
     /// profile was deleted and ON DELETE SET NULL fired).
     pub async fn node_opencode_profile(&self, node_id: &str) -> Result<Option<OpencodeProfile>> {
         let row = sqlx::query(
-            "SELECT p.id, p.name, p.config_json, p.hash, p.created_at, p.updated_at
+            "SELECT p.id, p.name, p.config_json, p.hash, p.prev_config_json, p.prev_hash, p.created_at, p.updated_at
              FROM opencode_profiles p
              JOIN nodes n ON n.opencode_profile_id = p.id
              WHERE n.id = ?",

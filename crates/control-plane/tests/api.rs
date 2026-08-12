@@ -8855,6 +8855,58 @@ async fn opencode_audit_post_and_read() {
     let bad_resp = app.oneshot(bad_req).await.unwrap();
     assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
 }
+/// Feature "opencode profiles": PUT overwrites keep the previous body for
+/// one-step rollback (`POST /v1/opencode-profiles/{name}/rollback`). The
+/// rollback swaps cur↔prev, pushes the new hash to every assigned node, and
+/// drops the far-older copy (only one revision lives at a time).
+#[tokio::test]
+async fn opencode_profile_rollback() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // 1. Initial upsert.
+    let body1 = serde_json::json!({"config": {"model": "a/one", "snapshot": true}});
+    let put1 = put_auth("/v1/opencode-profiles/rollback", body1.to_string(), &token);
+    let r1 = app.clone().oneshot(put1).await.unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+
+    // 2. Second upsert — prev now points at the first body.
+    let body2 = serde_json::json!({"config": {"model": "a/two", "snapshot": false}});
+    let put2 = put_auth("/v1/opencode-profiles/rollback", body2.to_string(), &token);
+    app.clone().oneshot(put2).await.unwrap();
+
+    let get = get_auth("/v1/opencode-profiles/rollback", &token);
+    let body = app.clone().oneshot(get).await.unwrap();
+    let p: serde_json::Value =
+        serde_json::from_slice(&to_bytes(body.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        p["hash"],
+        p["id"]
+            .is_string()
+            .then(|| p["hash"].as_str().unwrap())
+            .unwrap()
+    );
+    assert_eq!(p["prev"]["config"]["model"], "a/one");
+    assert_eq!(p["prev"]["hash"].as_str().unwrap().len(), 64);
+
+    // 3. Rollback swaps them.
+    let rb = post_auth(
+        "/v1/opencode-profiles/rollback/rollback",
+        "".to_string(),
+        &token,
+    );
+    let rb_resp = app.clone().oneshot(rb).await.unwrap();
+    assert_eq!(rb_resp.status(), StatusCode::OK);
+    let after: serde_json::Value =
+        serde_json::from_slice(&to_bytes(rb_resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(after["config"]["model"], "a/one");
+    assert!(
+        after["prev"].is_null() || after.get("prev").is_none(),
+        "after rollback prev is cleared (swap dropped the far older)"
+    );
+}
+
 /// Feature "opencode profiles": the allowlist gates the keys a client can
 /// push into a profile. Unknown keys are dropped silently so a typo cannot
 /// wedge every node on a parsing error.

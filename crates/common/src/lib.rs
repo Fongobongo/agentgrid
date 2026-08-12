@@ -1236,7 +1236,22 @@ pub struct OpencodeProfile {
     /// sha256 hex of the canonical JSON; compared by nodes to skip no-change
     /// writes. Bumped by the server on every write.
     pub hash: String,
+    /// Previous profile revision (one step back, for operator rollback).
+    /// None until at least one PUT has overwritten the row. Emerges from
+    /// migration 0067; the rollback endpoint swaps cur→prev and pushes the
+    /// swap to every assigned node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev: Option<Box<OpencodeProfileRevision>>,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Rolled-back profile contents (still allowlisted the same way). Small —
+/// just id, config, hash, updated_at is enough to render the revert button.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpencodeProfileRevision {
+    pub hash: String,
+    pub config: serde_json::Value,
     pub updated_at: String,
 }
 

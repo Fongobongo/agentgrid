@@ -2,7 +2,15 @@
 
 ## Unreleased
 
-- **Feature "opencode profiles"**: control-plane-hosted opencode configuration.
+- **Feature "opencode profiles" one-step rollback** (migration 0067): each
+  profile row keeps the previous body next to the current one. `POST
+  /v1/opencode-profiles/{name}/rollback` swaps cur↔prev, drops the far-older
+  snapshot and pushes the new hash to every assigned node over the existing
+  WS control channel. Web surfaces a rollback button per profile card; CLI
+  gains `ag opencode profile rollback <name>`.
+
+- **Feature "opencode profiles"**: control-plane-hosted opencode
+  configuration.
   Named profiles live on the CP (`opencode_profiles` migration 0066); 6 REST
   routes CRUD them (`GET/PUT/DELETE /v1/opencode-profiles[/{name}]`), assign one
   to a node (`POST /v1/nodes/{id}/opencode-profile`, flags unknown values 404),

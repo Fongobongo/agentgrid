@@ -12,6 +12,7 @@ interface OpencodeProfile {
   name: string;
   hash: string;
   config: Record<string, unknown>;
+  prev?: { hash: string; config: Record<string, unknown> } | null;
   created_at: string;
   updated_at: string;
 }
@@ -100,6 +101,24 @@ export default function OpencodeProfiles() {
     }
   };
 
+  const rollback = async (name: string) => {
+    if (!window.confirm(`Roll back profile "${name}" to the previous revision?`)) return;
+    const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(name)}/rollback`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    if (r.ok) {
+      setMsg('rolled back');
+      load();
+    } else if (r.status === 404) {
+      setMsg('no prior revision kept — nothing to roll back to');
+    } else {
+      setMsg(`rollback failed: ${r.status}`);
+    }
+  };
+
   if (!profiles) {
     if (error) return <ErrorBox err={error} />;
     return <Loading />;
@@ -126,6 +145,11 @@ export default function OpencodeProfiles() {
               </details>
               <div>
                 <button onClick={() => remove(p.name)}>delete</button>
+                {p.prev && (
+                  <button onClick={() => rollback(p.name)} title="Swap to previous revision">
+                    rollback
+                  </button>
+                )}
                 <select
                   defaultValue=""
                   onChange={(e) => assign(p.id, e.target.value)}
@@ -139,6 +163,12 @@ export default function OpencodeProfiles() {
                   ))}
                 </select>
               </div>
+              {p.prev && (
+                <details>
+                  <summary>previous ({p.prev.hash.slice(0, 12)}…)</summary>
+                  <pre>{JSON.stringify(p.prev.config, null, 2)}</pre>
+                </details>
+              )}
             </div>
           );
         })}

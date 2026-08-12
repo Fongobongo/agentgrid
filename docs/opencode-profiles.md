@@ -14,13 +14,19 @@ Control-plane-hosted opencode configuration. Each profile is a named JSON docume
 
 ```
 ag opencode profile list                         # all profiles (id, name, hash)
-ag opencode profile show <name>                  # one profile with full config
+ag opencode profile show <name>                  # one profile with full config (includes `prev` if a rollback
+target exists)
 ag opencode profile set  <name> --config <file>  # upsert from JSON file (or `-` for stdin)
 ag opencode profile delete <name>
+ag opencode profile rollback <name>              # swap back one revision
 ag opencode profile assign <node-id> --profile <name>   # bind node → profile
 ag opencode profile assign <node-id> --clear            # detach
 ag opencode node audit    <node-id>              # apply history
 ```
+
+Every PUT stashes the pre-write body as `prev` so a one-step `rollback`
+endpoint exists. The far-older copy is dropped — deeper history requires a
+follow-up migration adding an `opencode_profile_revisions` table.
 
 Per-attempt overrides on `ag run`:
 

@@ -467,6 +467,26 @@ paths:
         same config produces the same hash and no audit churn).
     delete:
       summary: Delete a profile (nodes keep their last-applied on-disk config)
+  /v1/opencode-profiles/{name}/rollback:
+    post:
+      summary: "Swap the profile back one revision"
+      description: |
+        Every PUT on `/v1/opencode-profiles/{name}` stashes the pre-PUT body
+        as `prev` (migration 0067); the rollback endpoint moves that body
+        back into the live slot and drops the far-older copy. At most one
+        step of history exists — if a longer audit trail is needed the CP
+        can add an `opencode_profile_revisions` table later. The assigned
+        nodes receive the new hash over the WS push channel immediately.
+      security: [{ userAuth: [] }]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Rolled back. Body is the profile after the swap. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Profile unknown or no previous revision exists. }
   /v1/nodes/{id}/opencode-profile:
     post:
       summary: Assign or clear the profile applied by a node

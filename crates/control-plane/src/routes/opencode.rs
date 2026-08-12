@@ -161,6 +161,40 @@ pub async fn assign_node_profile(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /v1/opencode-profiles/{name}/rollback` — swap the profile back one
+/// revision. No history is kept beyond one step (migration 0067), so a
+/// chain of PUTs deepens rollback only via the previous-on-previous chain.
+pub async fn rollback_profile(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<OpencodeProfile>, StatusCode> {
+    let profile = state
+        .store
+        .rollback_opencode_profile(&name)
+        .await
+        .map_err(|e| {
+            tracing::error!("rollback_opencode_profile: {e}");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    // Push the swap out to every node assigned to this profile.
+    let affected = state
+        .store
+        .list_nodes_for_profile(&profile.id)
+        .await
+        .unwrap_or_default();
+    if !affected.is_empty() {
+        push_config_update(
+            &state,
+            &affected,
+            Some(profile.id.clone()),
+            Some(profile.hash.clone()),
+        )
+        .await;
+    }
+    Ok(Json(profile))
+}
+
 /// `GET /v1/nodes/{id}/opencode-audit` — the last N apply events for a node.
 #[derive(Deserialize)]
 pub struct AuditQuery {

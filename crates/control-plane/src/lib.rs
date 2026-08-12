@@ -513,6 +513,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .delete(routes::opencode::delete_profile),
         )
         .route(
+            "/v1/opencode-profiles/{name}/rollback",
+            post(routes::opencode::rollback_profile),
+        )
+        .route(
             "/v1/nodes/{id}/opencode-profile",
             post(routes::opencode::assign_node_profile),
         )

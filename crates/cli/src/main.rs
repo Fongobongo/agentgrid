@@ -3756,6 +3756,8 @@ enum OpencodeAction {
     },
     /// Delete a profile. Nodes keep their last-applied on-disk config.
     Delete { name: String },
+    /// Swap the profile back one revision (PUT-with-history keeps one step).
+    Rollback { name: String },
     /// Assign (or `--clear`) the profile a node applies.
     Assign {
         node_id: String,
@@ -3849,6 +3851,20 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 }
                 other => anyhow::bail!("delete failed: {other}"),
             }
+        }
+        OpencodeAction::Rollback { name } => {
+            let resp = client
+                .post(format!("{base}/v1/opencode-profiles/{name}/rollback"))
+                .header("content-type", "application/json")
+                .body("{}")
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("rollback failed: {}", resp.status());
+            }
+            let p: OpencodeProfile = resp.json().await?;
+            println!("rolled back {} -> hash {}", p.name, &p.hash[..12]);
+            Ok(())
         }
         OpencodeAction::Assign {
             node_id,
