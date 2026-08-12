@@ -520,6 +520,15 @@ pub async fn read_stream<R: AsyncRead + Unpin>(
     if let Some(line) = redactor.finish() {
         emit_line_masked(&line, &sink, stream, &raw, &guard).await;
     }
+
+    // Drain the raw mirror before returning: `write_all` lands in the tokio
+    // fs pool, and a reader (a test, or a crash-path tail reader) may observe
+    // the file before the pool flushes. Without this, the last raw lines can
+    // be missing from disk when this function returns.
+    if let Some(f) = raw {
+        let mut g = f.lock().await;
+        let _ = g.flush().await;
+    }
 }
 
 /// Emit a line that has already been masked by the streaming redactor.
