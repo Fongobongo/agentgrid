@@ -24,6 +24,7 @@ use agentgrid_common::{
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
@@ -62,13 +63,50 @@ pub async fn get_profile(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+/// `PUT /v1/opencode-profiles/{name}?dry_run=true` — exercise normalize_config
+/// against the posted body *without writing*. Returns the effective config
+/// (post-sanitisation), the hash that WOULD have been computed, and the
+/// list of top-level keys stripped as unknown — so the web editor can show
+/// the operator exactly what their JSON becomes before they hit save.
+#[derive(Deserialize)]
+pub struct UpsertQuery {
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct UpsertDryRun {
+    pub would_set_hash: String,
+    pub effective_config: serde_json::Value,
+    pub dropped_keys: Vec<String>,
+}
+
+fn dry_run_response(config: serde_json::Value) -> Result<Json<UpsertDryRun>, StatusCode> {
+    use crate::store::opencode_profiles::{last_dropped_keys, sanitize_config};
+
+    let effective = sanitize_config(&config).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let dropped = last_dropped_keys();
+    let json_string = serde_json::to_string(&effective).map_err(|_| StatusCode::BAD_REQUEST)?;
+    use sha2::Digest;
+    let hash = format!("{:x}", sha2::Sha256::digest(json_string.as_bytes()));
+    Ok(Json(UpsertDryRun {
+        would_set_hash: hash,
+        effective_config: effective,
+        dropped_keys: dropped,
+    }))
+}
+
 /// `PUT /v1/opencode-profiles/{name}` — create-or-replace. On successful
 /// write the CP pushes ConfigUpdate to every node currently subscribed.
 pub async fn upsert_profile(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(q): Query<UpsertQuery>,
     Json(body): Json<UpsertOpencodeProfileRequest>,
-) -> Result<Json<OpencodeProfile>, StatusCode> {
+) -> Result<Response, StatusCode> {
+    if q.dry_run {
+        return dry_run_response(body.config).map(|j| j.into_response());
+    }
     let profile = state
         .store
         .upsert_opencode_profile(&name, body.config)
@@ -90,7 +128,7 @@ pub async fn upsert_profile(
         Some(profile.hash.clone()),
     )
     .await;
-    Ok(Json(profile))
+    Ok(Json(profile).into_response())
 }
 
 /// `DELETE /v1/opencode-profiles/{name}` — remove the profile. Nodes keep
@@ -161,16 +199,26 @@ pub async fn assign_node_profile(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /v1/opencode-profiles/{name}/rollback` — swap the profile back one
-/// revision. No history is kept beyond one step (migration 0067), so a
-/// chain of PUTs deepens rollback only via the previous-on-previous chain.
+/// `POST /v1/opencode-profiles/{name}/rollback` — swap the profile back N
+/// revisions. `?steps=n` walks the revision stack (default 1, capped at 32
+/// so an accidental endless-loop input can't spin the store).
+#[derive(Deserialize)]
+pub struct RollbackQuery {
+    #[serde(default = "default_steps")]
+    pub steps: u32,
+}
+fn default_steps() -> u32 {
+    1
+}
+
 pub async fn rollback_profile(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(q): Query<RollbackQuery>,
 ) -> Result<Json<OpencodeProfile>, StatusCode> {
     let profile = state
         .store
-        .rollback_opencode_profile(&name)
+        .rollback_opencode_profile(&name, q.steps.min(32))
         .await
         .map_err(|e| {
             tracing::error!("rollback_opencode_profile: {e}");

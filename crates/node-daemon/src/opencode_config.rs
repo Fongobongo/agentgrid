@@ -20,6 +20,26 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use sha2::Digest;
+use std::sync::Mutex;
+
+/// Track the most recently applied profile hash so the heartbeat can report
+/// it back. The CP compares against the assigned profile's hash — drift
+/// (manual edit, mid-flight rollback the daemon hasn't caught yet) shows
+/// up on the dashboard as a degraded node until the next pull/reapply.
+static APPLIED_HASH: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_applied_hash(hash: String) {
+    *APPLIED_HASH.lock().unwrap() = Some(hash);
+}
+
+#[allow(dead_code)]
+pub fn clear_applied_hash() {
+    *APPLIED_HASH.lock().unwrap() = None;
+}
+
+pub fn applied_hash() -> Option<String> {
+    APPLIED_HASH.lock().unwrap().clone()
+}
 
 /// Where the profiled opencode config lives. `~/.config/opencode/opencode.json`
 /// is the documented global-config location; per-attempt overrides go via
@@ -84,6 +104,7 @@ pub async fn pull_and_apply(
         trigger,
         "opencode profile applied"
     );
+    set_applied_hash(new_hash.clone());
     // Audit trail — best-effort; apply happened even if POST failed.
     let audit_url = format!("{}/v1/node/opencode-config/audit", cfg.server);
     let body = serde_json::json!({

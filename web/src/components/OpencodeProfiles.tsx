@@ -46,14 +46,48 @@ export default function OpencodeProfiles() {
     return () => clearInterval(t);
   }, []);
 
-  const upsert = async () => {
+  // The upsert formatter validates JSON locally before any server round
+  // trip (`dry_run` shows the post-sanitisation shape when keys are
+  // allowed on the allowlist).
+  const [dryResult, setDryResult] = useState<{ hash: string; dropped: string[]; effective: string } | null>(null);
+
+  const dryRun = async () => {
     if (!editName.trim() || !editBody.trim()) {
       setMsg('name and config body required');
       return;
     }
     try {
-      // Local parse gate — the CP will reject malformed JSON anyway, but
-      // the page surfaces the error before a fetch cycle needs to trip.
+      const cfg = JSON.parse(editBody);
+      const r = await fetch(
+        `/v1/opencode-profiles/${encodeURIComponent(editName.trim())}?dry_run=true`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ config: cfg }),
+        },
+      );
+      const data = await r.json();
+      if (!r.ok) throw new Error(`dry-run failed: ${r.status}`);
+      setDryResult({
+        hash: data.would_set_hash as string,
+        dropped: (data.dropped_keys as string[]) ?? [],
+        effective: JSON.stringify(data.effective_config, null, 2),
+      });
+      const drops = (data.dropped_keys as string[]).length;
+      setMsg(`dry-run ok — ${drops} keys stripped`);
+    } catch (e) {
+      setDryResult(null);
+      setMsg(`error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const upsertSave = async () => {
+    if (!editName.trim() || !editBody.trim()) {
+      setMsg('name and config body required');
+      return;
+    }
+    try {
       const cfg = JSON.parse(editBody);
       const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(editName.trim())}`, {
         method: 'PUT',
@@ -65,6 +99,7 @@ export default function OpencodeProfiles() {
       setMsg('profile saved');
       setEditBody('');
       setEditName('');
+      setDryResult(null);
       load();
     } catch (e) {
       setMsg(`error: ${e instanceof Error ? e.message : String(e)}`);
@@ -188,7 +223,22 @@ export default function OpencodeProfiles() {
           onChange={(e) => setEditBody(e.target.value)}
           style={{ width: '100%', fontFamily: 'monospace', marginTop: 8 }}
         />
-        <button onClick={upsert}>Save profile</button>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <button onClick={dryRun}>Preview (dry-run)</button>
+          <button onClick={upsertSave}>Save profile</button>
+        </div>
+        {dryResult && (
+          <div className="card" style={{ marginTop: 8 }}>
+            <div className="card-title">dry-run preview</div>
+            <div className="muted">would-set hash {dryResult.hash.slice(0, 16)}…</div>
+            {dryResult.dropped.length > 0 && (
+              <div className="muted">
+                dropped keys: {dryResult.dropped.join(', ')}
+              </div>
+            )}
+            <pre>{dryResult.effective}</pre>
+          </div>
+        )}
       </div>
     </section>
   );

@@ -207,6 +207,7 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 // per-attempt (egress audit) — this field stays the policy.
                 network_mode: cfg.network_mode.clone(),
                 account_usage: crate::account_usage::snapshot(),
+                applied_opencode_hash: crate::opencode_config::applied_hash(),
             };
             if let Err(e) = client
                 .post(format!("{}/v1/node/heartbeat", cfg.server))

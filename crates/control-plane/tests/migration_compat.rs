@@ -87,7 +87,8 @@ async fn migrations_serve_legacy_happy_path() {
         workspace_bytes: 0,
         network_mode: "none".into(),
         account_usage: vec![],
-    };
+        applied_opencode_hash: None,
+};
     assert!(s.heartbeat(&node_id, &hb).await.unwrap());
 
     // 4. Create a legacy task (no repo, no validation, plain-dir).

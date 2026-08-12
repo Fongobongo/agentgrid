@@ -465,18 +465,22 @@ paths:
         `config_update` to every node currently subscribed to this profile
         so it applies immediately when connected. PUT is idempotent (the
         same config produces the same hash and no audit churn).
+        Pass `?dry_run=true` to see the post-sanitisation body, the hash that
+        would have been computed and the dropped unknown keys — without
+        writing. Allowed keys are shape-checked (model a string, snapshot a
+        bool, provider an object, plugin an array) so a typo on an
+        allowed key fails the PUT loudly instead of silently shipping a
+        broken config.
     delete:
       summary: Delete a profile (nodes keep their last-applied on-disk config)
   /v1/opencode-profiles/{name}/rollback:
     post:
-      summary: "Swap the profile back one revision"
+      summary: "Swap the profile back N revisions"
       description: |
-        Every PUT on `/v1/opencode-profiles/{name}` stashes the pre-PUT body
-        as `prev` (migration 0067); the rollback endpoint moves that body
-        back into the live slot and drops the far-older copy. At most one
-        step of history exists — if a longer audit trail is needed the CP
-        can add an `opencode_profile_revisions` table later. The assigned
-        nodes receive the new hash over the WS push channel immediately.
+        Every PUT stores the pre-write body in `opencode_profile_revisions`
+        (0068); rollback walks back N (query `?steps=N`, default 1, cap 32)
+        and replaces the live row. The assigned nodes receive the new hash
+        over the WS push channel immediately.
       security: [{ userAuth: [] }]
       parameters:
         - in: path

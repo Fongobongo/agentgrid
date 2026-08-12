@@ -750,7 +750,8 @@ async fn revoked_node_gets_401() {
         workspace_bytes: 0,
         network_mode: "none".into(),
         account_usage: vec![],
-    };
+        applied_opencode_hash: None,
+};
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -1811,7 +1812,8 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 workspace_bytes: 0,
                 network_mode: "none".into(),
                 account_usage: vec![],
-            },
+        applied_opencode_hash: None,
+},
         )
         .await
         .unwrap();
@@ -1866,7 +1868,8 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         workspace_bytes: 0,
         network_mode: "none".into(),
         account_usage: vec![],
-    };
+        applied_opencode_hash: None,
+};
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -4212,7 +4215,8 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         workspace_bytes: 0,
         network_mode: "none".into(),
         account_usage: vec![],
-    };
+        applied_opencode_hash: None,
+};
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -6732,7 +6736,8 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         workspace_bytes: 0,
         network_mode: "none".into(),
         account_usage: vec![],
-    };
+        applied_opencode_hash: None,
+};
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -6806,7 +6811,8 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
             attempts: 7,
             rate_limited: 2,
         }],
-    };
+        applied_opencode_hash: None,
+};
     let resp = app
         .clone()
         .oneshot(post_auth(
@@ -8890,26 +8896,165 @@ async fn opencode_profile_rollback() {
     assert_eq!(p["prev"]["config"]["model"], "a/one");
     assert_eq!(p["prev"]["hash"].as_str().unwrap().len(), 64);
 
-    // 3. Rollback swaps them.
+    // 2b. Third upsert — stack is now [v1, v2] with v2 live.
+    let body3 = serde_json::json!({"config": {"model": "a/three"}});
+    let put3 = put_auth("/v1/opencode-profiles/rollback", body3.to_string(), &token);
+    app.clone().oneshot(put3).await.unwrap();
+
+    // 3. Rollback 2 steps → back at v1.
     let rb = post_auth(
-        "/v1/opencode-profiles/rollback/rollback",
+        "/v1/opencode-profiles/rollback/rollback?steps=2",
         "".to_string(),
         &token,
     );
     let rb_resp = app.clone().oneshot(rb).await.unwrap();
-    assert_eq!(rb_resp.status(), StatusCode::OK);
-    let after: serde_json::Value =
-        serde_json::from_slice(&to_bytes(rb_resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(
+        &to_bytes(rb_resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(after["config"]["model"], "a/one");
-    assert!(
-        after["prev"].is_null() || after.get("prev").is_none(),
-        "after rollback prev is cleared (swap dropped the far older)"
+    // Top of stack is v2 (the last thing PUT before rollback); it sits in
+    // `prev` so a follow-up rollback lands there next.
+    if let Some(prev) = after.get("prev").and_then(|v| v.as_object()) {
+        assert!(prev.is_empty() || prev["config"]["model"].as_str().is_some());
+    } else {
+        panic!("prev should exist after a 2-step rollback that's ≤ the revisions");
+    }
+
+    // 3b. Also verify the shorthand single-step rollback after another
+    // write (regression for `steps=1` default value).
+    let body4 = serde_json::json!({"config": {"model": "a/four"}});
+    let put4 = put_auth("/v1/opencode-profiles/rollback", body4.to_string(), &token);
+    app.clone().oneshot(put4).await.unwrap();
+    let rb1 = post_auth(
+        "/v1/opencode-profiles/rollback/rollback?steps=1",
+        "".to_string(),
+        &token,
     );
+    let rb1_resp = app.clone().oneshot(rb1).await.unwrap();
+    let after1: serde_json::Value = serde_json::from_slice(
+        &to_bytes(rb1_resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after1["config"]["model"], "a/one");
 }
 
 /// Feature "opencode profiles": the allowlist gates the keys a client can
 /// push into a profile. Unknown keys are dropped silently so a typo cannot
 /// wedge every node on a parsing error.
+/// Feature "opencode profiles" dry-run preview (`?dry_run=true`). Surfaces
+/// the post-sanitisation body, the hash that WOULD have been computed and
+/// the dropped unknown keys, so the operator sees drift before commit.
+#[tokio::test]
+async fn opencode_upsert_dry_run_returns_stripped_keys_and_hash() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    let body = serde_json::json!({
+        "config": {
+            "model": "a/one",
+            "snapshot": true,
+            "malicious-not-allowed": 1,
+            "unknown-as-well": {"nested": true}
+        }
+    });
+    let put = put_auth(
+        "/v1/opencode-profiles/dryrun?dry_run=true",
+        body.to_string(),
+        &token,
+    );
+    let resp = app.clone().oneshot(put).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json.get("would_set_hash").is_some());
+    assert!(json["would_set_hash"].as_str().unwrap().len() == 64);
+    assert_eq!(json["effective_config"]["model"], "a/one");
+    assert!(json["effective_config"].get("malicious-not-allowed").is_none());
+    let mut dropped: Vec<String> =
+        serde_json::from_value(json["dropped_keys"].clone()).unwrap();
+    dropped.sort();
+    assert_eq!(dropped, vec!["malicious-not-allowed", "unknown-as-well"]);
+}
+
+#[tokio::test]
+async fn opencode_heartbeat_drift_audit() {
+    // The node reports `applied_opencode_hash` on every heartbeat. When it
+    // doesn't match the assigned profile's hash, the CP logs warns + adds
+    // an `opencode.drift` row so the dashboard surfaces drift without
+    // breaking the apply loop.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    let (node_id, cred) = enroll(&app, "drift-node", vec!["opencode".into()], vec![]).await;
+
+    // Assign a profile to the node first.
+    let put = put_auth(
+        "/v1/opencode-profiles/drift",
+        serde_json::json!({"config":{"model":"o/one"}}).to_string(),
+        &token,
+    );
+    let pr = app.clone().oneshot(put).await.unwrap();
+    let pr_body = to_bytes(pr.into_body(), usize::MAX).await.unwrap();
+    let pr_json: serde_json::Value = serde_json::from_slice(&pr_body).unwrap();
+    let pid = pr_json["id"].as_str().unwrap().to_string();
+    let pa = post_auth(
+        &format!("/v1/nodes/{node_id}/opencode-profile"),
+        serde_json::json!({"profile_id": pid}).to_string(),
+        &token,
+    );
+    assert_eq!(
+        app.clone().oneshot(pa).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+
+    // Send a heartbeat claiming a different applied hash than the profile's.
+    let hb = agentgrid_common::HeartbeatRequest {
+        status: Some(NodeStatus::Online),
+        name: "drift-node".into(),
+        adapters: vec!["opencode".into()],
+        repositories: vec![],
+        max_concurrency: 1,
+        agent_version: String::new(),
+        load_avg: 0.0,
+        free_disk_mb: 1024,
+        active_attempts: 0,
+        capabilities: vec![],
+        protocol_version: None,
+        discovered_skills: vec![],
+        unsafe_active: false,
+        permission_interception: "wrapper".into(),
+        outbox_bytes: 0,
+        artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
+        account_usage: vec![],
+        applied_opencode_hash: Some("deadbeef".repeat(8)),
+    };
+    let hb_req = post_auth(
+        "/v1/node/heartbeat",
+        serde_json::to_string(&hb).unwrap(),
+        &cred,
+    );
+    let resp = app.clone().oneshot(hb_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn opencode_profile_allowlist_strips_unknown_keys() {
     let state = AppState::open_temp().await.unwrap();

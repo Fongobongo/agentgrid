@@ -28,7 +28,7 @@ mod events;
 mod learnings;
 mod maintenance;
 mod nodes;
-mod opencode_profiles;
+pub(crate) mod opencode_profiles;
 mod profiles;
 mod repositories;
 mod scheduler;

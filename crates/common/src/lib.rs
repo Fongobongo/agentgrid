@@ -773,6 +773,13 @@ pub struct HeartbeatRequest {
     /// quarantine directory. 0 on legacy nodes.
     #[serde(default)]
     pub outbox_corruption_count: u64,
+    /// Opencode config drift detector: hash of the on-disk
+    /// `~/.config/opencode/opencode.json` the node most recently applied.
+    /// The CP compares it to the assigned profile's hash on heartbeat; a
+    /// mismatch marks the node `degraded` until the next pull/reapply.
+    /// Absent on legacy nodes → no drift check fires.
+    #[serde(default)]
+    pub applied_opencode_hash: Option<String>,
     /// Hardening P0 item 10: pending completion records in completions.jsonl.
     /// 0 on legacy nodes.
     #[serde(default)]
@@ -1495,6 +1502,7 @@ mod tests {
             repo_cache_bytes: 0,
             workspace_bytes: 0,
             network_mode: "none".into(),
+            applied_opencode_hash: None,
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

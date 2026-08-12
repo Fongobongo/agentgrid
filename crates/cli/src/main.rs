@@ -3757,7 +3757,13 @@ enum OpencodeAction {
     /// Delete a profile. Nodes keep their last-applied on-disk config.
     Delete { name: String },
     /// Swap the profile back one revision (PUT-with-history keeps one step).
-    Rollback { name: String },
+    Rollback {
+        name: String,
+        /// Walk back N revisions instead of one (≤32; deeper walks need
+        /// `--steps=N` on this flag — the API caps at 32 per call).
+        #[arg(long, default_value_t = 1)]
+        steps: u32,
+    },
     /// Assign (or `--clear`) the profile a node applies.
     Assign {
         node_id: String,
@@ -3852,9 +3858,11 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 other => anyhow::bail!("delete failed: {other}"),
             }
         }
-        OpencodeAction::Rollback { name } => {
+        OpencodeAction::Rollback { name, steps } => {
             let resp = client
-                .post(format!("{base}/v1/opencode-profiles/{name}/rollback"))
+                .post(format!(
+                    "{base}/v1/opencode-profiles/{name}/rollback?steps={steps}"
+                ))
                 .header("content-type", "application/json")
                 .body("{}")
                 .send()
@@ -3863,7 +3871,12 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 anyhow::bail!("rollback failed: {}", resp.status());
             }
             let p: OpencodeProfile = resp.json().await?;
-            println!("rolled back {} -> hash {}", p.name, &p.hash[..12]);
+            println!(
+                "rolled back {} {steps} step{} -> hash {}",
+                p.name,
+                if steps == 1 { "" } else { "s" },
+                &p.hash[..12]
+            );
             Ok(())
         }
         OpencodeAction::Assign {

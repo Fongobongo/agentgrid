@@ -47,6 +47,25 @@ const ALLOWED_TOP_LEVEL: &[&str] = &[
     "autoupdate",
 ];
 
+/// Primitive per-key shape contract. Anything outside the allowlist is
+/// silently stripped (allows server to hide typos without producing a
+/// broken config); a key ON the list with the wrong JSON type is rejected
+/// loudly — otherwise the node would ship it to opencode and the binary
+/// would either crash or start silently with a fallback.
+fn check_shape(key: &str, v: &serde_json::Value) -> Result<()> {
+    let ok = match key {
+        "model" | "small_model" | "default_agent" => v.is_string(),
+        "share" | "snapshot" | "autoupdate" => v.is_boolean(),
+        "enabled_providers" | "disabled_providers" | "plugin" => v.is_array(),
+        "provider" | "mcp" | "agent" | "permission" => v.is_object() || v.is_null(),
+        _ => true,
+    };
+    if !ok {
+        anyhow::bail!("opencode profile key '{key}' has the wrong JSON shape");
+    }
+    Ok(())
+}
+
 /// Strip config keys outside the allowlist. Returns the canonical JSON
 /// string (sorted-within-object via serde's deterministic order) so two
 /// uploads with the same semantics produce the same hash.
@@ -56,6 +75,13 @@ fn normalize_config(v: serde_json::Value) -> Result<(String, String)> {
         anyhow::bail!("profile config must be a JSON object");
     }
     if let Some(obj) = v.as_object_mut() {
+        let keys: Vec<(String, serde_json::Value)> =
+            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (k, shape_v) in keys {
+            if ALLOWED_TOP_LEVEL.contains(&k.as_str()) {
+                check_shape(&k, &shape_v)?;
+            }
+        }
         obj.retain(|k, _| ALLOWED_TOP_LEVEL.contains(&k.as_str()));
     }
     let json = serde_json::to_string(&v)?;
@@ -64,6 +90,56 @@ fn normalize_config(v: serde_json::Value) -> Result<(String, String)> {
         format!("{:x}", sha2::Sha256::digest(json.as_bytes()))
     };
     Ok((json, hash))
+}
+
+/// `sanitize_config` runs the same allowlist the PUT path applies and
+/// returns the resulting Value (used by `?dry_run=true` to surface the
+/// preview + the dropped-keys list).
+///
+/// The dropped-key tracking is thread-local because the call sites are
+/// synchronous (no awaiting a mutex) and the only consumer is the same
+/// request thread that called us — no cross-request leaks.
+pub fn sanitize_config(v: &serde_json::Value) -> Result<serde_json::Value> {
+    LAST_DROPPED.with(|c| c.borrow_mut().clear());
+    let mut v = v.clone();
+    if !v.is_object() {
+        anyhow::bail!("profile config must be a JSON object");
+    }
+    if let Some(obj) = v.as_object_mut() {
+        // Shape-check allowed keys before stripping; even though the dry-run
+        // only reports on dropped keys, feeding material-for-allowed-keys a
+        // wrong-typed value should fail at the same place the real PUT
+        // would.
+        for (k, shape_v) in obj.iter() {
+            if ALLOWED_TOP_LEVEL.contains(&k.as_str()) {
+                check_shape(k, shape_v)?;
+            }
+        }
+        let mut dropped: Vec<String> = Vec::new();
+        let allowed: std::collections::HashSet<&str> =
+            ALLOWED_TOP_LEVEL.iter().copied().collect();
+        let keys: Vec<String> = obj.keys().cloned().collect();
+        for k in keys {
+            if !allowed.contains(k.as_str()) {
+                obj.remove(&k);
+                dropped.push(k);
+            }
+        }
+        dropped.sort();
+        LAST_DROPPED.with(|c| *c.borrow_mut() = dropped);
+    }
+    Ok(v)
+}
+
+/// Keys dropped on the most recent `sanitize_config` call on this thread.
+/// The route's dry-run path reads this right after `sanitize_config`.
+pub fn last_dropped_keys() -> Vec<String> {
+    LAST_DROPPED.with(|c| c.borrow().clone())
+}
+
+thread_local! {
+    static LAST_DROPPED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub struct OpencodeProfileRow {
@@ -172,7 +248,25 @@ impl Store {
         .bind(&now)
         .fetch_one(&self.pool)
         .await?;
-        row_to_profile(&row).into_view()
+        let final_row = row_to_profile(&row);
+        // Append the pre-PUT body as a revision so rollback can walk back
+        // more than one step. The row's `prev_*` column is the fast path
+        // for the most recent revision; this table adds deeper history.
+        if let (Some(prev_json), Some(prev_hash)) =
+            (&final_row.prev_config_json, &final_row.prev_hash)
+        {
+            let _ = sqlx::query(
+                "INSERT INTO opencode_profile_revisions (profile_id, config_json, hash, saved_at)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(&final_row.id)
+            .bind(prev_json)
+            .bind(prev_hash)
+            .bind(&now)
+            .execute(&self.pool)
+            .await;
+        }
+        final_row.into_view()
     }
 
     /// Roll the profile one step back: swap cur→prev, drop the old prev.
@@ -181,25 +275,86 @@ impl Store {
     /// vocabulary accepts "rollback" so the node-side entry stays honest
     /// about why the file turned.
     ///
-    /// Returns None when there is no previous revision to swap with.
-    pub async fn rollback_opencode_profile(&self, name: &str) -> Result<Option<OpencodeProfile>> {
-        let now = now_iso();
-        let row = sqlx::query(
-            "UPDATE opencode_profiles
-             SET config_json = prev_config_json,
-                 hash        = prev_hash,
-                 prev_config_json = NULL,
-                 prev_hash        = NULL,
-                 updated_at       = ?
-             WHERE name = ? AND prev_hash IS NOT NULL
-             RETURNING id, name, config_json, hash, prev_config_json, prev_hash,
-                       created_at, updated_at",
+    /// `steps` walks the revision stack (prev column = revision #1, plus
+    /// rows from `opencode_profile_revisions`); the body that ends up on
+    /// top replaces the live row and mid-walk snapshots re-land as new
+    /// revisions so the next rollback to the *previous* state stays cheap.
+    /// Returns None when the requested history depth doesn't exist.
+    pub async fn rollback_opencode_profile(
+        &self,
+        name: &str,
+        steps: u32,
+    ) -> Result<Option<OpencodeProfile>> {
+        let mut tx = self.pool.begin().await?;
+        type ProfileRow = (String, String, String, Option<String>, Option<String>);
+        let row: Option<ProfileRow> = sqlx::query_as(
+            "SELECT id, config_json, hash, prev_config_json, prev_hash
+             FROM opencode_profiles WHERE name = ?",
         )
-        .bind(&now)
         .bind(name)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        row.map(|r| row_to_profile(&r).into_view()).transpose()
+        let Some((profile_id, mut cur_json, mut cur_hash, prev_json, prev_hash)) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+
+        let mut stack: Vec<(String, String)> = Vec::new();
+        if let (Some(pj), Some(ph)) = (prev_json, prev_hash) {
+            stack.push((pj, ph));
+        }
+        let extra = sqlx::query_as::<_, (String, String)>(
+            "SELECT config_json, hash FROM opencode_profile_revisions
+             WHERE profile_id = ? ORDER BY id ASC",
+        )
+        .bind(&profile_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for e in extra {
+            stack.push(e);
+        }
+
+        let steps_n = steps.max(1) as usize;
+        if stack.len() < steps_n {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
+        let now = now_iso();
+        for _ in 0..steps_n {
+            let (new_json, new_hash) = stack.pop().unwrap();
+            let _ = sqlx::query(
+                "INSERT INTO opencode_profile_revisions (profile_id, config_json, hash, saved_at)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(&profile_id)
+            .bind(&cur_json)
+            .bind(&cur_hash)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await;
+            cur_json = new_json;
+            cur_hash = new_hash;
+        }
+        let (prev_j, prev_h) = stack
+            .pop()
+            .map(|(j, h)| (Some(j), Some(h)))
+            .unwrap_or((None, None));
+        sqlx::query(
+            "UPDATE opencode_profiles
+             SET config_json = ?, hash = ?, prev_config_json = ?, prev_hash = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&cur_json)
+        .bind(&cur_hash)
+        .bind(&prev_j)
+        .bind(&prev_h)
+        .bind(&now)
+        .bind(&profile_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.get_opencode_profile(name).await
     }
 
     pub async fn delete_opencode_profile(&self, name: &str) -> Result<bool> {

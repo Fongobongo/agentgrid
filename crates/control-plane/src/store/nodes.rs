@@ -169,6 +169,34 @@ impl Store {
             lose_node_attempts(&mut t, node_id).await?;
             t.commit().await?;
         }
+        // Opencode-config drift detector: when the node reports an applied
+        // hash that doesn't match its assigned profile's hash, log+wite an
+        // audit row so the UI/CLI can surface "this node drifted". We do
+        // NOT mark the node degraded — drift typically heals within one
+        // heartbeat when the next pull lands and the apply pipeline sets
+        // the hash to match.
+        if let (Some(applied), Some(profile_row)) = (
+            &req.applied_opencode_hash,
+            self.node_opencode_profile(node_id).await?,
+        ) {
+            if applied != &profile_row.hash {
+                tracing::warn!(
+                    node_id = node_id,
+                    applied = %applied,
+                    expected = %profile_row.hash,
+                    "opencode config drift — node applied hash mismatches assigned profile"
+                );
+                let detail = serde_json::json!({
+                    "applied": applied,
+                    "expected": profile_row.hash,
+                    "profile_id": profile_row.id,
+                })
+                .to_string();
+                let _ = self
+                    .audit("node", Some(node_id), "opencode.drift", None, Some(&detail))
+                    .await;
+            }
+        }
         Ok(affected == 1)
     }
 
