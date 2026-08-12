@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Multi-node opencode-profile smoke (`tests/e2e/run-opencode-smoke.sh`).**
+  A self-contained loopback smoke: temp control plane + two temp node
+  daemons, one profile assigned to both, assert two apply-audit rows.
+  Per-node `HOME` isolates each `opencode.json` (without it the second node
+  sees the file already at the right hash and skips the audit). Verified
+  locally and on the remote test host (191.96.11.161).
+
 - **A/B percent assign.** `POST /v1/opencode-profiles/{name}/assign-percent`
   (body `{ other, percent }`) redistributes the nodes currently on either
   arm so that `percent`% land on `{name}` and the rest on `other`.
