@@ -1255,6 +1255,10 @@ pub struct OpencodeProfile {
     /// disk). NULL = never expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Number of node applies recorded for this profile in the audit feed
+    /// (populated by the list route; None elsewhere).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply_count: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }

@@ -3803,11 +3803,14 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
             let items: ListResponse<OpencodeProfile> = resp.json().await?;
             for p in &items.items {
                 println!(
-                    "{:<16} {} {} {} bytes",
+                    "{:<16} {} {} {} bytes {}",
                     p.name,
                     &p.hash[..12],
                     p.updated_at,
-                    p.config.to_string().len()
+                    p.config.to_string().len(),
+                    p.apply_count
+                        .map(|n| format!("{n} applies"))
+                        .unwrap_or_default()
                 );
             }
             Ok(())

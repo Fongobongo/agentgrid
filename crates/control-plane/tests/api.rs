@@ -8905,6 +8905,79 @@ async fn opencode_delete_with_fallback_reassigns_nodes() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Feature "opencode profiles": the list route attaches per-profile apply
+/// counts from the audit feed (item 6 of the configurator polish list).
+#[tokio::test]
+async fn opencode_list_reports_apply_count() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+    let resp = app
+        .clone()
+        .oneshot(put_auth(
+            "/v1/opencode-profiles/p1",
+            serde_json::to_string(&serde_json::json!({"config": {"model": "m"}})).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // No applies yet -> 0.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/opencode-profiles", &token))
+        .await
+        .unwrap();
+    let list: ListResponse<agentgrid_common::OpencodeProfile> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(list.items.len(), 1);
+    assert_eq!(list.items[0].apply_count, Some(0));
+
+    // One node apply lands an audit row -> count becomes 1.
+    let (node_id, node_cred) = enroll(&app, "n1", vec!["mock".into()], vec!["*".into()]).await;
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/opencode-profiles/p1", &token))
+        .await
+        .unwrap();
+    let p: agentgrid_common::OpencodeProfile =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/nodes/{node_id}/opencode-profile"),
+            serde_json::to_string(&serde_json::json!({ "profile_id": p.id })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/opencode-config/audit",
+            serde_json::to_string(&serde_json::json!({
+                "profile_id": p.id,
+                "hash": p.hash,
+                "trigger": "startup",
+            }))
+            .unwrap(),
+            &node_cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/opencode-profiles", &token))
+        .await
+        .unwrap();
+    let list: ListResponse<agentgrid_common::OpencodeProfile> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(list.items[0].apply_count, Some(1));
+}
+
 /// Feature "opencode profiles": TTL — a profile with an `expires_at` in
 /// the past is swept by the janitor exactly like a manual delete (nodes
 /// re-pointed off, profile gone).

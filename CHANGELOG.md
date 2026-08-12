@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Per-profile apply metrics.** The list route attaches an `apply_count`
+  from the opencode audit feed (`SELECT COUNT(*) FROM
+  opencode_config_audit WHERE profile_id = …`); the web shows it per card
+  and `ag opencode profile list` prints it.
+
+- **Import/export in the profiles UI.** Each card gets an `export` button
+  (downloads its config as `<name>.opencode.json`); the upsert form gains
+  an `import…` file picker that loads a JSON file straight into the
+  editor.
+
 - **Profile TTL / auto-expire.** A profile can carry an absolute
   `expires_at` (RFC3339, validated loudly on upsert). A janitor on the same
   15 s maintenance cadence deletes expired profiles exactly like a manual

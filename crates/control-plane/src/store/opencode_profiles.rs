@@ -188,6 +188,7 @@ impl OpencodeProfileRow {
             hash: self.hash,
             prev,
             expires_at: self.expires_at,
+            apply_count: None,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -197,13 +198,18 @@ impl OpencodeProfileRow {
 impl Store {
     pub async fn list_opencode_profiles(&self) -> Result<Vec<OpencodeProfile>> {
         let rows = sqlx::query(
-            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, expires_at, created_at, updated_at
+            "SELECT id, name, config_json, hash, prev_config_json, prev_hash, expires_at, created_at, updated_at,
+                    (SELECT COUNT(*) FROM opencode_config_audit a WHERE a.profile_id = opencode_profiles.id) AS apply_count
              FROM opencode_profiles ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
-            .map(|r| row_to_profile(&r).into_view())
+            .map(|r| {
+                let mut p = row_to_profile(&r).into_view()?;
+                p.apply_count = Some(r.try_get("apply_count").unwrap_or(0));
+                Ok(p)
+            })
             .collect()
     }
 

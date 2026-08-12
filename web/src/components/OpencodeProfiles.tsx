@@ -14,6 +14,7 @@ interface OpencodeProfile {
   config: Record<string, unknown>;
   prev?: { hash: string; config: Record<string, unknown> } | null;
   expires_at?: string | null;
+  apply_count?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -189,6 +190,26 @@ export default function OpencodeProfiles() {
     share: p.config['share'] === true,
   });
 
+  const downloadConfig = (p: OpencodeProfile) => {
+    const blob = new Blob([JSON.stringify(p.config, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${p.name}.opencode.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importFile = (f: File | null) => {
+    if (!f) return;
+    f.text()
+      .then((t) => {
+        setEditBody(t);
+        setMsg(`loaded ${f.name} into the editor`);
+      })
+      .catch((e) => setMsg(`read failed: ${e}`));
+  };
+
   const remove = async (name: string) => {
     const fallback = window.prompt(
       `Delete profile "${name}"?\n\nLeave empty to delete plain (assigned nodes keep their last-applied config).\nOr enter another profile name to move assigned nodes onto it first.`,
@@ -254,12 +275,16 @@ export default function OpencodeProfiles() {
               {p.expires_at && (
                 <div className="muted">expires {fmtTime(p.expires_at)}</div>
               )}
+              <div className="muted">{p.apply_count ?? 0} applies</div>
               <details>
                 <summary>config</summary>
                 <pre>{JSON.stringify(p.config, null, 2)}</pre>
               </details>
               <div>
                 <button onClick={() => remove(p.name)}>delete</button>
+                <button onClick={() => downloadConfig(p)} title="Download this profile's config as JSON">
+                  export
+                </button>
                 {p.prev && (
                   <button onClick={() => rollback(p.name)} title="Swap to previous revision">
                     rollback
@@ -315,6 +340,18 @@ export default function OpencodeProfiles() {
           </button>
           <button onClick={dryRun}>Preview (dry-run)</button>
           <button onClick={upsertSave}>Save profile</button>
+          <label className="filebtn">
+            import…
+            <input
+              type="file"
+              accept=".json,application/json"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                importFile(e.target.files?.[0] ?? null);
+                e.target.value = '';
+              }}
+            />
+          </label>
         </div>
         {dryResult && (
           <div className="card" style={{ marginTop: 8 }}>
