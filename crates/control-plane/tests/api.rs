@@ -4084,6 +4084,57 @@ async fn node_protocol_mismatch_marks_degraded() {
     assert_eq!(node.status, NodeStatus::Degraded);
 }
 
+/// Hardening guard: `/v1/skills` routes are operator-JWT only. Without a
+/// token, both the read (`GET /v1/skills`) and the write
+/// (`POST /v1/skills/{name}/trust`) must be rejected (401), so a control
+/// plane reachable without a reverse-proxy auth front cannot have its trust
+/// ledger read or flipped by an anonymous caller. The middleware
+/// (`require_user_auth` over `user_protected`) enforces this; the handler's
+/// `Option<Extension<AuthedUser>>` + "system" fallback therefore only ever
+/// fires from an authenticated worker path (e.g. heartbeat auto-fill), never
+/// from the public route.
+#[tokio::test]
+async fn skills_routes_require_user_jwt() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+
+    let no_auth_get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/skills")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_auth_get.status(), StatusCode::UNAUTHORIZED);
+
+    let no_auth_trust = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/skills/ponytail/trust?source=user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_auth_trust.status(), StatusCode::UNAUTHORIZED);
+
+    // Authenticated caller succeeds (proves the rejection is auth, not a
+    // 5xx / route wiring).
+    let token = test_token(&app).await;
+    let authed = app
+        .clone()
+        .oneshot(get_auth("/v1/skills", &token))
+        .await
+        .unwrap();
+    assert_eq!(authed.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn skill_trust_defaults_untrusted_then_round_trips() {
     // Stage 9.2: an unrecorded skill is fail-closed untrusted; trusting it
