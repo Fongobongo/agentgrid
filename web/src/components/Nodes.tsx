@@ -8,7 +8,9 @@ export default function Nodes() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<NodeView | null>(null);
-  // Feature "opencode profiles": audit viewer expander — keyed by node id.
+  // Feature "opencode profiles": audit viewer expander (auto-polls with the
+  // rest of the page; the WS push sequence on the CP also surfaces as a new
+  // audit row immediately after the node applies it).
   const [auditNode, setAuditNode] = useState<string | null>(null);
   const [auditRows, setAuditRows] = useState<OpencodeAuditEntry[] | null>(null);
   const [profiles, setProfiles] = useState<OpencodeProfile[] | null>(null);
@@ -21,13 +23,14 @@ export default function Nodes() {
         setNodes(n);
       })
       .catch(setError);
+    listOpencodeProfiles().then(setProfiles).catch(() => undefined);
+    if (auditNode) {
+      getOpencodeAudit(auditNode).then(setAuditRows).catch(() => setAuditRows([]));
+    }
   };
 
   useEffect(load, []);
   useLiveRefresh(load);
-  useEffect(() => {
-    listOpencodeProfiles().then(setProfiles).catch(() => undefined);
-  }, []);
 
   const assignProfile = async (nodeId: string, profileId: string | null) => {
     setAssignBusy(nodeId);

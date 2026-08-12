@@ -51,6 +51,8 @@ export default function OpencodeProfiles() {
       return;
     }
     try {
+      // Local parse gate — the CP will reject malformed JSON anyway, but
+      // the page surfaces the error before a fetch cycle needs to trip.
       const cfg = JSON.parse(editBody);
       const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(editName.trim())}`, {
         method: 'PUT',
@@ -67,6 +69,16 @@ export default function OpencodeProfiles() {
       setMsg(`error: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
+
+  const preview = (p: OpencodeProfile) => ({
+    hash: p.hash.slice(0, 16),
+    keys: Object.keys(p.config).length,
+    model: typeof p.config['model'] === 'string' ? p.config['model'] : null,
+    small_model:
+      typeof p.config['small_model'] === 'string' ? p.config['small_model'] : null,
+    snapshot: p.config['snapshot'] === true,
+    share: p.config['share'] === true,
+  });
 
   const remove = async (name: string) => {
     if (!window.confirm(`Delete profile "${name}"?`)) return;
@@ -98,32 +110,38 @@ export default function OpencodeProfiles() {
       <h2>Opencode profiles</h2>
       {msg && <div className="muted">{msg}</div>}
       <div className="cards">
-        {profiles.map((p) => (
-          <div key={p.id} className="card">
-            <div className="card-title">{p.name}</div>
-            <div className="muted">hash {p.hash.slice(0, 16)}…</div>
-            <div className="muted">updated {fmtTime(p.updated_at)}</div>
-            <details>
-              <summary>config</summary>
-              <pre>{JSON.stringify(p.config, null, 2)}</pre>
-            </details>
-            <div>
-              <button onClick={() => remove(p.name)}>delete</button>
-              <select
-                defaultValue=""
-                onChange={(e) => assign(p.id, e.target.value)}
-              >
-                <option value="" disabled>assign to node…</option>
-                {nodes.map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {n.name}{' '}
-                    {n.opencode_profile_id === p.id ? ' ✓' : ''}
-                  </option>
-                ))}
-              </select>
+        {profiles.map((p) => {
+          const v = preview(p);
+          return (
+            <div key={p.id} className="card">
+              <div className="card-title">{p.name}</div>
+              <div className="muted">hash {v.hash}… · {v.keys} keys</div>
+              {v.model && <div className="muted">model {String(v.model)}</div>}
+              {v.small_model && <div className="muted">small {String(v.small_model)}</div>}
+              <div className="muted">snapshot {v.snapshot ? 'on' : 'off'} · share {v.share ? 'on' : 'off'}</div>
+              <div className="muted">updated {fmtTime(p.updated_at)}</div>
+              <details>
+                <summary>config</summary>
+                <pre>{JSON.stringify(p.config, null, 2)}</pre>
+              </details>
+              <div>
+                <button onClick={() => remove(p.name)}>delete</button>
+                <select
+                  defaultValue=""
+                  onChange={(e) => assign(p.id, e.target.value)}
+                >
+                  <option value="" disabled>assign to node…</option>
+                  {nodes.map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {n.name}{' '}
+                      {n.opencode_profile_id === p.id ? ' ✓' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <h3>Upsert profile</h3>
