@@ -364,6 +364,33 @@ impl Store {
         Ok(r.rows_affected() > 0)
     }
 
+    /// Delete a profile while atomically re-pointing every node currently
+    /// assigned to it onto a fallback profile. Single txn, so a node can't
+    /// observe a half-state (reassigned but profile still alive / profile
+    /// gone but nodes still pointing at it). Returns false when the target
+    /// profile does not exist.
+    pub async fn delete_opencode_profile_with_fallback(
+        &self,
+        name: &str,
+        fallback_id: &str,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE nodes SET opencode_profile_id = ?
+             WHERE opencode_profile_id = (SELECT id FROM opencode_profiles WHERE name = ?)",
+        )
+        .bind(fallback_id)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+        let r = sqlx::query("DELETE FROM opencode_profiles WHERE name = ?")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(r.rows_affected() > 0)
+    }
+
     /// Resolve the profile assigned to a node (or None if unassigned / the
     /// profile was deleted and ON DELETE SET NULL fired).
     pub async fn node_opencode_profile(&self, node_id: &str) -> Result<Option<OpencodeProfile>> {

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Delete-with-fallback for profiles.** `DELETE
+  /v1/opencode-profiles/{name}?fallback=<other>` re-points every node
+  currently assigned to the profile onto `<other>` in the same transaction
+  that removes it (self-fallback is a 400, missing fallback a 404); the
+  config push then carries the fallback hash so nodes apply it right away.
+  CLI: `ag opencode profile delete <name> --fallback <other>`; web: the
+  delete button asks for an optional fallback name. Plain delete keeps
+  today's "nodes keep last-applied config" behavior.
+
+- **Format button in the profile editor.** One click pretty-prints the
+  JSON body (`JSON.stringify(..., null, 2)`) — no editor dependency, the
+  bundle stays lean.
+
 - **Prev↔cur diff in the profiles UI.** Each profile card's "previous
   revision" panel now renders a line diff against the current config
   (dependency-free LCS, pretty-printed JSON) with removed lines in red,

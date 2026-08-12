@@ -188,28 +188,68 @@ pub async fn upsert_profile(
 
 /// `DELETE /v1/opencode-profiles/{name}` — remove the profile. Nodes keep
 /// their last-applied on-disk config (harmless); the FK pointer is cleared
-/// via ON DELETE SET NULL.
+/// via ON DELETE SET NULL. With `?fallback=<other>` the delete first
+/// re-points every assigned node onto that profile atomically (and the push
+/// carries the fallback's hash so nodes apply it immediately).
+#[derive(Deserialize)]
+pub struct DeleteQuery {
+    pub fallback: Option<String>,
+}
+
 pub async fn delete_profile(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<crate::auth::AuthedUser>,
     Path(name): Path<String>,
+    Query(q): Query<DeleteQuery>,
 ) -> Result<StatusCode, StatusCode> {
     // Snapshot the affected nodes BEFORE the delete so the push can wake
     // them into dropping the profile voluntarily.
-    let affected: Vec<String> = match state.store.get_opencode_profile(&name).await {
-        Ok(Some(p)) => state
+    let profile_id: Option<String> = match state.store.get_opencode_profile(&name).await {
+        Ok(Some(p)) => Some(p.id),
+        _ => None,
+    };
+    let affected: Vec<String> = match &profile_id {
+        Some(pid) => state
             .store
-            .list_nodes_for_profile(&p.id)
+            .list_nodes_for_profile(pid)
             .await
             .unwrap_or_default(),
-        _ => Vec::new(),
+        None => Vec::new(),
     };
-    match state.store.delete_opencode_profile(&name).await {
+
+    // Optional explicit fallback: reassign affected nodes to another
+    // profile before deleting — no auto-magic, the operator names it.
+    let (fallback_id, fallback_hash): (Option<String>, Option<String>) =
+        if let Some(fb) = q.fallback.as_deref() {
+            if fb == name {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            match state.store.get_opencode_profile(fb).await {
+                Ok(Some(p)) => (Some(p.id), Some(p.hash)),
+                _ => return Err(StatusCode::NOT_FOUND),
+            }
+        } else {
+            (None, None)
+        };
+
+    let deleted = match &fallback_id {
+        Some(fid) => {
+            state
+                .store
+                .delete_opencode_profile_with_fallback(&name, fid)
+                .await
+        }
+        None => state.store.delete_opencode_profile(&name).await,
+    };
+    match deleted {
         Ok(true) => {
-            push_config_update(&state, &affected, None, None).await;
+            // With fallback the push carries the new hash so nodes apply
+            // the replacement instead of merely dropping the old one.
+            push_config_update(&state, &affected, fallback_id, fallback_hash).await;
             let detail = serde_json::json!({
                 "profile_name": name,
                 "affected_nodes": affected.len(),
+                "fallback": q.fallback,
             })
             .to_string();
             let _ = state

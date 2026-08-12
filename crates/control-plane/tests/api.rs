@@ -8803,6 +8803,108 @@ async fn opencode_profiles_crud_and_node_pull() {
     );
 }
 
+/// Feature "opencode profiles": `DELETE ?fallback=<name>` re-points every
+/// assigned node onto the fallback profile atomically, instead of leaving
+/// them unassigned.
+#[tokio::test]
+async fn opencode_delete_with_fallback_reassigns_nodes() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    // Two profiles, one node on each.
+    for (name, model) in [("a", "model-a"), ("b", "model-b")] {
+        let resp = app
+            .clone()
+            .oneshot(put_auth(
+                &format!("/v1/opencode-profiles/{name}"),
+                serde_json::to_string(&serde_json::json!({"config": {"model": model}})).unwrap(),
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let (node_id, cred) = enroll(&app, "n1", vec!["mock".into()], vec!["*".into()]).await;
+    let a = get_auth("/v1/opencode-profiles/a", &token);
+    let pa: agentgrid_common::OpencodeProfile = serde_json::from_slice(
+        &to_bytes(
+            app.clone().oneshot(a).await.unwrap().into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    let b = get_auth("/v1/opencode-profiles/b", &token);
+    let pb: agentgrid_common::OpencodeProfile = serde_json::from_slice(
+        &to_bytes(
+            app.clone().oneshot(b).await.unwrap().into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    // PUT returns the profile JSON; GET here is just to fetch ids.
+    assert_ne!(pa.id, pb.id);
+
+    // Assign the node to profile "a".
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/nodes/{node_id}/opencode-profile"),
+            serde_json::to_string(&serde_json::json!({ "profile_id": pa.id })).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Plain delete of a missing profile is still 404.
+    let resp = app
+        .clone()
+        .oneshot(delete_auth("/v1/opencode-profiles/nope", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Fallback delete: node moves a -> b, profile a is gone.
+    let resp = app
+        .clone()
+        .oneshot(delete_auth("/v1/opencode-profiles/a?fallback=b", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/opencode-profiles/a", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/node/opencode-config/active", &cred))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let active: agentgrid_common::ActiveOpencodeConfigResponse =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        active.profile_id.as_deref(),
+        Some(pb.id.as_str()),
+        "fallback delete must move the node onto the fallback profile"
+    );
+
+    // Self-fallback is rejected.
+    let resp = app
+        .clone()
+        .oneshot(delete_auth("/v1/opencode-profiles/b?fallback=b", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 /// Feature "opencode profiles": nodes publish apply events through
 /// `POST /v1/node/opencode-config/audit` (auth = node bearer). An operator
 /// can then read them through the audited GET under `/v1/nodes/{id}`.

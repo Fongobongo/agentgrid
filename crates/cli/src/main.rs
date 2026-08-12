@@ -3754,8 +3754,14 @@ enum OpencodeAction {
         #[arg(long, value_name = "FILE")]
         config: String,
     },
-    /// Delete a profile. Nodes keep their last-applied on-disk config.
-    Delete { name: String },
+    /// Delete a profile. Nodes keep their last-applied on-disk config,
+    /// unless `--fallback <name>` re-points them onto another profile first.
+    Delete {
+        name: String,
+        /// Reassign every node currently on this profile to another profile.
+        #[arg(long, value_name = "NAME")]
+        fallback: Option<String>,
+    },
     /// Swap the profile back one revision (PUT-with-history keeps one step).
     Rollback {
         name: String,
@@ -3845,14 +3851,18 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
             );
             Ok(())
         }
-        OpencodeAction::Delete { name } => {
-            let resp = client
-                .delete(format!("{base}/v1/opencode-profiles/{name}"))
-                .send()
-                .await?;
+        OpencodeAction::Delete { name, fallback } => {
+            let mut url = format!("{base}/v1/opencode-profiles/{name}");
+            if let Some(fb) = &fallback {
+                url.push_str(&format!("?fallback={fb}"));
+            }
+            let resp = client.delete(url).send().await?;
             match resp.status() {
                 reqwest::StatusCode::NO_CONTENT => {
-                    println!("deleted {name}");
+                    match fallback {
+                        Some(fb) => println!("deleted {name}; nodes moved to {fb}"),
+                        None => println!("deleted {name}"),
+                    }
                     Ok(())
                 }
                 other => anyhow::bail!("delete failed: {other}"),

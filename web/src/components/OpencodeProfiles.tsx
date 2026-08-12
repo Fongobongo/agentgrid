@@ -104,6 +104,15 @@ export default function OpencodeProfiles() {
   // allowed on the allowlist).
   const [dryResult, setDryResult] = useState<{ hash: string; dropped: string[]; effective: string } | null>(null);
 
+  const formatBody = () => {
+    try {
+      setEditBody(JSON.stringify(JSON.parse(editBody), null, 2));
+      setMsg('');
+    } catch (e) {
+      setMsg(`format: invalid JSON — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const dryRun = async () => {
     if (!editName.trim() || !editBody.trim()) {
       setMsg('name and config body required');
@@ -170,8 +179,12 @@ export default function OpencodeProfiles() {
   });
 
   const remove = async (name: string) => {
-    if (!window.confirm(`Delete profile "${name}"?`)) return;
-    const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(name)}`, {
+    const fallback = window.prompt(
+      `Delete profile "${name}"?\n\nLeave empty to delete plain (assigned nodes keep their last-applied config).\nOr enter another profile name to move assigned nodes onto it first.`,
+    );
+    if (fallback === null) return;
+    const q = fallback.trim() ? `?fallback=${encodeURIComponent(fallback.trim())}` : '';
+    const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(name)}${q}`, {
       method: 'DELETE',
       credentials: 'include',
     });
@@ -277,6 +290,9 @@ export default function OpencodeProfiles() {
           style={{ width: '100%', fontFamily: 'monospace', marginTop: 8 }}
         />
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <button onClick={formatBody} disabled={!editBody.trim()} title="Pretty-print the JSON body">
+            Format
+          </button>
           <button onClick={dryRun}>Preview (dry-run)</button>
           <button onClick={upsertSave}>Save profile</button>
         </div>
