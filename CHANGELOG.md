@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Prev↔cur diff in the profiles UI.** Each profile card's "previous
+  revision" panel now renders a line diff against the current config
+  (dependency-free LCS, pretty-printed JSON) with removed lines in red,
+  added lines in green, plus a changed-line count in the summary.
+
 - **Auto-heal on opencode drift.** When the heartbeat-reported
   `applied_opencode_hash` mismatches the assigned profile's hash, the CP now
   (a) writes the `opencode.drift` audit row, and (b) immediately pushes a

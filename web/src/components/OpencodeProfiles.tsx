@@ -25,6 +25,59 @@ interface NodeView {
 
 const POLL_MS = 5000;
 
+// Line diff between two pretty-printed JSON configs. Small inputs
+// (tens of lines), so an O(n*m) LCS is fine and dependency-free.
+type DiffLine = { t: 'same' | 'add' | 'del'; s: string };
+function diffLines(a: string[], b: string[]): DiffLine[] {
+  const n = a.length;
+  const m = b.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      out.push({ t: 'same', s: a[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      out.push({ t: 'del', s: a[i] });
+      i++;
+    } else {
+      out.push({ t: 'add', s: b[j] });
+      j++;
+    }
+  }
+  while (i < n) out.push({ t: 'del', s: a[i++] });
+  while (j < m) out.push({ t: 'add', s: b[j++] });
+  return out;
+}
+
+function ConfigDiff({ prev, cur }: { prev: Record<string, unknown>; cur: Record<string, unknown> }) {
+  const lines = diffLines(
+    JSON.stringify(prev, null, 2).split('\n'),
+    JSON.stringify(cur, null, 2).split('\n'),
+  );
+  const changed = lines.filter((l) => l.t !== 'same').length;
+  return (
+    <>
+      <div className="muted">{changed} changed line{changed === 1 ? '' : 's'}</div>
+      <pre className="diff">
+        {lines.map((l, i) => (
+          <div key={i} className={`dline ${l.t}`}>
+            {l.t === 'del' ? '-' : l.t === 'add' ? '+' : ' '} {l.s}
+          </div>
+        ))}
+      </pre>
+    </>
+  );
+}
+
 export default function OpencodeProfiles() {
   const [profiles, setProfiles] = useState<OpencodeProfile[] | null>(null);
   const [nodes, setNodes] = useState<NodeView[]>([]);
@@ -200,8 +253,8 @@ export default function OpencodeProfiles() {
               </div>
               {p.prev && (
                 <details>
-                  <summary>previous ({p.prev.hash.slice(0, 12)}…)</summary>
-                  <pre>{JSON.stringify(p.prev.config, null, 2)}</pre>
+                  <summary>diff vs previous ({p.prev.hash.slice(0, 12)}…)</summary>
+                  <ConfigDiff prev={p.prev.config} cur={p.config} />
                 </details>
               )}
             </div>
