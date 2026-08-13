@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Patch-review approval integration test (Plan 1.1 follow-up).**
+  `succeeded_attempt_creates_patch_review_approval` walks the flow end-to-end
+  (enroll → stdout event → complete with commit_sha → GET
+  `/v1/tasks/{id}/review-approval`) and asserts a pending `ApprovalView` with
+  `kind=patch_review`, the correct task/attempt ids, and scope
+  `task_patch_review`. Closes the last pre-existing build-but-no-runtime test
+  gap.
+
 - **`ag index` knowledge-graph (Plan 1.13, minimal landing).** Offline
   ctags-like extraction of top-level symbols and import paths per file in a
   repo, emitted as a commit-stamped JSON packet for agents without built-in

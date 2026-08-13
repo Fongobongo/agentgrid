@@ -373,13 +373,93 @@ async fn full_task_lifecycle() {
     );
 }
 
+/// Plan 1.1 follow-up: a successful attempt must auto-create a pending
+/// `task_patch_review` approval so the diff review UI can decide whether to
+/// show the Accept/Reject/Rework buttons. Moves the whole flow end-to-end
+/// (enroll → events → complete → GET `/v1/tasks/{id}/review-approval`) and
+/// asserts the approval exists with `kind: patch_review`.
+#[tokio::test]
+async fn succeeded_attempt_creates_patch_review_approval() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-pr", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    let token = test_token(&app).await;
+
+    // Flip attempt → running via a stdout event.
+    let ev = IngestEventsRequest {
+        events: vec![IncomingEvent {
+            sequence: 1,
+            r#type: EventType::Stdout,
+            payload: json!({"text": "start"}),
+        }],
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Complete as a success with a (mock) commit sha.
+    let resp = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/complete", assign.attempt_id),
+            serde_json::to_string(&CompleteAttemptRequest {
+                exit_code: 0,
+                commit_sha: Some("deadbeefcafebabe".into()),
+                error_code: None,
+                resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
+                acp_session_id: None,
+                provenance: None,
+                plan: None,
+                pending_artifacts: vec![],
+            })
+            .unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Succeeded);
+
+    // Must have a pending patch-review approval attached to this task.
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            &format!("/v1/tasks/{}/review-approval", assign.task_id),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let approval: Option<ApprovalView> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let approval = approval.expect("expected a pending patch-review approval");
+    let perm: serde_json::Value =
+        serde_json::from_str(&approval.permission).expect("permission json");
+    assert_eq!(perm["kind"], "patch_review");
+    assert_eq!(perm["task_id"], assign.task_id);
+    assert_eq!(perm["attempt_id"], assign.attempt_id);
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(approval.scope, "task_patch_review");
+}
+
 #[tokio::test]
 async fn failure_marks_task_failed() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
     let (node_id, cred) = enroll(&app, "node-2", vec!["mock".into()], vec!["*".into()]).await;
-    let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await;
-    // Acknowledge the assignment before completing.
+    let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await;    // Acknowledge the assignment before completing.
     ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await;
     let resp = app
         .clone()
