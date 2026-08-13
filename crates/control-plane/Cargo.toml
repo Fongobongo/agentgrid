@@ -42,7 +42,7 @@ libc = "0.2"
 reqwest.workspace = true
 
 # Redis caching (Plan 0.4)
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "1.5", features = ["tokio-comp", "connection-manager"] }
 
 # TLS termination (rustls, no system OpenSSL) — opt-in via AGENTGRID_TLS_CERT/_KEY.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
