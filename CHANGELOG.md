@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Capacity-pressure gate now real (Plan 2.14).** Two paired gaps
+  closed: the node daemon now reports its `active_rss_mib` (VmRSS from
+  `/proc/self/status`) in each heartbeat and the store persists it onto the
+  `nodes` row; the scheduler SELECT now reads `active_rss_mib` and
+  `max_rss_mib` (previously neither column was in the row, so `try_get`
+  fell back to `(0, 1024)` and the gate never rejected on real memory
+  pressure — a node could OOM and the scheduler kept dispatching).
+
 - **Bundle-pinned skills (item 10).** A profile can declare a set of
   agentgrid skill names (`pinned_skills`, migration 0071); on apply the
   node reconciles them against the trust ledger and reports any untrusted

@@ -806,6 +806,15 @@ pub struct HeartbeatRequest {
     /// Hardening P2 item 659: node-level network mode (`none` | `restricted` | `unrestricted`).
     #[serde(default = "default_network_mode")]
     pub network_mode: String,
+    /// Plan 2.14 (#27): this node's resident-set size in MiB, sampled from
+    /// `/proc/self/status` (`VmRSS`). The capacity-pressure gate reads
+    /// `nodes.active_rss_mib` and refuses an assignment when
+    /// `active_rss + forecast*attempts` exceeds `max_rss_mib`; before this
+    /// writer existed the gate always saw 0 and never rejected on real
+    /// memory pressure. Absent on legacy nodes (defaults to 0 → gate
+    /// falls back to the per-attempt forecast only).
+    #[serde(default)]
+    pub active_rss_mib: u64,
 }
 
 /// Plan 1.8 (#15): per-account usage reported by a node in its heartbeat so
@@ -1538,6 +1547,7 @@ mod tests {
             workspace_bytes: 0,
             network_mode: "none".into(),
             applied_opencode_hash: None,
+            active_rss_mib: 0,
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

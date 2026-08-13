@@ -767,6 +767,7 @@ async fn revoked_node_gets_401() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: None,
+        active_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -820,6 +821,106 @@ async fn revoked_node_gets_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Plan 2.14 (#27): the capacity-pressure gate must respect the node's
+/// reported RSS. Before the heartbeat `active_rss_mib` writer existed, the
+/// gate always read 0 (migration added the column but nothing populated
+/// it) and never rejected on real memory pressure — a node could be OOM-ing
+/// and the scheduler kept dispatching. With the writer, a heartbeat reporting
+/// RSS over `max_rss_mib` blocks the next `try_assign_batch` and records a
+/// `metrics_capacity_pressure` row.
+#[tokio::test]
+async fn capacity_pressure_gate_uses_heartbeat_rss() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-cap", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Lower the node's hard memory ceiling so a realistic RSS sample trips
+    // the gate (default max_rss_mib = 1024 MiB would need a ~1 GiB VmRSS).
+    sqlx::query("UPDATE nodes SET max_rss_mib = ? WHERE id = ?")
+        .bind(100i64)
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+
+    // Heartbeat reports the node already at 90 MiB RSS. The gate forecast
+    // for one new attempt is 256 MiB → 90 + 256 = 346 > 100 → reject.
+    let hb = HeartbeatRequest {
+        status: Some(NodeStatus::Online),
+        name: "node-cap".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        agent_version: "t".into(),
+        load_avg: 0.1,
+        free_disk_mb: 1000,
+        active_attempts: 0,
+        capabilities: vec![],
+        protocol_version: None,
+        discovered_skills: vec![],
+        unsafe_active: false,
+        permission_interception: "wrapper".into(),
+        outbox_bytes: 0,
+        artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
+        account_usage: vec![],
+        applied_opencode_hash: None,
+        active_rss_mib: 90,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            serde_json::to_string(&hb).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Persisted — confirms the writer landed the value on the nodes row.
+    let stored: i64 = sqlx::query_scalar("SELECT active_rss_mib FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored, 90,
+        "heartbeat must write active_rss_mib to the nodes row"
+    );
+
+    // Queue a task the node could serve.
+    let task_id = create_task(&app, "mock", None).await;
+    // The gate rejects: no assignment is returned.
+    let got = state.store.try_assign_batch(&node_id, 4).await.unwrap();
+    assert!(
+        got.is_empty(),
+        "gate must reject when active_rss_mib exceeds max_rss_mib"
+    );
+    // The queued task stayed pending.
+    assert_eq!(show_status(&app, &task_id).await, TaskStatus::Queued);
+    // And the rejection was recorded for observability.
+    let rejects: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM metrics_capacity_pressure WHERE node_id = ?")
+            .bind(&node_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rejects, 1,
+        "a capacity-pressure row must be recorded on rejection"
+    );
 }
 
 #[tokio::test]
@@ -1829,6 +1930,7 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 network_mode: "none".into(),
                 account_usage: vec![],
                 applied_opencode_hash: None,
+                active_rss_mib: 0,
             },
         )
         .await
@@ -1885,6 +1987,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: None,
+        active_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -4283,6 +4386,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: None,
+        active_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -6804,6 +6908,7 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: None,
+        active_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -6879,6 +6984,7 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
             rate_limited: 2,
         }],
         applied_opencode_hash: None,
+        active_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -9635,6 +9741,7 @@ async fn opencode_heartbeat_drift_audit() {
         network_mode: "none".into(),
         account_usage: vec![],
         applied_opencode_hash: Some("deadbeef".repeat(8)),
+        active_rss_mib: 0,
     };
     let hb_req = post_auth(
         "/v1/node/heartbeat",

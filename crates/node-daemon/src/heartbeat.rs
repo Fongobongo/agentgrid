@@ -27,6 +27,32 @@ pub fn read_load_avg() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Read this process's resident-set size in MiB from `/proc/self/status`
+/// (`VmRSS:` kB). Returns 0 off-Linux (the capacity-pressure gate then
+/// falls back to its per-attempt forecast only — same as a legacy node).
+pub fn read_vmrss_mib() -> u64 {
+    // `std::fs::read_to_string` on /proc is a tiny read; safe off the
+    // runtime. On non-Linux it opens an absent path → 0.
+    let s = match std::fs::read_to_string("/proc/self/status") {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            // `VmRSS:\t   12345 kB` — take the first integer token.
+            if let Some(kb) = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                return kb / 1024;
+            }
+            return 0;
+        }
+    }
+    0
+}
+
 /// Read free disk space in MB for `path`.
 pub fn read_free_disk_mb(path: &Path) -> u64 {
     let cpath = match CString::new(path.to_string_lossy().as_bytes().to_vec()) {
@@ -132,6 +158,7 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
 
             // Build and send heartbeat.
             let active = cfg.max_concurrency - sem.available_permits() as u32;
+            let vmrss_mib = read_vmrss_mib();
             // Outbox/artifact scans are synchronous disk I/O; keep them off
             // the runtime.
             let hb_outbox_root = cfg.outbox_root.clone();
@@ -208,6 +235,7 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 network_mode: cfg.network_mode.clone(),
                 account_usage: crate::account_usage::snapshot(),
                 applied_opencode_hash: crate::opencode_config::applied_hash(),
+                active_rss_mib: vmrss_mib,
             };
             if let Err(e) = client
                 .post(format!("{}/v1/node/heartbeat", cfg.server))
