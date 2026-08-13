@@ -616,6 +616,67 @@ mod tests {
         assert!(vol2.ends_with(":/ag"), "default mount stays rw, got {vol2}");
     }
 
+    /// Plan 2.4 follow-up: prove the `read_only_worktree=true` mount option
+    /// actually blocks a write at the kernel — not just that the docker args
+    /// contain ":ro" (a stripped path or a wrong mount target would still pass
+    /// the substring assertion but leave the agent able to write). Requires a
+    /// reachable docker daemon, an image, and `AG_RUST_TEST_DOCKER=1` to opt
+    /// in (set in the e2e CI job where docker is available); otherwise it
+    /// no-ops so `cargo test` on a docker-less runner stays green.
+    ///
+    /// opt-in gate (not `#[ignore]`) keeps it runnable from `cargo test` on a
+    /// dev box without tweaking the harness.
+    #[test]
+    fn docker_ro_mount_really_blocks_write() {
+        if std::env::var("AG_RUST_TEST_DOCKER").ok().as_deref() != Some("1") {
+            return;
+        }
+        let image = std::env::var("AGENTGRID_SANDBOX_IMAGE").unwrap_or_else(|_| "ubuntu:24.04".into());
+        // Skip when the image or the daemon is not available — keeps `cargo
+        // test` green on a docker-less or image-less runner (e.g. the fast
+        // `rust` CI job) without masking the test where it SHOULD run (the
+        // e2e job, which builds the image and sets the opt-in env).
+        if std::process::Command::new("docker")
+            .args(["image", "inspect", &image])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        { return; }
+
+        // Create a scratch host dir to mount read-only into the container.
+        let host = std::env::temp_dir().join(format!("ag-ro-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::write(host.join(".marker"), b"").unwrap();
+
+        // `test ! -w /ag` succeeds (exit 0) only when the mount is actually RO.
+        // `--entrypoint sh` overrides an image that ships its own entrypoint
+        // (e.g. the agentgrid node image) so the "/ag" write-test runs.
+        let out = std::process::Command::new("docker")
+            .args([
+                "run", "--rm", "--read-only",
+                "--entrypoint", "sh",
+                "-v", &format!("{}:/ag:ro", host.display()),
+                &image, "-c", "test ! -w /ag && ! touch /ag/evil 2>/dev/null",
+            ])
+            .output();
+        let _ = std::fs::remove_dir_all(&host);
+        match out {
+            Ok(o) => assert!(
+                o.status.success(),
+                "read-only mount let the verifier write: status={:?} stderr={}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stderr),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skip docker_ro_mount_really_blocks_write: docker not found");
+            }
+            Err(e) => panic!("failed to spawn docker: {e}"),
+        }
+    }
+
     #[test]
     fn docker_opts_read_only_and_resource_limits() {
         let _g = ENV_LOCK.lock().unwrap();

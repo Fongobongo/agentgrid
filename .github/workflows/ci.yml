@@ -100,6 +100,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: bring up stack and run a task
         run: bash tests/e2e/run.sh
         # Nightly-only (and manual): the workflow E2E brings up its own
@@ -108,6 +110,16 @@ jobs:
       - name: workflow E2E (multi-role DAG across two nodes)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: bash tests/e2e/run-workflow.sh
+      # Plan 2.4 follow-up: prove the read-only verifier worktree mount
+      # actually blocks a write (kernel-semantics test), not just that the
+      # docker args contain `:ro`. Runs once `run.sh` has built `ag-node:test`
+      # and uses the agentgrid entrypoint-override to drop into `sh`.
+      - name: verifier read-only write→EPERM (docker unit test)
+        run: |
+          cargo test -p agentgrid-node-daemon sandbox::tests::docker_ro_mount_really_blocks_write -- --nocapture
+        env:
+          AG_RUST_TEST_DOCKER: "1"
+          AGENTGRID_SANDBOX_IMAGE: ag-node:test
 
   skill-bundle:
     name: skill bundle materializes identically local vs remote

@@ -87,7 +87,11 @@ echo ">> step provenance (projection):"
 curl -fsS "$BASE/v1/workflow-runs/$RID/projection" -H "authorization: Bearer $JWT" \
   | python3 -c 'import sys,json
 for s in json.load(sys.stdin)["steps"]:
-    print(f"  step {s[\"step_id\"]:4} role={s[\"role\"]:11} node={s.get(\"node_id\")} verdict={s[\"verdict\"]}")'
+    sid = s["step_id"]
+    role = s["role"]
+    node = s.get("node_id") or "-"
+    verdict = s["verdict"]
+    print(f"  step {sid:4} role={role:11} node={node} verdict={verdict}")'
 
 [ "$status" = "succeeded" ] || { echo "E2E FAILED: run $RID -> $status"; exit 1; }
 echo "E2E OK: workflow ran across two nodes"

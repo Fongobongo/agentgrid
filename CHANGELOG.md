@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Verifier read-only write→EPERM test (Plan 2.4 follow-up).** Closes the
+  coverage gap between the docker-args substring assertion and real kernel
+  semantics: `docker_ro_mount_really_blocks_write` (sandbox.rs) spawns a
+  real `docker run --read-only -v <tmp>:/ag:ro` and asserts the write is
+  blocked. Opt-in via `AG_RUST_TEST_DOCKER=1` (no-op on docker-less CI runners);
+  the `e2e` workflow job runs it after building `ag-node:test`.
+
 - **Capacity-pressure gate now real (Plan 2.14).** Two paired gaps
   closed: the node daemon now reports its `active_rss_mib` (VmRSS from
   `/proc/self/status`) in each heartbeat and the store persists it onto the
