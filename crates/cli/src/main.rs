@@ -11,7 +11,10 @@ use agentgrid_common::{
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
+use index::IndexArgs;
+
 mod autopilot;
+mod index;
 mod phase;
 mod tui;
 use phase::Phase;
@@ -101,6 +104,10 @@ enum AgCommand {
     /// Feature "opencode profiles": CP-hosted opencode configuration — list,
     /// show, set, delete; assign a profile to a node.
     Opencode(OpencodeArgs),
+    /// Plan 1.13: offline ctags-like extraction of top-level symbols/imports
+    /// for a repo, intended as a system-prompt context packet for agents
+    /// without built-in codebase awareness.
+    Index(IndexArgs),
 }
 
 #[derive(Args)]
@@ -857,6 +864,7 @@ async fn main() -> Result<()> {
         AgCommand::Ctx(a) => cmd_ctx(&client, &base, a).await,
         AgCommand::Agent(a) => cmd_agent(&client, &base, a).await,
         AgCommand::Opencode(a) => cmd_opencode(&client, &base, a).await,
+        AgCommand::Index(a) => index::cmd_index(a, cli.json),
         AgCommand::Autopilot(a) => cmd_autopilot(&client, &base, a).await,
         AgCommand::Setup(a) => cmd_setup(&client, &base, a).await,
         AgCommand::Doctor => cmd_doctor(&client, &base, cli.json).await,

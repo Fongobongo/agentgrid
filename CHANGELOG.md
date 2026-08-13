@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **`ag index` knowledge-graph (Plan 1.13, minimal landing).** Offline
+  ctags-like extraction of top-level symbols and import paths per file in a
+  repo, emitted as a commit-stamped JSON packet for agents without built-in
+  codebase awareness. Zero new dependencies (line-prefix dialect parser for
+  rust/ts/tsx/js/jsx/py/go/c/cpp/java), deliberately top-level-only to keep
+  token cost low when fed into a system prompt. Build/pruned dirs (`target/`,
+  `node_modules/`, `.idx/`, `.git/`, VCS) are skipped. Two follow-ups kept
+  DEFERRED: `.idx` cache layer on disk, and a `ag start` system-prompt-digest
+  injector that consumes the packet (both need workspace/adapter plumbing).
+
 - **Verifier read-only write→EPERM test (Plan 2.4 follow-up).** Closes the
   coverage gap between the docker-args substring assertion and real kernel
   semantics: `docker_ro_mount_really_blocks_write` (sandbox.rs) spawns a
