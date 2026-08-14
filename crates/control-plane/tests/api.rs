@@ -430,7 +430,10 @@ async fn succeeded_attempt_creates_patch_review_approval() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Succeeded);
+    assert_eq!(
+        show_status(&app, &assign.task_id).await,
+        TaskStatus::Succeeded
+    );
 
     // Must have a pending patch-review approval attached to this task.
     let resp = app
@@ -459,7 +462,7 @@ async fn failure_marks_task_failed() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
     let (node_id, cred) = enroll(&app, "node-2", vec!["mock".into()], vec!["*".into()]).await;
-    let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await;    // Acknowledge the assignment before completing.
+    let assign = create_and_assign(&app, &node_id, &cred, "fail:3").await; // Acknowledge the assignment before completing.
     ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await;
     let resp = app
         .clone()

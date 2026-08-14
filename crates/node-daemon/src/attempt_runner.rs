@@ -1040,13 +1040,20 @@ mod digest_tests {
             .unwrap()
             .join("target/debug/ag");
         if !ag.exists() {
-            eprintln!("skip digest inline test: {} missing (build `ag` first)", ag.display());
+            eprintln!(
+                "skip digest inline test: {} missing (build `ag` first)",
+                ag.display()
+            );
             return;
         }
         // Build a tiny rust repo to index.
         let dir = std::env::temp_dir().join(format!("digest-repo-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("lib.rs"), "pub fn alpha() -> u32 { 1 }\nstruct Foo;\n").unwrap();
+        std::fs::write(
+            dir.join("lib.rs"),
+            "pub fn alpha() -> u32 { 1 }\nstruct Foo;\n",
+        )
+        .unwrap();
 
         // Gate on.
         std::env::set_var("AGENTGRID_REPO_INDEX", "1");
@@ -1057,16 +1064,26 @@ mod digest_tests {
 
         // The original prompt stays (after the splice), the index header
         // came first, and the symbol `alpha` appeared in the digest.
-        assert!(out.starts_with("## Repo index"), "header missing; got: {}", &out[..out.len().min(80)]);
+        assert!(
+            out.starts_with("## Repo index"),
+            "header missing; got: {}",
+            &out[..out.len().min(80)]
+        );
         assert!(out.contains("PROMPT_BODY"), "original prompt dropped");
         assert!(out.contains("alpha"), "symbol `alpha` missing in digest");
-        assert!(out.contains("---\n\nPROMPT_BODY"), "splice separator missing");
+        assert!(
+            out.contains("---\n\nPROMPT_BODY"),
+            "splice separator missing"
+        );
 
         // `.idx.json` written (cache layer).
         let p = dir.join(".idx.json");
         assert!(p.exists(), "index packet .idx.json missing");
         let s = std::fs::read_to_string(&p).unwrap();
-        assert!(s.contains("\"name\": \"alpha\""), "json packet missing symbol");
+        assert!(
+            s.contains("\"name\": \"alpha\""),
+            "json packet missing symbol"
+        );
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(&dir);

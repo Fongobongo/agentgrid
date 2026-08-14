@@ -85,17 +85,19 @@ pub fn index_repo(root: &Path) -> Result<IndexPacket> {
             total_files,
             total_symbols,
             total_imports,
-            langs: langs
-                .into_iter()
-                .map(|(l, n)| (l.to_string(), n))
-                .collect(),
+            langs: langs.into_iter().map(|(l, n)| (l.to_string(), n)).collect(),
         },
     })
 }
 
 /// Map extension to a language tag, or None for un-indexable files.
 fn lang_of(p: &Path) -> Option<&'static str> {
-    match p.extension().and_then(|e| e.to_str())?.to_ascii_lowercase().as_str() {
+    match p
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "rs" => Some("rust"),
         "ts" => Some("typescript"),
         "tsx" => Some("tsx"),
@@ -115,7 +117,9 @@ fn lang_of(p: &Path) -> Option<&'static str> {
 fn is_pruned(name: &str) -> bool {
     matches!(
         name,
-        ".git" | ".hg" | ".svn"
+        ".git"
+            | ".hg"
+            | ".svn"
             | "target"
             | "node_modules"
             | "dist"
@@ -189,9 +193,7 @@ fn scan(lang: &'static str, src: &str) -> (Vec<Sym>, Vec<String>) {
             }
             "python" => scan_python(line, l, top, line_no, &mut syms, &mut imps),
             "go" => scan_go(line, l, top, line_no, &mut syms, &mut imps),
-            "java" | "c" | "cpp" => {
-                scan_c_family(line, l, top, line_no, &mut syms, &mut imps)
-            }
+            "java" | "c" | "cpp" => scan_c_family(line, l, top, line_no, &mut syms, &mut imps),
             _ => {}
         }
     }
@@ -239,15 +241,35 @@ fn scan_rust(
         return;
     }
     if let Some(n) = ident_after(l, "pub async fn").or_else(|| ident_after(l, "async fn")) {
-        syms.push(Sym { kind: "fn", name: n, line: line_no });
+        syms.push(Sym {
+            kind: "fn",
+            name: n,
+            line: line_no,
+        });
     } else if let Some(n) = ident_after(l, "pub fn").or_else(|| ident_after(l, "fn")) {
-        syms.push(Sym { kind: "fn", name: n, line: line_no });
+        syms.push(Sym {
+            kind: "fn",
+            name: n,
+            line: line_no,
+        });
     } else if let Some(n) = ident_after(l, "pub struct").or_else(|| ident_after(l, "struct")) {
-        syms.push(Sym { kind: "type", name: n, line: line_no });
+        syms.push(Sym {
+            kind: "type",
+            name: n,
+            line: line_no,
+        });
     } else if let Some(n) = ident_after(l, "pub enum").or_else(|| ident_after(l, "enum")) {
-        syms.push(Sym { kind: "type", name: n, line: line_no });
+        syms.push(Sym {
+            kind: "type",
+            name: n,
+            line: line_no,
+        });
     } else if let Some(n) = ident_after(l, "pub trait").or_else(|| ident_after(l, "trait")) {
-        syms.push(Sym { kind: "trait", name: n, line: line_no });
+        syms.push(Sym {
+            kind: "trait",
+            name: n,
+            line: line_no,
+        });
     } else if let Some(n) = ident_after(l, "pub const").or_else(|| ident_after(l, "const")) {
         let _ = n; // consts noisy — keep types/fns only
     } else if let Some(rest) = l.strip_prefix("use ") {
@@ -268,12 +290,28 @@ fn scan_js(
     imps: &mut Vec<String>,
 ) {
     if top {
-        if let Some(n) = ident_after(l, "export async function").or_else(|| ident_after(l, "async function")) {
-            syms.push(Sym { kind: "fn", name: n, line: line_no });
-        } else if let Some(n) = ident_after(l, "export function").or_else(|| ident_after(l, "function")) {
-            syms.push(Sym { kind: "fn", name: n, line: line_no });
+        if let Some(n) =
+            ident_after(l, "export async function").or_else(|| ident_after(l, "async function"))
+        {
+            syms.push(Sym {
+                kind: "fn",
+                name: n,
+                line: line_no,
+            });
+        } else if let Some(n) =
+            ident_after(l, "export function").or_else(|| ident_after(l, "function"))
+        {
+            syms.push(Sym {
+                kind: "fn",
+                name: n,
+                line: line_no,
+            });
         } else if let Some(n) = ident_after(l, "export class").or_else(|| ident_after(l, "class")) {
-            syms.push(Sym { kind: "type", name: n, line: line_no });
+            syms.push(Sym {
+                kind: "type",
+                name: n,
+                line: line_no,
+            });
         } else if let Some(n) = ident_after(l, "export const").or_else(|| ident_after(l, "const")) {
             // Only index top-level named consts in TS (.d.ts-like surface),
             // since const = noise in JS apps. Still skipped here: piggy on
@@ -317,11 +355,21 @@ fn scan_python(
     syms: &mut Vec<Sym>,
     imps: &mut Vec<String>,
 ) {
-    if !top { return; }
+    if !top {
+        return;
+    }
     if let Some(n) = ident_after(l, "async def").or_else(|| ident_after(l, "def")) {
-        syms.push(Sym { kind: "fn", name: n, line: line_no });
+        syms.push(Sym {
+            kind: "fn",
+            name: n,
+            line: line_no,
+        });
     } else if let Some(n) = ident_after(l, "class") {
-        syms.push(Sym { kind: "type", name: n, line: line_no });
+        syms.push(Sym {
+            kind: "type",
+            name: n,
+            line: line_no,
+        });
     } else if l.starts_with("import ") || l.starts_with("from ") {
         // from X import Y → "X"; import A, B → "A", "B"
         if let Some(rest) = l.strip_prefix("from ") {
@@ -360,10 +408,18 @@ fn scan_go(
             };
             let name = ident_of(after_recv);
             if !name.is_empty() {
-                syms.push(Sym { kind: "fn", name, line: line_no });
+                syms.push(Sym {
+                    kind: "fn",
+                    name,
+                    line: line_no,
+                });
             }
         } else if let Some(n) = ident_after(l, "type") {
-            syms.push(Sym { kind: "type", name: n, line: line_no });
+            syms.push(Sym {
+                kind: "type",
+                name: n,
+                line: line_no,
+            });
         }
     }
     if l.starts_with("import ") {
@@ -445,7 +501,11 @@ pub fn cmd_index(args: IndexArgs, json: bool) -> Result<()> {
     if let Some(out) = &args.out {
         let s = serde_json::to_string_pretty(&packet)?;
         std::fs::write(out, s)?;
-        println!("wrote {} bytes to {}", std::fs::metadata(out)?.len(), out.display());
+        println!(
+            "wrote {} bytes to {}",
+            std::fs::metadata(out)?.len(),
+            out.display()
+        );
         return Ok(());
     }
     if json {
@@ -473,7 +533,11 @@ pub fn cmd_index(args: IndexArgs, json: bool) -> Result<()> {
     for f in &packet.files {
         println!("# {} [{}]", f.path, f.lang);
         if !f.symbols.is_empty() {
-            let names: Vec<String> = f.symbols.iter().map(|s| format!("{} {}", s.kind, s.name)).collect();
+            let names: Vec<String> = f
+                .symbols
+                .iter()
+                .map(|s| format!("{} {}", s.kind, s.name))
+                .collect();
             println!("  {}", names.join(" · "));
         }
         if !f.imports.is_empty() {
@@ -513,7 +577,11 @@ mod tests {
         assert_eq!(packet.vcs, "none"); // not a git repo, head_sha empty
         assert!(packet.commit.is_empty());
 
-        let lib = packet.files.iter().find(|f| f.path.ends_with("lib.rs")).expect("lib.rs");
+        let lib = packet
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("lib.rs"))
+            .expect("lib.rs");
         let names: Vec<&str> = lib.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"alpha"), "alpha missing: {names:?}");
         assert!(names.contains(&"beta"), "beta missing: {names:?}");
@@ -521,20 +589,39 @@ mod tests {
         assert!(names.contains(&"Color"));
         assert!(names.contains(&"Greet"));
         // imports captured
-        assert!(lib.imports.iter().any(|i| i == "serde::Serialize"), "serde import missing");
+        assert!(
+            lib.imports.iter().any(|i| i == "serde::Serialize"),
+            "serde import missing"
+        );
         assert!(lib.imports.iter().any(|i| i == "std::path::Path"));
 
-        let inner = packet.files.iter().find(|f| f.path.contains("inner.rs")).expect("inner.rs");
+        let inner = packet
+            .files
+            .iter()
+            .find(|f| f.path.contains("inner.rs"))
+            .expect("inner.rs");
         assert!(inner.symbols.iter().any(|s| s.name == "helper"));
         assert!(inner.symbols.iter().any(|s| s.name == "Inner"));
 
         // README not indexed.
         assert!(!packet.files.iter().any(|f| f.path.ends_with(".md")));
         // Summary totals populated (plan 1.13 follow-up: used by digest inject).
-        assert_eq!(packet.summary.total_files, 2, "total_files wrong: {}", packet.summary.total_files);
-        assert!(packet.summary.total_symbols >= 4, "total_symbols wrong: {}", packet.summary.total_symbols);
+        assert_eq!(
+            packet.summary.total_files, 2,
+            "total_files wrong: {}",
+            packet.summary.total_files
+        );
+        assert!(
+            packet.summary.total_symbols >= 4,
+            "total_symbols wrong: {}",
+            packet.summary.total_symbols
+        );
         // Rust appears in langs summary.
-        assert!(packet.summary.langs.iter().any(|(l, n)| l == "rust" && *n == 2));
+        assert!(packet
+            .summary
+            .langs
+            .iter()
+            .any(|(l, n)| l == "rust" && *n == 2));
     }
 
     #[test]
@@ -587,11 +674,7 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(root.join(".idx")).unwrap();
-        std::fs::write(
-            root.join(".idx").join("cached.rs"),
-            "fn dont_either() {}\n",
-        )
-        .unwrap();
+        std::fs::write(root.join(".idx").join("cached.rs"), "fn dont_either() {}\n").unwrap();
         let packet = index_repo(root).expect("index");
         assert_eq!(packet.files.len(), 1);
         assert_eq!(packet.files[0].path, "lib.rs");

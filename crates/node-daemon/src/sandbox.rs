@@ -631,7 +631,8 @@ mod tests {
         if std::env::var("AG_RUST_TEST_DOCKER").ok().as_deref() != Some("1") {
             return;
         }
-        let image = std::env::var("AGENTGRID_SANDBOX_IMAGE").unwrap_or_else(|_| "ubuntu:24.04".into());
+        let image =
+            std::env::var("AGENTGRID_SANDBOX_IMAGE").unwrap_or_else(|_| "ubuntu:24.04".into());
         // Skip when the image or the daemon is not available — keeps `cargo
         // test` green on a docker-less or image-less runner (e.g. the fast
         // `rust` CI job) without masking the test where it SHOULD run (the
@@ -644,7 +645,9 @@ mod tests {
             .ok()
             .map(|s| !s.success())
             .unwrap_or(true)
-        { return; }
+        {
+            return;
+        }
 
         // Create a scratch host dir to mount read-only into the container.
         let host = std::env::temp_dir().join(format!("ag-ro-{}", uuid::Uuid::new_v4()));
@@ -656,10 +659,16 @@ mod tests {
         // (e.g. the agentgrid node image) so the "/ag" write-test runs.
         let out = std::process::Command::new("docker")
             .args([
-                "run", "--rm", "--read-only",
-                "--entrypoint", "sh",
-                "-v", &format!("{}:/ag:ro", host.display()),
-                &image, "-c", "test ! -w /ag && ! touch /ag/evil 2>/dev/null",
+                "run",
+                "--rm",
+                "--read-only",
+                "--entrypoint",
+                "sh",
+                "-v",
+                &format!("{}:/ag:ro", host.display()),
+                &image,
+                "-c",
+                "test ! -w /ag && ! touch /ag/evil 2>/dev/null",
             ])
             .output();
         let _ = std::fs::remove_dir_all(&host);

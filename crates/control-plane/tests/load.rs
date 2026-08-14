@@ -224,19 +224,31 @@ async fn poll_loop(
 /// so assignment latency should sit near the WALL delay of write+push, NOT
 /// a poll cadence — proving the plan 0.3 `< 200 ms p99` target on push.
 async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usize) {
-    let ws_url = format!("ws://{}/v1/node/ws", sp.base.strip_prefix("http://").unwrap_or(&sp.base));
+    let ws_url = format!(
+        "ws://{}/v1/node/ws",
+        sp.base.strip_prefix("http://").unwrap_or(&sp.base)
+    );
     // tokio_tungstenite needs an IntoClientRequest; bare "ws://..." is fine.
-    let mut req = match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(&ws_url) {
-        Ok(r) => r,
-        Err(_) => { tokio::time::sleep(std::time::Duration::from_secs(1)).await; return; }
-    };
+    let mut req =
+        match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+            &ws_url,
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                return;
+            }
+        };
     req.headers_mut().insert(
         "authorization",
         format!("Bearer {}", node.credential).parse().unwrap(),
     );
     let mut ws = match tokio_tungstenite::connect_async(req).await {
         Ok((s, _)) => s,
-        Err(_) => { tokio::time::sleep(std::time::Duration::from_secs(1)).await; return; }
+        Err(_) => {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            return;
+        }
     };
     let hello = NodeWsMsg::Hello {
         node_id: node.node_id.clone(),
@@ -263,12 +275,7 @@ async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usi
     // skipped — a lost push mid-test drops load below threshold, fix surfaces
     // as `completed < tasks_n` assertion downstream.
     while sp.completed.load(std::sync::atomic::Ordering::Relaxed) < completed_threshold {
-        let msg = match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            ws.next(),
-        )
-        .await
-        {
+        let msg = match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await {
             Ok(Some(Ok(m))) => m,
             _ => continue,
         };
@@ -312,7 +319,11 @@ async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usi
 }
 
 /// Deadline-wait + percents + assertion, then print LOAD-RESULT.
-async fn finalize_load(sp: Arc<Spinup>, start: Instant, mut handles: Vec<tokio::task::JoinHandle<()>>) {
+async fn finalize_load(
+    sp: Arc<Spinup>,
+    start: Instant,
+    mut handles: Vec<tokio::task::JoinHandle<()>>,
+) {
     let tasks_n = sp.tasks_n;
     let deadline = Instant::now() + std::time::Duration::from_secs(600);
     while sp.completed.load(std::sync::atomic::Ordering::Relaxed) < tasks_n {
@@ -349,7 +360,12 @@ async fn finalize_load(sp: Arc<Spinup>, start: Instant, mut handles: Vec<tokio::
     };
     let (rp50, rp99) = (rpct(0.50), rpct(0.99));
 
-    let metrics = sp.http.get(format!("{}/metrics", sp.base)).send().await.unwrap();
+    let metrics = sp
+        .http
+        .get(format!("{}/metrics", sp.base))
+        .send()
+        .await
+        .unwrap();
     let m = metrics.text().await.unwrap();
     let metric = |name: &str| -> u64 {
         m.lines()
@@ -434,7 +450,10 @@ async fn drive(sp: Arc<Spinup>, transport: &str, poll_ms: u64) -> Vec<tokio::tas
                     .map(|r| r.status().is_success())
                     .unwrap_or(false);
                 if ok {
-                    sp.read_latencies.lock().await.push(t0.elapsed().as_millis());
+                    sp.read_latencies
+                        .lock()
+                        .await
+                        .push(t0.elapsed().as_millis());
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
