@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Load E2E scoped 10/100 on poll transport (plan 0.3 stage 3.1, partial).**
+  `tests/e2e/run-load.sh` + `docs/load-baseline-3.1.md` — 10 mock nodes
+  × 100 tasks, real HTTP control plane. 100/100 completed in 4.0 s,
+  373 write txns, **0 `write_lock_failures`** (no `SQLITE_BUSY`).
+  Confirms scale + contention budget; p99 assign latency target
+  (< 200 ms) not reached — poll-cadence-bound by design (~3.4 s p50);
+  needs a WS-transport variant of the load harness to prove that target,
+  left open.
+
 - **RSS idle baseline (plan 0.3 stage 3.2, partial).** New
   `docs/rss-budget-baseline.md` + reproducible scanner
   `deploy/dev-bench/measure-rss-baseline.sh` measuring VmRSS on the debug
