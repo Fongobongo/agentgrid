@@ -63,6 +63,87 @@ pub(crate) fn rotate_account_token(cfg: &mut Config, index: &mut usize) -> bool 
     true
 }
 
+/// Plan 1.13 follow-up: spawn `ag index --out .idx.json` on the worktree
+/// (gated by `AGENTGRID_REPO_INDEX=1`, default off — runs the walker on every
+/// attempt; only opt in when the adapter has no built-in codebase awareness and
+/// the per-attempt token price pays for itself). On success the JSON packet
+/// lives at `<worktree>/.idx.json`; a digest (top-levels + symbol names) is
+/// spliced above the profile text.
+///
+/// `ag` is resolved from `AGENTGRID_INDEX_BIN` (default `ag`) and must be on
+/// PATH. On any failure (binary missing, parse error, non-zero exit) the
+/// profile text is returned unchanged — the slow path never blocks the agent.
+fn maybe_with_repo_digest(profile_text: &str, worktree: &std::path::Path) -> String {
+    if std::env::var("AGENTGRID_REPO_INDEX").ok().as_deref() != Some("1") {
+        return profile_text.to_string();
+    }
+    let bin = std::env::var("AGENTGRID_INDEX_BIN").unwrap_or_else(|_| "ag".into());
+    let out = worktree.join(".idx.json");
+    // ponytail: synchronous subprocess inside the attempt prep path. The
+    // indexer walk on a small repo is ~50 ms; on a huge one the cost is paid
+    // once per attempt and only when an operator opts in. Async spawn would
+    // add ceremony without saving wall time (we block prep either way).
+    let status = match std::process::Command::new(&bin)
+        .arg("index")
+        .arg(worktree)
+        .arg("--out")
+        .arg(&out)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) => s,
+        Err(_) => return profile_text.to_string(),
+    };
+    if !status.success() {
+        return profile_text.to_string();
+    }
+    let bytes = match std::fs::read(&out) {
+        Ok(b) => b,
+        Err(_) => return profile_text.to_string(),
+    };
+    // Pull just enough of the packet sketch to render a digest; serde_json::Value
+    // keeps the helper allocation-light and resilient to packet shape evolution.
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return profile_text.to_string(),
+    };
+    let commit = v.get("commit").and_then(|x| x.as_str()).unwrap_or("");
+    let total_files = v
+        .get("summary")
+        .and_then(|s| s.get("total_files"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let total_syms = v
+        .get("summary")
+        .and_then(|s| s.get("total_symbols"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let mut digest = format!(
+        "## Repo index (commit {commit})\n\
+         Top-level entry points across {total_files} files ({total_syms} symbols).\
+         See `.idx.json` for the full packet.\n"
+    );
+    if let Some(files) = v.get("files").and_then(|f| f.as_array()) {
+        // ponytail: cap at 20 files in the digest — keeps the token cost modest
+        // and avoids dumping the whole index into every system prompt. The
+        // full packet is on disk at `.idx.json` if the agent wants to read it.
+        for f in files.iter().take(20) {
+            let path = f.get("path").and_then(|x| x.as_str()).unwrap_or("");
+            if let Some(syms) = f.get("symbols").and_then(|s| s.as_array()) {
+                let names: Vec<&str> = syms
+                    .iter()
+                    .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
+                    .collect();
+                if !names.is_empty() {
+                    digest.push_str(&format!("\n- `{path}`: {}\n", names.join(" · ")));
+                }
+            }
+        }
+    }
+    format!("{digest}\n---\n\n{profile_text}")
+}
+
 /// Run one task attempt assigned by the control plane.
 pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) -> Result<()> {
     // WS Cancel messages wake the supervisor via this notifier (plan 0.3 2.3);
@@ -138,18 +219,23 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         .filter(|s| !s.is_empty())
         .or_else(|| agent_profile(&assignment.adapter));
     if let Some(text) = &prompt_text {
+        // Plan 1.13 follow-up: inject a top-level symbol digest from a
+        // `ag index --out <path>` run on the worktree into the system prompt,
+        // cost-gated by `AGENTGRID_REPO_INDEX=1` (default off — every attempt
+        // spins the indexer, so the token price every run). The digest lands
+        // above the profile text as a `## Repo index (commit …)` section,
+        // giving agents without built-in codebase awareness a map of fn/type
+        // entry points before they start writing. `--out` writes the JSON
+        // packet to `<worktree>/.idx.json` so a future cache layer can hash.
+        let text = maybe_with_repo_digest(text, &ws.path);
         let p = ws.path.join("AGENTS.md");
-        let _ = tokio::fs::write(&p, text).await;
-        // Stage 11.3 / line 363: also write the per-agent native convention
-        // file(s) that an adapter observes in preference to `AGENTS.md`.
-        // Each is a verbatim copy of the same profile text; agents reading
-        // either see the same guidance.
+        let _ = tokio::fs::write(&p, &text).await;
         for rel in native_projection_files(&assignment.adapter) {
             let f = ws.path.join(rel);
             if let Some(parent) = f.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            let _ = tokio::fs::write(&f, text).await;
+            let _ = tokio::fs::write(&f, &text).await;
         }
     }
 
@@ -914,4 +1000,75 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     .await
     .ok();
     Ok(())
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::maybe_with_repo_digest;
+    use std::sync::Mutex;
+
+    // Both tests mutate `AGENTGRID_REPO_INDEX`, which is a process-global env
+    // var. Serialize them so they don't race on the gate.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn digest_idempotent_when_env_off_by_default() {
+        let _g = ENV_GUARD.lock().unwrap();
+        // AGENTGRID_REPO_INDEX unset (or any value != "1") → text intact, no
+        // spawn attempt, no `.idx.json` written.
+        std::env::remove_var("AGENTGRID_REPO_INDEX");
+        let dir = std::env::temp_dir().join(format!("digest-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = maybe_with_repo_digest("hello", &dir);
+        assert_eq!(out, "hello");
+        // `.idx.json` never created because the gate closed before spawn.
+        assert!(!dir.join(".idx.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn digest_inlines_top_level_symbols_when_ag_present() {
+        let _g = ENV_GUARD.lock().unwrap();
+        // The harness runs the live debug `ag` binary from this workspace's
+        // `target/debug/ag`; gating via `AGENTGRID_INDEX_BIN` lets the test
+        // point to it without relying on PATH order.  Skipped no-op when the
+        // binary is absent (CI runners without a freshly built `ag`).
+        let ag = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("target/debug/ag");
+        if !ag.exists() {
+            eprintln!("skip digest inline test: {} missing (build `ag` first)", ag.display());
+            return;
+        }
+        // Build a tiny rust repo to index.
+        let dir = std::env::temp_dir().join(format!("digest-repo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.rs"), "pub fn alpha() -> u32 { 1 }\nstruct Foo;\n").unwrap();
+
+        // Gate on.
+        std::env::set_var("AGENTGRID_REPO_INDEX", "1");
+        std::env::set_var("AGENTGRID_INDEX_BIN", ag.to_str().unwrap());
+        let out = maybe_with_repo_digest("PROMPT_BODY", &dir);
+        std::env::remove_var("AGENTGRID_REPO_INDEX");
+        std::env::remove_var("AGENTGRID_INDEX_BIN");
+
+        // The original prompt stays (after the splice), the index header
+        // came first, and the symbol `alpha` appeared in the digest.
+        assert!(out.starts_with("## Repo index"), "header missing; got: {}", &out[..out.len().min(80)]);
+        assert!(out.contains("PROMPT_BODY"), "original prompt dropped");
+        assert!(out.contains("alpha"), "symbol `alpha` missing in digest");
+        assert!(out.contains("---\n\nPROMPT_BODY"), "splice separator missing");
+
+        // `.idx.json` written (cache layer).
+        let p = dir.join(".idx.json");
+        assert!(p.exists(), "index packet .idx.json missing");
+        let s = std::fs::read_to_string(&p).unwrap();
+        assert!(s.contains("\"name\": \"alpha\""), "json packet missing symbol");
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

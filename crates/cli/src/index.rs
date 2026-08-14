@@ -18,6 +18,10 @@ pub struct IndexArgs {
     /// Repo root to index (default: current dir).
     #[arg(default_value = ".")]
     path: PathBuf,
+    /// Write the JSON packet to this path instead of stdout. Useful as a
+    /// cache/disk writer (plan 1.13 follow-up) for node-daemon digest inject.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,13 +75,14 @@ pub fn index_repo(root: &Path) -> Result<IndexPacket> {
         }
     }
     langs.sort_by_key(|(_, n): &(&'static str, usize)| std::cmp::Reverse(*n));
+    let total_files = files.len();
     Ok(IndexPacket {
         commit,
         vcs,
         root: canonical.display().to_string(),
         files,
         summary: IndexSummary {
-            total_files: 0,
+            total_files,
             total_symbols,
             total_imports,
             langs: langs
@@ -434,6 +439,15 @@ fn head_sha(root: &Path) -> String {
 
 pub fn cmd_index(args: IndexArgs, json: bool) -> Result<()> {
     let packet = index_repo(&args.path)?;
+    // Plan 1.13 follow-up: `--out <path>` writes the JSON packet to a file
+    // (cache/disk writer for the node-daemon digest-injector), bypassing the
+    // stdout pretty-printer.
+    if let Some(out) = &args.out {
+        let s = serde_json::to_string_pretty(&packet)?;
+        std::fs::write(out, s)?;
+        println!("wrote {} bytes to {}", std::fs::metadata(out)?.len(), out.display());
+        return Ok(());
+    }
     if json {
         let s = serde_json::to_string_pretty(&packet)?;
         println!("{s}");
@@ -516,6 +530,9 @@ mod tests {
 
         // README not indexed.
         assert!(!packet.files.iter().any(|f| f.path.ends_with(".md")));
+        // Summary totals populated (plan 1.13 follow-up: used by digest inject).
+        assert_eq!(packet.summary.total_files, 2, "total_files wrong: {}", packet.summary.total_files);
+        assert!(packet.summary.total_symbols >= 4, "total_symbols wrong: {}", packet.summary.total_symbols);
         // Rust appears in langs summary.
         assert!(packet.summary.langs.iter().any(|(l, n)| l == "rust" && *n == 2));
     }

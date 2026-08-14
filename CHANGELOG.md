@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **`ag index --out` + repo digest injector (Plan 1.13 follow-up).** The CLI
+  `ag index` gains `--out <path>` to write the JSON packet to a file (cache /
+  disk writer for the node-daemon). In node-daemon, when an operator sets
+  `AGENTGRID_REPO_INDEX=1` on a node, `run_attempt` spawns `ag index --out
+  <worktree>/.idx.json` during attempt prep and splices a top-levels digest
+  (file → fn/type names, capped at 20 files) above the agent profile text
+  written as `AGENTS.md`. Default off — every attempt spins the indexer, so
+  it pays for itself only with adapters without built-in codebase awareness.
+  On any failure (`ag` missing, non-zero exit, parse error) the original
+  profile text is written unmodified — the slow path never blocks the agent.
+  Tests: `digest_idempotent_when_env_off`, `digest_inlines_top_level_symbols`.
+
 - **Load harness gain WS-transport variant; plan 0.3 p99 assign target achieved**
   (stage 3.1). `crates/control-plane/tests/load.rs` refactored into a shared
   `spinup_load` + a `ws_loop` mock node that connects to `/v1/node/ws`, sends
