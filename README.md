@@ -58,6 +58,11 @@ Tear down: `./deploy/compose/down.sh` (or `docker compose down`).
 > `--listen 0.0.0.0` only with TLS) and `deploy/install-node.sh` (creates an
 > unprivileged `agentgrid` user, installs a hardened systemd unit, and scrubs the
 > enrollment token after first connect). Both are idempotent.
+>
+> Node transport defaults to **WebSocket** with automatic fallback to long
+> polling (set `AGENTGRID_TRANSPORT=poll|ws|auto` on a node to pin one).
+> See [`docs/runbook-transport.md`](docs/runbook-transport.md) for the
+> poll-vs-ws tradeoffs, fallback semantics, and node migration guidance.
 
 ## Quickstart: first real task (~15 minutes)
 

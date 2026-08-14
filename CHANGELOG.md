@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **RSS idle baseline (plan 0.3 stage 3.2, partial).** New
+  `docs/rss-budget-baseline.md` + reproducible scanner
+  `deploy/dev-bench/measure-rss-baseline.sh` measuring VmRSS on the debug
+  binaries: control plane idle ~52 MB (≤ 64 MB budget), node-daemon idle ~17 MB
+  (≤ 25 MB). Cellar/debug scale — release slims further. Full load test
+  (100 mock nodes × 1000 tasks, Stage 3.1) deferred: needs 100-node harness on
+  compose or a two-host runner; CP ≤ 96 MB under WS stays a target, not a
+  measurement, until that runs.
+
+- **README: link the transport runbook.** Quickstart now points at
+  `docs/runbook-transport.md` and names `AGENTGRID_TRANSPORT=poll|ws|auto`.
+  Closes plan 0.3 stage 3.3 doc criterion.
+
 - **Patch-review approval integration test (Plan 1.1 follow-up).**
   `succeeded_attempt_creates_patch_review_approval` walks the flow end-to-end
   (enroll → stdout event → complete with commit_sha → GET
