@@ -159,6 +159,16 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
             // Build and send heartbeat.
             let active = cfg.max_concurrency - sem.available_permits() as u32;
             let vmrss_mib = read_vmrss_mib();
+            // Plan 2.14 write gap: the gate's `max_rss_mib` was pinned to the
+            // schema default (1024 MiB) because the heartbeat never sent a
+            // value the operator could configure. Now the node declares its
+            // own ceiling (`AGENTGRID_MAX_RSS_MIB`, MiB) so a small host
+            // (Termux 256, RPi 512) can lower the gate instead of being let
+            // through into OOM. 0 = unset → CP keeps its row value.
+            let max_rss_mib = std::env::var("AGENTGRID_MAX_RSS_MIB")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
             // Outbox/artifact scans are synchronous disk I/O; keep them off
             // the runtime.
             let hb_outbox_root = cfg.outbox_root.clone();
@@ -236,6 +246,7 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 account_usage: crate::account_usage::snapshot(),
                 applied_opencode_hash: crate::opencode_config::applied_hash(),
                 active_rss_mib: vmrss_mib,
+                max_rss_mib,
             };
             if let Err(e) = client
                 .post(format!("{}/v1/node/heartbeat", cfg.server))

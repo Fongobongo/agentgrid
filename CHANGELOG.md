@@ -2,6 +2,20 @@
 
 ## [v0.3.2] — 2026-08-14
 
+### Fixed (capacity-pressure gate writer)
+
+- **`max_rss_mib` heartbeat writer (Plan 2.14 follow-up).** The capacity-pressure
+  gate reads `nodes.max_rss_mib` and rejects assignments when
+  `active_rss + forecast*256` exceeds it, but the column had no writer — it
+  stayed pinned to the schema default (1024 MiB) forever. An operator on a
+  small host (Termux 256, RPi 512, a constrained VM) could never lower the
+  gate, and real OOM pressure slipped through. Now the node declares its own
+  ceiling in `AGENTGRID_MAX_RSS_MIB` (MiB); the heartbeat sends
+  `HeartbeatRequest.max_rss_mib`, and the CP UPDATE writes it only when
+  `> 0` (legacy / unset nodes keep the row value). `docs/deploy-termux.md`
+  points the script's `max_rss_mib = 256` default at the new knob. Test:
+  `heartbeat_max_rss_mib_overrides_schema_default_only_when_set`.
+
 ### Added (agentgrid toolkit + transport validation + ops)
 
 - **`ag index --out` + repo digest injector (Plan 1.13 follow-up).** The CLI

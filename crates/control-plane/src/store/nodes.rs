@@ -131,7 +131,7 @@ impl Store {
                load_avg = ?, free_disk_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
                outbox_bytes = ?, artifact_spool_bytes = ?, \
-               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ? \
+               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END \
              WHERE id = ?",
         )
         // active_attempts is intentionally not heartbeat-settable: it is the
@@ -161,6 +161,8 @@ impl Store {
         .bind(req.workspace_bytes as i64)
         .bind(&req.network_mode)
         .bind(req.active_rss_mib as i64)
+        .bind(req.max_rss_mib as i64)
+        .bind(req.max_rss_mib as i64)
         .bind(node_id)
         .execute(&self.pool)
         .await?

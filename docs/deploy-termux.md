@@ -47,7 +47,10 @@ chmod +x deploy/install-node-termux.sh
 
 Defaults the script assumes (override with flags):
 - `max_rss_mib = 256` — Android OOM-kills above ~200 MiB RSS
-  for serial daemons on 3 GiB devices.
+  for serial daemons on 3 GiB devices. Set on the node via
+  `AGENTGRID_MAX_RSS_MIB=256` (the heartbeat writes it to `nodes.max_rss_mib`;
+  before this knob existed the gate stayed pinned to the schema default
+  1024 MiB and real OOM pressure slipped through).
 - `max_parallel_attempts = 1` — a second attempt competes for the
   radio + battery.
 - `workspace_dir = $PREFIX/var/lib/agentgrid/workspace` — inside
@@ -88,7 +91,7 @@ ag doctor --server https://your-cp.example.com
   `termux-wake-lock` script) is running. Battery-saver kills
   background CPUs aggressively.
 - Long-running builds will thermal-throttle the device. Prefer
-  `max_rss_mib = 256` / `max_parallel_attempts = 1` — that keeps the
+  `AGENTGRID_MAX_RSS_MIB=256` / `max_parallel_attempts = 1` — that keeps the
   file-lock in RAM.
 - For CI coverage on cheap ARM devices, Termux-on-Android fits
   `ag autopilot` iteration loops nicely because one attempt ≈ one

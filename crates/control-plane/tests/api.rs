@@ -851,6 +851,7 @@ async fn revoked_node_gets_401() {
         account_usage: vec![],
         applied_opencode_hash: None,
         active_rss_mib: 0,
+        max_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -960,6 +961,7 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
         account_usage: vec![],
         applied_opencode_hash: None,
         active_rss_mib: 90,
+        max_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -1003,6 +1005,104 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
     assert_eq!(
         rejects, 1,
         "a capacity-pressure row must be recorded on rejection"
+    );
+}
+
+/// Plan 2.14 write gap fix: `max_rss_mib` was pinned to the schema default
+/// (1024 MiB) because the heartbeat never sent a value, so an operator on a
+/// small host (Termux 256 / RPi 512) could never lower the gate and
+/// OOM-pressure slipped through. Now the node can declare its own ceiling;
+/// the heartbeat UPDATE only writes when the field is > 0, so a 0 (unset /
+/// legacy build) leaves the row untouched.
+#[tokio::test]
+async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-ceiling", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Schema default after enrollment.
+    let initial: i64 = sqlx::query_scalar("SELECT max_rss_mib FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(initial, 1024, "schema default should be 1024");
+
+    // Heartbeat reporting max_rss_mib = 0 → CP must NOT overwrite the row
+    // (CASE WHEN 0 > 0 path). The ceiling stays at the schema default.
+    let hb_0 = HeartbeatRequest {
+        status: Some(NodeStatus::Online),
+        name: "node-ceiling".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        agent_version: "t".into(),
+        load_avg: 0.1,
+        free_disk_mb: 1000,
+        active_attempts: 0,
+        capabilities: vec![],
+        protocol_version: None,
+        discovered_skills: vec![],
+        unsafe_active: false,
+        permission_interception: "wrapper".into(),
+        outbox_bytes: 0,
+        artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
+        account_usage: vec![],
+        applied_opencode_hash: None,
+        active_rss_mib: 0,
+        max_rss_mib: 0,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            serde_json::to_string(&hb_0).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let kept: i64 = sqlx::query_scalar("SELECT max_rss_mib FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        kept, 1024,
+        "max_rss_mib=0 must not overwrite the existing ceiling (legacy/unset path)"
+    );
+
+    // Heartbeat reporting max_rss_mib = 256 (Termux/RPi class) → CP writes it.
+    let mut hb_256 = hb_0.clone();
+    hb_256.max_rss_mib = 256;
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            serde_json::to_string(&hb_256).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let lowered: i64 = sqlx::query_scalar("SELECT max_rss_mib FROM nodes WHERE id = ?")
+        .bind(&node_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        lowered, 256,
+        "max_rss_mib>0 must write, so a small host lowers the gate"
     );
 }
 
@@ -2014,6 +2114,7 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 account_usage: vec![],
                 applied_opencode_hash: None,
                 active_rss_mib: 0,
+                max_rss_mib: 0,
             },
         )
         .await
@@ -2071,6 +2172,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         account_usage: vec![],
         applied_opencode_hash: None,
         active_rss_mib: 0,
+        max_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -4470,6 +4572,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         account_usage: vec![],
         applied_opencode_hash: None,
         active_rss_mib: 0,
+        max_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -6992,6 +7095,7 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         account_usage: vec![],
         applied_opencode_hash: None,
         active_rss_mib: 0,
+        max_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -7068,6 +7172,7 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
         }],
         applied_opencode_hash: None,
         active_rss_mib: 0,
+        max_rss_mib: 0,
     };
     let resp = app
         .clone()
@@ -9825,6 +9930,7 @@ async fn opencode_heartbeat_drift_audit() {
         account_usage: vec![],
         applied_opencode_hash: Some("deadbeef".repeat(8)),
         active_rss_mib: 0,
+        max_rss_mib: 0,
     };
     let hb_req = post_auth(
         "/v1/node/heartbeat",

@@ -815,6 +815,16 @@ pub struct HeartbeatRequest {
     /// falls back to the per-attempt forecast only).
     #[serde(default)]
     pub active_rss_mib: u64,
+    /// Plan 2.14 (#27): the hard memory ceiling in MiB this node wants the
+    /// gate to enforce. The node operator declares it (typically matching the
+    /// sandbox memory cap or the host's available RAM); before this writer
+    /// existed the gate's `max_rss_mib` stayed pinned to the schema default
+    /// (1024 MiB) forever, so an operator on a small host (Termux 256, RPi
+    /// 512, …) could never lower it and the gate let real OOM pressure
+    /// through. `0` = node does not want to override the schema default
+    /// (legacy / value unset — the CP then keeps whatever row value it had).
+    #[serde(default)]
+    pub max_rss_mib: u64,
 }
 
 /// Plan 1.8 (#15): per-account usage reported by a node in its heartbeat so
@@ -1548,6 +1558,7 @@ mod tests {
             network_mode: "none".into(),
             applied_opencode_hash: None,
             active_rss_mib: 0,
+            max_rss_mib: 0,
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {
