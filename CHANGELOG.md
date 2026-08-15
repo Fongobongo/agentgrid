@@ -2,6 +2,20 @@
 
 ## [v0.3.2] — 2026-08-14
 
+### Removed (dead 0.4 spike surface)
+
+- **Redis cache layer.** `crates/control-plane/src/cache.rs` + `cache/redis.rs`
+  (and the `redis` Cargo dependency) were an orphaned stub from an Aug-7
+  "0.4 production" spike: `mod cache` was never declared in `lib.rs`, no
+  production path referenced it, the file's own docstring said "a stub
+  demonstrating API compatibility". Removed (continues the k8s/Helm drop from
+  commit 9284072 — the same spike's heavy-load surface). Release binary loses
+  the bundled redis dependency. `docs/plans/deploy-k8s.md` (Helm install guide)
+  was orphaned with it — deleted. `docs/plans/0.4-production-ready.md`
+  (PostgreSQL + Redis + k8s design) marked DEPRECATED/SUPERSEDED: it ran
+  against agentgrid's hard constraints (SQLite-only, no external DB/NFS,
+  no required Docker/Node runtime, single control-plane instance).
+
 ### Fixed (capacity-pressure gate writer)
 
 - **`max_rss_mib` heartbeat writer (Plan 2.14 follow-up).** The capacity-pressure
