@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## [v0.3.2] — 2026-08-14
+
+### Added (agentgrid toolkit + transport validation + ops)
 
 - **`ag index --out` + repo digest injector (Plan 1.13 follow-up).** The CLI
   `ag index` gains `--out <path>` to write the JSON packet to a file (cache /
@@ -186,10 +188,6 @@
   `ag run`. Config payload is normalised server-side through a strict
   top-level allowlist; hash-string idempotent (idempotent apply on repeat
   upsert); revision blobs stay out for now (YAGNI).
-
-All notable changes to this project are documented in this file.
-
-## [Unreleased]
 
 ### Added (plan 2.14)
 

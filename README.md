@@ -5,7 +5,7 @@ node daemons, each running an LLM agent adapter (Claude Code / Codex / OpenCode)
 in an isolated git worktree. SQLite WAL on local disk, single active
 control-plane instance.
 
-> Status: MVP 0.4 — see [CHANGELOG.md](CHANGELOG.md).
+> Status: MVP 0.3.2 — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Feature maturity
 
@@ -13,9 +13,12 @@ control-plane instance.
 |------|--------|-------|
 | tasks / nodes / attempts / events / Git worktrees / adapters / artifacts | **stable** | core lifecycle, cross-node isolation, fencing tokens, retention |
 | auth (JWT, setup-token bootstrap), CLI (`ag`), web UI shell | **beta** | usable, APIs still settling pre-1.0 |
+| WebSocket node transport (default), long-poll fallback | **stable** | `AGENTGRID_TRANSPORT=ws\|poll\|auto`; see runbook |
+| opencode profiles (revisions, TTL, A/B, pinned skills, drift auto-heal) | **beta** | CP-hosted config + WS push apply; UI + CLI surface stable |
+| `ag index` knowledge-graph packet + digest injector | **beta** | offline ctags-like extraction; opt-in via `AGENTGRID_REPO_INDEX` |
 | workflows (DAG / schedule / run projection) | **experimental** | gate behind an opt-in before relying on it |
 | ACP gateway / Telegram gateway | **experimental** | separate binaries, not in the minimal release by default |
-| skills / profiles / MCP registry | **experimental** | operator registry, semantics may change |
+| skills / MCP registry | **experimental** | operator registry, semantics may change |
 | schedules / plan expansion / zeroshot / context provider | **experimental** | subject to change |
 | Docker/Podman sandbox backend | **beta** | the worktree is **not** a security sandbox — run untrusted agents in the Docker sandbox with a restrictive network/secrets policy |
 
@@ -24,12 +27,16 @@ Untrusted agents must run under the Docker/Podman sandbox with `permission_inter
 ## Architecture
 
 - **control-plane** (Axum + SQLite): task/attempt state machine, scheduler,
-  node long-poll assignment, idempotent event ingest, artifacts, auth (JWT).
-- **node-daemon**: long-poll loop, adapter subprocess per attempt in its own
-  worktree + process group, streams stdout/stderr as events, reports completion.
+  node assignment over WebSocket or long-poll, idempotent event ingest,
+  artifacts, auth (JWT).
+- **node-daemon**: WebSocket control channel (default; falls back to long-poll),
+  adapter subprocess per attempt in its own worktree + process group, streams
+  stdout/stderr as events, reports completion.
 - **adapters**: `mock` (no LLM), `claude`, `opencode` — translate the agent's
   JSON events into the agentgrid contract.
-- **cli** (`ag`): submit/inspect tasks, list nodes, mint tokens, run server.
+- **cli** (`ag`): submit/inspect tasks, list nodes, mint tokens, run server,
+  index a repo into a knowledge-graph packet for system-prompt injection
+  (`ag index`).
 - **web**: TypeScript UI (Vite + React) served by the control plane.
 
 ## Quickstart (Docker)
@@ -203,8 +210,9 @@ sequence) DO NOTHING`) and **durable**: the node persists each event to an on-di
 outbox before sending, so a kill `-9` or CP outage does not lose in-flight
 events; on reconnect the un-acked tail is replayed. Event batches are bounded
 (`AGENTGRID_MAX_EVENT_BATCH` count, `AGENTGRID_MAX_EVENT_BATCH_KB` bytes), and
-events for a terminal attempt are rejected. A long-poll assignment never
-double-delivers a task to two pollers (`WHERE status='queued'` CAS).
+events for a terminal attempt are rejected. An assignment never
+  double-delivers a task to two nodes (`WHERE status='queued'` CAS — true for
+  both WS push and long-poll transports).
 
 Since migration 0037 every event also carries a **global monotonic `ingest_id`**
 (allocated from a single-row counter at ingest), so the SSE `id:`/`Last-Event-ID`
@@ -267,7 +275,7 @@ See `docs/decisions/0001-mvp-scope.md` (ADR) and `docs/decisions/threat-model.md
 | TLS | `rustls` only — no system OpenSSL. | enforced |
 | Runtime deps | none required — no Docker/Node/Python/Java/external DB at runtime (Node.js only for building the web UI). | documented |
 | Rust | edition 2021, stable toolchain. | enforced |
-| Transport (node channel) | long polling (WebSocket deferred). Public API under `/v1`. | as documented |
+| Transport (node channel) | WebSocket default with long-poll fallback (`AGENTGRID_TRANSPORT=ws\|poll\|auto`); data plane over HTTP `/v1`. | as documented |
 | Migrations | forward-only; downgrades fail loud against a newer-DB. | enforced |
 | Release targets | `x86_64`/`aarch64`-`unknown-linux-musl` (+ `x86_64-gnu` fallback). | in `release.yml` |
 
