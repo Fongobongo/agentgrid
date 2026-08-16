@@ -11,10 +11,12 @@ on:
     - cron: "0 6 * * *"
 
 permissions:
-  # issues: write — audit-check files a tracking issue when it finds
-  # advisories; without it the job dies with "Resource not accessible by
-  # integration" instead of reporting the finding.
+  # audit-check reports its findings as a CheckRun (checks: write) and files
+  # a tracking issue when it finds advisories (issues: write); missing either
+  # kills the job with "Resource not accessible by integration" instead of
+  # reporting the finding.
   contents: read
+  checks: write
   issues: write
 
 jobs:
