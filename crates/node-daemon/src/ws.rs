@@ -102,8 +102,9 @@ async fn handle_msg(
     sock: &mut WsStream,
     cred: &SavedCredential,
 ) -> Result<()> {
-    let send =
-        |msg: &NodeWsMsg| -> Result<Message> { Ok(Message::Text(serde_json::to_string(msg)?.into())) };
+    let send = |msg: &NodeWsMsg| -> Result<Message> {
+        Ok(Message::Text(serde_json::to_string(msg)?.into()))
+    };
     match serde_json::from_str::<NodeWsMsg>(text) {
         Ok(NodeWsMsg::Assignment { assignments }) if !assignments.is_empty() => {
             let ids: Vec<String> = assignments.iter().map(|a| a.attempt_id.clone()).collect();
