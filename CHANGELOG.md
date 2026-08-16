@@ -24,6 +24,19 @@
   `bash -e`, so the script's exit 77 ("no AG_REMOTE_* configured") killed the
   step before the `rc` check could convert it into a skip. Guarded with
   `|| rc=$?`.
+- **Release image job was unrunnable: `docker/build-push-action` pinned to
+  a commit SHA that does not exist on the action's repo (broken dependabot
+  bump residue — "unable to find version"). Re-pinned to the real v7.3.0
+  commit (53b7df96c91f9c12dcc8a07bcb9ccacbed38856a).
+
+### Known issues (not gating)
+
+- **`run-disk-full.sh` e2e**: the chatty-task run reaches `failed` but no
+  `spool_full` error event is observed — the fail-closed latch path
+  (event_sink → outbox) does not fire as scripted since the attempt-runner
+  refactor / WS transport landed. Pre-existing on master (the job had not
+  run green since the CI test step went red); needs a focused
+  investigation, tracked for the next patch release.
 - **Supply chain.** `issues: write` added so audit-check can file its
   tracking issue instead of dying with "Resource not accessible by
   integration". RUSTSEC-2024-0437 (protobuf 2.28 recursion crash, pulled by
