@@ -17,6 +17,12 @@
   `AGENTGRID_DB=<data>/control-plane.db`.
 - **install-node.sh verified the wrong binary names** (`/usr/local/bin/mock`
   instead of `adapter-mock`) and aborted a fully successful install.
+- **run-disk-full e2e could never pass**: the spool_full terminal error
+  event carried only a human `error` string, while the e2e asserts on a
+  machine-readable `error_code`/`event` key — the assert could not match
+  even when the latch fired and the completion already reported
+  `error_code=spool_full`. The event now carries `"error_code":
+  "spool_full"` alongside the human message.
 - **pr-validation "Docker Build" referenced a Dockerfile that was never
   committed** (`Dockerfile.node-daemon-musl`) — the check failed on every PR
   since the workflow landed.
