@@ -36,6 +36,15 @@
   against a nonexistent control plane. `--version`/`-V` now print the
   version and exit before any startup side effects.
 
+- **`adapter-claude --version`**: like the daemon, adapter-claude parsed no
+  `--version` and instead started as an agent (exit 127 trying to spawn
+  `claude` on the runner). Now prints the version and exits (mirrors the
+  existing adapter-opencode behavior).
+- **GHCR image tag must be lowercase**: `github.repository_owner`
+  ("Fongobongo") was interpolated verbatim into the image tag; GHCR
+  rejects uppercase repository names. The owner is lowercased when the
+  tags are derived.
+
 ### Known issues (not gating)
 
 - **`run-disk-full.sh` e2e**: the chatty-task run reaches `failed` but no

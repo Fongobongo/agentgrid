@@ -125,8 +125,16 @@ fn main() {
     let mut prompt = String::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
-        if a == "--prompt" {
-            prompt = args.next().unwrap_or_default();
+        match a.as_str() {
+            // Release smoke test invokes --version; without this branch the
+            // adapter started as an agent and exited non-zero trying to
+            // spawn `claude` on a machine that doesn't have it.
+            "--version" | "-v" => {
+                println!("adapter-claude {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "--prompt" => prompt = args.next().unwrap_or_default(),
+            _ => {}
         }
     }
 
