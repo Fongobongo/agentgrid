@@ -200,6 +200,7 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
         server_time: chrono::Utc::now().timestamp_millis(),
     };
     let _ = state.ws_registry.send(&node_id, &ok).await; // via channel
+    // A freshly connected node may already have free slots and queued work.
     // Reconnect pull for in-flight assignments: an assignment pushed to a
     // connection that died mid-delivery leaves the attempt `assigned`
     // (never acked) until the ack deadline — and the pump below only hands
@@ -218,7 +219,6 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
         Ok(_) => {}
         Err(e) => tracing::warn!(node_id, "unacked assignment pull failed: {e}"),
     }
-    // A freshly connected node may already have free slots and queued work.
     state.assignment_notify.notify_waiters();
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
