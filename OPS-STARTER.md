@@ -1,4 +1,4 @@
-# Operator Starter Guide — AgentGrid v0.3.2
+# Operator Starter Guide — AgentGrid v0.3.3
 
 Быстрый старт для развёртывания и поддержки кластера AgentGrid.
 

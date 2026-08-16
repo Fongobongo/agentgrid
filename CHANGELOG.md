@@ -1,5 +1,46 @@
 # Changelog
 
+## [v0.3.3] — 2026-08-16
+
+### Added
+
+- **`GET /v1/nodes/{id}`** — the control plane's view of a single node. Was
+  documented in the OpenAPI and consumed by `ag node doctor`, but the route
+  had shipped DELETE-only (405). Found end-to-end while deploying the v0.3.2
+  lab node; includes an API test (view + 404 on unknown id).
+
+### Fixed
+
+- **install-control-plane.sh set a node-daemon env var**: the CP reads
+  `AGENTGRID_DB` (default is a RELATIVE `control-plane.db` — under systemd,
+  cwd=/ means EACCES creating the lock file in /). The unit now sets
+  `AGENTGRID_DB=<data>/control-plane.db`.
+- **install-node.sh verified the wrong binary names** (`/usr/local/bin/mock`
+  instead of `adapter-mock`) and aborted a fully successful install.
+- **pr-validation "Docker Build" referenced a Dockerfile that was never
+  committed** (`Dockerfile.node-daemon-musl`) — the check failed on every PR
+  since the workflow landed.
+- **WSL2 deployment note**: the shipped systemd sandbox (ProtectSystem /
+  PrivateTmp / ReadWritePaths) is incompatible with the WSL filesystem
+  (EROFS/EACCES); documented drop-in that relaxes it (the WSL2 VM boundary
+  provides isolation instead).
+
+### Dependencies (the queued dependabot set)
+
+- sqlx 0.8.6 → **0.9.0** — new compile-time dynamic-SQL audit: all nine
+  dynamic query sites audited and wrapped in `AssertSqlSafe` (clauses are
+  compile-time constants; every value is a bound parameter).
+- tokio-tungstenite 0.24 → **0.29** — `Message::Text` now takes `Utf8Bytes`;
+  all send sites converted.
+- OpenTelemetry stack 0.27 → **0.32** (opentelemetry, sdk,
+  opentelemetry-prometheus) + prometheus 0.13 → **0.14** — landed as one
+  consistent set: individually each bump leaves duplicate crate versions in
+  the graph. `Resource::new` became `pub(crate)`; migrated to the builder
+  API.
+- tower-http 0.6 → **0.7**, clap 4.6.6, thiserror 2.0.20, libc 0.2.189.
+- Actions: trivy-action 0.36, cosign-installer 4.1.2, codeql-action pin,
+  docker/setup-buildx-action v4.
+
 ## [v0.3.2] — 2026-08-16
 
 ### Fixed (release pipeline — unblocks the v0.3.1→v0.3.2 gap)
