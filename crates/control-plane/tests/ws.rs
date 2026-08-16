@@ -91,7 +91,7 @@ async fn send_hello(sock: &mut WsClient, node_id: &str, max_concurrency: u32) {
         protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
         agent_version: "test".into(),
     };
-    sock.send(Message::Text(serde_json::to_string(&hello).unwrap()))
+    sock.send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
         .await
         .unwrap();
 }
@@ -175,7 +175,7 @@ async fn ws_assignment_pushed_under_200ms_and_ack_lands() {
         ok: true,
         error: None,
     };
-    sock.send(Message::Text(serde_json::to_string(&ack).unwrap()))
+    sock.send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
         .await
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -349,7 +349,7 @@ async fn ws_ack_with_stale_fencing_token_rejected() {
         ok: true,
         error: None,
     };
-    sock.send(Message::Text(serde_json::to_string(&ack).unwrap()))
+    sock.send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
         .await
         .unwrap();
     // Give the CP time to (wrongly) apply it; the attempt must stay assigned.
