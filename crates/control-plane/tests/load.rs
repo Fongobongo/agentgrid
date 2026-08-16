@@ -260,7 +260,7 @@ async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usi
         agent_version: String::new(),
     };
     if let Ok(s) = serde_json::to_string(&hello) {
-        let _ = ws.send(Message::Text(s)).await;
+        let _ = ws.send(Message::Text(s.as_str().into())).await;
     }
     // Tell pusher we have slots free (once). Subsequent ack's below will
     // indirectly wake the pump because `handle_client_msg` notifies on Ack,
@@ -268,7 +268,7 @@ async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usi
     {
         let hb = NodeWsMsg::Heartbeat { free_slots: 2 };
         if let Ok(s) = serde_json::to_string(&hb) {
-            let _ = ws.send(Message::Text(s)).await;
+            let _ = ws.send(Message::Text(s.as_str().into())).await;
         }
     }
     // Drive the channel until the queue drains. Reconnect is intentionally
@@ -300,7 +300,7 @@ async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usi
                     error: None,
                 };
                 if let Ok(s) = serde_json::to_string(&ack) {
-                    let _ = ws.send(Message::Text(s)).await;
+                    let _ = ws.send(Message::Text(s.as_str().into())).await;
                 }
                 fulfill_one(
                     &sp.http,

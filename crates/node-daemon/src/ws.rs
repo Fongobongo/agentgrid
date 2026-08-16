@@ -56,7 +56,7 @@ async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream> 
         protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
         agent_version: cfg.agent_version.clone(),
     };
-    sock.send(Message::Text(serde_json::to_string(&hello)?))
+    sock.send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await?;
     Ok(sock)
 }
@@ -76,7 +76,7 @@ async fn run_session(
         tokio::select! {
             _ = hb.tick() => {
                 let msg = NodeWsMsg::Heartbeat { free_slots: sem.available_permits() as u32 };
-                sock.send(Message::Text(serde_json::to_string(&msg)?)).await?;
+                sock.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
             }
             msg = sock.next() => {
                 let Some(msg) = msg else { return Ok(()) };
@@ -102,8 +102,9 @@ async fn handle_msg(
     sock: &mut WsStream,
     cred: &SavedCredential,
 ) -> Result<()> {
-    let send =
-        |msg: &NodeWsMsg| -> Result<Message> { Ok(Message::Text(serde_json::to_string(msg)?)) };
+    let send = |msg: &NodeWsMsg| -> Result<Message> {
+        Ok(Message::Text(serde_json::to_string(msg)?.into()))
+    };
     match serde_json::from_str::<NodeWsMsg>(text) {
         Ok(NodeWsMsg::Assignment { assignments }) if !assignments.is_empty() => {
             let ids: Vec<String> = assignments.iter().map(|a| a.attempt_id.clone()).collect();
