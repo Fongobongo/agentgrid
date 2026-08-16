@@ -126,7 +126,9 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile.node-daemon-musl
+          # Dockerfile.node-daemon-musl was never committed; the regular
+          # node-daemon Dockerfile builds fine without push.
+          file: ./Dockerfile.node-daemon
           platforms: linux/amd64
           push: false
           load: true
