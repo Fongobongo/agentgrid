@@ -349,10 +349,16 @@ pub async fn probe_runtime_version() -> anyhow::Result<Option<String>> {
 pub async fn probe_adapter_in_sandbox(bin: &str) -> anyhow::Result<bool> {
     let runtime =
         std::env::var("AGENTGRID_SANDBOX_RUNTIME").unwrap_or_else(|_| "docker".to_string());
+    // --network none mirrors how the sandbox itself runs the adapter; with a
+    // default (bridge) network the probe drags in netavark/nftables setup,
+    // which fails under rootless podman on minimal service environments
+    // (no user session, WSL2 kernel) — reporting a healthy image as missing.
     let out = tokio::process::Command::new(&runtime)
         .args([
             "run",
             "--rm",
+            "--network",
+            "none",
             "--entrypoint",
             "sh",
             &image_ref(),
@@ -385,7 +391,9 @@ pub async fn cleanup_orphan_containers() {
     };
     let runtime =
         std::env::var("AGENTGRID_SANDBOX_RUNTIME").unwrap_or_else(|_| "docker".to_string());
-    let label = format!("agentgrid.node={node_id}");
+    // The filter needs the `label=` prefix — a bare `name=value` is rejected
+    // by both docker ("Invalid filter") and podman 5.x ("invalid filter").
+    let label = format!("label=agentgrid.node={node_id}");
     let out = match tokio::process::Command::new(&runtime)
         .args(["ps", "-aq", "--filter", &label])
         .output()
