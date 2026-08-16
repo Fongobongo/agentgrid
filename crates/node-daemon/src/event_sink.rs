@@ -233,6 +233,9 @@ impl EventSink {
             sequence: seq,
             r#type: EventType::Error,
             payload: json!({
+                // Machine-readable marker (matches the completion's
+                // error_code; the run-disk-full e2e asserts on this key).
+                "error_code": "spool_full",
                 "error": "event outbox spool full; attempt failed to avoid data loss"
             }),
         };
