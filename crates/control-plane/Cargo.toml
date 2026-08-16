@@ -53,7 +53,7 @@ opentelemetry-prometheus = { version = "0.27", optional = true }
 prometheus = { version = "0.13", optional = true }
 
 # Static file serving (tower-http ServeDir)
-tower-http = { version = "0.6", features = ["fs", "compression-br"] }
+tower-http = { version = "0.7", features = ["fs", "compression-br"] }
 tower.workspace = true
 http-body-util = "0.1"
 
