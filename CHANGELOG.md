@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **WS assignment redelivery on reconnect (ws_node_survives_cp_restart
+  flake)**: a best-effort push to a connection that died mid-delivery
+  silently succeeds at the channel layer, leaving the attempt `assigned`
+  and never acked until the ack deadline — and the reconnect path only
+  handed out still-QUEUED work. On registration the CP now redelivers the
+  node's unacked assignments over the fresh socket (original fencing
+  tokens preserved, `ws_redeliveries` counter in /metrics).
+
 ## [v0.3.3] — 2026-08-16
 
 ### Added

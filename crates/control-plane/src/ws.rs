@@ -37,6 +37,7 @@ const CHANNEL_CAPACITY: usize = 64;
 static WS_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Cumulative assignment batches pushed over WS (plan 2.5 metrics).
 static WS_PUSHES: AtomicU64 = AtomicU64::new(0);
+static WS_REDELIVERIES: AtomicU64 = AtomicU64::new(0);
 
 struct WsConn {
     gen: u64,
@@ -109,6 +110,12 @@ impl WsRegistry {
     pub async fn connection_count(&self) -> usize {
         self.conns.lock().await.len()
     }
+}
+
+/// Reconnect redeliveries of unacked assignments (observability for the
+/// pull added in handle_conn).
+pub fn ws_redeliveries() -> u64 {
+    WS_REDELIVERIES.load(Ordering::Relaxed)
 }
 
 pub fn ws_pushes() -> u64 {
@@ -193,7 +200,25 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
         server_time: chrono::Utc::now().timestamp_millis(),
     };
     let _ = state.ws_registry.send(&node_id, &ok).await; // via channel
-                                                         // A freshly connected node may already have free slots and queued work.
+    // Reconnect pull for in-flight assignments: an assignment pushed to a
+    // connection that died mid-delivery leaves the attempt `assigned`
+    // (never acked) until the ack deadline — and the pump below only hands
+    // out still-QUEUED work. Redeliver the node's unacked attempts over
+    // the fresh socket so a flapping connection cannot strand work for a
+    // full lease window (root cause of the ws_node_survives_cp_restart
+    // flake).
+    match state.store.unacked_assignments(&node_id).await {
+        Ok(pending) if !pending.is_empty() => {
+            WS_REDELIVERIES.fetch_add(1, Ordering::Relaxed);
+            state
+                .ws_registry
+                .send(&node_id, &NodeWsMsg::Assignment { assignments: pending })
+                .await;
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(node_id, "unacked assignment pull failed: {e}"),
+    }
+    // A freshly connected node may already have free slots and queued work.
     state.assignment_notify.notify_waiters();
 
     let mut ping = tokio::time::interval(PING_INTERVAL);

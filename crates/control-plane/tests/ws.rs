@@ -369,3 +369,45 @@ async fn ws_ack_with_stale_fencing_token_rejected() {
         "a stale fencing token must not ack the attempt"
     );
 }
+
+/// Reconnect pull: an assignment that landed while the node's socket was
+/// dead (the push is best-effort and can be lost to a half-open
+/// connection) must be redelivered on the next connection instead of
+/// stranding the attempt until the ack deadline. Root cause behind the
+/// ws_node_survives_cp_restart flake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ws_reconnect_redelivers_unacked_assignment() {
+    let state = AppState::open_temp().await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let st = state.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, build_router(st)).await;
+    });
+    let base = format!("http://{addr}");
+    let token = login(&base).await;
+    let (node_id, cred) = enroll(&base, &token, "ws-redeliver", 2).await;
+
+    // Simulate the stranded state: the scheduler assigned the task but the
+    // delivery went nowhere (no socket connected at all).
+    let task_id = create_task(&base, &token).await;
+    let batch = state.store.try_assign_batch(&node_id, 1).await.unwrap();
+    assert_eq!(batch.len(), 1, "task should have been assigned");
+    let stranded_token = batch[0].fencing_token.clone();
+
+    // The node connects only now — the pull must hand the assignment back.
+    let mut sock = ws_connect(&base, &cred).await;
+    send_hello(&mut sock, &node_id, 2).await;
+    expect_hello_ok(&mut sock).await;
+
+    let msg = recv_msg(&mut sock, Duration::from_secs(5)).await;
+    let Some(NodeWsMsg::Assignment { assignments }) = msg else {
+        panic!("expected redelivered assignment after reconnect, got {msg:?}")
+    };
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].task_id, task_id);
+    assert_eq!(
+        assignments[0].fencing_token, stranded_token,
+        "redelivery must keep the original fencing token"
+    );
+}

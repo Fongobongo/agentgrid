@@ -14,6 +14,91 @@ impl Store {
         Ok(self.try_assign_batch(node_id, 1).await?.into_iter().next())
     }
 
+    /// Attempts assigned to `node_id` that were never acked — the
+    /// assignment message may have gone to a connection that died
+    /// mid-delivery. The WS reconnect path redelivers these; without the
+    /// pull they would sit `assigned` until the ack deadline.
+    pub async fn unacked_assignments(&self, node_id: &str) -> Result<Vec<Assignment>> {
+        let rows = sqlx::query(
+            "SELECT a.id AS attempt_id, a.number, a.fencing_token, \
+                    t.id AS task_id, t.prompt, t.adapter, t.repository, t.timeout_secs, \
+                    t.validation_command AS task_validation, t.base_commit, \
+                    t.parent_acp_session_id, t.network_mode, t.group_id, \
+                    t.consensus_group_id, t.consensus_member, t.opencode_override, \
+                    r.git_url, r.default_branch, r.validation_command AS repo_validation \
+             FROM attempts a \
+             JOIN tasks t ON t.id = a.task_id \
+             LEFT JOIN repositories r ON r.name = t.repository \
+             WHERE a.node_id = ? AND a.status = 'assigned' \
+             ORDER BY a.started_at ASC",
+        )
+        .bind(node_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for c in &rows {
+            let task_id: String = c.try_get("task_id")?;
+            let role = sqlx::query_scalar::<_, String>(
+                "SELECT ws.role FROM role_runs rr \
+                 JOIN workflow_steps ws ON ws.id = rr.step_run_id \
+                 WHERE rr.task_id = ? LIMIT 1",
+            )
+            .bind(&task_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            let read_only = role.as_deref() == Some("verifier");
+            let number: i64 = c.try_get("number")?;
+            let eval_cases: Vec<String> = if number > 1 {
+                sqlx::query_scalar(
+                    "SELECT a.name FROM artifacts a \
+                     JOIN attempts at ON at.id = a.attempt_id \
+                     WHERE at.task_id = ? AND a.name LIKE 'eval-case-%' \
+                     ORDER BY a.name",
+                )
+                .bind(&task_id)
+                .fetch_all(&self.pool)
+                .await?
+            } else {
+                Vec::new()
+            };
+            let repo_validation: Option<String> = c.try_get("repo_validation")?;
+            let task_validation: Option<String> = c.try_get("task_validation")?;
+            out.push(Assignment {
+                attempt_id: c.try_get("attempt_id")?,
+                fencing_token: c.try_get("fencing_token")?,
+                task_id,
+                prompt: c.try_get("prompt")?,
+                adapter: c.try_get("adapter")?,
+                repository: c.try_get("repository")?,
+                number: number as u32,
+                timeout_secs: c.try_get::<i64, _>("timeout_secs")? as u64,
+                git_url: c.try_get::<String, _>("git_url")?,
+                default_branch: c.try_get::<String, _>("default_branch")?,
+                validation_command: task_validation.or(repo_validation),
+                validation_timeout_secs: None,
+                base_commit: c.try_get("base_commit").ok().flatten(),
+                parent_acp_session_id: c.try_get("parent_acp_session_id").ok().flatten(),
+                network_mode: c.try_get("network_mode").ok().flatten(),
+                provenance: None,
+                upstream_commits: Vec::new(),
+                upstream_task_ids: Vec::new(),
+                group_id: c.try_get("group_id").ok().flatten(),
+                read_only,
+                eval_cases,
+                consensus_group_id: c.try_get("consensus_group_id").ok().flatten(),
+                consensus_member: c.try_get("consensus_member").ok().flatten(),
+                opencode_override: c
+                    .try_get::<Option<String>, _>("opencode_override")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| {
+                        serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()
+                    }),
+            });
+        }
+        Ok(out)
+    }
+
     /// Plan 0.3 item 1.2: assign up to `limit` queued tasks to this node in a
     /// single `BEGIN IMMEDIATE` transaction (was: one transaction per task).
     /// The batch is capped by the node's free concurrency slots, so a poll
