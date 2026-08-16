@@ -389,7 +389,7 @@ impl Store {
             full.to_string_lossy().replace('\'', "''")
         );
         // audited: stmt is code-generated DDL, not user input
-        sqlx::query(sqlx::AssertSqlSafe(&stmt))
+        sqlx::query(sqlx::AssertSqlSafe(stmt.as_str()))
             .execute(&self.pool)
             .await?;
         Ok(())

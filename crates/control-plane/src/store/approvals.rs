@@ -123,7 +123,7 @@ impl Store {
         }
         sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
         // audited: clauses are compile-time constants; values are bound
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(&sql));
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(s) = &status {
             let v = serde_json::to_value(s).map(|v| v.as_str().unwrap_or("pending").to_string())?;
             q = q.bind(v);
