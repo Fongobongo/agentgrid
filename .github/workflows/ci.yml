@@ -29,10 +29,12 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-        # Plan 0.2 item 0.6: --report-time surfaces the slowest tests in the
-        # CI log so regressions in suite runtime are visible per-PR.
+      # Plan 0.2 item 0.6 originally added `-- --report-time` to surface the
+      # slowest tests, but that flag is nightly-only (-Z unstable-options) and
+      # fails the whole step on the stable toolchain above. Dropped; per-test
+      # timing can be reintroduced under a nightly job if needed.
       - name: test
-        run: cargo test --workspace -- --report-time
+        run: cargo test --workspace
       - name: build
         run: cargo build --workspace
       # Plan 1.9 (#17): workflows are code — validate every committed
@@ -137,8 +139,11 @@ jobs:
           AG_REMOTE_USER: ${{ secrets.AG_REMOTE_USER }}
           AG_REMOTE_PASS: ${{ secrets.AG_REMOTE_PASS }}
         run: |
-          bash tests/e2e/run-skill-bundle.sh
-          rc=$?
+          # The step shell is bash -e: a bare `bash script` that exits 77 kills
+          # the step before the rc check below can turn it into a skip. Guard
+          # with `|| rc=$?` so errexit never fires on the script's exit code.
+          rc=0
+          bash tests/e2e/run-skill-bundle.sh || rc=$?
           if [ "$rc" = "77" ]; then
             echo "no AG_REMOTE_* configured — skipping skill-bundle job"
             exit 0
@@ -191,7 +196,10 @@ jobs:
           toolchain: nightly
           components: miri
       - name: miri test common
-        run: cargo +nightly miri test -p agentgrid-common
+        # -Zmiri-disable-isolation: agentgrid-common's workflow-yaml tests
+        # write/read temp files, which Miri's default isolation forbids
+        # ("unsupported operation: `open` not available").
+        run: cargo +nightly miri test -p agentgrid-common -Zmiri-disable-isolation
 
   two-host:
     name: physical two-host E2E (local CP + remote node)

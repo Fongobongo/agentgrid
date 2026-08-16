@@ -1,0 +1,12 @@
+# Gitleaks allowlist — known false positives (format: <commit>:<file>:<rule>:<line>).
+#
+# tests/e2e/rm-rss-test.sh: the "secret" is a hardcoded JWT signing key for a
+# throwaway local control-plane instance the RSS e2e script boots on
+# 127.0.0.1:7812 — a test fixture, never a real credential.
+0e47204d1e5b0027d34beee28b44cf1d1547a52f:tests/e2e/rm-rss-test.sh:generic-api-key:4
+# crates/node-daemon/src/main.rs (historical commits, file since refactored):
+# the matched literals are synthetic test secrets in unit tests of the
+# secret-redaction / validation-masking paths — that is exactly the code that
+# must handle strings that LOOK like credentials.
+dbfe9fe9db67e482869b5e491d951014ca36cf41:crates/node-daemon/src/main.rs:generic-api-key:1618
+e0279261e4583268854cd5ab0df4adccb4ae72a6:crates/node-daemon/src/main.rs:generic-api-key:2282

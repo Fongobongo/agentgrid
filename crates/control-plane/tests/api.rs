@@ -6280,19 +6280,14 @@ async fn events_batch_count_limit_enforced() {
 /// Hardening P1 item 14: a single node flooding the event endpoint beyond the
 /// per-node rate limit is throttled with 429 after the budget is spent.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn events_rate_limit_throttles_one_node() {
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev_max = std::env::var("AGENTGRID_EVENT_RATE_MAX").ok();
-    let prev_win = std::env::var("AGENTGRID_EVENT_RATE_WINDOW_SECS").ok();
-    // Tiny budget so we exhaust it without firing many requests; long window so
-    // the test does not race a rolling reset.
-    std::env::set_var("AGENTGRID_EVENT_RATE_MAX", "2");
-    std::env::set_var("AGENTGRID_EVENT_RATE_WINDOW_SECS", "3600");
     let state = AppState::open_temp().await.unwrap();
-    let app = build_router(state.clone());
+    // Tiny budget so we exhaust it without firing many requests; long window so
+    // the test does not race a rolling reset. Set via the state hook, NOT env:
+    // env is process-global and would poison the limiter of every test that
+    // constructs an AppState concurrently (the cross-test 429 flake).
+    state.set_event_rate_limits(2, 3600).await;
+    let app = build_router(state);
     let (node_id, cred) = enroll(&app, "n-rate", vec!["mock".into()], vec!["*".into()]).await;
     let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
     let mk = |seq| IncomingEvent {
@@ -6339,17 +6334,6 @@ async fn events_rate_limit_throttles_one_node() {
             StatusCode::TOO_MANY_REQUESTS,
             "req {seq} over limit must be 429"
         );
-    }
-    std::env::remove_var("AGENTGRID_EVENT_RATE_MAX");
-    std::env::remove_var("AGENTGRID_EVENT_RATE_WINDOW_SECS");
-    for (k, v) in [
-        ("AGENTGRID_EVENT_RATE_MAX", prev_max),
-        ("AGENTGRID_EVENT_RATE_WINDOW_SECS", prev_win),
-    ] {
-        match v {
-            Some(p) => std::env::set_var(k, p),
-            None => std::env::remove_var(k),
-        }
     }
     let _ = node_id;
 }

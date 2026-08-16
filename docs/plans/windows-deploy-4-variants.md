@@ -27,9 +27,9 @@
 
 ## Общая часть (для всех вариантов)
 
-**Артефакты релиза v0.3.1** — статические musl-бинарники, не требуют Rust-тулчейна и glibc:
+**Артефакты релиза v0.3.2** — статические musl-бинарники, не требуют Rust-тулчейна и glibc:
 `agentgrid-control-plane`, `agentgrid-node-daemon`, `ag` (CLI), `adapter-mock`, `adapter-claude`,
-`adapter-opencode` + `checksums.txt`. Образ ноды на GHCR: `ghcr.io/<owner>/agentgrid-node-daemon:v0.3.1`
+`adapter-opencode` + `checksums.txt`. Образ ноды на GHCR: `ghcr.io/<owner>/agentgrid-node-daemon:v0.3.2`
 (amd64+arm64; owner = владелец репозитория).
 
 **Топология.** Простейшая схема — control-plane и нода в одном Linux-окружении: CP слушает `:7800`,
@@ -49,7 +49,7 @@
 
 - Включить WSL2 (`wsl --install -d Ubuntu`), включить systemd в `/etc/wsl.conf`
 - Ограничить аппетиты через `%UserProfile%\.wslconfig` (`memory=3GB`, `processors=3`)
-- Скачать release v0.3.1 (musl), сверить checksums
+- Скачать release v0.3.2 (musl), сверить checksums
 - Установить CP и ноду штатными скриптами (`deploy/install-control-plane.sh`,
   `deploy/install-node.sh --server http://127.0.0.1:7800 --token <…> --staging ./release-bin`)
 - Всё живёт в одном WSL2-дистрибутиве, workspace/repo-roots на ext4 (не `/mnt/*`)

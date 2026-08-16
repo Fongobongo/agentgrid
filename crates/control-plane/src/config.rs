@@ -97,6 +97,19 @@ impl EventRate {
         }
     }
 
+    /// Env-independent construction. `AppState::set_event_rate_limits` uses
+    /// this so a test can throttle its own AppState without mutating the
+    /// process-global env — every concurrently-running test that constructs
+    /// an AppState reads that env and would inherit the poisoned tiny budget
+    /// (the cause of the flaky 429s in the events ingest tests).
+    pub(crate) fn with_limits(max: u32, window_secs: i64) -> Self {
+        Self {
+            per_node: std::collections::HashMap::new(),
+            max,
+            window_secs,
+        }
+    }
+
     /// `true` if this request is under the per-node budget; the first request of
     /// a new window resets the counter.
     pub(crate) fn admit(&mut self, node_id: &str, now: i64) -> bool {

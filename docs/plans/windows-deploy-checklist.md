@@ -12,23 +12,23 @@
 
 ### 0.1 Проверка машины
 
-- [ ] Редакция Windows — Pro или выше (для Hyper-V):
+- [x] Редакция Windows — Pro или выше (для Hyper-V):
   ```powershell
   (Get-CimInstance Win32_OperatingSystem).Caption
   ```
-- [ ] Виртуализация включена в BIOS (ожидаемо `True`; если `False` — включить VT-x в BIOS):
+- [x] Виртуализация включена в BIOS (ожидаемо `True`; если `False` — включить VT-x в BIOS):
   ```powershell
   (Get-CimInstance Win32_Processor).VirtualizationFirmwareEnabled
   ```
-- [ ] Гипервизор свободен (ожидаемо `False` до начала работ):
+- [x] Гипервизор свободен (ожидаемо `False` до начала работ):
   ```powershell
   (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
   ```
-- [ ] Свободно ≥25 ГБ на диске под Linux-окружение (VM/VHDX/образы)
+- [x] Свободно ≥25 ГБ на диске под Linux-окружение (VM/VHDX/образы)
 
 ### 0.2 Релизные артефакты (заготовка для дорожек A/B/C)
 
-- [ ] Скачать release **v0.3.1**, тарболл `x86_64-unknown-linux-musl` со страницы Releases репозитория
+- [ ] Скачать release **v0.3.2**, тарболл `x86_64-unknown-linux-musl` со страницы Releases репозитория
 - [ ] Распаковать в рабочую папку, например `~/release-bin/`. Ожидаемое содержимое:
   `agentgrid-control-plane`, `agentgrid-node-daemon`, `ag`, `agentgrid-gateway`,
   `agentgrid-acp-agent`, `adapter-mock`, `adapter-claude`, `adapter-opencode`, `adapter-fake-acp`
@@ -78,7 +78,7 @@
 
 ### A.3 Установка control-plane (внутри Ubuntu)
 
-- [ ] Положить бинарники из тарболла v0.3.1 в `/usr/local/bin`:
+- [ ] Положить бинарники из тарболла v0.3.2 в `/usr/local/bin`:
   ```bash
   sudo install -m 0755 ~/release-bin/agentgrid-control-plane ~/release-bin/ag /usr/local/bin/
   ```
@@ -187,7 +187,7 @@
   echo "$DIGEST"   # sha256:…
   ```
   (Альтернатива — образ проекта с запечёнными адаптерами:
-  `podman pull ghcr.io/<owner>/agentgrid-node-daemon:v0.3.1`.)
+  `podman pull ghcr.io/<owner>/agentgrid-node-daemon:v0.3.2`.)
 - [ ] Создать DropIn к юниту ноды — `/etc/systemd/system/agentgrid-node.service.d/sandbox.conf`:
   ```ini
   [Service]
@@ -284,7 +284,7 @@ worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/
   docker build -f Dockerfile.control-plane -t ag-cp:test .
   docker build -f Dockerfile.node-daemon  -t ag-node:test .
   ```
-  (Либо: тянуть `ghcr.io/<owner>/agentgrid-node-daemon:v0.3.1` и переписать теги в
+  (Либо: тянуть `ghcr.io/<owner>/agentgrid-node-daemon:v0.3.2` и переписать теги в
   `docker-compose.yml`.)
 - [ ] Поднять стек штатным скриптом — генерирует секреты, читает setup-токен из логов CP,
   делает bootstrap, пишет `deploy/compose/.env`:

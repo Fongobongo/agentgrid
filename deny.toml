@@ -15,7 +15,12 @@ yanked = "deny"
 # rustls-pemfile 2.2.0 is archived (RUSTSEC-2025-0134) with no safe upgrade; the
 # PEM parsing it wraps is now in rustls-pki-types. Tracked under hardening #29 —
 # migrate to `rustls_pki_types::pem::PemObject` when touching the TLS loader.
-ignore = ["RUSTSEC-2025-0134"]
+#
+# RUSTSEC-2024-0437 (protobuf 2.28 recursion crash) ships via the `prometheus`
+# crate, which uses it for metric encoding only — no untrusted protobuf input
+# is parsed anywhere in this workspace. Mirrored in supply-chain.yml
+# (audit-check ignore); drop both when prometheus moves off protobuf 2.x.
+ignore = ["RUSTSEC-2025-0134", "RUSTSEC-2024-0437"]
 
 [licenses]
 # Allow common OSS licenses; unknown / restriction surface here.

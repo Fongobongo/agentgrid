@@ -256,6 +256,15 @@ impl AppState {
         Ok(state)
     }
 
+    /// Replace the per-node event-ingest rate limits on this state without
+    /// touching the process env. Tests use this instead of setting
+    /// `AGENTGRID_EVENT_RATE_*`: env is process-global, and any test that
+    /// constructs an AppState while a mutated value is visible inherits it
+    /// (the source of cross-test 429 flakes — see `EventRate::with_limits`).
+    pub async fn set_event_rate_limits(&self, max: u32, window_secs: i64) {
+        *self.event_rate.lock().await = EventRate::with_limits(max, window_secs);
+    }
+
     /// Issue a 12h JWT for `username` (Stage 4.1).
     /// Includes `jti` for session revocation (Stage 4.2) and the RBAC
     /// `role` claim (plan 5.2).

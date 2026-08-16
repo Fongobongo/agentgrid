@@ -1,6 +1,37 @@
 # Changelog
 
-## [v0.3.2] — 2026-08-14
+## [v0.3.2] — 2026-08-16
+
+### Fixed (release pipeline — unblocks the v0.3.1→v0.3.2 gap)
+
+- **Cross-test 429 flake in the events ingest suite.**
+  `events_rate_limit_throttles_one_node` configured its tiny throttle budget
+  via `std::env::set_var("AGENTGRID_EVENT_RATE_MAX", "2")` (window 3600s).
+  Env is process-global while every `#[tokio::test]` builds its own
+  `AppState` — any test constructing a state in that window inherited the
+  poisoned limiter and 429'd on its third ingest. This is what killed both
+  v0.3.1 release builds (`events_ordered_by_global_ingest_cursor_across_attempts`:
+  `429 != 200`) and the nightly stress run
+  (`ingest_id_monotonic_under_concurrent_ingestion`). The env save/set/restore
+  is gone: `AppState::set_event_rate_limits(max, window)` +
+  `EventRate::with_limits` let the test throttle exactly its own state.
+- **CI `test` step fails on stable: `--report-time` is nightly-only.**
+  Dropped the flag (surfacing slow tests can return under a nightly job).
+- **Miri job: workflow-yaml tests write temp files, forbidden under Miri
+  isolation.** `cargo +nightly miri test -p agentgrid-common` now runs with
+  `-Zmiri-disable-isolation`.
+- **Skill-bundle nightly job died on its own skip path.** The step shell is
+  `bash -e`, so the script's exit 77 ("no AG_REMOTE_* configured") killed the
+  step before the `rc` check could convert it into a skip. Guarded with
+  `|| rc=$?`.
+- **Supply chain.** `issues: write` added so audit-check can file its
+  tracking issue instead of dying with "Resource not accessible by
+  integration". RUSTSEC-2024-0437 (protobuf 2.28 recursion crash, pulled by
+  `prometheus` for metric encoding only — no untrusted protobuf parsed in
+  this workspace) is a documented ignore in `deny.toml` + the audit job.
+  Three gitleaks false positives (e2e JWT test fixture + two synthetic
+  test secrets in historical commits of the secret-redaction tests) are
+  fingerprinted in `.gitleaksignore`.
 
 ### Removed (dead 0.4 spike surface)
 

@@ -11,7 +11,11 @@ on:
     - cron: "0 6 * * *"
 
 permissions:
+  # issues: write — audit-check files a tracking issue when it finds
+  # advisories; without it the job dies with "Resource not accessible by
+  # integration" instead of reporting the finding.
   contents: read
+  issues: write
 
 jobs:
   cargo-audit:
@@ -22,6 +26,12 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2024-0437 (protobuf 2.28 recursion crash): pulled by the
+          # `prometheus` crate for metric encoding only — no untrusted
+          # protobuf is parsed anywhere in the workspace. Tracked with the
+          # same justification in deny.toml; drop both when prometheus
+          # migrates off protobuf 2.x.
+          ignore: RUSTSEC-2024-0437
 
   cargo-deny:
     name: cargo deny
