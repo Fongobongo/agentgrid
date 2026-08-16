@@ -491,6 +491,35 @@ paths:
         '200': { description: Rolled back. Body is the profile after the swap. }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { description: Profile unknown or no previous revision exists. }
+  /v1/opencode-profiles/{name}/assign-percent:
+    post:
+      summary: "A/B split the fleet between two profiles"
+      description: |
+        Moves the nodes currently on either arm (`{name}` and the body's
+        `other`) so that `percent`% land on `{name}` and the rest on
+        `other`. Deterministic (ordered by node id) so re-running with the
+        same percent is stable; only nodes already on one of the two arms
+        move, the rest of the fleet is left alone.
+      security: [{ userAuth: [] }]
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [other, percent]
+              properties:
+                other: { type: string, description: The other arm's profile id. }
+                percent: { type: integer, minimum: 0, maximum: 100 }
+      responses:
+        '200': { description: Moved. Body reports the moved node ids and counts per arm. }
+        '400': { description: '`other` equals `{name}`, or `percent` > 100. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Either profile unknown. }
   /v1/nodes/{id}/opencode-profile:
     post:
       summary: Assign or clear the profile applied by a node
@@ -564,6 +593,20 @@ paths:
   /v1/nodes/enrollment-token:
     post:
       summary: Mint a one-time node enrollment token (admin)
+  /v1/node/skills-trust:
+    get:
+      summary: "Node-readable copy of the operator skill trust ledger"
+      description: |
+        The same rows `GET /v1/skills` returns, but behind node auth so a
+        node daemon holding only its long-lived credential can read them.
+        Used to compose the agent's "approved skills" block and to
+        reconcile bundle-pinned skills against the operator trust verdicts.
+      security: [{ nodeAuth: [] }]
+      responses:
+        '200':
+          description: Skill trust rows (name, source, trusted, decided_by, updated_at).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { description: Store failure. }
   /v1/node/enroll:
     post:
       summary: Enroll a new node with a one-time token (node credentials)
