@@ -45,6 +45,11 @@
   rejects uppercase repository names. The owner is lowercased when the
   tags are derived.
 
+- **aarch64 smoke could never execute**: the smoke step ran the
+  cross-compiled aarch64 binaries directly on the x86_64 runner
+  ("Exec format error"). The step now executes only runner-arch (x86-64)
+  binaries and asserts the ELF architecture of foreign-arch builds.
+
 ### Known issues (not gating)
 
 - **`run-disk-full.sh` e2e**: the chatty-task run reaches `failed` but no

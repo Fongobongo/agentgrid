@@ -79,19 +79,22 @@ jobs:
             | xargs -0 -I{} sh -c 'test "$(stat -c%s "{}")" -le 62914560'
 
       - name: smoke test (binaries start)
-        # Hardening P2 item 30: every published binary must at least start and
-        # report a version (musl binaries run on the ubuntu host; no dynamic
-        # libs needed). Catches a broken build before the release is cut.
-        # adapter-mock has no --version (it starts as an agent) — skipped.
+        # Hardening P2 item 30: every published binary must at least start
+        # and report a version. Catches a broken build before the release is
+        # cut. Only runner-arch (x86-64) binaries can execute here — a
+        # cross-compiled aarch64 build on an x86_64 runner gets an ELF
+        # architecture assertion instead. adapter-mock has no --version (it
+        # starts as an agent) — skipped.
         run: |
           cd "target/${{ matrix.target }}/release"
-          ./ag --version
-          ./agentgrid-control-plane --version
-          ./agentgrid-node-daemon --version
-          ./agentgrid-gateway --version
-          ./agentgrid-acp-agent --version
-          ./adapter-claude --version
-          ./adapter-opencode --version
+          for b in ag agentgrid-control-plane agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-claude adapter-opencode; do
+            if file -b "$b" | grep -q "x86-64"; then
+              "./$b" --version
+            else
+              echo "$b: foreign arch ($(file -b "$b" | cut -d, -f2)) — asserting ELF header instead of executing"
+              file -b "$b" | grep -qE "ARM aarch64|ARM64"
+            fi
+          done
 
       - name: checksums (SHA256SUMS)
         run: |
