@@ -35,7 +35,7 @@ agentgrid-common.workspace = true
 agentgrid-skills.workspace = true
 thiserror.workspace = true
 
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
+sqlx = { version = "0.9", features = ["sqlite", "runtime-tokio", "migrate"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 libc = "0.2"
 # Plan 1.2 (#22a): notify webhook fire-and-forget POST.
