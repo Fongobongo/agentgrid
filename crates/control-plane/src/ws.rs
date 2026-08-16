@@ -214,7 +214,12 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
             WS_REDELIVERIES.fetch_add(1, Ordering::Relaxed);
             state
                 .ws_registry
-                .send(&node_id, &NodeWsMsg::Assignment { assignments: pending })
+                .send(
+                    &node_id,
+                    &NodeWsMsg::Assignment {
+                        assignments: pending,
+                    },
+                )
                 .await;
         }
         Ok(_) => {}
