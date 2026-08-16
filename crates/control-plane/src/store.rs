@@ -498,7 +498,8 @@ impl Store {
             sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
         }
         sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
-        let mut q = sqlx::query(&sql);
+        // audited: clauses are compile-time constants; values are bound
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some((created_at, id)) = &after {
             q = q.bind(created_at).bind(created_at).bind(id);
         }

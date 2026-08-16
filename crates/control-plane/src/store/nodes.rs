@@ -379,9 +379,10 @@ impl Store {
             pool: &sqlx::Pool<Sqlite>,
             table: &'static str,
         ) -> Result<std::collections::BTreeMap<String, i64>> {
-            let rows = sqlx::query(&format!(
+            // audited: table is a 'static str from the caller's code
+            let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT status, COUNT(*) AS n FROM {table} GROUP BY status"
-            ))
+            )))
             .fetch_all(pool)
             .await?;
             let mut m = std::collections::BTreeMap::new();
