@@ -388,7 +388,7 @@ impl Store {
             "VACUUM INTO '{}'",
             full.to_string_lossy().replace('\'', "''")
         );
-                // audited: stmt comes from code-generated DDL, not user input
+        // audited: stmt is code-generated DDL, not user input
         sqlx::query(sqlx::AssertSqlSafe(&stmt))
             .execute(&self.pool)
             .await?;
