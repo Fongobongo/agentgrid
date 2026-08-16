@@ -1,0 +1,25 @@
+name: Regen lockfile (tt branch)
+on: [push]
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - name: update lockfile entries for tokio-tungstenite
+        run: cargo update -p tokio-tungstenite 2>&1 | tail -10
+      - name: commit regenerated lock
+        run: |
+          git config user.name "agentgrid-ci"
+          git config user.email "ci@agentgrid.local"
+          git add Cargo.lock
+          if git diff --cached --quiet; then
+            echo "lock already up to date"
+          else
+            git commit -m "chore: regenerate Cargo.lock for tokio-tungstenite 0.29"
+            git push
+          fi
