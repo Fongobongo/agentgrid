@@ -1037,7 +1037,10 @@ async fn get_node_returns_view_and_404() {
 
     let resp = app
         .clone()
-        .oneshot(get_auth("/v1/nodes/00000000-0000-0000-0000-000000000000", &token))
+        .oneshot(get_auth(
+            "/v1/nodes/00000000-0000-0000-0000-000000000000",
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
