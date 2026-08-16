@@ -1,9 +1,23 @@
 # Changelog
 
-## [Unreleased]
+## [v0.3.4] — 2026-08-17
 
 ### Fixed
 
+- **Idempotent assignment dispatch**: the redelivery above exposed that a
+  redelivered assignment whose ack had not landed yet would start a SECOND
+  runner for the same attempt, interleaving two event streams (the outbox
+  e2e caught it: 268 events where 200 were expected). Delivery is
+  at-least-once; `dispatch_batch` now drops duplicates via a process-wide
+  in-flight attempt set.
+- **Sandbox adapter probe used the default bridge network**, dragging in
+  netavark/nftables setup that fails under rootless podman on minimal
+  service environments (no user session / WSL2 kernel) — a healthy image
+  reported as missing and the node degraded. The probe now mirrors the
+  sandbox itself (`--network none`).
+- **Orphan-container cleanup was a no-op**: `--filter agentgrid.node=<id>`
+  was missing the `label=` prefix and is rejected by both docker and
+  podman.
 - **WS assignment redelivery on reconnect (ws_node_survives_cp_restart
   flake)**: a best-effort push to a connection that died mid-delivery
   silently succeeds at the channel layer, leaving the attempt `assigned`
