@@ -20,10 +20,10 @@ pub fn init_otel() -> Result<()> {
     let service_name = std::env::var("OTEL_SERVICE_NAME")
         .unwrap_or_else(|_| "agentgrid-control-plane".to_string());
 
-    let resource = opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-        "service.name",
-        service_name,
-    )]);
+    // otel 0.32: Resource::new went pub(crate); the builder is the public API.
+    let resource = opentelemetry_sdk::Resource::builder()
+        .with_service_name(service_name)
+        .build();
 
     // Build the meter provider with Prometheus reader (if enabled)
     let mut builder =
