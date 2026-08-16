@@ -29,6 +29,13 @@
   bump residue — "unable to find version"). Re-pinned to the real v7.3.0
   commit (53b7df96c91f9c12dcc8a07bcb9ccacbed38856a).
 
+- **Release smoke test could never pass: `agentgrid-node-daemon --version`
+  was not handled.** The daemon parses no CLI args, so the smoke step's
+  `--version` flag was silently ignored and the binary booted for real —
+  probing adapters, pruning workspaces, then exiting 1 on a failed enroll
+  against a nonexistent control plane. `--version`/`-V` now print the
+  version and exit before any startup side effects.
+
 ### Known issues (not gating)
 
 - **`run-disk-full.sh` e2e**: the chatty-task run reaches `failed` but no

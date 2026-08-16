@@ -496,6 +496,17 @@ fn policy_decision(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Hardening P2 item 30: the release smoke test invokes `--version` on
+    // every published binary. The daemon otherwise takes no CLI args, so an
+    // unrecognized flag used to be ignored and the daemon booted for real
+    // (probing adapters, pruning workspaces, then failing to enroll) —
+    // handle it explicitly before any startup side effects.
+    for a in std::env::args().skip(1) {
+        if a == "--version" || a == "-V" {
+            println!("agentgrid-node-daemon {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+    }
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(
