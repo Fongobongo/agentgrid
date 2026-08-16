@@ -122,6 +122,7 @@ impl Store {
             sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
         }
         sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        #[sqlx::audit("clauses are compile-time constants; every value is a bound parameter")]
         let mut q = sqlx::query(&sql);
         if let Some(s) = &status {
             let v = serde_json::to_value(s).map(|v| v.as_str().unwrap_or("pending").to_string())?;

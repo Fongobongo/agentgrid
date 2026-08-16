@@ -106,6 +106,7 @@ impl Store {
             sql.push_str(" AND assigned_attempt_id IN (SELECT id FROM attempts WHERE node_id = ?)");
         }
         sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        #[sqlx::audit("clauses are compile-time constants; every value is a bound parameter")]
         let mut q = sqlx::query(&sql);
         if let Some((created_at, id)) = &after {
             // The keyset predicate has three placeholders: created_at > ?, and

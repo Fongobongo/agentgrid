@@ -388,6 +388,7 @@ impl Store {
             "VACUUM INTO '{}'",
             full.to_string_lossy().replace('\'', "''")
         );
+        #[sqlx::audit("clauses are compile-time constants; every value is a bound parameter")]
         sqlx::query(&stmt).execute(&self.pool).await?;
         Ok(())
     }

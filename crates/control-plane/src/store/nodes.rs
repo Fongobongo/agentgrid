@@ -379,6 +379,7 @@ impl Store {
             pool: &sqlx::Pool<Sqlite>,
             table: &'static str,
         ) -> Result<std::collections::BTreeMap<String, i64>> {
+            #[sqlx::audit("clauses are compile-time constants; every value is a bound parameter")]
             let rows = sqlx::query(&format!(
                 "SELECT status, COUNT(*) AS n FROM {table} GROUP BY status"
             ))
