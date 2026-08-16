@@ -113,9 +113,18 @@ pub async fn poll_loop_inner(
     }
 }
 
+/// Attempts currently dispatched by this daemon. The CP's WS reconnect pull
+/// can redeliver an assignment whose ack is still in flight (attempt still
+/// `assigned` in the store); dispatching it twice would run two attempt
+/// runners for one attempt, interleaving their event streams.
+static IN_FLIGHT: std::sync::LazyLock<tokio::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
+
 /// Dispatch a batch of assignments: one task per attempt, gated by the
 /// concurrency semaphore. Shared by the poll and WS transports (plan 0.3 2.3);
 /// waits (never drops) if a slot is briefly busy, so no assignment is lost.
+/// Duplicate attempt ids (redelivery) are dropped — delivery is at-least-once,
+/// dispatch is idempotent.
 pub async fn dispatch_batch(
     cfg: &Config,
     client: &Client,
@@ -123,6 +132,16 @@ pub async fn dispatch_batch(
     batch: Vec<agentgrid_common::Assignment>,
 ) -> Result<()> {
     for a in batch {
+        {
+            let mut in_flight = IN_FLIGHT.lock().await;
+            if !in_flight.insert(a.attempt_id.clone()) {
+                tracing::warn!(
+                    attempt_id = %a.attempt_id,
+                    "assignment redelivered while already in flight; dropping duplicate"
+                );
+                continue;
+            }
+        }
         let permit = match sem.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => sem.clone().acquire_owned().await?,
@@ -130,9 +149,11 @@ pub async fn dispatch_batch(
         let cfg2 = cfg.clone();
         let client2 = client.clone();
         tokio::spawn(async move {
+            let attempt_id = a.attempt_id.clone();
             if let Err(e) = crate::attempt_runner::run_attempt(cfg2, client2, a).await {
                 tracing::error!("attempt error: {e}");
             }
+            IN_FLIGHT.lock().await.remove(&attempt_id);
             drop(permit);
         });
     }
