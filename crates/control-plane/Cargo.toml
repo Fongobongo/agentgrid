@@ -50,7 +50,7 @@ rustls-pemfile = "2"
 opentelemetry = { version = "0.27", optional = true }
 opentelemetry_sdk = { version = "0.27", optional = true }
 opentelemetry-prometheus = { version = "0.27", optional = true }
-prometheus = { version = "0.13", optional = true }
+prometheus = { version = "0.14", optional = true }
 
 # Static file serving (tower-http ServeDir)
 tower-http = { version = "0.7", features = ["fs", "compression-br"] }
