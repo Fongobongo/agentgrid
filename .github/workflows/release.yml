@@ -191,17 +191,31 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: artifacts
-      - name: flatten artifacts
+          # Only the build artifacts — build-push-action also attaches
+          # incidental *.dockerbuild artifacts to the run, and the blanket
+          # download chokes on them (persistent "download failed after 5
+          # retries" on v0.3.2; fixed by deleting them and re-running).
+          pattern: agentgrid-*
+      - name: package per-target tarballs
+        # Binaries from the three targets share names — a flat copy made
+        # them overwrite each other and the SHA256SUMS namespacing collapsed
+        # into one file (first exercised by the v0.3.2 release). Package
+        # each target as a self-contained tarball with its own SHA256SUMS.
         run: |
+          set -eux
           mkdir -p release-assets
-          find artifacts -type f \
-            \( -name 'agentgrid-control-plane' -o -name 'ag' \
-               -o -name 'agentgrid-node-daemon' -o -name 'agentgrid-gateway' \
-               -o -name 'agentgrid-acp-agent' -o -name 'adapter-mock' \
-               -o -name 'adapter-claude' -o -name 'adapter-opencode' -o -name 'SHA256SUMS' \) \
-            -exec cp {} release-assets/ \;
-          # Namespace SHA256SUMS per target to avoid collisions.
-          find artifacts -name 'SHA256SUMS' -exec sh -c 'd=$(dirname {}); t=$(basename $d | sed "s/agentgrid-//"); cp {} release-assets/SHA256SUMS.$t' \;
+          for d in artifacts/agentgrid-*; do
+            t=$(basename "$d" | sed "s/agentgrid-//")
+            src="$d/target/$t/release"
+            [ -d "$src" ] || src="$d"
+            (
+              cd "$src"
+              tar czf "$GITHUB_WORKSPACE/release-assets/agentgrid-$t.tar.gz" \
+                agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
+                agentgrid-acp-agent adapter-mock adapter-claude adapter-opencode SHA256SUMS
+            )
+          done
+          cp -r artifacts/agentgrid-x86_64-unknown-linux-musl/web/dist release-assets/web
           ls -la release-assets
       - name: attest build provenance
         # Hardening P2 item 29: GitHub provenance attestation for every release
@@ -226,7 +240,7 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          for f in release-assets/SHA256SUMS.*; do
+          for f in release-assets/agentgrid-*.tar.gz; do
             cosign sign-blob --yes "$f" --output-signature "$f.sig"
           done
       - name: create GitHub Release

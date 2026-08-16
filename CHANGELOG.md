@@ -56,6 +56,16 @@
   failed depending on cache state; the release workflow now builds clean
   (no rust-cache).
 
+- **Release asset layout**: the flatten step copied same-named binaries from
+  all three targets into one directory (silent overwrites) and its
+  SHA256SUMS namespacing collapsed to a single file — the step had never
+  run before this release. Replaced by per-target tarballs
+  (`agentgrid-<target>.tar.gz`, each with its own SHA256SUMS inside);
+  v0.3.2's release page carries the three tarballs + SBOM + notes, and the
+  image job's incidental `.dockerbuild` artifacts are filtered out of the
+  release job's download (they made it fail with persistent download
+  retries).
+
 ### Known issues (not gating)
 
 - **`run-disk-full.sh` e2e**: the chatty-task run reaches `failed` but no
