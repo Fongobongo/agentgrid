@@ -1014,7 +1014,6 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
 /// OOM-pressure slipped through. Now the node can declare its own ceiling;
 /// the heartbeat UPDATE only writes when the field is > 0, so a 0 (unset /
 /// legacy build) leaves the row untouched.
-#[tokio::test]
 /// GET /v1/nodes/{id} returns the CP view of one node (read by `ag node
 /// doctor`) and 404s for unknown ids. The route had shipped DELETE-only.
 #[tokio::test]
@@ -1046,6 +1045,7 @@ async fn get_node_returns_view_and_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
 async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state.clone());
