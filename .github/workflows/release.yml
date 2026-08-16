@@ -240,8 +240,11 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
+          # cosign 4.x sign-blob writes a Sigstore bundle by default and
+          # errors with an empty bundle path when only --output-signature is
+          # given; pass an explicit bundle target alongside the signature.
           for f in release-assets/agentgrid-*.tar.gz; do
-            cosign sign-blob --yes "$f" --output-signature "$f.sig"
+            cosign sign-blob --yes "$f" --bundle "$f.bundle" --output-signature "$f.sig"
           done
       - name: create GitHub Release
         env:
