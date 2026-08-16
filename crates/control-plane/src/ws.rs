@@ -200,6 +200,7 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
         server_time: chrono::Utc::now().timestamp_millis(),
     };
     let _ = state.ws_registry.send(&node_id, &ok).await; // via channel
+
     // A freshly connected node may already have free slots and queued work.
     // Reconnect pull for in-flight assignments: an assignment pushed to a
     // connection that died mid-delivery leaves the attempt `assigned`
