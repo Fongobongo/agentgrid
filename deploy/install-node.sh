@@ -58,7 +58,7 @@ for a in "${adapter_list[@]}"; do
   [ -n "$a" ] || continue
   install_bin "adapter-$a"
 done
-for b in agentgrid-node-daemon "${adapter_list[@]}"; do
+for b in agentgrid-node-daemon "${adapter_list[@]/#/adapter-}"; do
   [ -n "$b" ] || continue
   command -v "$BIN_DIR/$b" >/dev/null 2>&1 || { echo "missing $BIN_DIR/$b"; exit 1; }
 done

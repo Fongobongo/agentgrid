@@ -506,7 +506,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/nodes/enrollment-token",
             post(routes::nodes::create_enrollment_token),
         )
-        .route("/v1/nodes/{id}", delete(routes::nodes::revoke_node))
+        .route(
+            "/v1/nodes/{id}",
+            get(routes::nodes::get_node).delete(routes::nodes::revoke_node),
+        )
         .route(
             "/v1/nodes/{id}/drain",
             post(routes::nodes::drain_node_handler),

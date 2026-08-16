@@ -66,6 +66,22 @@
   release job's download (they made it fail with persistent download
   retries).
 
+- **`GET /v1/nodes/{id}` was documented and CLI-consumed but never
+  implemented** — `ag node doctor` (report-only diagnostics) got a 405
+  because the route shipped DELETE-only. Handler added (single-node view,
+  404 on unknown id); found end-to-end while deploying the v0.3.2 lab node.
+- **install-control-plane.sh set a node-daemon env var**: the CP reads
+  `AGENTGRID_DB` (default is a RELATIVE `control-plane.db` — under systemd,
+  cwd=/ means an EACCES trying to create the lock file in /). The unit now
+  sets `AGENTGRID_DB=<data>/control-plane.db`.
+- **install-node.sh verified the wrong binary names**: the post-install
+  check looked for `/usr/local/bin/<adapter-id>` instead of
+  `adapter-<adapter-id>` and aborted a fully successful install.
+- **WSL2 note (lab deployment)**: the shipped systemd sandbox
+  (ProtectSystem=strict / PrivateTmp / ReadWritePaths) is incompatible with
+  the WSL filesystem (EROFS/EACCES); deploy via a drop-in that relaxes
+  namespace sandboxing — the WSL2 VM boundary provides isolation instead.
+
 ### Known issues (not gating)
 
 - **`run-disk-full.sh` e2e**: the chatty-task run reaches `failed` but no

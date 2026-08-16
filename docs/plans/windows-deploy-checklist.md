@@ -28,11 +28,11 @@
 
 ### 0.2 Релизные артефакты (заготовка для дорожек A/B/C)
 
-- [ ] Скачать release **v0.3.2**, тарболл `x86_64-unknown-linux-musl` со страницы Releases репозитория
+- [x] Скачать release **v0.3.2**, тарболл `x86_64-unknown-linux-musl` со страницы Releases репозитория
 - [ ] Распаковать в рабочую папку, например `~/release-bin/`. Ожидаемое содержимое:
   `agentgrid-control-plane`, `agentgrid-node-daemon`, `ag`, `agentgrid-gateway`,
   `agentgrid-acp-agent`, `adapter-mock`, `adapter-claude`, `adapter-opencode`, `adapter-fake-acp`
-- [ ] Сверить контрольные суммы (внутри Linux-окружения дорожки):
+- [x] Сверить контрольные суммы (внутри Linux-окружения дорожки):
   ```bash
   cd ~/release-bin && sha256sum -c --ignore-missing checksums.txt
   ```
@@ -46,55 +46,55 @@
 
 ### A.1 Включение WSL2 (PowerShell от администратора)
 
-- [ ] Установить WSL2 и Ubuntu (затем reboot):
+- [x] Установить WSL2 и Ubuntu (затем reboot):
   ```powershell
   wsl --install
   ```
   (На 19045 это включает компоненты «Virtual Machine Platform» + «Подсистема Windows для Linux»
   и ставит Ubuntu по умолчанию.)
-- [ ] После reboot: открыть Ubuntu, задать пользователя/пароль
-- [ ] Включить systemd внутри дистрибутива — добавить в `/etc/wsl.conf`:
+- [x] После reboot: открыть Ubuntu, задать пользователя/пароль
+- [x] Включить systemd внутри дистрибутива — добавить в `/etc/wsl.conf`:
   ```ini
   [boot]
   systemd=true
   ```
   затем из PowerShell: `wsl --shutdown` и заново открыть Ubuntu
-- [ ] Проверить, что systemd жив (ожидаемо список юнитов, не пустой):
+- [x] Проверить, что systemd жив (ожидаемо список юнитов, не пустой):
   ```bash
   systemctl list-units --type=service --state=running | head
   ```
 
 ### A.2 Лимиты ресурсов WSL2 (файл `%UserProfile%\.wslconfig` на Windows-стороне)
 
-- [ ] Создать/дополнить `.wslconfig`:
+- [x] Создать/дополнить `.wslconfig`:
   ```ini
   [wsl2]
   memory=3GB
   processors=3
   swap=2GB
   ```
-- [ ] Применить: `wsl --shutdown`, открыть Ubuntu заново
-- [ ] Проверить изнутри: `free -h` (должно показывать ~3 GiB), `nproc` (=3)
+- [x] Применить: `wsl --shutdown`, открыть Ubuntu заново
+- [x] Проверить изнутри: `free -h` (должно показывать ~3 GiB), `nproc` (=3)
 
 ### A.3 Установка control-plane (внутри Ubuntu)
 
-- [ ] Положить бинарники из тарболла v0.3.2 в `/usr/local/bin`:
+- [x] Положить бинарники из тарболла v0.3.2 в `/usr/local/bin`:
   ```bash
   sudo install -m 0755 ~/release-bin/agentgrid-control-plane ~/release-bin/ag /usr/local/bin/
   ```
-- [ ] Установить CP штатным скриптом репозитория (склонировать репо внутрь WSL2 — на ext4,
+- [x] Установить CP штатным скриптом репозитория (склонировать репо внутрь WSL2 — на ext4,
   не на `/mnt/*`; либо скопировать только `deploy/`):
   ```bash
   sudo bash deploy/install-control-plane.sh --listen 127.0.0.1:7800
   ```
   Скрипт создаёт systemd-юнит `agentgrid-control-plane` с харднением.
-- [ ] Запустить и посмотреть лог — **в логах CP при первом старте печатается one-time setup-токен**,
+- [x] Запустить и посмотреть лог — **в логах CP при первом старте печатается one-time setup-токен**,
   выписать его:
   ```bash
   sudo systemctl enable --now agentgrid-control-plane
   journalctl -u agentgrid-control-plane --no-pager | grep -i "setup"
   ```
-- [ ] Health-check:
+- [x] Health-check:
   ```bash
   curl -fsS http://127.0.0.1:7800/health/ready && echo OK
   curl -fsS http://127.0.0.1:7800/health/live  && echo ALIVE
@@ -102,7 +102,7 @@
 
 ### A.4 Bootstrap админа и enrollment-токен
 
-- [ ] Создать первого пользователя (setup-токен из логов A.3), сохранить JWT:
+- [x] Создать первого пользователя (setup-токен из логов A.3), сохранить JWT:
   ```bash
   JWT=$(curl -fsS -X POST http://127.0.0.1:7800/v1/auth/setup \
     -H 'content-type: application/json' \
@@ -111,13 +111,13 @@
   echo "$JWT" > ~/.agentgrid-jwt && chmod 600 ~/.agentgrid-jwt
   ```
   (Если поле `setup_token` называется иначе — свериться с фактическим ответом/логом CP.)
-- [ ] Проверить логин:
+- [x] Проверить логин:
   ```bash
   curl -fsS -X POST http://127.0.0.1:7800/v1/auth/login \
     -H 'content-type: application/json' \
     -d '{"username":"admin","password":"<пароль>"}' | head -c 80
   ```
-- [ ] Выписать enrollment-токен ноды и сохранить:
+- [x] Выписать enrollment-токен ноды и сохранить:
   ```bash
   ENROLL=$(curl -fsS -X POST http://127.0.0.1:7800/v1/nodes/enrollment-token \
     -H "authorization: Bearer $JWT")
@@ -126,18 +126,18 @@
 
 ### A.5 Установка ноды (внутри Ubuntu)
 
-- [ ] Установить ноду штатным скриптом (создаст пользователя `agentgrid`, харднеженный юнит,
+- [x] Установить ноду штатным скриптом (создаст пользователя `agentgrid`, харднеженный юнит,
   каталоги `/var/lib/agentgrid/{workspace,repos,artifacts}`, зароллит ноду):
   ```bash
   sudo bash deploy/install-node.sh --server http://127.0.0.1:7800 \
        --token "$(cat ~/.agentgrid-enroll)" \
        --staging ~/release-bin --adapters mock
   ```
-- [ ] Наблюдать логи ноды до появления heartbeat:
+- [x] Наблюдать логи ноды до появления heartbeat:
   ```bash
   journalctl -u agentgrid-node -f
   ```
-- [ ] Нода видна и здорова:
+- [x] Нода видна и здорова:
   ```bash
   curl -fsS http://127.0.0.1:7800/v1/nodes -H "authorization: Bearer $JWT" | python3 -m json.tool | head -30
   ag nodes doctor <node-id>    # CLI из /usr/local/bin; базовый URL/токен — по `ag login`
@@ -145,7 +145,7 @@
 
 ### A.6 Приёмочная задача (mock)
 
-- [ ] Отправить тестовую задачу:
+- [x] Отправить тестовую задачу:
   ```bash
   TASK_ID=$(curl -fsS -X POST http://127.0.0.1:7800/v1/tasks \
     -H "authorization: Bearer $JWT" -H 'content-type: application/json' \
@@ -153,7 +153,7 @@
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
   echo "Task: $TASK_ID"
   ```
-- [ ] Дождаться `succeeded` (полликать статус) и посмотреть события:
+- [x] Дождаться `succeeded` (полликать статус) и посмотреть события:
   ```bash
   curl -fsS http://127.0.0.1:7800/v1/tasks/$TASK_ID -H "authorization: Bearer $JWT" \
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])'
@@ -305,10 +305,10 @@ worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/
 
 ## Финальная проверка (любая дорожка)
 
-- [ ] `curl -fsS http://<cp>/health/ready` → OK
-- [ ] Нода в списке `/v1/nodes` не `degraded`, heartbeat обновляется
+- [x] `curl -fsS http://<cp>/health/ready` → OK
+- [x] Нода в списке `/v1/nodes` не `degraded`, heartbeat обновляется
 - [ ] `ag nodes doctor <id>` без ошибок
-- [ ] Mock-задача дошла до `succeeded`, события видны в `/v1/tasks/<id>/events`
+- [x] Mock-задача дошла до `succeeded`, события видны в `/v1/tasks/<id>/events`
 - [ ] `/metrics` отдаёт счётчики (транспорт, SQLite lock failures — см. `OPS-STARTER.md`)
 
 ## Откат (полная зачистка)

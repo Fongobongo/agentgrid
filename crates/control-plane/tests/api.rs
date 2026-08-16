@@ -1015,6 +1015,34 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
 /// the heartbeat UPDATE only writes when the field is > 0, so a 0 (unset /
 /// legacy build) leaves the row untouched.
 #[tokio::test]
+/// GET /v1/nodes/{id} returns the CP view of one node (read by `ag node
+/// doctor`) and 404s for unknown ids. The route had shipped DELETE-only.
+#[tokio::test]
+async fn get_node_returns_view_and_404() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, _cred) = enroll(&app, "node-get", vec!["mock".into()], vec!["*".into()]).await;
+    let token = test_token(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/nodes/{node_id}"), &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["id"].as_str(), Some(node_id.as_str()));
+    assert_eq!(v["name"].as_str(), Some("node-get"));
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/nodes/00000000-0000-0000-0000-000000000000", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state.clone());

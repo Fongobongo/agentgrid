@@ -42,6 +42,24 @@ pub async fn list_nodes(
     }
 }
 
+/// `GET /v1/nodes/{id}` — the control plane's view of one node. Read by
+/// `ag node doctor` (report-only diagnostics). The route had shipped
+/// DELETE-only, so the CLI's GET got a 405.
+pub async fn get_node(
+    State(state): State<Arc<AppState>>,
+    Extension(_auth): Extension<crate::auth::AuthedUser>,
+    Path(id): Path<String>,
+) -> Result<Json<NodeView>, StatusCode> {
+    match state.store.get_node(&id).await {
+        Ok(Some(n)) => Ok(Json(n)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("get_node failed: {e}");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+}
+
 /// Query for `GET /v1/audit` (plan 3.4): optional action filter + row cap.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AuditQuery {

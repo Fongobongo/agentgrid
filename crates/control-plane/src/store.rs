@@ -506,6 +506,19 @@ impl Store {
         Ok(rows.iter().map(row_to_node_view).collect())
     }
 
+    /// Single node by id (`GET /v1/nodes/{id}`, read by `ag node doctor`).
+    /// `None` when the id is unknown.
+    pub async fn get_node(&self, node_id: &str) -> Result<Option<NodeView>> {
+        let row = sqlx::query(
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at \
+             FROM nodes WHERE id = ?",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_node_view))
+    }
+
     /// Register a newly seen node or refresh an existing one (acts as heartbeat).
     pub async fn register_or_touch_node(&self, req: &PollRequest) -> Result<()> {
         let now = now_iso();

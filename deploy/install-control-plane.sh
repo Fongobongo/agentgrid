@@ -57,6 +57,9 @@ Restart=on-failure
 RestartSec=5
 Environment=AGENTGRID_LISTEN=$LISTEN
 Environment=AGENTGRID_DATA_DIR=$DB_DIR
+# The control plane reads AGENTGRID_DB (default is a RELATIVE
+# control-plane.db - under systemd cwd=/ that is an EACCES on /).
+Environment=AGENTGRID_DB=$DB_DIR/control-plane.db
 Environment=AGENTGRID_ARTIFACT_ROOT=$ARTIFACT_DIR
 # AGENTGRID_JWT_SECRET intentionally NOT set here: set it yourself via
 # `systemctl edit agentgrid-control-plane` (>=32 bytes) before exposing the
