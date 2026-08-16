@@ -235,7 +235,7 @@ jobs:
       - name: install cosign
         # Hardening P2 item 29: keyless cosign signature over the per-target
         # SHA256SUMS so consumers can verify artifact integrity independently.
-        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: sign checksums (keyless cosign)
         env:
           COSIGN_EXPERIMENTAL: "1"
