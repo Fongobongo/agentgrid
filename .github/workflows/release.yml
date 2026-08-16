@@ -42,7 +42,12 @@ jobs:
         if: matrix.cross
         run: cargo install cross --locked
 
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      # Deliberately NO rust-cache here: the host-target test build and the
+      # cross-container build share target/ paths, and a cache restored from
+      # one context (host glibc 2.39 build scripts) crashes in the other
+      # (cross container glibc < 2.28) — a flaky GLIBC-version mismatch we
+      # hit on the v0.3.2 tag. Release builds are rare; a clean build is the
+      # reproducible one.
 
       - name: test before release (host target)
         # Hardening P2 item 30: never ship binaries from a tree that does not

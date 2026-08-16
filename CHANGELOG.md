@@ -50,6 +50,12 @@
   ("Exec format error"). The step now executes only runner-arch (x86-64)
   binaries and asserts the ELF architecture of foreign-arch builds.
 
+- **Flaky aarch64 cross build (GLIBC mismatch)**: rust-cache restored
+  host-compiled build scripts into the cross container, whose older glibc
+  rejected them (`version GLIBC_2.28 not found`). Same commit passed and
+  failed depending on cache state; the release workflow now builds clean
+  (no rust-cache).
+
 ### Known issues (not gating)
 
 - **`run-disk-full.sh` e2e**: the chatty-task run reaches `failed` but no
