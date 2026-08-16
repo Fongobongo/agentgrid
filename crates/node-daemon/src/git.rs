@@ -1716,8 +1716,15 @@ mod tests {
             ],
         )
         .unwrap();
-        // Merge leaves a conflict.
-        git(&dir, &["merge", "feat"]).ok();
+        // Merge leaves a conflict. Identity flags required: git ≥2.5x checks
+        // the committer identity before even attempting the merge, and the
+        // CI runner has no global git config — without them the merge dies
+        // with "Committer identity unknown" and the fixture never conflicts.
+        git(
+            &dir,
+            &["-c", "user.name=t", "-c", "user.email=t@x", "merge", "feat"],
+        )
+        .ok();
         let conflicted = git_out(&dir, &["diff", "--name-only", "--diff-filter=U"]).unwrap();
         assert!(!conflicted.trim().is_empty(), "fixture must be conflicted");
 

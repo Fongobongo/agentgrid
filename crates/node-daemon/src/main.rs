@@ -705,6 +705,35 @@ mod tests {
     use tokio::sync::Mutex;
     use validation::run_validation;
 
+    /// Locate the adapter-fake-acp binary, building it on demand.
+    /// `cargo test` compiles bin targets only as test harnesses under
+    /// `target/debug/deps/<name>-<hash>`; the plain `target/debug/<name>`
+    /// binary these tests spawn exists only after a `cargo build`, which a
+    /// clean CI runner never ran (locally it is always left over from
+    /// previous builds, which masked this). The on-demand build is a cached
+    /// no-op when the binary already exists.
+    fn fake_acp_bin() -> std::path::PathBuf {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let find = || {
+            [
+                "../../target/debug/adapter-fake-acp",
+                "../../target/release/adapter-fake-acp",
+            ]
+            .iter()
+            .map(|p| std::path::Path::new(manifest).join(p))
+            .find(|p| p.is_file())
+        };
+        if find().is_none() {
+            let status = std::process::Command::new(env!("CARGO"))
+                .current_dir(manifest)
+                .args(["build", "--bin", "adapter-fake-acp"])
+                .status()
+                .expect("spawn cargo build adapter-fake-acp");
+            assert!(status.success(), "cargo build adapter-fake-acp failed");
+        }
+        find().expect("fake ACP agent built")
+    }
+
     /// Hardening P0 (safe node install): after a successful enroll the one-time
     /// `AGENTGRID_ENROLL_TOKEN` line must be removed from the env file so it
     /// can't be reused/leaked off disk; other vars are preserved; the file is
@@ -1164,15 +1193,7 @@ mod tests {
     async fn drive_acp_session_runs_fake_agent_and_streams_events() {
         // Make the test-only ACP agent discoverable on PATH. It is built into
         // the same target dir; locate it relative to CARGO_MANIFEST_DIR.
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let fake = [
-            "../../target/debug/adapter-fake-acp",
-            "../../target/release/adapter-fake-acp",
-        ]
-        .iter()
-        .map(|p| std::path::Path::new(manifest).join(p))
-        .find(|p| p.is_file())
-        .expect("fake ACP agent built");
+        let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
         let orig = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
@@ -1287,15 +1308,7 @@ mod tests {
     /// via second account.
     #[tokio::test]
     async fn drive_acp_session_flags_rate_limit_then_rotates() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let fake = [
-            "../../target/debug/adapter-fake-acp",
-            "../../target/release/adapter-fake-acp",
-        ]
-        .iter()
-        .map(|p| std::path::Path::new(manifest).join(p))
-        .find(|p| p.is_file())
-        .expect("fake ACP agent built");
+        let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
         let orig = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
@@ -1451,15 +1464,7 @@ mod tests {
     /// timeout — the attempt fails with `timeout`, no hang.
     #[tokio::test]
     async fn drive_acp_session_hang_mid_frame_times_out() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let fake = [
-            "../../target/debug/adapter-fake-acp",
-            "../../target/release/adapter-fake-acp",
-        ]
-        .iter()
-        .map(|p| std::path::Path::new(manifest).join(p))
-        .find(|p| p.is_file())
-        .expect("fake ACP agent built");
+        let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
         let orig = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
@@ -1575,15 +1580,7 @@ mod tests {
     /// and resolve the attempt as `cancelled` (not timeout, not success).
     #[tokio::test]
     async fn drive_acp_session_cancel_mid_prompt_turn() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let fake = [
-            "../../target/debug/adapter-fake-acp",
-            "../../target/release/adapter-fake-acp",
-        ]
-        .iter()
-        .map(|p| std::path::Path::new(manifest).join(p))
-        .find(|p| p.is_file())
-        .expect("fake ACP agent built");
+        let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
         let orig = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
@@ -1745,15 +1742,7 @@ mod tests {
             std::fs::create_dir_all(&tmp).unwrap();
             std::env::set_var("HOME", &tmp);
 
-            let manifest = env!("CARGO_MANIFEST_DIR");
-            let fake = [
-                "../../target/debug/adapter-fake-acp",
-                "../../target/release/adapter-fake-acp",
-            ]
-            .iter()
-            .map(|p| std::path::Path::new(manifest).join(p))
-            .find(|p| p.is_file())
-            .expect("fake ACP agent built");
+            let fake = fake_acp_bin();
             let bin_dir = fake.parent().unwrap();
             let orig = std::env::var("PATH").unwrap_or_default();
             std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));

@@ -30,10 +30,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           # RUSTSEC-2024-0437 (protobuf 2.28 recursion crash): pulled by the
           # `prometheus` crate for metric encoding only — no untrusted
-          # protobuf is parsed anywhere in the workspace. Tracked with the
-          # same justification in deny.toml; drop both when prometheus
-          # migrates off protobuf 2.x.
-          ignore: RUSTSEC-2024-0437
+          # protobuf is parsed anywhere in the workspace.
+          # RUSTSEC-2023-0071 (rsa Marvin Attack): no patched rsa release
+          # exists; sqlx-mysql pulls it transitively and this workspace only
+          # uses sqlx's SQLite driver (RSA paths never executed). Both are
+          # tracked with the same justification in deny.toml.
+          ignore: RUSTSEC-2024-0437 RUSTSEC-2023-0071
 
   cargo-deny:
     name: cargo deny

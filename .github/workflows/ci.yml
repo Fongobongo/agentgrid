@@ -196,10 +196,12 @@ jobs:
           toolchain: nightly
           components: miri
       - name: miri test common
-        # -Zmiri-disable-isolation: agentgrid-common's workflow-yaml tests
-        # write/read temp files, which Miri's default isolation forbids
-        # ("unsupported operation: `open` not available").
-        run: cargo +nightly miri test -p agentgrid-common -Zmiri-disable-isolation
+        # MIRIFLAGS (not a cargo -Z arg, which cargo rejects): the
+        # workflow-yaml tests write/read temp files, which Miri's default
+        # isolation forbids ("unsupported operation: `open` not available").
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +nightly miri test -p agentgrid-common
 
   two-host:
     name: physical two-host E2E (local CP + remote node)

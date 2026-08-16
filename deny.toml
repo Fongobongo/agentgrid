@@ -20,7 +20,12 @@ yanked = "deny"
 # crate, which uses it for metric encoding only — no untrusted protobuf input
 # is parsed anywhere in this workspace. Mirrored in supply-chain.yml
 # (audit-check ignore); drop both when prometheus moves off protobuf 2.x.
-ignore = ["RUSTSEC-2025-0134", "RUSTSEC-2024-0437"]
+#
+# RUSTSEC-2023-0071 (rsa 0.9.10 Marvin Attack timing sidechannel): no patched
+# version exists upstream (unfixed since 2023). Pulled transitively by
+# sqlx-mysql; this workspace only uses sqlx's SQLite driver, so the RSA code
+# paths are never executed at runtime. Mirrored in supply-chain.yml.
+ignore = ["RUSTSEC-2025-0134", "RUSTSEC-2024-0437", "RUSTSEC-2023-0071"]
 
 [licenses]
 # Allow common OSS licenses; unknown / restriction surface here.
