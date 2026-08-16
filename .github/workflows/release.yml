@@ -215,7 +215,9 @@ jobs:
                 agentgrid-acp-agent adapter-mock adapter-claude adapter-opencode SHA256SUMS
             )
           done
-          cp -r artifacts/agentgrid-x86_64-unknown-linux-musl/web/dist release-assets/web
+          # gh release create uploads files only - package the web UI
+          # instead of copying the directory.
+          tar czf release-assets/web-dist.tar.gz             -C artifacts/agentgrid-x86_64-unknown-linux-musl/web/dist .
           ls -la release-assets
       - name: attest build provenance
         # Hardening P2 item 29: GitHub provenance attestation for every release
