@@ -853,6 +853,7 @@ mod tests {
 
     #[test]
     fn unsafe_guard_strips_unset_env_when_unsandboxed() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX");
         let remove = unsafe_env_guard(SandboxKind::None);
         assert!(
@@ -869,6 +870,7 @@ mod tests {
 
     #[test]
     fn unsafe_guard_keeps_env_with_override() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX", "1");
         let remove = unsafe_env_guard(SandboxKind::None);
         assert!(remove.is_empty(), "explicit override keeps the unsafe env");

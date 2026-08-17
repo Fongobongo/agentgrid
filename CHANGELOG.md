@@ -4,6 +4,34 @@
 
 ### Fixed
 
+- **Flaky unit tests under the CI churn job (high-parallelism, repeat).**
+  Three independent races each surfaced at 16-thread test stress:
+  - `read_stream` env-var race — `read_stream` captures
+    `AGENTGRID_MAX_LINE_BYTES` at start, and `read_stream_caps_oversized_line`
+    temporarily sets it to `16`. A test starting in that window built a 16-byte
+    redactor and truncated its own lines, so `"hello"` never reached the raw
+    mirror (`read_stream_mirrors_raw_output` flake) or a secret was cut before
+    masking. Serialized the mutator and the tests whose assertions depend on
+    the knob behind a `READ_STREAM_ENV_LOCK` (mirrors the existing
+    `sandbox::tests::ENV_LOCK`).
+  - `mcp`/`profiles`/`ingest` dummy-server RST race — the test TCP servers
+    wrote the response and dropped the connection **without reading the
+    request**; closing a socket with unread request bytes races a TCP RST that
+    discards the queued response on the client side, making
+    `mcp_servers_payload` return `Null` and the `unwrap` panic. They now read
+    the request before replying and half-close the write side.
+  - `unsafe_guard_strips_unset_env_when_unsandboxed` /
+    `unsafe_guard_keeps_env_with_override` mutated the process-global
+    `AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX` outside the existing sandbox
+    `ENV_LOCK`; both now take it.
+  Stress-verified: the full `node-daemon` suite ran 10× at `--test-threads=16`
+  with 0 failures (previously reproducible flakes within 2–3 passes).
+- **Stale `Cargo.lock` broke the nightly churn job.** The committed lock pinned
+  the workspace crates at `0.3.2` while the manifests had moved to `0.3.4`, so
+  `cargo test --workspace --no-run --locked` failed with
+  "cannot update the lock file". Regenerated the lock (`cargo update
+  --workspace`); the bump touches only the workspace members, no dependency
+  churn. `--locked` full-workspace compile verified green.
 - **Sandbox spawn now clears the image ENTRYPOINT**: `docker run` passes the
   explicit `<program> <args>` after the image ref, but an image ENTRYPOINT
   (the GHCR node-daemon image ships the daemon as its ENTRYPOINT) makes docker

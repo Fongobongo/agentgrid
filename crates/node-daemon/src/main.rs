@@ -890,11 +890,27 @@ mod tests {
         Arc::new(outbox::EventOutbox::open(&dir, attempt_id).unwrap())
     }
 
+    /// Serialize the tests that set, or assert on output shaped by, the
+    /// process-global knobs `read_stream`/`EventSink` read while running
+    /// (`AGENTGRID_MAX_LINE_BYTES` default 1 MiB, `AGENTGRID_EVENT_BUF_BYTES`
+    /// default 4 MiB): `read_stream_caps_oversized_line` sets a 16-byte line
+    /// cap and a concurrently starting reader truncates its lines — "hello"
+    /// never reaches the raw mirror (`read_stream_mirrors_raw_output` flake)
+    /// or a secret is cut before masking so `***` never appears
+    /// (`validation_command_masks_secrets_in_output_and_log`); likewise
+    /// `event_sink_drops_logs_over_cap...` sets a 64-byte buffer cap that a
+    /// concurrent sink then drops events under. Mirrors
+    /// `sandbox::tests::ENV_LOCK`, which killed the same class of flake for
+    /// the AGENTGRID_SANDBOX_* knobs. A tokio (not std) mutex so the guard
+    /// can legally span the awaited `read_stream` calls.
+    static READ_STREAM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn event_sink_drops_logs_over_cap_but_keeps_terminal_state() {
         // Stage 2.1: backpressure. A chatty agent's stdout/stderr are dropped
         // once the RAM buffer exceeds the cap; status/result/error are never
         // dropped, and exactly one `output_truncated` notice is emitted.
+        let _g = READ_STREAM_ENV_LOCK.lock().await;
         std::env::set_var("AGENTGRID_EVENT_BUF_BYTES", "64");
         let sink = EventSink::new(
             "a1".into(),
@@ -958,6 +974,7 @@ mod tests {
     async fn validation_command_masks_secrets_in_output_and_log() {
         // Audit 22.1.1: a secret that appears in validation stdout must be
         // masked in BOTH the streamed events and the validation.log artifact.
+        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("ag-valmsk-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let sink = EventSink::new(
@@ -1063,6 +1080,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_stream_mirrors_raw_output() {
+        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("ag-raw-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
         let raw_path = std::path::Path::new(&dir).join("raw.log");
@@ -1104,6 +1122,7 @@ mod tests {
         // must not silently drop its final partial output. The partial tail is
         // flushed as a final raw line so the crashed adapter's last half-event
         // is preserved (best-effort) instead of lost.
+        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("ag-part-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
         let raw_path = std::path::Path::new(&dir).join("raw.log");
@@ -1145,7 +1164,9 @@ mod tests {
     }
 
     /// Accept anything on a port and answer 200 OK, so the daemon's event sink
-    /// flushes without retry/backoff noise during the test.
+    /// flushes without retry/backoff noise during the test. Serves a full
+    /// HTTP/1.1 keep-alive connection (see `mcp::tests::dummy_profile_server`
+    /// for the pooled-connection RST race this avoids).
     async fn dummy_ingest_server() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1156,9 +1177,19 @@ mod tests {
                     Err(_) => break,
                 };
                 tokio::spawn(async move {
-                    let _ = s
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                        .await;
+                    let mut buf = [0u8; 65536];
+                    loop {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                        if s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                 });
             }
         });
@@ -1168,6 +1199,9 @@ mod tests {
     /// A dummy CP that routes `/cancel` requests to a fixed `CancelState`
     /// (always cancel-requested) and everything else to empty 200 OK. Used to
     /// exercise `drive_acp_session`'s cancel race without a real control plane.
+    /// Serves keep-alive connections (`wait_for_cancel` polls the same pooled
+    /// connection repeatedly; exiting after one response would strand the pool
+    /// on a closed socket).
     async fn dummy_cancel_server() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1178,21 +1212,30 @@ mod tests {
                     Err(_) => break,
                 };
                 tokio::spawn(async move {
-                    let mut buf = [0u8; 512];
-                    let _ = s.read(&mut buf).await;
-                    let req = String::from_utf8_lossy(&buf);
-                    if req.contains("/cancel") {
-                        let body = r#"{"cancel_requested":true}"#;
-                        let resp = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
-                            len = body.len(),
-                            body = body
-                        );
-                        let _ = s.write_all(resp.as_bytes()).await;
-                    } else {
-                        let _ = s
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        if req.contains("/cancel") {
+                            let body = r#"{"cancel_requested":true}"#;
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
+                                len = body.len(),
+                                body = body
+                            );
+                            if s.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        } else if s
                             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 });
             }
@@ -1708,7 +1751,8 @@ mod tests {
     /// A dummy CP that serves a fixed JSON body for `GET /v1/node/skills-trust`
     /// and 200 OK (empty) for everything else. Used to exercise the
     /// `compose_skills_block` → `session/prompt` wiring inside
-    /// `drive_acp_session` without a real control plane.
+    /// `drive_acp_session` without a real control plane. Serves keep-alive
+    /// connections (see `dummy_ingest_server` for the race this avoids).
     async fn dummy_skills_server(skills_body: &'static str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1719,20 +1763,29 @@ mod tests {
                     Err(_) => break,
                 };
                 tokio::spawn(async move {
-                    let mut buf = [0u8; 1024];
-                    let _ = s.read(&mut buf).await;
-                    let req = String::from_utf8_lossy(&buf);
-                    if req.starts_with("GET /v1/node/skills-trust") {
-                        let resp = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            skills_body.len(),
-                            skills_body
-                        );
-                        let _ = s.write_all(resp.as_bytes()).await;
-                    } else {
-                        let _ = s
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        if req.starts_with("GET /v1/node/skills-trust") {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                skills_body.len(),
+                                skills_body
+                            );
+                            if s.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        } else if s
                             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 });
             }
@@ -1897,6 +1950,7 @@ mod tests {
     /// at the line cap instead of growing `acc` without bound; the pipe keeps draining.
     #[tokio::test]
     async fn read_stream_caps_oversized_line() {
+        let _g = READ_STREAM_ENV_LOCK.lock().await;
         std::env::set_var("AGENTGRID_MAX_LINE_BYTES", "16");
         let sink = EventSink::new(
             "a-cap".into(),
@@ -1929,6 +1983,7 @@ mod tests {
     /// produces events instead of crashing the reader.
     #[tokio::test]
     async fn read_stream_handles_invalid_utf8() {
+        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let sink = EventSink::new(
             "a-utf8".into(),
             reqwest::Client::new(),
@@ -1964,6 +2019,7 @@ mod tests {
     /// the redactor: fix the path, do not weaken the test.
     #[tokio::test]
     async fn read_stream_never_leaks_secrets_regulator() {
+        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let secret = "sk-live-abc123XYZ".to_string();
         let sink = EventSink::new(
             "a-secrets".into(),

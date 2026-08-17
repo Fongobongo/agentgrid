@@ -56,9 +56,14 @@ pub async fn mcp_servers_payload(client: &Client, server: &str, subset: &[String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// Accept anything on a port and answer 200 OK with `body`.
+    /// Accept anything on a port and answer 200 OK with `body`. Serves a full
+    /// HTTP/1.1 keep-alive connection: reqwest pools the connection, and a
+    /// handler that exits after one response races a client reuse — the pooled
+    /// second request hits a closed socket and dies on a TCP RST (flaky `Null`
+    /// payloads under 16-thread test stress). Looping until the client closes
+    /// keeps pooled connections serviceable.
     async fn dummy_profile_server(body: &'static str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -69,11 +74,20 @@ mod tests {
                     Err(_) => break,
                 };
                 tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                         body.len(), body
                     );
-                    let _ = s.write_all(resp.as_bytes()).await;
+                    loop {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                        if s.write_all(resp.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
                 });
             }
         });

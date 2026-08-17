@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentgrid-acp"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "agentgrid-common",
  "axum",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "agentgrid-adapters"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "agentgrid-common",
  "libc",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agentgrid-cli"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "agentgrid-common",
  "agentgrid-skills",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "agentgrid-common"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "chrono",
  "proptest",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "agentgrid-control-plane"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "agentgrid-common",
  "agentgrid-skills",
@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "agentgrid-gateway"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "agentgrid-common",
  "anyhow",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "agentgrid-node-daemon"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "agentgrid-acp",
  "agentgrid-adapters",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "agentgrid-skills"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "regex",
  "serde",
