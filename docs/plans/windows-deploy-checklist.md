@@ -332,9 +332,9 @@ worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/
 
 - [x] `curl -fsS http://<cp>/health/ready` → OK
 - [x] Нода в списке `/v1/nodes` не `degraded`, heartbeat обновляется
-- [ ] `ag nodes doctor <id>` без ошибок
+- [x] `ag nodes doctor <id>` без ошибок
 - [x] Mock-задача дошла до `succeeded`, события видны в `/v1/tasks/<id>/events`
-- [ ] `/metrics` отдаёт счётчики (транспорт, SQLite lock failures — см. `OPS-STARTER.md`)
+- [x] `/metrics` отдаёт счётчики (транспорт, SQLite lock failures — см. `OPS-STARTER.md`)
 
 ## Откат (полная зачистка)
 
