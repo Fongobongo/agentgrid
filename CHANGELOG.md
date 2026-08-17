@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Sandbox spawn now clears the image ENTRYPOINT**: `docker run` passes the
+  explicit `<program> <args>` after the image ref, but an image ENTRYPOINT
+  (the GHCR node-daemon image ships the daemon as its ENTRYPOINT) makes docker
+  exec `<entrypoint> <program> <args>` — the daemon starts inside the sandbox
+  and dies, so the node-daemon image could not serve as a sandbox base. The
+  spawn head now adds `--entrypoint ""` so the explicit command wins for any
+  image (regression test `sandbox::tests::docker_clears_image_entrypoint`).
+
+### Changed
+
+- **Windows deploy checklist, track B (podman sandbox)** — verified on the
+  WSL2 lab (podman 5.7.0, rootless): replaced the GHCR-image alternative with
+  the local sandbox-image recipe (ubuntu:24.04 + adapter binaries, `ENTRYPOINT
+  []`; mind the exec bit before `COPY` — a 644 binary makes the in-image
+  adapter probe fail), documented the rootless drop-in
+  (`RuntimeDirectory`/`XDG_RUNTIME_DIR`, subuid/subgid), recorded the measured
+  cold start (raw container start 0.47–0.9 s, end-to-end task ~0.7 s) and
+  marked the track complete. Also fixed the stale `ghcr.io/…/agent-sandbox`
+  default-image reference in `docs/deploy/sandbox-benchmark.md` (the actual
+  default is `ubuntu:24.04`).
+
 ## [v0.3.4] — 2026-08-17
 
 ### Fixed

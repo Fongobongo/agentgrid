@@ -7,9 +7,12 @@
 //! `AGENTGRID_SANDBOX` (`none` | `docker`) and `AGENTGRID_SANDBOX_IMAGE`.
 //!
 //! `sandbox_command` returns the `(program, args)` to spawn: either the raw
-//! command, or a hardened `docker run --rm -i --cap-drop=ALL … <image> -- <cmd>`
-//! prefix. Both the wrapper path and the ACP path route through it. Docker
-//! hardening knobs (plan §25): `AGENTGRID_SANDBOX_NETWORK` (default `none`),
+//! command, or a hardened
+//! `docker run --rm -i --entrypoint "" --cap-drop=ALL … <image> <cmd>`
+//! prefix (`--entrypoint ""` clears any image ENTRYPOINT so the explicit
+//! command wins). Both the wrapper path and the ACP path route through it.
+//! Docker hardening knobs (plan §25): `AGENTGRID_SANDBOX_NETWORK` (default
+//! `none`),
 //! `AGENTGRID_SANDBOX_READ_ONLY=1` (read-only root + tmpfs `/tmp`),
 //! `AGENTGRID_SANDBOX_PIDS_LIMIT`, `AGENTGRID_SANDBOX_MEMORY`,
 //! `AGENTGRID_SANDBOX_CPUS`, `AGENTGRID_SANDBOX_IMAGE_DIGEST` (pin by digest).
@@ -117,9 +120,10 @@ fn parse_ipv6(s: &str) -> bool {
 
 /// Build the leading `docker run …` argument vector shared by both spawn
 /// paths: housekeeping flags (`--rm -i`), the security hardening flags (plan
-/// §25: cap-drop, no-new-privileges, network none, optional read-only + tmpfs,
-/// optional pids/memory/cpus limits), the worktree mount at `/ag`, and the
-/// `--` separator. The caller appends `<image> [program args]` after it.
+/// §25: entrypoint clear, cap-drop, no-new-privileges, network none, optional
+/// read-only + tmpfs, optional pids/memory/cpus limits), the worktree mount at
+/// `/ag`, and the `--` separator. The caller appends `<image> [program args]`
+/// after it.
 ///
 /// Knobs (all optional, env-driven so the sandbox wrapper need not change
 /// its call sites to tighten isolation): `AGENTGRID_SANDBOX_NETWORK` (default
@@ -139,6 +143,12 @@ fn docker_run_head(
         "run".to_string(),
         "--rm".to_string(),
         "-i".to_string(),
+        // The node always spawns an explicit `<program> <args>`; an image
+        // ENTRYPOINT (the GHCR node image ships one: the daemon itself) would
+        // swallow the program and run the entrypoint with our args instead.
+        // Clear it so the explicit command wins for ANY image.
+        "--entrypoint".to_string(),
+        "".to_string(),
         "--cap-drop=ALL".to_string(),
         "--security-opt=no-new-privileges".to_string(),
     ];
@@ -513,6 +523,38 @@ mod tests {
         );
         assert_eq!(p, "adapter-x");
         assert!(a.is_empty());
+    }
+
+    #[test]
+    fn docker_clears_image_entrypoint() {
+        // Lab finding (WSL2 track B, 2026-08-17): an image whose ENTRYPOINT is
+        // a binary (the GHCR node image ships the daemon as ENTRYPOINT) swallows
+        // the explicit `<program> <args>` — docker/podman runs
+        // `<entrypoint> <program> <args>` instead of `<program> <args>`. The
+        // node always spawns an explicit command, so it must clear the
+        // entrypoint; `--entrypoint ""` makes the explicit command win for any
+        // image.
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "adapter-mock",
+            &["--prompt".into(), "hi".into()],
+            std::path::Path::new("/w"),
+            None,
+            false,
+        );
+        clear_sandbox_env();
+        let idx = a
+            .iter()
+            .position(|x| x == "--entrypoint")
+            .expect("--entrypoint flag missing");
+        assert_eq!(
+            a[idx + 1],
+            "",
+            "entrypoint must be cleared so the explicit command wins"
+        );
     }
 
     #[test]

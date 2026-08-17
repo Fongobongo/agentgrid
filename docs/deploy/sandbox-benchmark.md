@@ -6,9 +6,11 @@ cold-start cost. Run it before deciding whether to pre-warm containers.
 
 ## How to run
 
-1. Start a control plane and one node daemon (with the sandbox image pre-pulled
-   `docker pull $AGENTGRID_SANDBOX_IMAGE`, default
-   `ghcr.io/agentgrid/agent-sandbox:latest`).
+1. Start a control plane and one node daemon (with the sandbox image pre-pulled:
+   `docker pull $AGENTGRID_SANDBOX_IMAGE`; the default is `ubuntu:24.04` — see
+   `crates/node-daemon/src/sandbox.rs`. An image that bakes the adapters in is
+   preferable; note the spawn head clears the image ENTRYPOINT, so even a daemon
+   ENTRYPOINT image can still be used).
 2. Run the benchmark — it drives the control plane twice, once per sandbox
    mode, and prints `submit_ms` per iteration plus a per-mode average:
 

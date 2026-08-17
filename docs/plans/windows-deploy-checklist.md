@@ -171,46 +171,71 @@
 (`--cap-drop=ALL`, `--network none`, read-only корень). **Время:** +15–20 мин к A.
 **Откат:** удалить DropIn → возврат к sandbox=none.
 
-- [ ] Установить рантайм + алиас `docker`→`podman` (spawn-путь проекта хардкодит `docker run`):
+- [x] Установить рантайм + алиас `docker`→`podman` (spawn-путь проекта хардкодит `docker run`):
   ```bash
   sudo apt update && sudo apt install -y podman podman-docker
   ```
-- [ ] Проверить версию рантайма (это же делает стартовая проба ноды):
+  (Лаборатория 2026-08-17: podman 5.7.0; для rootless также нужны записи в `/etc/subuid`/
+  `/etc/subgid` для пользователя `agentgrid`.)
+- [x] Проверить версию рантайма (это же делает стартовая проба ноды):
   ```bash
   podman version --format '{{.Server.Version}}'
   docker version --format '{{.Server.Version}}'   # должен ответить через алиас
   ```
-- [ ] Подтянуть образ песочницы и зафиксировать digest:
+- [x] Подтянуть базовый образ, собрать образ песочницы с адаптером и зафиксировать digest:
   ```bash
   podman pull ubuntu:24.04
-  DIGEST=$(podman inspect --format '{{.Digest}}' docker.io/library/ubuntu:24.04)
+  podman build -t agentgrid-sandbox:lab -f Dockerfile.sandbox .
+  DIGEST=$(podman inspect --format '{{.Digest}}' agentgrid-sandbox:lab)
   echo "$DIGEST"   # sha256:…
   ```
-  (Альтернатива — образ проекта с запечёнными адаптерами:
-  `podman pull ghcr.io/<owner>/agentgrid-node-daemon:v0.3.2`.)
-- [ ] Создать DropIn к юниту ноды — `/etc/systemd/system/agentgrid-node.service.d/sandbox.conf`:
+  GHCR-образ ноды (`ghcr.io/<owner>/agentgrid-node-daemon:…`) как база песочницы **не годится**:
+  его ENTRYPOINT — демон ноды, внутри песочницы стартует демон и умирает. Вместо него —
+  локальный образ: `ubuntu:24.04` + адаптеры, `ENTRYPOINT []`:
+
+  ```dockerfile
+  FROM ubuntu:24.04
+  COPY adapter-mock /usr/local/bin/adapter-mock
+  ENTRYPOINT []
+  ```
+
+  Подводный камень: `COPY` сохраняет режимы исходного файла — если бинарь на хосте лежит
+  с mode 644 (как в релизном тарболле), в образе он будет не исполняемым, и проба
+  `command -v adapter-mock` вернёт «adapter missing». `chmod 0755` перед сборкой обязателен.
+- [x] Создать DropIn к юниту ноды — `/etc/systemd/system/agentgrid-node.service.d/sandbox.conf`:
   ```ini
   [Service]
+  RuntimeDirectory=agentgrid
+  Environment=XDG_RUNTIME_DIR=/run/agentgrid
   Environment=AGENTGRID_SANDBOX=podman
   Environment=AGENTGRID_SANDBOX_RUNTIME=podman
   Environment=AGENTGRID_SANDBOX_NETWORK=none
-  Environment=AGENTGRID_SANDBOX_IMAGE=ubuntu:24.04
+  Environment=AGENTGRID_SANDBOX_IMAGE=agentgrid-sandbox:lab
   Environment=AGENTGRID_SANDBOX_IMAGE_DIGEST=<sha256-из-предыдущего-шага>
   ```
   Пин по digest обязателен (fail closed при отсутствии пина — Hardening §32).
-- [ ] Перезапустить ноду и убедиться в логах, что рантайм найден и probe адаптера в образе прошёл:
+  Для rootless-подмана сервисному пользователю нужен приватный runtime-каталог:
+  `RuntimeDirectory=agentgrid` + `XDG_RUNTIME_DIR` в том же drop-in.
+- [x] Перезапустить ноду и убедиться в логах, что рантайм найден и probe адаптера в образе прошёл:
   ```bash
   sudo systemctl daemon-reload && sudo systemctl restart agentgrid-node
   journalctl -u agentgrid-node --no-pager | grep -iE "runtime|sandbox|adapter"
   # ожидаемо: "container runtime ready" и отсутствие degraded
   ```
-- [ ] Отправить задачу (как в A.6) и убедиться, что спавн пошёл через контейнер:
+  (Лаборатория: `adapter present in sandbox image`, `container runtime ready`, runtime 5.7.0.)
+- [x] Отправить задачу (как в A.6) и убедиться, что спавн пошёл через контейнер:
   ```bash
-  journalctl -u agentgrid-node --no-pager | grep -i "docker run"
-  podman ps -a | head    # следы --rm-контейнеров
+  journalctl -u agentgrid-node --no-pager | grep -i "container create"
+  runuser -u agentgrid -- env XDG_RUNTIME_DIR=/run/agentgrid podman ps -a | head
   ```
-- [ ] Сверить overhead холодного старта с базлайном `docs/deploy/sandbox-benchmark.md`
-  (ориентир: +1–2 с на попытку)
+  (Лаборатория: mock-задача `succeeded`, в журнале полный цикл `container create/init/remove`
+  с label `agentgrid.node=<id>`; `podman ps -a` пуст — `--rm` отработал. Запуск контейнера
+  идёт из rootless-стора сервисного пользователя, поэтому `podman ps` — от `agentgrid`,
+  не от root.)
+- [x] Сверить overhead холодного старта с базлайном `docs/deploy/sandbox-benchmark.md`
+  (ориентир: +1–2 с на попытку) — в лаборатории чистый
+  `podman run --rm --cap-drop=ALL --network none <img> true` занимал 0.47–0.91 с,
+  задача end-to-end (с тиком CP) — ~0.7 с.
 
 **Нюанс rootless:** контейнер стартует от пользователя; если адаптеру в образе нужны права на
 worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/etc/subgid`). Workspace обязан лежать
