@@ -67,4 +67,4 @@ serde_json.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 # Plan 0.3 2.2: WS test client (plaintext in-process tests).
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
