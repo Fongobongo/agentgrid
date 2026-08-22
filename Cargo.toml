@@ -10,6 +10,9 @@ members = [
     "crates/acp",
     "crates/gateway",
 ]
+# cargo-fuzz crate: its own workspace (libfuzzer needs nightly + sanitizer
+# flags that must not leak into the stable CI/test builds).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.3.5"
