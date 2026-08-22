@@ -54,7 +54,11 @@
   shimming `posix_spawnattr_init`, so the scheduled UB job died on
   "unsupported operation: can't call foreign function". The spawning tests
   are now `#[cfg_attr(miri, ignore)]` — they exercise the fail-closed error
-  path, not UB, and keep running under the normal test job.
+  path, not UB, and keep running under the normal test job. Past that crash
+  the job still blew its 30-min timeout: the state-machine proptests run
+  ~256 cases each, 2.5-4 min under Miri interpretation. The Miri job now
+  sets `PROPTEST_CASES=25` (UB checking needs code-path coverage, not
+  statistical power) and a 40-min timeout.
 
 ### Changed
 

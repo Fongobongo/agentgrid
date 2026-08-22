@@ -187,7 +187,7 @@ jobs:
     # machine and DTO layers (the unsafe-free core). Only `agentgrid-common`
     # is run — the tokio/sqlx crates do not support Miri. Nightly + manual.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: install nightly + miri
@@ -199,8 +199,13 @@ jobs:
         # MIRIFLAGS (not a cargo -Z arg, which cargo rejects): the
         # workflow-yaml tests write/read temp files, which Miri's default
         # isolation forbids ("unsupported operation: `open` not available").
+        # PROPTEST_CASES: the state-machine proptests run ~256 cases each,
+        # 2.5-4 min under Miri interpretation — the suite blows the job
+        # timeout. UB checking needs code-path coverage, not statistical
+        # power; 25 cases keep every transition path exercised.
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
+          PROPTEST_CASES: 25
         run: cargo +nightly miri test -p agentgrid-common
 
   two-host:
