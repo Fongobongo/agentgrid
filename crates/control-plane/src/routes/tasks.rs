@@ -91,9 +91,9 @@ pub async fn list_tasks(
     {
         Ok(items) => {
             // Audit X-C5: compare against the EFFECTIVE (server-capped) page size —
-    // against the raw requested limit a `?limit=2000` client got 1000 rows,
-    // saw `len != limit`, and silently dropped the rest as "no more".
-    let next_cursor = if items.len() == q.limit.unwrap_or(100).min(1000) as usize {
+            // against the raw requested limit a `?limit=2000` client got 1000 rows,
+            // saw `len != limit`, and silently dropped the rest as "no more".
+            let next_cursor = if items.len() == q.limit.unwrap_or(100).min(1000) as usize {
                 items.last().map(|t| format!("{},{}", t.created_at, t.id))
             } else {
                 None
