@@ -34,22 +34,26 @@ impl StreamingRedactor {
         loop {
             // Find the next newline
             if let Some(nl_pos) = self.buf.iter().position(|&b| b == b'\n') {
-                // Extract line up to (not including) newline
-                let line = &self.buf[..nl_pos];
                 // Check line cap on the unmasked line
-                if line.len() >= self.line_cap {
-                    // Emit truncated line
-                    let truncated = &line[..self.line_cap];
+                if nl_pos >= self.line_cap {
+                    // Audit X-N3: forced split of an over-long NEWLINE-
+                    // terminated line. This branch used to drop everything
+                    // past the cap without carrying an overlap, so a secret
+                    // straddling the cap leaked as an unmasked fragment.
+                    // Emit the capped window, then keep the same trailing
+                    // overlap the no-newline branch uses so the straddling
+                    // secret is masked whole in the next emitted piece.
+                    let truncated = &self.buf[..self.line_cap];
                     let mut masked = mask_line(truncated, &self.secrets, self.min_len);
                     masked.push_str("... [truncated]");
                     lines.push(masked.into_bytes());
-                    // Remove the newline and continue (keep rest of buffer)
-                    self.buf = self.buf[nl_pos + 1..].to_vec();
+                    let overlap = self.overlap_len();
+                    self.buf.drain(..self.line_cap - overlap);
                     continue;
                 }
 
                 // Normal line - mask and emit
-                let masked = mask_line(line, &self.secrets, self.min_len);
+                let masked = mask_line(&self.buf[..nl_pos], &self.secrets, self.min_len);
                 lines.push(masked.into_bytes());
 
                 // Remove the processed line + newline from buffer
@@ -304,5 +308,27 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(String::from_utf8_lossy(&lines[0]), "hello");
         assert_eq!(String::from_utf8_lossy(&lines[1]), "world");
+    }
+
+    #[test]
+    fn masks_secret_spanning_cap_in_newlined_line() {
+        // Audit X-N3 regression: an over-long line WITH a newline must carry
+        // the same overlap as the no-newline forced split, so a secret
+        // straddling the cap is masked whole instead of leaking a fragment.
+        let mut redactor = StreamingRedactor::new(vec!["secret123".to_string()], 6, 16);
+        let input = format!("{}secret123{}\n", "x".repeat(12), "y".repeat(4));
+        let mut lines = redactor.feed(input.as_bytes());
+        if let Some(tail) = redactor.finish() {
+            lines.push(tail);
+        }
+        let joined = lines
+            .iter()
+            .map(|l| String::from_utf8_lossy(l).into_owned())
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(
+            !joined.contains("secret123"),
+            "secret straddling cap in a newline-terminated line must be masked: {joined}"
+        );
     }
 }

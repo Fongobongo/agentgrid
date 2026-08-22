@@ -797,29 +797,38 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         };
         let code = run.code;
         let kill_reason = run.kill_reason;
-        // Stage 2.1: record the terminal completion BEFORE the post-adapter
-        // sends so a daemon kill during the (possibly blocking) flush/upload
-        // window still redelivers the completion on the next startup. The exit
-        // code is known here; commit_sha/validation verdict are refined later
-        // (record() replaces the prior line, latest wins).
-        let early_req = CompleteAttemptRequest {
-            exit_code: code,
-            commit_sha: None,
-            error_code: kill_reason.map(|k| k.to_string()),
-            resolved_base_sha: None,
-            remote_head_at_start: None,
-            remote_head_at_finish: None,
-            acp_session_id: None,
-            plan: None,
-            provenance: assignment.provenance.clone().or_else(provenance_from_env),
-            pending_artifacts: vec![],
-        };
-        if let Err(e) = cfg.completion_outbox.record(
-            &assignment.attempt_id,
-            &early_req,
-            &assignment.fencing_token,
-        ) {
-            tracing::warn!(attempt_id = %assignment.attempt_id, "early completion record failed: {e}");
+        // Stage 2.1 / audit X-N6: record the terminal completion BEFORE the
+        // post-adapter sends so a daemon kill during the (possibly blocking)
+        // flush/upload window still redelivers a terminal outcome on the next
+        // startup. Only failures are recorded here: at this point the exit
+        // code is known but the validation/eval verdict is NOT — persisting a
+        // provisional success let a crash after a failed validation redeliver
+        // a false `succeeded` (ND-4 redelivery wins over re-running, so the
+        // wrong terminal state would stand). A lost success is safe: the CP
+        // reaper fails the attempt and the task retries.
+        if code != 0 {
+            let early_req = CompleteAttemptRequest {
+                exit_code: code,
+                commit_sha: None,
+                error_code: kill_reason.as_ref().map(|k| k.to_string()),
+                resolved_base_sha: None,
+                remote_head_at_start: None,
+                remote_head_at_finish: None,
+                acp_session_id: None,
+                plan: None,
+                provenance: assignment.provenance.clone().or_else(provenance_from_env),
+                pending_artifacts: vec![],
+            };
+            if let Err(e) = cfg.completion_outbox.record(
+                &assignment.attempt_id,
+                &early_req,
+                &assignment.fencing_token,
+            ) {
+                tracing::warn!(
+                    attempt_id = %assignment.attempt_id,
+                    "early completion record failed: {e}"
+                );
+            }
         }
         // Single-shot drain: don't block for tens of seconds on a down CP; the
         // flusher loop + durable outbox cover redelivery.

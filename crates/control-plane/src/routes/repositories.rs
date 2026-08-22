@@ -90,7 +90,7 @@ pub async fn list_repositories(
     };
     match state.store.list_repositories(after, q.limit).await {
         Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100).min(1000) as usize {
                 items.last().map(|r| format!("{},{}", r.created_at, r.id))
             } else {
                 None

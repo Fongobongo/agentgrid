@@ -39,7 +39,7 @@ pub async fn list_approvals_handler(
     };
     match state.store.list_approvals(status, after, q.limit).await {
         Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100).min(1000) as usize {
                 items.last().map(|a| format!("{},{}", a.created_at, a.id))
             } else {
                 None

@@ -67,6 +67,18 @@ pub async fn materialize_eval_cases(
         .context("create evals dir")?;
     let mut out = Vec::new();
     for name in case_names {
+        // Audit X-N5: the case name arrives from the CP-supplied assignment;
+        // sanitize it like every other CP-controlled path segment
+        // (artifact_spool::safe_segment) so a hostile `../..` cannot write
+        // outside the worktree's evals dir.
+        let safe: String = name
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+            .collect();
+        if safe.is_empty() || safe.starts_with('.') || safe.contains("..") {
+            tracing::warn!(case = %name, "unsafe eval-case file name; skipping");
+            continue;
+        }
         let url = format!("{server}/v1/node/tasks/{task_id}/artifacts/{name}");
         let resp = client
             .get(&url)
@@ -82,10 +94,10 @@ pub async fn materialize_eval_cases(
             continue;
         }
         let body = resp.text().await.context("read eval case body")?;
-        let path = dir.join(name);
+        let path = dir.join(&safe);
         tokio::fs::write(&path, body)
             .await
-            .with_context(|| format!("write eval case {name}"))?;
+            .with_context(|| format!("write eval case {safe}"))?;
         out.push(path);
     }
     Ok(out)
@@ -176,6 +188,11 @@ pub async fn probe_evals(workdir: &Path, timeout: Duration) -> Result<EvalOutcom
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
+        // Audit X-N4 (parity with validation.rs): on an unsandboxed run the
+        // eval `sh -c` must not inherit the daemon's unsafe-bypass env.
+        for k in crate::sandbox::unsafe_env_guard(kind) {
+            cmd.env_remove(k);
+        }
         let (code, tail, timed_out) = run_capture(&mut cmd, timeout).await;
         if timed_out {
             ok = false;
@@ -237,6 +254,12 @@ async fn run_capture(
         Ok(Ok(_)) => false,
         Ok(Err(_)) => false,
         Err(_) => {
+            // Audit X-N4: the eval runs as its own process group, so a bare
+            // `child.kill()` only killed the direct child — any grandchild
+            // (a daemon the case spawned) survived holding the stdout/stderr
+            // pipes and hung the reader joins below forever. Kill the whole
+            // group like validation.rs does.
+            crate::completion::terminate_group(child.id().unwrap_or(0));
             let _ = child.kill().await;
             let _ = child.wait().await;
             true

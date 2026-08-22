@@ -82,6 +82,44 @@ impl Store {
             .await
     }
 
+    /// Audit X-C3: full-table status counts for /metrics. `list_tasks()`
+    /// caps at MAX_TASKS oldest rows, which froze every task gauge and
+    /// outcome counter (and silently skewed alerting) once the table grew
+    /// past the cap.
+    pub async fn task_status_counts(&self) -> Result<Vec<(String, i64)>> {
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT status, COUNT(*) FROM tasks GROUP BY status")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    /// Audit X-C3: durations (seconds) of the most recent terminal tasks —
+    /// histogram input for /metrics, newest first so the window tracks live
+    /// traffic instead of the oldest page.
+    pub async fn recent_terminal_task_seconds(&self, limit: i64) -> Result<Vec<i64>> {
+        let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT finished_at, created_at FROM tasks \
+             WHERE finished_at IS NOT NULL AND started_at IS NOT NULL \
+             ORDER BY created_at DESC, id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (f, c) in rows {
+            if let (Some(f), Some(c)) = (f, c) {
+                if let (Ok(fdt), Ok(cdt)) = (
+                    chrono::DateTime::parse_from_rfc3339(&f),
+                    chrono::DateTime::parse_from_rfc3339(&c),
+                ) {
+                    out.push((fdt - cdt).num_seconds().max(0));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Hardening P2 item 20: list tasks with optional server-side filters
     /// (`status`, `repository`, `node_id`) plus the same row cap. Each filter
     /// is exact match; `None` means no predicate. Symbol/leftover lexic of

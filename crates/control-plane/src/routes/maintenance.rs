@@ -93,8 +93,17 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         Ok(n) => n,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".into_response()),
     };
-    let tasks = match state.store.list_tasks().await {
+    // Audit X-C3: task gauges/counters used to be computed from
+    // `list_tasks()` — the oldest 1000 rows only — so once the table grew
+    // past the cap the outcome counters froze and running-task alerts went
+    // blind to new tasks. Full-table GROUP BY for counts; newest-terminal
+    // window for the duration histogram.
+    let task_counts = match state.store.task_status_counts().await {
         Ok(t) => t,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".into_response()),
+    };
+    let durations = match state.store.recent_terminal_task_seconds(1000).await {
+        Ok(d) => d,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".into_response()),
     };
     let attempts = state.store.count_attempts().await.unwrap_or(0);
@@ -104,34 +113,28 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         *node_status.entry(format!("{}", n.status)).or_insert(0) += 1;
     }
     let mut task_status = std::collections::HashMap::<String, u64>::new();
-    for t in &tasks {
-        *task_status.entry(format!("{}", t.status)).or_insert(0) += 1;
+    for (st, c) in &task_counts {
+        *task_status.entry(st.clone()).or_insert(0) += *c as u64;
     }
 
     // Task duration histogram + terminal outcome counters (Stage 5.2).
     let mut buckets: [(u64, u64); 5] = [(60, 0), (300, 0), (1800, 0), (3600, 0), (u64::MAX, 0)];
     let mut dur_sum = 0u64;
     let mut dur_count = 0u64;
-    let mut outcome: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for t in &tasks {
-        if let (Some(f), c) = (t.finished_at.as_deref(), t.created_at.as_str()) {
-            if let (Ok(fdt), Ok(cdt)) = (
-                chrono::DateTime::parse_from_rfc3339(f),
-                chrono::DateTime::parse_from_rfc3339(c),
-            ) {
-                let secs = (fdt - cdt).num_seconds().max(0) as u64;
-                dur_sum += secs;
-                dur_count += 1;
-                for b in buckets.iter_mut() {
-                    if secs <= b.0 {
-                        b.1 += 1;
-                    }
-                }
+    for secs in &durations {
+        let secs = *secs as u64;
+        dur_sum += secs;
+        dur_count += 1;
+        for b in buckets.iter_mut() {
+            if secs <= b.0 {
+                b.1 += 1;
             }
         }
-        let st = format!("{}", t.status);
+    }
+    let mut outcome: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for (st, c) in &task_counts {
         if st == "succeeded" || st == "failed" || st == "cancelled" {
-            *outcome.entry(st).or_insert(0) += 1;
+            outcome.insert(st.clone(), *c as u64);
         }
     }
 
@@ -469,7 +472,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         .iter()
     {
         s.push_str(&format!(
-            "agentgrid_validation_outcomes_total{{outcome=\"{k}\"}} {v}\n"
+            "agentgrid_validation_outcomes_total{{outcome=\"{}\"}} {v}\n",
+            prom_label(k)
         ));
     }
     s.push_str(
@@ -484,7 +488,8 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         .iter()
     {
         s.push_str(&format!(
-            "agentgrid_attempts_by_security_profile_total{{profile=\"{k}\"}} {v}\n"
+            "agentgrid_attempts_by_security_profile_total{{profile=\"{}\"}} {v}\n",
+            prom_label(k)
         ));
     }
 

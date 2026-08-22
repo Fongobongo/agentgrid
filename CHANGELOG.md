@@ -4,6 +4,55 @@
 
 ### Fixed
 
+- **A secret straddling the line-cap leaked through the redactor's
+  newline-truncation path (audit X-N3).** The streaming redactor carries a
+  trailing overlap when it force-splits a newline-less overflow, but the
+  over-long-line-with-newline branch dropped everything past the cap with no
+  overlap — a key crossing `AGENTGRID_MAX_LINE_BYTES` was published as an
+  unmasked fragment. Both branches now carry the same overlap; the middle of
+  the line is also streamed (masked) instead of silently discarded.
+- **A timed-out eval probe could hang the attempt forever (audit X-N4).**
+  Eval commands run as their own process group but the timeout arm killed
+  only the direct child — any grandchild survived holding stdout/stderr, so
+  the pipe-reader joins never returned. Timeout now kills the whole group
+  (same escalation as validation), and unsandboxed eval runs get the same
+  unsafe-env guard as every other spawn.
+- **Eval-case file names were written unsanitized (audit X-N5).** The name
+  comes from the CP-supplied assignment and went straight into
+  `dir.join(name)`; a hostile `../../x` escaped the worktree. Names are now
+  filtered to safe segment characters with traversal rejected.
+- **A crash between agent exit and the final report could publish a false
+  success (audit X-N6).** The durable early-completion record persisted
+  `exit=0` before validation/eval ran; if the daemon died after a failed
+  validation, startup recovery redelivered the provisional record and the CP
+  marked the attempt `succeeded` (redelivery wins over re-running). Only
+  failures are recorded early now — a lost success is recoverable (reaper →
+  retry), a false one was not.
+- **`/metrics` task gauges and outcome counters were computed from the
+  oldest 1000 tasks (audit X-C3).** `list_tasks()` caps at the oldest page,
+  so past that size the counters froze and running-task alerting went blind
+  to new tasks. Counts now come from a full-table GROUP BY and the duration
+  histogram from the newest terminal window.
+- **Prometheus label injection via node-supplied values (audit X-C4).** The
+  `validation_outcomes_total` / `attempts_by_security_profile_total`
+  series interpolated raw error codes / profile names — an authenticated
+  node could forge arbitrary time series with an embedded newline. Labels
+  go through the existing escaping helper now.
+- **Keyset pagination silently dropped rows when the client requested more
+  than the server cap (audit X-C5).** `next_cursor` was derived by
+  comparing against the requested limit; a `?limit=2000` client received
+  the capped 1000 rows, saw "page not full", and never fetched the tail. All
+  list routes now compare against the effective page size.
+- **A conversation turn could run unlogged (audit X-C6).** The user message
+  was appended after task creation: a failed INSERT left a live agent
+  answering a turn missing from history, so every later prompt silently
+  omitted it. The message is persisted first, then the task is created and
+  linked.
+- **Concurrent consensus completions minted duplicate disagreement
+  approvals (audit X-C7).** The dedup check was scoped to each member's own
+  task id and ran outside any transaction, so the last two members finishing
+  together both passed and both inserted. Check+insert is serialized under
+  the write gate and scoped to the whole consensus group.
 - **Fully-delivered event spools were never deleted — the node eventually
   bricked itself with `spool_full` (audit X-N1).** Every attempt left its
   `<attempt>.jsonl` behind forever while the global quota scan counted every

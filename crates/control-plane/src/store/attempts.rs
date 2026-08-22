@@ -393,16 +393,6 @@ impl Store {
                 return Ok(());
             }
         }
-        let existing: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM approvals WHERE task_id = ? AND permission LIKE '%' || ? || '%'",
-        )
-        .bind(task_id)
-        .bind(&group_id)
-        .fetch_one(&self.pool)
-        .await?;
-        if existing > 0 {
-            return Ok(());
-        }
         let mut patch_shas: Vec<(String, String)> = Vec::new();
         for r in &rows {
             let st: String = r.try_get("status")?;
@@ -427,6 +417,24 @@ impl Store {
         if !patch_shas.iter().any(|(_, s)| *s != first_sha) {
             return Ok(());
         }
+        // Audit X-C7: the dedup COUNT used to be scoped to this task only,
+        // and check+insert ran on the pool — two group members finishing
+        // concurrently each passed their own count and inserted duplicate
+        // disagreement approvals. Serialize count+insert under the global
+        // write gate and scope the check to the whole consensus group.
+        let mut tx = self.write_txn().await?;
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM approvals WHERE permission LIKE '%' || ? || '%' \
+             AND task_id IN (SELECT id FROM tasks WHERE consensus_group_id = ?)",
+        )
+        .bind(&group_id)
+        .bind(&group_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if existing > 0 {
+            drop(tx);
+            return Ok(());
+        }
         let approval_id = Uuid::new_v4().to_string();
         let now = now_iso();
         let expires = iso_plus_secs(86400);
@@ -445,8 +453,9 @@ impl Store {
         .bind(&perm)
         .bind(&now)
         .bind(&expires)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 

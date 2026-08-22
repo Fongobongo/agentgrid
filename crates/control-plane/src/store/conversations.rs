@@ -110,6 +110,27 @@ impl Store {
             .collect())
     }
 
+    /// Audit X-C6: attach the spawned task id to the already-persisted user
+    /// turn. The message is appended BEFORE `create_task` so a failed task
+    /// creation can no longer leave a live agent running on an unlogged turn.
+    pub async fn set_conversation_message_task(
+        &self,
+        conversation_id: &str,
+        seq: i64,
+        task_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE conversation_messages SET task_id = ? \
+             WHERE conversation_id = ? AND seq = ?",
+        )
+        .bind(task_id)
+        .bind(conversation_id)
+        .bind(seq)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Stage 11.5: the most recent ACP session id produced by a finished task
     /// in this conversation, so the next task can resume it. `None` when there
     /// is no resumable session (first turn, or the prior attempt was not ACP).

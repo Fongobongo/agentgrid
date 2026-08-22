@@ -125,18 +125,33 @@ pub async fn append_conversation_message(
         consensus_member: None,
         opencode_override: None,
     };
-    let task = state.store.create_task(&task_req).await.map_err(|e| {
-        tracing::error!("create_task for conversation failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    state
+    // Audit X-C6: persist the user turn FIRST, then create the task, then
+    // link the two. The old order (create_task → append) meant a failed
+    // message INSERT left a live task running on a turn that was never
+    // logged — every later prompt composed from history silently omitted
+    // what the agent had answered.
+    let msg_seq = state
         .store
-        .append_conversation_message(&id, "user", &req.content, Some(&task.id))
+        .append_conversation_message(&id, "user", &req.content, None)
         .await
         .map_err(|e| {
             tracing::error!("append user message failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    let task = state.store.create_task(&task_req).await.map_err(|e| {
+        tracing::error!("create_task for conversation failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if let Err(e) = state
+        .store
+        .set_conversation_message_task(&id, msg_seq, Some(&task.id))
+        .await
+    {
+        // The turn is logged and the task is live; a failed link leaves the
+        // row with a NULL task_id (degraded metadata), which beats losing
+        // either side.
+        tracing::error!("link conversation message to task failed: {e}");
+    }
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({"task_id": task.id, "conversation_id": id})),
@@ -162,7 +177,10 @@ pub async fn list_conversation_messages(
         .await
     {
         Ok(items) => {
-            let next_cursor = if items.len() == limit as usize {
+            // Audit X-C5: the store clamps limit to 1000 — compare against
+            // the effective page size so an over-large request still gets a
+            // cursor instead of silently dropping the tail.
+            let next_cursor = if items.len() == limit.clamp(1, 1000) as usize {
                 items.last().map(|m| m.seq.to_string())
             } else {
                 None

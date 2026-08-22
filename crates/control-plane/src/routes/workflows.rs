@@ -86,7 +86,7 @@ pub async fn list_workflows(
     };
     match state.store.list_workflow_templates(after, q.limit).await {
         Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100).min(1000) as usize {
                 items.last().map(|t| format!("{},{}", t.created_at, t.id))
             } else {
                 None
@@ -169,7 +169,7 @@ pub async fn list_workflow_schedules(
         .await
     {
         Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100).min(1000) as usize {
                 items.last().map(|s| format!("{},{}", s.created_at, s.id))
             } else {
                 None
@@ -209,7 +209,7 @@ pub async fn list_workflow_runs(
     };
     match state.store.list_workflow_runs(after, q.limit).await {
         Ok(items) => {
-            let next_cursor = if items.len() == q.limit.unwrap_or(100) as usize {
+            let next_cursor = if items.len() == q.limit.unwrap_or(100).min(1000) as usize {
                 items.last().map(|r| format!("{},{}", r.created_at, r.id))
             } else {
                 None
