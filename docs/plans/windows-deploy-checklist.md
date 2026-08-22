@@ -433,11 +433,27 @@ worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/
 живы. Для фактического демонтажа пройти по командам ниже в нужном порядке.
 
 - [x] ~~Дорожка A/B: `wsl --unregister Ubuntu` (удаляет дистрибутив целиком)~~
+  (Проверено 2026-08-22: дистрибутив `Ubuntu` существует. `docker-desktop` не трогать —
+  он принадлежит Docker Desktop и удаляется вместе с ним на дорожке D. Опционально, если
+  WSL больше не нужен вовсе: `Disable-WindowsOptionalFeature -Online -FeatureName
+  VirtualMachinePlatform`.)
 - [x] ~~Дорожка C: `Remove-VM agentgrid` + удалить `D:\HyperV\agentgrid-cloud.vhdx` +
       `Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All`~~
-  (файл диска фактически `agentgrid-cloud.vhdx`, а не `agentgrid.vhdx`; отключение
-  Hyper-V требует перезагрузки хоста)
+  (Проверено 2026-08-22: VM `agentgrid`, диск `agentgrid-cloud.vhdx` (имя исправлено с
+  `agentgrid.vhdx`), снапшотов нет, фича `Microsoft-Hyper-V-All` = Enabled. Нюансы:
+  на работающей VM `Remove-VM` спросит подтверждение — сначала `Stop-VM agentgrid`
+  или сразу `Remove-VM agentgrid -Force`; к VM до сих пор привязан DVD
+  `D:\agentgrid-release\vm-seed\seed.iso` — сам каталог `D:\agentgrid-release\`
+  (ключи, инсталляторы, тарболлы, v0.3.4) удаляется вручную; отключение Hyper-V
+  требует перезагрузки хоста и не ломает WSL2/Docker Desktop — им достаточно
+  Virtual Machine Platform.)
 - [x] ~~Дорожка D: `bash deploy/compose/down.sh` + Docker Desktop → Troubleshoot → Uninstall~~
+  (Проверено 2026-08-22: скрипт на месте, `bash -n` OK. Нюансы: для полной зачистки —
+  `down.sh --purge` (plain `down` сохраняет volume с SQLite/артефактами); движок должен
+  быть запущен — стартовать Docker Desktop и добавить `D:\Program\resources\bin` в PATH
+  (docker.exe там из-за бага инсталлятора с пробелом в `--installation-dir`);
+  GUI-деинсталляция требует запущенного Docker Desktop, CLI-альтернатива —
+  `D:\DockerDesktop-Installer.exe uninstall`.)
 
 ## Справочник
 
