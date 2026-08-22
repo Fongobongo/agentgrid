@@ -4,6 +4,31 @@
 
 ### Fixed
 
+- **A workspace-finalize failure aborted the attempt with no completion and
+  no cleanup (audit ND-3).** Both runner branches propagated the
+  `finalize_workspace` error out of `run_attempt`, so no `report_complete`
+  was ever sent — the CP kept the attempt `running` until the ack-deadline
+  reaper marked it `lost` — and the worktree/branch leaked until the 24h
+  prune. A finalize failure is now a reported terminal outcome:
+  exit non-zero with `error_code=infrastructure_failed` (outranking
+  agent/validation verdicts — without a finalized worktree there is no
+  deliverable result), followed by the normal drain/report/cleanup path.
+  `Ok(None)` (non-git or nothing to commit) remains a success.
+- **Serialized startup recovery delayed the first heartbeat (audit ND-9).**
+  `startup_recovery` ran before `spawn_heartbeat`: each pending durable
+  completion redelivery can back off up to 20 rounds against a slow or down
+  CP, so a long recovery kept the node silent past the 30s offline sweep and
+  flapped it offline mid-recovery. Recovery now runs as a spawned background
+  task — it is best-effort, and its one unsafe interleaving (a redelivered
+  assignment re-running an attempt whose completion is still undelivered) is
+  already guarded by the ND-4 completion-redelivery check.
+- **ACP agent stderr bypassed secret redaction (audit ND-10).**
+  `drive_acp_session` spawned the adapter with `Stdio::inherit()` on stderr,
+  so anything the agent printed there landed raw in the daemon log — unlike
+  every wrapper-path stream, which goes through the streaming redactor. The
+  stderr is now piped and drained through the same masking `read_stream`,
+  so agent stderr reaches the attempt's event stream (as `stderr` log
+  events) with secrets masked.
 - **Late ack after a lease revert was accepted as success (unfenced duplicate
   execution).** When the ack-deadline reaper reverted an assignment (attempt
   `cancelled`, task requeued) and the node's runner then started — e.g. after

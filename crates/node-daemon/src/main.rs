@@ -114,7 +114,11 @@ async fn drive_acp_session(
     cmd.args(&args);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        // Audit ND-10: inherit() sent the agent's stderr straight to the
+        // daemon log, bypassing the secret redaction every wrapper-path
+        // stream goes through. Pipe it and drain through the same masked
+        // read_stream below.
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         // Own process group so terminate_group's killpg reaches the whole
         // agent tree on cancel/timeout (matches validation.rs).
@@ -193,6 +197,25 @@ async fn drive_acp_session(
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stdin = child.stdin.take().expect("piped stdin");
+    // Audit ND-10: drain the piped stderr through the same redacting
+    // read_stream the wrapper path uses, so agent stderr lands in the event
+    // stream masked instead of raw in the daemon log. The task ends when the
+    // child exits (or is killed via kill_on_drop) and its pipe closes.
+    if let Some(stderr) = child.stderr.take() {
+        let sink2 = sink.clone();
+        let guard = Arc::new(crate::command_guard::CommandGuard::new(
+            cfg.guard_deny.clone(),
+            cfg.guard_allow.clone(),
+        ));
+        tokio::spawn(event_sink::read_stream(
+            stderr,
+            sink2,
+            "stderr",
+            cfg.secrets.clone(),
+            None,
+            guard,
+        ));
+    }
     let (acp, mut notif) = agentgrid_acp::new(stdout, stdin);
     let acp = std::sync::Arc::new(acp);
 

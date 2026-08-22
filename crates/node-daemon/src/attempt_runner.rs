@@ -144,6 +144,29 @@ fn maybe_with_repo_digest(profile_text: &str, worktree: &std::path::Path) -> Str
     format!("{digest}\n---\n\n{profile_text}")
 }
 
+/// Audit ND-3: finalize the workspace without `?`-aborting the attempt. A
+/// finalize error used to propagate out of `run_attempt` - no completion was
+/// reported (the CP kept the attempt `running` until the reaper) and the
+/// worktree leaked until the 24h prune. Returns `(sha, failed)`; a `None`
+/// sha from a successful non-git / no-commit finalize is NOT a failure.
+async fn finalize_or_fail(
+    ws: git::Workspace,
+    node_name: String,
+    attempt_id: &str,
+) -> (Option<String>, bool) {
+    match tokio::task::spawn_blocking(move || git::finalize_workspace(ws, &node_name)).await {
+        Ok(Ok(sha)) => (sha, false),
+        Ok(Err(e)) => {
+            tracing::error!(attempt_id = %attempt_id, "workspace finalize failed: {e:#}");
+            (None, true)
+        }
+        Err(e) => {
+            tracing::error!(attempt_id = %attempt_id, "workspace finalize task panicked: {e}");
+            (None, true)
+        }
+    }
+}
+
 /// Run one task attempt assigned by the control plane.
 pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) -> Result<()> {
     // WS Cancel messages wake the supervisor via this notifier (plan 0.3 2.3);
@@ -347,10 +370,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         let cleanup_branch =
             (ws.is_git && ws.branch.is_some()).then(|| ws.branch.clone().unwrap_or_default());
         let cleanup_path = ws.path.clone();
-        let node_name = cfg.node_name.clone();
-        let commit_sha =
-            tokio::task::spawn_blocking(move || git::finalize_workspace(ws, node_name.as_str()))
-                .await??;
+        let (commit_sha, finalize_failed) =
+            finalize_or_fail(ws, cfg.node_name.clone(), &assignment.attempt_id).await;
         // Run the optional validation command — the ACP path used to skip it,
         // silently leaving validation_command unenforced for ACP agents. The
         // diff is already committed so it survives a validation failure.
@@ -360,6 +381,10 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         if sink.spool_full() {
             exit_code = 1;
             error_code = Some("spool_full".into());
+        }
+        if finalize_failed {
+            exit_code = 1;
+            error_code = Some("infrastructure_failed".into());
         }
         if exit_code == 0 {
             if let Some(cmd) = &assignment.validation_command {
@@ -923,7 +948,6 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // after report_complete so a terminal attempt doesn't leak the task.
     // (was: flusher.abort() here, before the post-adapter sends.)
 
-    let node_name = cfg.node_name.clone();
     let patch_path = workdir.join("changes.patch");
     // Stage 2.3: keep the per-attempt repo_dir/branch so the worktree and its
     // ref can be reclaimed after the attempt is terminal (finalize takes ws).
@@ -946,12 +970,14 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     } else {
         None
     };
-    let commit_sha =
-        tokio::task::spawn_blocking(move || git::finalize_workspace(ws, node_name.as_str()))
-            .await??;
+    // Audit ND-3 (wrapper branch, same as the ACP one): a finalize failure
+    // used to `?`-abort run_attempt with no completion report and no
+    // worktree cleanup, stranding the attempt `running` until the reaper.
+    let (commit_sha, finalize_failed) =
+        finalize_or_fail(ws, cfg.node_name.clone(), &assignment.attempt_id).await;
 
-    let code = last_code;
-    let error_code: Option<String> = if let Some(v) = validation_verdict {
+    let mut code = last_code;
+    let mut error_code: Option<String> = if let Some(v) = validation_verdict {
         // Hardening P0 item 12: timeout/cancel are distinct from a plain
         // validation failure and must not collapse into `validation_failed`.
         Some(v.into())
@@ -966,6 +992,13 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     } else {
         Some(last_kill_reason.unwrap_or("agent_failed").into())
     };
+    // Audit ND-3: the finalize verdict outranks agent/validation outcomes —
+    // without a finalized worktree there is no deliverable result even when
+    // the agent itself exited 0.
+    if finalize_failed {
+        code = code.max(1);
+        error_code = Some("infrastructure_failed".into());
+    }
 
     // Upload produced artifacts (changes.patch for git tasks; validation.log;
     // raw adapter output as a format-change safety net, Stage 3.1). Each is

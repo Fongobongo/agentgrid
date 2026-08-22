@@ -29,7 +29,18 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
 
     // Startup recovery: redeliver durable completions, reap orphaned artifact
     // spool entries, and retry staged artifacts from a prior (killed) run.
-    recovery::startup_recovery(&cfg, &client).await;
+    // Audit ND-9: this used to be awaited before the first heartbeat, but a
+    // slow CP (send_with_retry backs off up to 20 rounds per pending
+    // completion) kept the node silent past the 30s offline sweep, flapping
+    // it offline during every long recovery. The work is best-effort and its
+    // one unsafe interleaving is already guarded (ND-4 redelivers an
+    // undelivered completion instead of re-running), so spawn it and let the
+    // heartbeat / poll loops start immediately.
+    {
+        let rcfg = cfg.clone();
+        let rclient = client.clone();
+        tokio::spawn(async move { recovery::startup_recovery(&rcfg, &rclient).await });
+    }
 
     // Heartbeat loop: publish status/load/capabilities periodically (runs on
     // every transport; the WS channel additionally carries slot heartbeats).
