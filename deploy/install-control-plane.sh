@@ -81,4 +81,5 @@ systemctl daemon-reload
 systemctl enable --now agentgrid-control-plane.service
 echo ">> control plane listening on $LISTEN. journalctl -u agentgrid-control-plane -f"
 echo ">> first run: read the one-time setup token from the logs above,"
-echo ">> then: curl -X POST $LISTEN/v1/auth/setup -H 'content-type: application/json'"" ">>   -d '{\"setup_token\":\"<token>\",\"username\":\"admin\",\"password\":\"<your>\"}'"
+echo ">> then: curl -X POST $LISTEN/v1/auth/setup -H 'content-type: application/json'"
+echo ">>   -d '{\"setup_token\":\"<token>\",\"username\":\"admin\",\"password\":\"<your>\"}'"

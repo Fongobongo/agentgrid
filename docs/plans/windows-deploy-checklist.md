@@ -29,12 +29,14 @@
 ### 0.2 Релизные артефакты (заготовка для дорожек A/B/C)
 
 - [x] Скачать release **v0.3.2**, тарболл `x86_64-unknown-linux-musl` со страницы Releases репозитория
-- [ ] Распаковать в рабочую папку, например `~/release-bin/`. Ожидаемое содержимое:
+- [x] Распаковать в рабочую папку, например `~/release-bin/`. Ожидаемое содержимое:
   `agentgrid-control-plane`, `agentgrid-node-daemon`, `ag`, `agentgrid-gateway`,
   `agentgrid-acp-agent`, `adapter-mock`, `adapter-claude`, `adapter-opencode`, `adapter-fake-acp`
+  (Лаборатория: файл сумм в тарболле называется `SHA256SUMS`, а не `checksums.txt`; бинари в
+  тарболле без бита `+x` — после распаковки обязателен `chmod 0755`, иначе «Permission denied».)
 - [x] Сверить контрольные суммы (внутри Linux-окружения дорожки):
   ```bash
-  cd ~/release-bin && sha256sum -c --ignore-missing checksums.txt
+  cd ~/release-bin && sha256sum -c --ignore-missing SHA256SUMS
   ```
 
 ---
@@ -251,15 +253,18 @@ worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/
 
 ### C.1 Hyper-V (PowerShell от администратора)
 
-- [ ] Включить роль (затем reboot):
+- [x] Включить роль (затем reboot):
   ```powershell
   Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All
   ```
-- [ ] Скачать ISO Ubuntu Server 24.04 LTS (x86_64)
+- [x] Скачать ISO Ubuntu Server 24.04 LTS (x86_64)
+  (Лаборатория: интерактивная установка и subiquity-autoinstall через live-ISO не
+  завелись — патч grub.cfg у xorriso ломает El Torito-записи, а без явного kernel-параметра
+  `autoinstall` установщик не стартует. Перешли на cloud image — см. C.2.)
 
 ### C.2 Создание VM
 
-- [ ] Создать VM (Gen2, 3 vCPU, 4 ГБ, 40 ГБ VHDX):
+- [x] Создать VM (Gen2, 3 vCPU, 4 ГБ, 40 ГБ VHDX):
   ```powershell
   New-VM -Name agentgrid -Generation 2 -MemoryStartupBytes 4GB `
     -NewVHDPath D:\HyperV\agentgrid.vhdx -NewVHDSizeBytes 40GB -SwitchName "Default Switch"
@@ -268,27 +273,77 @@ worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/
   # в Firmware загрузка с DVD первой; для Gen2: выключить Secure Boot или поставить шаблон Microsoft UEFI:
   Set-VMFirmware -VMName agentgrid -EnableSecureBoot Off
   ```
-- [ ] Установить Ubuntu Server (пользователь, SSH), зайти по SSH через IP из `Get-VM agentgrid | Get-VMNetworkAdapter`
+  (Лаборатория: вместо установки с ISO — Ubuntu cloud image `noble-server-cloudimg-amd64.img`
+  (SHA256 сверён), конвертация `qemu-img convert -f qcow2 -O vhdx` → `D:\HyperV\agentgrid-cloud.vhdx`,
+  `Resize-VHD` до 32 ГБ, подключён как SCSI0-0. NoCloud seed `seed.iso` (volid CIDATA) на DVD1.
+  Secure Boot выключен. **Подводный камень seed-конфига:** `users:` с `primary_group: <group>`
+  требует отдельного блока `groups: [<group>]`, иначе cloud-init падает с
+  `useradd: group 'X' does not exist` и юзер не создаётся. Пароль/ключ — в `user-data`
+  (`passwd: <openssl passwd -6 ...>`, `ssh_authorized_keys`, `ssh_pwauth: true`).
+  После смены seed обязательно менять `instance-id` в `meta-data`, иначе старый экземпляр кэша не обновится.)
+- [x] Установить Ubuntu Server (пользователь, SSH), зайти по SSH через IP из `Get-VM agentgrid | Get-VMNetworkAdapter`
+  (Лаборатория: пользователь `agentgrid` создан cloud-init; SSH-ключ `D:\agentgrid-release\vm-id`;
+  `ssh_pwauth: true`. При пересоздании образа host keys меняются — чистить старую запись
+  `ssh-keygen -R <ip>`.)
 - [ ] Сделать чекпоинт чистой системы:
   ```powershell
   Checkpoint-VM -VMName agentgrid -SnapshotName clean-install
   ```
+  (Пропущено осознанно: production-чекпоинт создаёт .avhdx, который бесконтрольно растёт
+  на живом VM и может переполнить диск. Одиночный случайный снапшот пришлось мержить:
+  `Remove-VMSnapshot` на работающей VM делает live-merge.)
 
 ### C.3 Установка agentgrid внутри VM
 
-- [ ] Выполнить **этап 0.2** (артефакты) внутри VM — например `scp` тарболл с Windows-хоста
-- [ ] Выполнить **шаги A.3–A.6 дословно** — внутри VM это стоковый Ubuntu с systemd,
+- [x] Выполнить **этап 0.2** (артефакты) внутри VM — например `scp` тарболл с Windows-хоста
+  (Лаборатория: `scp agentgrid-x86_64-unknown-linux-musl.tar.gz` → `~/release-bin`, распаковка,
+  `sha256sum -c --ignore-missing SHA256SUMS` — все 8 бинарников OK.)
+- [x] Выполнить **шаги A.3–A.6 дословно** — внутри VM это стоковый Ubuntu с systemd,
   WSL-специфики нет (кроме `.wslconfig`/`wsl.conf` — не нужно)
-- [ ] (Опционально, вместо podman-шагов дорожки B) при недоверенных задачах — поставить
+  (Лаборатория: CP на `0.0.0.0:7800`, админ `admin`, нода `online` (id `c17fa176-…`),
+  mock-задача `succeeded`, `/metrics` отдаёт счётчики. Замечания:
+  ① bash-скрипты репо переносятся на Windows с CRLF/битыми кавычками — при копировании через
+  PowerShell конвертировать в LF и проверять `bash -n`; исправлена закоммиченная строка 84 в
+  `deploy/install-control-plane.sh` (две `echo` были слиты в одну с битыми кавычками).
+  ② `GET /v1/nodes/{id}` появился после v0.3.2, поэтому `ag nodes doctor` на CP v0.3.2
+  даёт HTTP 405; симптом-проверка заменена на `ag status` + `/v1/nodes`.
+  (Обновление 2026-08-22: CP и нода в VM подняты до v0.3.4 — `ag nodes doctor` работает,
+  `doctor: OK — no symptoms`.)
+  ③ web UI: CP ищет `web/dist` рядом с бинарником либо `AGENTGRID_WEB_ROOT`; dist скопирован в
+  `/usr/local/share/agentgrid/web`. JWT-секрет (≥32 Б) задан drop-in'ом
+  `/etc/systemd/system/agentgrid-control-plane.service.d/override.conf`
+  (`AGENTGRID_JWT_SECRET`, `AGENTGRID_WEB_ROOT`); после смены секрета нужно заново `ag login`.)
+- [x] (Опционально, вместо podman-шагов дорожки B) при недоверенных задачах — поставить
   `docker` или `podman` по выбору и повторить конфигурацию DropIn из B
+  (Лаборатория 2026-08-22: **rootful podman 4.9.3** внутри VM, aлиас `podman-docker`
+  (spawn-путь ноды зовёт `docker`), образ `agentgrid-sandbox:lab` (ubuntu:24.04 + `adapter-mock`,
+  `ENTRYPOINT []`, digest запинен). Бинарники VM обновлены до **v0.3.4** (v0.3.2 недостаточно:
+  проба адаптера там без `--network none` — под жёстким юнитом bridge-сеть через netavark
+  не поднимается, и проба ложно рапортует «adapter missing in sandbox image»; там же был
+  сломан orphan-фильтр — голый `agentgrid.node=` вместо `label=…`, чинится только кодом).
+  Запуск контейнерного рантайма **внутри** hardened-юнита потребовал цепочки ослаблений в
+  DropIn сверх дорожки B — каждое сняло конкретный отказ (порядок возникновения):
+  `ReadWritePaths=/var/lib/containers /run/containers /var/cache/containers`
+  (последний — кэш short-name-алиасов, podman пишет его при каждом резолве короткого имени образа),
+  `RestrictNamespaces=false` + `ProtectKernelTunables=false` (создание namespace'ов контейнера),
+  `ProtectControlGroups=false` + `Delegate=yes` (conmon/crun не могли создать
+  `machine.slice/libpod-*.scope`), `PrivateDevices=false` (`mknod /dev/null`), 
+  `ProtectHostname=false` (seccomp-фильтр systemd режет `sethostname` даже в UTS-namespace
+  контейнера), `NoNewPrivileges=false` (`capset` у crun). Итог: `adapter present in sandbox
+  image`, рантайм ready, mock-задача `succeeded` в контейнере (label `agentgrid.node=<id>`,
+  digest-pinned образ, `network none`, `--rm` отработал — `podman ps -a` пуст), нода `online`
+  без degraded, `ag nodes doctor` — OK. Остаточные WARN о `changes.patch`/`validation.log`
+  от mock-адаптера — ожидаемы, он эти артефакты не создаёт.)
 
 ### C.4 Доступ из Windows
 
-- [ ] Из Windows проверен health-check по IP VM:
+- [x] Из Windows проверен health-check по IP VM:
   ```powershell
   curl.exe -fsS http://<vm-ip>:7800/health/ready
   ```
-- [ ] Web-UI (если поднят) открывается из браузера Windows по `http://<vm-ip>:7800`
+  (Лаборатория: `ready=200`, `live=200`.)
+- [x] Web-UI (если поднят) открывается из браузера Windows по `http://<vm-ip>:7800`
+  (Лаборатория: `GET /` → 200, `index.html` отдаётся.)
 
 ---
 
@@ -299,32 +354,61 @@ worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/
 **Важно:** нода в контейнере без внутренней docker-песочницы (`AGENTGRID_SANDBOX` не задан) —
 граница изоляции = контейнер ноды. Только demo/eval, не для недоверенных агентов в бою.
 
-- [ ] Установить Docker Desktop (перезагрузка после установки)
-- [ ] В Settings → General **снять** галку «Use the WSL 2 based engine» → Apply & Restart
-  (Hyper-V backend; требует Pro — есть)
-- [ ] Проверить, что Docker жив: `docker version` (Server должен ответить)
-- [ ] Собрать образы из корня репозитория (Git Bash):
-  ```bash
-  cd /d/PythonProjects/agentgrid
+- [x] Установить Docker Desktop (без перезагрузки хоста в лаборатории):
+  per-user + WSL2 backend + данные на D:
+  ```powershell
+  curl.exe -fL -o D:\DockerDesktop-Installer.exe "https://desktop.docker.com/win/main/amd64/Docker Desktop Installer.exe"
+  Start-Process 'D:\DockerDesktop-Installer.exe' -Wait -ArgumentList @(
+    'install','--user','--backend=wsl-2','--accept-license',
+    "--installation-dir=D:\Program Files\Docker\Docker",
+    "--wsl-default-data-root=D:\Docker\data",'--no-windows-containers','--quiet')
+  Start-Process 'D:\Program\Docker Desktop.exe'
+  ```
+  (Лаборатория 2026-08-19: Docker Desktop 4.87.0 / engine 29.7.2, per-user mode,
+  install-dir указал `D:\Program Files\Docker\Docker`, но инсталлятор осел в `D:\Program`
+  из-за пробела в `--installation-dir` — некритично; образы/данные на `D:\Docker\data`.
+  **Подводный камень 1:** `docker.exe` и хелпер `docker-credential-desktop` в `%LOCALAPPDATA%\..`,
+  но не в PATH текущей shell-сессии — перед сборкой добавить `D:\Program\resources\bin` в `$env:Path`,
+  иначе сборка падает с `exec: docker-credential-desktop not found in %PATH%`.
+  **Подводный камень 2:** `up.sh` требует `python3` в PATH (в чистом Windows есть только `python.exe`)
+  и `curl`; решение — shim/python-вместо-curl или Git Bash с доступным python3.
+  **Подводный камень 3:** Windows curl в PowerShell ломает JSON в одинарных кавычках
+  (`Failed to parse the request body as JSON`) — для bootstrap-шагов использовать python/файл,
+  а не inline curl.)
+- [x] ~~В Settings → General снять галку «Use the WSL 2 based engine»~~ — в лаборатории выбран
+  **WSL2 backend** (--backend=wsl-2), это текущий дефолт Docker и не требует Hyper-V backend,
+  который был нужен только в старом варианте; для Hyper-V backend нужен all-users режим
+- [x] Проверить, что Docker жив: `docker version` (Server ответил: engine 29.7.2, containerd v2.2.5)
+- [x] Собрать образы из корня репозитория (оба `exit=0`):
+  ```powershell
   docker build -f Dockerfile.control-plane -t ag-cp:test .
   docker build -f Dockerfile.node-daemon  -t ag-node:test .
   ```
-  (Либо: тянуть `ghcr.io/<owner>/agentgrid-node-daemon:v0.3.2` и переписать теги в
-  `docker-compose.yml`.)
-- [ ] Поднять стек штатным скриптом — генерирует секреты, читает setup-токен из логов CP,
+  (Лаборатория: `.dockerignore` корректно исключает target/ и node_modules, контекст компактный.
+  CP-сборка включает web UI `npm ci && npm run build`.)
+- [x] Поднять стек штатным скриптом — генерирует секреты, читает setup-токен из логов CP,
   делает bootstrap, пишет `deploy/compose/.env`:
   ```bash
   bash deploy/compose/up.sh
   ```
-- [ ] Проверить здоровье и контейнеры:
-  ```bash
-  curl -fsS http://127.0.0.1:7800/health/ready && echo OK
+  (Лаборатория: CP healthy, node-1/node-2 online, реципиент-токены выпущены и использованы,
+  `.env` содержит только JWT_SECRET (токены стерты после зачисления — Hardening P0 item 6/29).
+  Admin: `admin / OYG2vfgAuCFsbgbk4cf4my1N` — показан один раз, в `.env` не пишется.)
+- [x] Проверить здоровье и контейнеры:
+  ```powershell
+  curl.exe -fsS http://127.0.0.1:7800/health/ready && echo OK
   docker ps --format '{{.Names}} {{.Status}}'
-  # ожидаемо: ag-control-plane-1, ag-node-1-1, ag-node-2-1 — все Up
   ```
-- [ ] Взять пароль админа: `grep ADMIN_PASS deploy/compose/.env`
-- [ ] Выполнить приёмочную mock-задачу по шагам **A.6** (только URL — `http://127.0.0.1:7800`)
-- [ ] Открыть web-UI в браузере: `http://127.0.0.1:7800`
+  (Лаборатория: `agentgrid-control-plane-1 Up (healthy)`, `node-1-1`/`node-2-1` Up;
+  `/health/ready` 200; обе ноды `online` с heartbeat.)
+- [x] Взять пароль админа: `grep ADMIN_PASS deploy/compose/.env` — **в `.env` не пишется**,
+  пароль печатается один раз в конце `up.sh`: `>> login: admin / <pass>`
+- [x] Выполнить приёмочную mock-задачу по шагам **A.6** (URL `http://127.0.0.1:7800`):
+  task `209c9f90-6275-4dbb-aa7d-8923f4d18e81` → `succeeded`, события stdout/result видны
+- [x] Открыть web-UI в браузере: `http://127.0.0.1:7800` (`GET /` → 200, отдаёт index.html)
+
+**Дополнение:** если CP поднят **одновременно** с Hyper-V VM (дорожка C), локальный порт 7800
+не конфликтует — VM CP висит на `172.28.157.79:7800`, compose CP на `127.0.0.1:7800`.
 
 ---
 
