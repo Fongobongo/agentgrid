@@ -2032,12 +2032,15 @@ async fn race_ack_after_lease_expiry_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(aa, 0, "active_attempts decremented once by lease revert");
-    // Late ACK for the reverted attempt is idempotent (status already
-    // terminal): it returns 200 and must NOT flip the task back to running and
-    // must NOT decrement the counter again.
+    // Late ACK for the reverted attempt is REJECTED, not acknowledged: the
+    // revert rotated the fencing token, so the stale holder's presentation
+    // 409s at the fencing check (a 404 from the store-level check would be
+    // equivalent). Either way the task must NOT flip back to running and the
+    // counter must NOT decrement again — and the fixed node drops the
+    // assignment on 404/409 instead of running the agent.
     assert_eq!(
         ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
-        StatusCode::OK
+        StatusCode::CONFLICT
     );
     assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
     let aa2: i64 = sqlx::query_scalar("SELECT active_attempts FROM nodes WHERE id = ?")
