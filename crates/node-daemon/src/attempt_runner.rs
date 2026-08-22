@@ -800,13 +800,17 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // Stage 2.1 / audit X-N6: record the terminal completion BEFORE the
         // post-adapter sends so a daemon kill during the (possibly blocking)
         // flush/upload window still redelivers a terminal outcome on the next
-        // startup. Only failures are recorded here: at this point the exit
-        // code is known but the validation/eval verdict is NOT — persisting a
-        // provisional success let a crash after a failed validation redeliver
-        // a false `succeeded` (ND-4 redelivery wins over re-running, so the
-        // wrong terminal state would stand). A lost success is safe: the CP
-        // reaper fails the attempt and the task retries.
-        if code != 0 {
+        // startup. At this point the exit code is known but the
+        // validation/eval verdict is NOT — persisting a provisional success
+        // when those stages exist let a crash after a failed validation
+        // redeliver a false `succeeded` (ND-4 redelivery wins over
+        // re-running, so the wrong terminal state would stand). So: failures
+        // always record; a success records only when no later stage can flip
+        // the verdict. Losing an unverdicted success is safe — the CP reaper
+        // fails the attempt and the task retries.
+        let verdict_already_final =
+            assignment.validation_command.is_none() && assignment.eval_cases.is_empty();
+        if code != 0 || (code == 0 && verdict_already_final) {
             let early_req = CompleteAttemptRequest {
                 exit_code: code,
                 commit_sha: None,

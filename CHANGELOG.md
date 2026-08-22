@@ -25,9 +25,11 @@
   success (audit X-N6).** The durable early-completion record persisted
   `exit=0` before validation/eval ran; if the daemon died after a failed
   validation, startup recovery redelivered the provisional record and the CP
-  marked the attempt `succeeded` (redelivery wins over re-running). Only
-  failures are recorded early now — a lost success is recoverable (reaper →
-  retry), a false one was not.
+  marked the attempt `succeeded` (redelivery wins over re-running). A
+  success is now recorded early only when no later stage can flip the
+  verdict (no validation command, no eval cases); failures always record.
+  Losing an unverdicted success is recoverable (reaper → retry), a false
+  one was not.
 - **`/metrics` task gauges and outcome counters were computed from the
   oldest 1000 tasks (audit X-C3).** `list_tasks()` caps at the oldest page,
   so past that size the counters froze and running-task alerting went blind
