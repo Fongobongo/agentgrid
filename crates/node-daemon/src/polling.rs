@@ -254,8 +254,8 @@ pub async fn upload_if_exists(
             let _ = artifact_spool::remove(spool_root, attempt_id, name);
         }
         Ok(s)
-            if s.status() == reqwest::StatusCode::CONFLICT
-                || s.status() == reqwest::StatusCode::PRECONDITION_FAILED =>
+            if s == reqwest::StatusCode::CONFLICT
+                || s == reqwest::StatusCode::PRECONDITION_FAILED =>
         {
             // Audit ND-8: a fencing rejection is TERMINAL — this writer is
             // stale (the attempt was reverted/reassigned), and no retry can
@@ -264,8 +264,7 @@ pub async fn upload_if_exists(
             // once per restart until the 24h orphan reaper deletes it, with
             // pending_artifacts advertising it the whole time. Drop it now.
             tracing::warn!(
-                "artifact {name} for {attempt_id} fenced off by the CP ({}); dropping staged copy",
-                s.status()
+                "artifact {name} for {attempt_id} fenced off by the CP ({s}); dropping staged copy"
             );
             let _ = artifact_spool::remove(spool_root, attempt_id, name);
         }
