@@ -427,10 +427,17 @@ worktree-маунт — проверить UID-маппинг (`/etc/subuid`, `/
 
 ## Откат (полная зачистка)
 
-- [ ] Дорожка A/B: `wsl --unregister Ubuntu` (удаляет дистрибутив целиком)
-- [ ] Дорожка C: `Remove-VM agentgrid` + удалить `D:\HyperV\agentgrid.vhdx` +
-      `Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All`
-- [ ] Дорожка D: `bash deploy/compose/down.sh` + Docker Desktop → Troubleshoot → Uninstall
+Справочник на случай отката/демонтажа лаборатории. При успешной верификации
+(«Финальная проверка» — all-green 2026-08-22) откат не требуется: пункты закрыты
+как N/A — команды не выполнялись, все окружения (WSL2, Hyper-V VM, Docker Desktop)
+живы. Для фактического демонтажа пройти по командам ниже в нужном порядке.
+
+- [x] ~~Дорожка A/B: `wsl --unregister Ubuntu` (удаляет дистрибутив целиком)~~
+- [x] ~~Дорожка C: `Remove-VM agentgrid` + удалить `D:\HyperV\agentgrid-cloud.vhdx` +
+      `Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All`~~
+  (файл диска фактически `agentgrid-cloud.vhdx`, а не `agentgrid.vhdx`; отключение
+  Hyper-V требует перезагрузки хоста)
+- [x] ~~Дорожка D: `bash deploy/compose/down.sh` + Docker Desktop → Troubleshoot → Uninstall~~
 
 ## Справочник
 
