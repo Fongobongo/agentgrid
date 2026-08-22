@@ -114,7 +114,12 @@ impl Store {
         // Hardening P0 (crash safety): write to a sibling temp file then
         // atomic rename, so a crash between write and metadata commit cannot
         // leave a half-written published artifact. Same dir => same fs rename.
-        let tmp = path.with_extension("tmp.upload");
+        // The uuid suffix keeps concurrent uploads of the same artifact (an
+        // in-flight retry racing the original request) from clobbering each
+        // other's tmp file — last-rename-wins bytes could mismatch the sha
+        // row the other writer committed, and on Windows the second rename
+        // onto an existing target fails outright.
+        let tmp = path.with_extension(format!("tmp.upload-{}", Uuid::new_v4()));
         tokio::fs::write(&tmp, bytes).await?;
         tokio::fs::rename(&tmp, &path).await?;
         let size = bytes.len() as i64;

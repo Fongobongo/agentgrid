@@ -152,16 +152,49 @@ pub async fn report_complete(
     }
 }
 
+/// Outcome of the assignment ack. `Rejected` means the CP definitively
+/// refused the lease (404/409 — reverted by the ack-deadline reaper,
+/// cancelled, or fenced off): the assignment must be dropped, never run,
+/// or the stale holder would execute the task alongside the new one.
+/// `Unreachable` keeps the historical best-effort semantics (network error
+/// / 5xx): the ack is lost, the runner proceeds, and the lease race is
+/// settled by the reaper plus the redelivery in-flight guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckOutcome {
+    Accepted,
+    Rejected,
+    Unreachable,
+}
+
 /// Explicit assignment acknowledgement (Stage 1.3): tell the control plane the
 /// agent actually started so the assignment is not reverted by the ack deadline.
-pub async fn ack_attempt(client: &Client, server: &str, attempt_id: &str, fence: &str) {
+pub async fn ack_attempt(
+    client: &Client,
+    server: &str,
+    attempt_id: &str,
+    fence: &str,
+) -> AckOutcome {
     let url = format!("{}/v1/node/attempts/{}/ack", server, attempt_id);
     let mut req = client.post(&url);
     if !fence.is_empty() {
         req = req.header("x-agentgrid-fencing-token", fence);
     }
-    if let Err(e) = req.send().await {
-        tracing::warn!("ack failed for {attempt_id}: {e}");
+    match req.send().await {
+        Err(e) => {
+            tracing::warn!("ack failed for {attempt_id}: {e}");
+            AckOutcome::Unreachable
+        }
+        Ok(resp) if resp.status().is_success() => AckOutcome::Accepted,
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::warn!("ack rejected for {attempt_id}: HTTP {status}");
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT
+            {
+                AckOutcome::Rejected
+            } else {
+                AckOutcome::Unreachable
+            }
+        }
     }
 }
 

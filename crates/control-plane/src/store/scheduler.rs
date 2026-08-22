@@ -72,8 +72,10 @@ impl Store {
                 repository: c.try_get("repository")?,
                 number: number as u32,
                 timeout_secs: c.try_get::<i64, _>("timeout_secs")? as u64,
-                git_url: c.try_get::<String, _>("git_url")?,
-                default_branch: c.try_get::<String, _>("default_branch")?,
+                git_url: c.try_get::<Option<String>, _>("git_url")?.unwrap_or_default(),
+                default_branch: c
+                    .try_get::<Option<String>, _>("default_branch")?
+                    .unwrap_or_default(),
                 validation_command: task_validation.or(repo_validation),
                 validation_timeout_secs: None,
                 base_commit: c.try_get("base_commit").ok().flatten(),

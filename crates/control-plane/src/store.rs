@@ -564,13 +564,21 @@ async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<usize> {
     .await?;
     let mut reverted = 0usize;
     for r in rows {
+        use uuid::Uuid;
         let attempt_id: String = r.try_get("id")?;
         let task_id: String = r.try_get("task_id")?;
         let node_id: String = r.try_get("node_id")?;
+        // Fencing: rotate the token together with the cancel so any later
+        // mutation from the stale holder (artifact/event uploads still
+        // presenting the old token) is rejected with 409 instead of being
+        // attributed to the reverted attempt.
+        let stale_fence = Uuid::new_v4().to_string();
         let moved = sqlx::query(
-            "UPDATE attempts SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'assigned'",
+            "UPDATE attempts SET status = 'cancelled', finished_at = ?, fencing_token = ? \
+             WHERE id = ? AND status = 'assigned'",
         )
         .bind(now)
+        .bind(&stale_fence)
         .bind(&attempt_id)
         .execute(&mut *tx)
         .await?

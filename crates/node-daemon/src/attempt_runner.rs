@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::artifact_spool;
 use crate::capabilities::resolve_adapter_bin;
-use crate::completion::{ack_attempt, create_agent_session, report_complete};
+use crate::completion::{ack_attempt, create_agent_session, report_complete, AckOutcome};
 use crate::config::Config;
 use crate::evals;
 use crate::event_sink::EventSink;
@@ -282,13 +282,23 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             outbox.clone(),
         );
         sink.requeue(pending).await;
-        ack_attempt(
-            &client,
-            &cfg.server,
-            &assignment.attempt_id,
-            &assignment.fencing_token,
-        )
-        .await;
+        if matches!(
+            ack_attempt(
+                &client,
+                &cfg.server,
+                &assignment.attempt_id,
+                &assignment.fencing_token,
+            )
+            .await,
+            AckOutcome::Rejected
+        ) {
+            tracing::warn!(
+                attempt_id = %assignment.attempt_id,
+                "ack rejected: lease reverted or cancelled on the CP; dropping assignment \
+                 before spawning the agent"
+            );
+            return Ok(());
+        }
         create_agent_session(
             &client,
             &cfg.server,
@@ -571,13 +581,23 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     let mut validation_verdict: Option<&'static str> = None;
 
     // Ack once; the attempt is `running` for its whole (multi-round) lifetime.
-    ack_attempt(
-        &client,
-        &cfg.server,
-        &assignment.attempt_id,
-        &assignment.fencing_token,
-    )
-    .await;
+    if matches!(
+        ack_attempt(
+            &client,
+            &cfg.server,
+            &assignment.attempt_id,
+            &assignment.fencing_token,
+        )
+        .await,
+        AckOutcome::Rejected
+    ) {
+        tracing::warn!(
+            attempt_id = %assignment.attempt_id,
+            "ack rejected: lease reverted or cancelled on the CP; dropping assignment \
+             before spawning the agent"
+        );
+        return Ok(());
+    }
     create_agent_session(
         &client,
         &cfg.server,

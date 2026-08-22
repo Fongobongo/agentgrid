@@ -2,7 +2,37 @@
 
 ## [Unreleased]
 
-- Nothing yet.
+### Fixed
+
+- **Late ack after a lease revert was accepted as success (unfenced duplicate
+  execution).** When the ack-deadline reaper reverted an assignment (attempt
+  `cancelled`, task requeued) and the node's runner then started — e.g. after
+  waiting on the concurrency semaphore past the 30s deadline — the CP's
+  `ack_attempt` returned 200 for the `cancelled` attempt, the fencing token
+  was never rotated and no cancel was flagged, so the stale holder executed
+  the whole task alongside the new one with artifact uploads still accepted.
+  Now: the CP rejects acks on `cancelled` attempts (404), the revert rotates
+  the fencing token in the same CAS transaction (stale uploads 409), and the
+  node treats a 404/409 ack as terminal — it drops the assignment before
+  spawning the agent (network errors keep the historical best-effort
+  semantics).
+- **Unknown task `network_mode` reached `--network` verbatim.** An assignment
+  carrying e.g. `network_mode: "host"` passed the CP's capacity gate (unknown
+  modes rank as `none`) and the daemon executed `docker run --network host` —
+  full host egress — while the egress-audit log printed
+  `resolved_network=none`. Task-supplied modes are now clamped fail-closed to
+  `none`; the operator `AGENTGRID_SANDBOX_NETWORK` env stays trusted
+  (startup-validated; may name an egress-proxy network).
+- **WS reconnect redelivery aborted wholesale for tasks without a
+  `repositories` row** (repository `"*"` from webhooks, ad-hoc names): the
+  redelivery query decoded the LEFT JOIN's NULL `git_url`/`default_branch`
+  as non-optional and one such task failed the entire batch, stranding every
+  unacked assignment of the node. Decodes as `Option` with empty-string
+  defaults now, matching the assign path.
+- **Concurrent uploads of the same artifact shared one tmp path**
+  (`tmp.upload`): a retried upload racing the original could swap bytes under
+  the other writer's committed sha row (and the second rename fails on
+  Windows). The tmp name now carries a per-write uuid suffix.
 
 ## [v0.3.5] — 2026-08-22
 

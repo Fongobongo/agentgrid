@@ -171,6 +171,7 @@ fn docker_run_head(
     // the container). Real LAN-blocking-with-internet needs the egress-proxy
     // upgrade path (same as the allowlist refusal).
     let net = match net.as_str() {
+        "none" => "none".to_string(),
         "restricted" => {
             tracing::debug!(
                 "network_mode=restricted maps to --network none (docker has no \
@@ -179,6 +180,16 @@ fn docker_run_head(
             "none".to_string()
         }
         "unrestricted" => "bridge".to_string(),
+        // Fail closed for TASK-supplied modes only: an unknown string from an
+        // assignment payload (e.g. "host") must never reach --network
+        // verbatim — the egress audit (resolved_network_mode) already reports
+        // unknowns as "none", so executing anything else would grant egress
+        // the operator never signed off on. The operator env fallback stays
+        // trusted (validated at startup; may name an egress-proxy network).
+        other if network_mode.is_some() => {
+            tracing::warn!(mode = other, "unknown task network_mode clamped to none");
+            "none".to_string()
+        }
         other => other.to_string(),
     };
     v.push("--network".to_string());
@@ -786,6 +797,10 @@ mod tests {
         assert_eq!(net_of(Some("unrestricted")), "bridge");
         assert_eq!(net_of(Some("restricted")), "none");
         assert_eq!(net_of(None), "none", "default remains none");
+        // Unknown TASK-supplied modes fail closed: a CP-controlled "host"
+        // (or any garbage) must never reach --network verbatim.
+        assert_eq!(net_of(Some("host")), "none");
+        assert_eq!(net_of(Some("made-up")), "none");
     }
 
     #[test]

@@ -532,9 +532,14 @@ impl Store {
         let status: String = row.try_get("status")?;
         if status != "assigned" {
             let _ = tx.rollback().await;
+            // A `cancelled` attempt was reverted by the lease reaper (or an
+            // explicit cancel) and the task requeued/reassigned — a late ack
+            // from the stale holder must be rejected, not reported as success:
+            // otherwise the node treats the 200 as "lease mine" and runs the
+            // whole agent unfenced alongside the new holder.
             return Ok(matches!(
                 status.as_str(),
-                "running" | "succeeded" | "failed" | "cancelled" | "lost" | "validating"
+                "running" | "succeeded" | "failed" | "lost" | "validating"
             ));
         }
         let now = now_iso();
