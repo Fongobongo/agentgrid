@@ -157,7 +157,8 @@ jobs:
     # repeated invocations to surface races (double-assign, lease/ACK drift,
     # outbox seq race) that a single deterministic pass hides. Nightly + manual.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 30
+    # Measured: ~2.5 min build + 3 x ~10.5 min iterations = ~34 min.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
