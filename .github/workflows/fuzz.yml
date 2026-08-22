@@ -1,0 +1,53 @@
+name: fuzz
+
+# Audit phase C follow-up: the fuzz/ crate targets only ever ran when someone
+# invoked them manually. Short scheduled sessions accumulate parser coverage
+# over time and catch regressions in the untrusted-input parsers
+# (PolicyVerdict JSON, workflow template YAML, handoff package JSON) without
+# gating merges on flaky fuzz findings.
+on:
+  schedule:
+    - cron: "40 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - policy_verdict_json
+          - workflow_template_yaml
+          - handoff_package_json
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # cargo-fuzz builds with -Zsanitizer=-Zbuild-std, which requires the
+      # nightly toolchain plus the rust-src component.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: nightly
+          components: rust-src
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+        with:
+          # The fuzz crate is its own workspace (excluded from the stable
+          # workspace), so cache its target dir separately.
+          workspaces: fuzz
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: fuzz ${{ matrix.target }}
+        working-directory: fuzz
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: crash-${{ matrix.target }}
+          path: |
+            fuzz/crash-*
+            fuzz/*/crash-*
+          if-no-files-found: ignore
