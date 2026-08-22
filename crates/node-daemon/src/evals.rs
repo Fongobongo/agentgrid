@@ -165,7 +165,7 @@ pub async fn probe_evals(workdir: &Path, timeout: Duration) -> Result<EvalOutcom
         let (program, prefix_args) = crate::sandbox::sandbox_prefix(
             kind, workdir, "sh", None,  /* no network override for evals */
             false, /* evals write scratch if needed */
-            None, /* no per-attempt name: transient eval probe */
+            None,  /* no per-attempt name: transient eval probe */
         );
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&prefix_args)
