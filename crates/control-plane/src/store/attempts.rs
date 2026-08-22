@@ -613,7 +613,8 @@ impl Store {
             return Ok(false);
         }
         sqlx::query(
-            "UPDATE tasks SET status = 'failed', finished_at = ? \
+            "UPDATE tasks SET status = 'failed', finished_at = ?, \
+             assigned_attempt_id = NULL \
              WHERE id = ? AND status = 'assigned'",
         )
         .bind(&now)

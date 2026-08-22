@@ -128,8 +128,24 @@ pub async fn poll_loop_inner(
 /// can redeliver an assignment whose ack is still in flight (attempt still
 /// `assigned` in the store); dispatching it twice would run two attempt
 /// runners for one attempt, interleaving their event streams.
-static IN_FLIGHT: std::sync::LazyLock<tokio::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
+static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Audit X-N2: RAII removal of the IN_FLIGHT entry. The entry used to be
+/// dropped only at the normal end of the runner task, so the undelivered-
+/// completion redelivery branch (which never spawns a runner) and a panicking
+/// runner leaked the id forever — every later legitimate redelivery of that
+/// attempt was then silently dropped as a "duplicate" until daemon restart.
+struct InFlightGuard(String);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
 
 /// Dispatch a batch of assignments: one task per attempt, gated by the
 /// concurrency semaphore. Shared by the poll and WS transports (plan 0.3 2.3);
@@ -157,8 +173,11 @@ pub async fn dispatch_batch(
         .collect();
     for a in batch {
         {
-            let mut in_flight = IN_FLIGHT.lock().await;
-            if !in_flight.insert(a.attempt_id.clone()) {
+            let dup = !IN_FLIGHT
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(a.attempt_id.clone());
+            if dup {
                 tracing::warn!(
                     attempt_id = %a.attempt_id,
                     "assignment redelivered while already in flight; dropping duplicate"
@@ -175,8 +194,13 @@ pub async fn dispatch_batch(
             let cfg2 = cfg.clone();
             let client2 = client.clone();
             let aid = a.attempt_id.clone();
+            // The guard releases the slot when the redelivery attempt ends —
+            // success or not — so a still-undelivered completion can be
+            // redelivered again on the next offer.
+            let guard = InFlightGuard(aid.clone());
             tokio::spawn(async move {
                 crate::recovery::redeliver_completion(&cfg2, &client2, &aid).await;
+                drop(guard);
             });
             continue;
         }
@@ -186,12 +210,12 @@ pub async fn dispatch_batch(
         };
         let cfg2 = cfg.clone();
         let client2 = client.clone();
+        let guard = InFlightGuard(a.attempt_id.clone());
         tokio::spawn(async move {
-            let attempt_id = a.attempt_id.clone();
             if let Err(e) = crate::attempt_runner::run_attempt(cfg2, client2, a).await {
                 tracing::error!("attempt error: {e}");
             }
-            IN_FLIGHT.lock().await.remove(&attempt_id);
+            drop(guard);
             drop(permit);
         });
     }

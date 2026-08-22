@@ -397,6 +397,18 @@ pub fn prepare_workspace(
             REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
         }
     } else {
+        // Audit X-N7: a clone killed mid-write leaves a populated directory
+        // without HEAD; `clone --mirror` refuses a non-empty destination, so
+        // every future attempt of this repo would fail until an operator
+        // removed it by hand. Detect the partial state and re-clone fresh.
+        if repo_dir.exists() {
+            tracing::warn!(
+                repo = %repo,
+                dir = %repo_dir.display(),
+                "partial mirror clone detected (no HEAD); removing and re-cloning"
+            );
+            std::fs::remove_dir_all(&repo_dir)?;
+        }
         std::fs::create_dir_all(repository_root)?;
         git(repository_root, &["clone", "--mirror", gurl, repo])?;
         // Hardening P2 item 35: check repo cache quota after clone.

@@ -122,10 +122,16 @@ pub async fn enroll(
 pub async fn heartbeat(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
-    Json(req): Json<HeartbeatRequest>,
+    Json(mut req): Json<HeartbeatRequest>,
 ) -> StatusCode {
     if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
         let _ = state.store.set_node_degraded(&auth.node_id).await;
+        // Audit X-C1: the heartbeat UPDATE keeps only 'revoked' sticky — it
+        // would overwrite the degraded we just set with the daemon-reported
+        // status (default online), letting an incompatible node show online
+        // and stay schedulable. Pin this beat's reported status too; the node
+        // recovers naturally once it reports a compatible protocol again.
+        req.status = Some(agentgrid_common::NodeStatus::Degraded);
     }
     match state.store.heartbeat(&auth.node_id, &req).await {
         Ok(true) => {

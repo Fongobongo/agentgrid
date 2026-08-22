@@ -204,6 +204,23 @@ impl EventOutbox {
         Ok(())
     }
 
+    /// Audit X-N1: drop the attempt's spool file once the attempt is terminal
+    /// and its events were drained. Startup recovery never replays event
+    /// outboxes of terminal attempts (attempt ids are unique per attempt — a
+    /// retry gets a new id), so a surviving file is dead weight that still
+    /// counts against the global quota scan; enough accumulated files push
+    /// every future `push` into `SpoolFull` until an operator wipes history.
+    pub fn discard(&self) {
+        let _g = self.file.lock().unwrap();
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(path = %self.path.display(), "outbox discard failed: {e}")
+            }
+        }
+    }
+
     /// Read all currently-pending events (in sequence order). Hardening P0
     /// item 10: an unparseable middle line is moved to
     /// `<dir>/quarantine/<file>-<ts>` instead of silently dropped — a torn

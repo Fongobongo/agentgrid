@@ -535,6 +535,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // delivered now while the CP is known-up.
         sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(15))
             .await;
+        // Audit X-N1: terminal attempt — drop the drained spool file so it
+        // stops counting against the global outbox quota.
+        outbox.discard();
         if exit_code == 0 {
             crate::config_error::note_attempt_succeeded();
         } else {
@@ -1091,6 +1094,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(15))
         .await;
     flusher.abort();
+    // Audit X-N1: terminal attempt — drop the drained spool file so it stops
+    // counting against the global outbox quota.
+    outbox.discard();
     // Stage 2.3: reclaim the per-attempt worktree and branch now the attempt
     // is terminal. Best-effort in a spawn_blocking so a stuck worktree never
     // turns a successful attempt terminal.

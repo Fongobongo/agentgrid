@@ -4,6 +4,44 @@
 
 ### Fixed
 
+- **Fully-delivered event spools were never deleted — the node eventually
+  bricked itself with `spool_full` (audit X-N1).** Every attempt left its
+  `<attempt>.jsonl` behind forever while the global quota scan counted every
+  file under the outbox root; once the accumulated history crossed
+  `AGENTGRID_OUTBOX_QUOTA_BYTES` (default 1 GiB) each new `push` failed and
+  every new attempt terminated `spool_full` until an operator wiped the
+  directory by hand. Terminal attempts now discard their drained spool file
+  (startup recovery never replays event outboxes of terminal attempts and a
+  retry gets a fresh attempt id, so nothing deliverable is lost).
+- **The in-flight guard leaked on the completion-redelivery path — later
+  redeliveries of that attempt were dropped silently forever (audit X-N2).**
+  The IN_FLIGHT entry was removed only at the normal end of the runner task,
+  so the branch that redelivers an undelivered completion instead of running
+  the agent never released it: after one failed redelivery, every future
+  offer of that assignment hit the duplicate check and was discarded until
+  daemon restart. The entry is now an RAII guard, so both the redelivery
+  branch and a panicking runner release the slot.
+- **A mirror clone killed mid-write bricked the repository cache until
+  manual cleanup (audit X-N7).** The partial directory has no `HEAD`, so
+  every subsequent attempt took the clone path and `git clone --mirror`
+  refused the non-empty destination — permanent failures for that repo.
+  `prepare_workspace` now detects the partial state and re-clones fresh.
+- **An incompatible-protocol node showed `online` again on its next
+  heartbeat (audit X-C1).** The handler set `degraded`, but the heartbeat
+  UPDATE only keeps `revoked` sticky and overwrote status with the
+  daemon-reported value — the node stayed schedulable despite the protocol
+  gate. The beat's reported status is now pinned to `degraded`; the node
+  returns online naturally once it reports a compatible protocol.
+- **A workflow run could wedge in `plan_ready` forever if the process died
+  between expanding steps and flipping status (audit X-C2).** The status
+  flip ran outside the expansion transaction; on retry the re-inserted steps
+  violated the unique index and surfaced as an opaque 500 every time. The
+  flip is now a CAS inside the same transaction (`plan_ready → running`),
+  which also makes a concurrent double-approve fail cleanly as 409.
+- **`reject_assignment` left `tasks.assigned_attempt_id` pointing at the
+  dead attempt** (residual from the WS-reject fix): terminal tasks are
+  required to have no active attempt; now cleared like every other terminal
+  path.
 - **A workspace-finalize failure aborted the attempt with no completion and
   no cleanup (audit ND-3).** Both runner branches propagated the
   `finalize_workspace` error out of `run_attempt`, so no `report_complete`

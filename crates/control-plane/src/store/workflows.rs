@@ -1009,9 +1009,25 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
+        // Audit X-C2: the run-status flip used to run AFTER the expansion
+        // commit. A crash (or a failed UPDATE) in that window left the run
+        // PlanReady with steps already expanded — every retry then violated
+        // ux_workflow_steps_run_step and surfaced as an opaque 500, wedging
+        // the run permanently. Flip inside the same transaction, CAS-guarded,
+        // so a concurrent double-approve fails cleanly as 409 instead.
+        let flipped = sqlx::query(
+            "UPDATE workflow_runs SET status = 'running' \
+             WHERE id = ? AND status = 'plan_ready'",
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if flipped != 1 {
+            tx.rollback().await.ok();
+            anyhow::bail!("run is not awaiting plan approval (status changed concurrently)");
+        }
         tx.commit().await?;
-        self.set_workflow_run_status(run_id, WorkflowRunStatus::Running, None)
-            .await?;
         Ok(())
     }
 
