@@ -29,6 +29,39 @@
   as non-optional and one such task failed the entire batch, stranding every
   unacked assignment of the node. Decodes as `Option` with empty-string
   defaults now, matching the assign path.
+- **ACP attempts lost their tail events and artifacts forever.** The ACP
+  branch of the runner never drained the durable event outbox after the
+  session ended (the flusher died with `drive_acp_session`), so
+  validating/eval-fail/account-rotation events written after the session
+  stranded on disk permanently — startup recovery never replays event
+  outboxes of terminal attempts. It also never uploaded `changes.patch` /
+  `validation.log`: both were written, then destroyed by the workspace
+  cleanup, so the documented upstream-patch fallback silently degraded.
+  The branch now mirrors the wrapper: uploads + a pre-completion drain +
+  pending-artifact reporting + a post-completion redelivery drain.
+- **WS assignment reject (`ok=false`) was a no-op that looped forever.**
+  The reject path called `complete_attempt` with a Fail transition on an
+  still-`assigned` attempt — an invalid transition the handler swallowed,
+  so the attempt sat assigned until the 30s reaper, got reassigned to the
+  same node, and rejected again; the task never reached a terminal state
+  (the node protocol doc promises "immediately failed"). New
+  `reject_assignment` store path applies the legal NodeLost pairing
+  (attempt `lost`, task `failed`) with the node counter decremented and an
+  audit row carrying the reject reason.
+- **GitHub webhook deliveries were not deduplicated.** Delivery is
+  at-least-once (response lost after commit, timeout, manual redelivery),
+  and every replay minted a fresh task — duplicate full agent runs for the
+  same issue/CI failure/PR. The delivery GUID (`X-GitHub-Delivery`) is now
+  recorded in a `webhook_deliveries` table (INSERT OR IGNORE) before any
+  task creation across all three webhook handlers.
+- **A workflow step wedged `running` forever when its task link was
+  missing.** The pending→running claim commits in its own transaction and
+  the task create/link run outside it; a crash in between (or one transient
+  DB error) left a Running step with `role_runs.task_id` NULL — a state no
+  tick branch could progress or terminate, pinning the whole run in
+  `running` with the 5s ticker spinning on it. The tick now detects a
+  Running step with no task link and resets it to Pending for a clean
+  re-claim.
 - **Concurrent uploads of the same artifact shared one tmp path**
   (`tmp.upload`): a retried upload racing the original could swap bytes under
   the other writer's committed sha row (and the second rename fails on

@@ -7,6 +7,24 @@ use sqlx::Row;
 use uuid::Uuid;
 
 impl Store {
+    /// GitHub webhook delivery dedup (audit CP-4): delivery is at-least-once,
+    /// and every replay used to mint a fresh task — duplicate full agent runs
+    /// for the same issue/CI failure/PR. Records the delivery GUID with
+    /// INSERT OR IGNORE and returns false when the GUID was already seen
+    /// (the handler then drops the replay). Uses the write txn (single
+    /// writer) so two concurrent replays cannot both insert.
+    pub async fn webhook_delivery_fresh(&self, guid: &str) -> Result<bool> {
+        let n = sqlx::query(
+            "INSERT OR IGNORE INTO webhook_deliveries (guid, seen_at) VALUES (?, ?)",
+        )
+        .bind(guid)
+        .bind(now_iso())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n == 1)
+    }
+
     pub async fn create_task(&self, req: &CreateTaskRequest) -> Result<TaskView> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();

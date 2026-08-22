@@ -24,6 +24,16 @@ fn configured_secret() -> Option<String> {
     }
 }
 
+/// The GitHub delivery GUID (`X-GitHub-Delivery`): unique per delivery,
+/// stable across retries of the same delivery — the dedup key for
+/// `webhook_delivery_fresh`. None when the header is absent.
+fn delivery_guid(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-github-delivery")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 /// Verify the GitHub `X-Hub-Signature-256` HMAC against the raw body.
 /// Plan 1.10: shared by the issue / check_run / pull_request webhooks.
 /// Returns `Err(StatusCode)` suitable for the route.
@@ -91,6 +101,21 @@ pub async fn github_issue_webhook(
     body: axum::body::Bytes,
 ) -> Result<StatusCode, StatusCode> {
     verify_github_sig(&headers, &body)?;
+
+    // Delivery dedup (audit CP-4): GitHub delivery is at-least-once — a
+    // replayed delivery GUID must not mint a second task for the same
+    // issue. Missing header (non-GitHub sender / proxy strip) falls back
+    // to the historical create-once behavior.
+    if let Some(guid) = delivery_guid(&headers) {
+        match state.store.webhook_delivery_fresh(&guid).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(StatusCode::OK),
+            Err(e) => {
+                tracing::error!("webhook delivery dedup failed: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    }
 
     // Parse the GitHub issue event.
     let v: serde_json::Value =
@@ -190,6 +215,16 @@ pub async fn github_check_run_webhook(
     body: axum::body::Bytes,
 ) -> Result<StatusCode, StatusCode> {
     verify_github_sig(&headers, &body)?;
+    if let Some(guid) = delivery_guid(&headers) {
+        match state.store.webhook_delivery_fresh(&guid).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(StatusCode::OK),
+            Err(e) => {
+                tracing::error!("webhook delivery dedup failed: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    }
     let v: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     if v.get("action").and_then(|a| a.as_str()) != Some("completed") {
@@ -246,6 +281,16 @@ pub async fn github_pull_request_webhook(
     body: axum::body::Bytes,
 ) -> Result<StatusCode, StatusCode> {
     verify_github_sig(&headers, &body)?;
+    if let Some(guid) = delivery_guid(&headers) {
+        match state.store.webhook_delivery_fresh(&guid).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(StatusCode::OK),
+            Err(e) => {
+                tracing::error!("webhook delivery dedup failed: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    }
     let v: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");

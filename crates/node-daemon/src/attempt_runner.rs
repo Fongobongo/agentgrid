@@ -442,6 +442,51 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             "error_code": error_code.as_deref().unwrap_or(""),
             "adapter": assignment.adapter,
         });
+        // Wrapper-branch parity (audit ND-1/ND-2): upload the produced
+        // artifacts and drain the durable outbox BEFORE the completion, so
+        // the CP sees the full event stream and the patch while the attempt
+        // is still live. The ACP flusher died with drive_acp_session, so
+        // this disk-ground-truth drain is the only delivery path left —
+        // without it the eval/validation events written above would strand
+        // on disk forever (startup recovery never replays event outboxes of
+        // terminal attempts) and changes.patch would be destroyed by the
+        // cleanup below without ever reaching the CP.
+        let spool_root = cfg.artifact_spool_root.clone();
+        upload_if_exists(
+            &client,
+            &cfg.server,
+            &assignment.attempt_id,
+            "changes.patch",
+            &workdir.join("changes.patch"),
+            &assignment.fencing_token,
+            &spool_root,
+            cfg.max_artifact_size,
+        )
+        .await;
+        upload_if_exists(
+            &client,
+            &cfg.server,
+            &assignment.attempt_id,
+            "validation.log",
+            &workdir.join("validation.log"),
+            &assignment.fencing_token,
+            &spool_root,
+            cfg.max_artifact_size,
+        )
+        .await;
+        sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(60))
+            .await;
+        // Hardening P1 item 11 (wrapper parity): report which artifacts are
+        // still owed so operators see the outstanding set.
+        let pending_artifacts: Vec<String> = artifact_spool::pending(&cfg.artifact_spool_root)
+            .ok()
+            .map(|p| {
+                p.iter()
+                    .filter(|(aid, _, _)| aid == &assignment.attempt_id)
+                    .map(|(_, name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         report_complete(
             &client,
             &cfg.server,
@@ -455,11 +500,16 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             None,
             None,
             assignment.provenance.clone().or_else(provenance_from_env),
-            vec![],
+            pending_artifacts,
             &cfg.completion_outbox,
             &assignment.fencing_token,
         )
         .await;
+        // Wrapper parity: post-completion ground-truth redelivery — events
+        // still on disk after the pre-drain (CP flapped mid-drain) are
+        // delivered now while the CP is known-up.
+        sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(15))
+            .await;
         if exit_code == 0 {
             crate::config_error::note_attempt_succeeded();
         } else {

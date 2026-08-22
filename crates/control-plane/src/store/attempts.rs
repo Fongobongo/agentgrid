@@ -572,6 +572,65 @@ impl Store {
         Ok(true)
     }
 
+    /// A node explicitly refused an assignment (ws ack `ok=false`): the
+    /// attempt dies terminal (`lost`) and the task `failed` — the legal
+    /// NodeLost pairing from `assigned`. Terminal, NOT a requeue: a requeue
+    /// would hot-loop assign→reject on the same node (the scheduler refills
+    /// the freed slot immediately), and the node-protocol doc promises
+    /// "ok=false → attempt immediately failed". The old path called
+    /// `complete_attempt` with a Fail transition on an `assigned` attempt —
+    /// an invalid transition the handler swallowed, leaving the attempt
+    /// assigned for the 30s reaper and cycling forever.
+    pub async fn reject_assignment(&self, attempt_id: &str, reason: &str) -> Result<bool> {
+        let mut tx = self.write_txn().await?;
+        let row = sqlx::query("SELECT task_id, node_id, status FROM attempts WHERE id = ?")
+            .bind(attempt_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        };
+        let task_id: String = row.try_get("task_id")?;
+        let node_id: String = row.try_get("node_id")?;
+        let status: String = row.try_get("status")?;
+        if status != "assigned" {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        }
+        let now = now_iso();
+        let moved = sqlx::query(
+            "UPDATE attempts SET status = 'lost', finished_at = ? \
+             WHERE id = ? AND status = 'assigned'",
+        )
+        .bind(&now)
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if moved != 1 {
+            let _ = tx.rollback().await;
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE tasks SET status = 'failed', finished_at = ? \
+             WHERE id = ? AND status = 'assigned'",
+        )
+        .bind(&now)
+        .bind(&task_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE nodes SET active_attempts = MAX(0, active_attempts - 1) WHERE id = ?")
+            .bind(&node_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        let _ = self
+            .audit("attempt", Some(attempt_id), "attempt.node_rejected", Some(reason), None)
+            .await;
+        Ok(true)
+    }
+
     pub async fn begin_validate(&self, attempt_id: &str) -> Result<bool> {
         let mut tx = self.write_txn().await?;
         let n = sqlx::query(

@@ -297,28 +297,20 @@ async fn handle_client_msg(state: &Arc<AppState>, node_id: &str, msg: NodeWsMsg)
                         tracing::error!(attempt = %id, "ws ack_attempt failed: {e}");
                     }
                 } else {
-                    // Rejected on the node: fail the attempt so the task is
-                    // retryable, same store path as an HTTP completion.
-                    let req = agentgrid_common::CompleteAttemptRequest {
-                        exit_code: 1,
-                        commit_sha: None,
-                        error_code: Some(format!(
-                            "node_rejected{}",
-                            error
-                                .as_deref()
-                                .map(|e| format!(": {e}"))
-                                .unwrap_or_default()
-                        )),
-                        resolved_base_sha: None,
-                        remote_head_at_start: None,
-                        remote_head_at_finish: None,
-                        acp_session_id: None,
-                        provenance: None,
-                        plan: None,
-                        pending_artifacts: vec![],
-                    };
-                    if let Err(e) = state.store.complete_attempt(id, &req).await {
-                        tracing::warn!(attempt = %id, "ws ack-fail completion failed: {e}");
+                    // Rejected on the node: the attempt dies terminal (lost)
+                    // and the task fails — legal NodeLost transitions from
+                    // `assigned`. The old complete_attempt/Fail call was an
+                    // invalid transition the handler swallowed, leaving the
+                    // attempt assigned until the 30s reaper and cycling.
+                    let reason = format!(
+                        "node_rejected{}",
+                        error
+                            .as_deref()
+                            .map(|e| format!(": {e}"))
+                            .unwrap_or_default()
+                    );
+                    if let Err(e) = state.store.reject_assignment(id, &reason).await {
+                        tracing::warn!(attempt = %id, "ws reject_assignment failed: {e}");
                     }
                 }
             }

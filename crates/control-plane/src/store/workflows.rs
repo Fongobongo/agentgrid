@@ -1312,7 +1312,38 @@ impl Store {
                 | WorkflowStepStatus::Skipped
                 | WorkflowStepStatus::Blocked => continue,
                 WorkflowStepStatus::Running => {
-                    if let Some(task_id) = self.step_task_id(&step.id).await? {
+                    let task_link = self.step_task_id(&step.id).await?;
+                    if task_link.is_none() {
+                        // Audit CP-5 (wedge recovery): a Running step with no
+                        // task link means the pending→running claim committed
+                        // but create_task/set_role_run_task never did (crash
+                        // between them, or a transient DB error after the
+                        // task existed). No later branch of this tick can
+                        // progress or terminate such a step, so the run would
+                        // sit `running` forever with the ticker spinning on
+                        // it. Reset to Pending; the next tick re-claims and
+                        // re-creates the task.
+                        let reset = sqlx::query(
+                            "UPDATE workflow_steps SET status = 'pending' \
+                             WHERE id = ? AND status = 'running'",
+                        )
+                        .bind(&step.id)
+                        .execute(&self.pool)
+                        .await?
+                        .rows_affected()
+                            > 0;
+                        if reset {
+                            tracing::warn!(
+                                step = %step.id,
+                                "running step had no task link; reset to pending \
+                                 (claim/link wedge recovery)"
+                            );
+                            status_by_id
+                                .insert(&step.step_id, WorkflowStepStatus::Pending);
+                        }
+                        continue;
+                    }
+                    if let Some(task_id) = task_link {
                         if let Some(ts) = self.get_task_status(&task_id).await? {
                             match ts {
                                 TaskStatus::Succeeded => {
