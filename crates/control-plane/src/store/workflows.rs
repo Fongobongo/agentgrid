@@ -1338,8 +1338,7 @@ impl Store {
                                 "running step had no task link; reset to pending \
                                  (claim/link wedge recovery)"
                             );
-                            status_by_id
-                                .insert(&step.step_id, WorkflowStepStatus::Pending);
+                            status_by_id.insert(&step.step_id, WorkflowStepStatus::Pending);
                         }
                         continue;
                     }
