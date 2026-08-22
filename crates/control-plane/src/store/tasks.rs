@@ -14,12 +14,13 @@ impl Store {
     /// (the handler then drops the replay). Uses the write txn (single
     /// writer) so two concurrent replays cannot both insert.
     pub async fn webhook_delivery_fresh(&self, guid: &str) -> Result<bool> {
-        let n = sqlx::query("INSERT OR IGNORE INTO webhook_deliveries (guid, seen_at) VALUES (?, ?)")
-            .bind(guid)
-            .bind(now_iso())
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+        let n =
+            sqlx::query("INSERT OR IGNORE INTO webhook_deliveries (guid, seen_at) VALUES (?, ?)")
+                .bind(guid)
+                .bind(now_iso())
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
         Ok(n == 1)
     }
 

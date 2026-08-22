@@ -253,8 +253,9 @@ pub async fn upload_if_exists(
         Ok(s) if s.is_success() => {
             let _ = artifact_spool::remove(spool_root, attempt_id, name);
         }
-        Ok(s) if s.status() == reqwest::StatusCode::CONFLICT
-            || s.status() == reqwest::StatusCode::PRECONDITION_FAILED =>
+        Ok(s)
+            if s.status() == reqwest::StatusCode::CONFLICT
+                || s.status() == reqwest::StatusCode::PRECONDITION_FAILED =>
         {
             // Audit ND-8: a fencing rejection is TERMINAL — this writer is
             // stale (the attempt was reverted/reassigned), and no retry can
