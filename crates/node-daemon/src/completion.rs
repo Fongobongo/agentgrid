@@ -188,8 +188,7 @@ pub async fn ack_attempt(
         Ok(resp) => {
             let status = resp.status();
             tracing::warn!("ack rejected for {attempt_id}: HTTP {status}");
-            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT
-            {
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT {
                 AckOutcome::Rejected
             } else {
                 AckOutcome::Unreachable
