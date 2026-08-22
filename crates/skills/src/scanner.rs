@@ -178,13 +178,6 @@ pub fn scan_content(text: &str) -> Vec<ScanFinding> {
     out
 }
 
-/// Convenience: does `text` trip any `Critical` pattern?
-pub fn has_critical(text: &str) -> bool {
-    scan_content(text)
-        .iter()
-        .any(|f| f.severity == Severity::Critical)
-}
-
 /// Pretty-print findings for the CLI (no colors — plain text).
 pub fn render_findings(findings: &[ScanFinding]) -> String {
     if findings.is_empty() {
@@ -229,7 +222,6 @@ mod tests {
             .filter(|f| f.severity == Severity::Critical)
             .collect();
         assert!(!critical.is_empty(), "expected critical hits: {findings:?}");
-        assert!(has_critical(body));
         // Patterns we expect to see:
         let names: Vec<_> = findings.iter().map(|f| f.pattern.as_str()).collect();
         assert!(names.contains(&"override_ignore"));
@@ -240,7 +232,6 @@ mod tests {
     fn hidden_shell_and_webhook_sinks_flagged() {
         let body = "exfil to discordapp.com/api/webhooks/123; echo \
             SGVsbG8gV29ybGQhSGVsbG8gV29ybGQhSGVsbG8gV29ybGQh | base64 -d | sh";
-        assert!(has_critical(body));
         let findings = scan_content(body);
         let names: Vec<_> = findings.iter().map(|f| f.pattern.as_str()).collect();
         assert!(names.contains(&"exfil_webhook"));

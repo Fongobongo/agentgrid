@@ -1,16 +1,13 @@
-//! Stage 4.2: skill trust gate + bundles + materialization + profile revisions.
+//! Stage 4.2: skill trust gate + materialization.
 //!
-//! ponytail: minimal but testable. Bundle sources are `filesystem`/`git` (git is
-//! a pin record only — actual git fetch is the node's job). Materialization
-//! copies the original `SKILL.md` verbatim (preserving content + hash) rather
-//! than re-serializing the parsed struct. Revisions use a symlinked `active`
-//! pointer for transactional flip + rollback (Linux-only, per project constraints).
+//! ponytail: minimal but testable. Materialization copies the original
+//! `SKILL.md` verbatim (preserving content + hash) rather than re-serializing
+//! the parsed struct.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -21,40 +18,6 @@ pub fn compute_skill_hash(content: &str) -> String {
     let mut h = Sha256::new();
     h.update(content.as_bytes());
     format!("{:x}", h.finalize())
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum BundleSource {
-    Filesystem { path: PathBuf },
-    Git { url: String, rev: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum SkillPin {
-    Commit(String),
-    Hash(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillRef {
-    pub name: String,
-    pub source: BundleSource,
-    pub pin: SkillPin,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LockEntry {
-    pub name: String,
-    pub hash: String,
-}
-
-/// A skill bundle manifest: where skills come from and what hashes are pinned.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct SkillBundle {
-    pub skills: Vec<SkillRef>,
-    pub lock: Vec<LockEntry>,
 }
 
 /// Decides which skills may activate. Project skills are untrusted by default
@@ -149,98 +112,6 @@ pub fn materialize(
     }
 
     Ok((written, skipped))
-}
-
-/// Manages immutable profile revisions under `<root>/revisions/<id>` with an
-/// `active` symlink that is flipped transactionally (and can be rolled back).
-pub struct RevisionStore {
-    root: PathBuf,
-}
-
-impl RevisionStore {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn revisions_dir(&self) -> PathBuf {
-        self.root.join("revisions")
-    }
-
-    fn active_link(&self) -> PathBuf {
-        self.root.join("active")
-    }
-
-    /// Currently-active revision id, if any.
-    pub fn active(&self) -> Option<String> {
-        let link = self.active_link();
-        let target = std::fs::read_link(&link).ok()?;
-        target.file_name()?.to_str().map(String::from)
-    }
-
-    /// Materialize `src` into a new immutable revision `<id>` and flip `active`
-    /// to it. Returns the previous active id (for rollback), if any.
-    pub fn activate(&self, id: &str, src: &Path) -> Result<Option<String>, MaterializeError> {
-        let prev = self.active();
-        let rev_dir = self.revisions_dir().join(id);
-        if rev_dir.exists() {
-            std::fs::remove_dir_all(&rev_dir)
-                .map_err(|e| MaterializeError::Io(rev_dir.display().to_string(), e.to_string()))?;
-        }
-        copy_dir(src, &rev_dir)
-            .map_err(|e| MaterializeError::Io(rev_dir.display().to_string(), e.to_string()))?;
-
-        let link = self.active_link();
-        if link.exists() || link.is_symlink() {
-            std::fs::remove_file(&link)
-                .map_err(|e| MaterializeError::Io(link.display().to_string(), e.to_string()))?;
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&rev_dir, &link)
-            .map_err(|e| MaterializeError::Io(link.display().to_string(), e.to_string()))?;
-        #[cfg(not(unix))]
-        std::fs::write(&link, rev_dir.to_string_lossy().as_bytes())
-            .map_err(|e| MaterializeError::Io(link.display().to_string(), e.to_string()))?;
-
-        Ok(prev)
-    }
-
-    /// Flip `active` back to an earlier revision id (must already exist).
-    pub fn rollback(&self, prev_id: &str) -> Result<(), MaterializeError> {
-        let rev_dir = self.revisions_dir().join(prev_id);
-        if !rev_dir.exists() {
-            return Err(MaterializeError::Io(
-                rev_dir.display().to_string(),
-                "revision does not exist".into(),
-            ));
-        }
-        let link = self.active_link();
-        if link.exists() || link.is_symlink() {
-            std::fs::remove_file(&link)
-                .map_err(|e| MaterializeError::Io(link.display().to_string(), e.to_string()))?;
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&rev_dir, &link)
-            .map_err(|e| MaterializeError::Io(link.display().to_string(), e.to_string()))?;
-        #[cfg(not(unix))]
-        std::fs::write(&link, rev_dir.to_string_lossy().as_bytes())
-            .map_err(|e| MaterializeError::Io(link.display().to_string(), e.to_string()))?;
-        Ok(())
-    }
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let path = entry.path();
-        let target = dst.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir(&path, &target)?;
-        } else {
-            std::fs::copy(&path, &target)?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -342,33 +213,5 @@ mod tests {
                 let _ = std::fs::remove_dir_all(p);
             }
         }
-    }
-
-    #[test]
-    fn revision_activate_and_rollback() {
-        let src = std::env::temp_dir().join(format!("ag_rev_src_{}", std::process::id()));
-        let root = std::env::temp_dir().join(format!("ag_rev_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(src.join("s1")).unwrap();
-        std::fs::write(src.join("s1").join("SKILL.md"), b"v1").unwrap();
-
-        let rs = RevisionStore::new(root.clone());
-        let prev = rs.activate("r1", &src).unwrap();
-        assert!(prev.is_none());
-        assert_eq!(rs.active(), Some("r1".into()));
-        // new revision
-        std::fs::write(src.join("s1").join("SKILL.md"), b"v2").unwrap();
-        let prev = rs.activate("r2", &src).unwrap();
-        assert_eq!(prev, Some("r1".into()));
-        assert_eq!(rs.active(), Some("r2".into()));
-        // rollback
-        rs.rollback("r1").unwrap();
-        assert_eq!(rs.active(), Some("r1".into()));
-        // r1 still has v1
-        let v = std::fs::read(root.join("active").join("s1").join("SKILL.md")).unwrap();
-        assert_eq!(&v[..], b"v1");
-        let _ = std::fs::remove_dir_all(&src);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

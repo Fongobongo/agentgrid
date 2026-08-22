@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Dead code sweep (audit): the unused `to_event_kind` adapter mapping
+  (superseded by the ACP envelope translation), `Store::user_exists`,
+  `config_error::current_streak`, the test-only `CommandGuard::from_env`,
+  the never-called `opencode_config::clear_applied_hash` (the keep-last-
+  known-good profile decision makes it intentionally unreachable), the
+  unparsed bundle-manifest types (`SkillBundle`/`SkillRef`/`LockEntry`/
+  `BundleSource`/`SkillPin`) and the never-wired `RevisionStore`
+  rollback feature with its tests, the test-only `has_critical` /
+  `SkillCatalogEntry` helpers, the empty `ReworkRequest` placeholder, the
+  unused `common::rss` module (heartbeat has its own probe), and the
+  documented-but-never-sent WS close code 4004 (const + protocol-doc row).
+  The stale `#[allow(dead_code)]` on `RequestId` (actually read by attempt
+  handlers) is dropped too.
+
 ### Fixed
 
 - **A secret straddling the line-cap leaked through the redactor's

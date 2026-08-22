@@ -34,22 +34,6 @@ pub struct Skill {
     pub body: String,
 }
 
-/// Catalog view: only name + description are advertised before activation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillCatalogEntry {
-    pub name: String,
-    pub description: String,
-}
-
-impl Skill {
-    pub fn catalog_entry(&self) -> SkillCatalogEntry {
-        SkillCatalogEntry {
-            name: self.name.clone(),
-            description: self.description.clone(),
-        }
-    }
-}
-
 #[derive(Debug, Error, PartialEq)]
 #[error("skill parse error: {}", errors.join("; "))]
 pub struct SkillParseError {
@@ -375,13 +359,5 @@ mod tests {
     fn missing_closing_delimiter_errors() {
         let bad = "---\nname: x\ndescription: y\n";
         assert!(parse_skill_md(bad, true).is_err());
-    }
-
-    #[test]
-    fn catalog_entry_drops_body() {
-        let r = parse_skill_md(MINIMAL, true).unwrap();
-        let e = r.skill.catalog_entry();
-        assert_eq!(e.name, "git-helper");
-        assert_eq!(e.description, "Helps with git tasks");
     }
 }

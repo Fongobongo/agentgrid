@@ -72,14 +72,6 @@ impl Store {
             .collect()
     }
 
-    pub async fn user_exists(&self, username: &str) -> Result<bool> {
-        let row = sqlx::query("SELECT COUNT(*) AS c FROM users WHERE username = ?")
-            .bind(username)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(row.try_get::<i64, _>("c")? > 0)
-    }
-
     /// Verify a username/password pair. Returns the user id and role on success.
     pub async fn verify_user(
         &self,

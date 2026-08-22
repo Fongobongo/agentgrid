@@ -75,7 +75,6 @@ pub mod cluster;
 pub mod context;
 pub mod mcp;
 pub mod profile;
-pub mod rss;
 pub mod skills_trust;
 mod state_machine;
 
@@ -1230,9 +1229,6 @@ pub struct CreateAnnotationRequest {
 /// prompt. The CP looks up the annotated attempt's owning task for the
 /// original prompt + repo/adapter, appends an `[ANNOTATIONS]` block, and
 /// creates a fresh task. Returns the new task id so the caller can poll.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ReworkRequest {}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReworkResponse {
     pub task_id: String,

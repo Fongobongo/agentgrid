@@ -77,12 +77,6 @@ pub fn note_attempt_succeeded() {
     CONSECUTIVE_CONFIG_ERRS.store(0, Ordering::Relaxed);
 }
 
-/// Snapshot the current streak (for diagnostics).
-#[allow(dead_code)]
-pub fn current_streak() -> u64 {
-    CONSECUTIVE_CONFIG_ERRS.load(Ordering::Relaxed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

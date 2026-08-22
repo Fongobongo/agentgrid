@@ -32,11 +32,6 @@ pub fn set_applied_hash(hash: String) {
     *APPLIED_HASH.lock().unwrap() = Some(hash);
 }
 
-#[allow(dead_code)]
-pub fn clear_applied_hash() {
-    *APPLIED_HASH.lock().unwrap() = None;
-}
-
 pub fn applied_hash() -> Option<String> {
     APPLIED_HASH.lock().unwrap().clone()
 }

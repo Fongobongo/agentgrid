@@ -98,7 +98,6 @@ pub fn api_error_with_id(
 /// Request id available to handlers via extensions (for explicit logging /
 /// future audit). The span already carries it for every log line.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // read by future handlers via extensions
 pub struct RequestId(pub String);
 
 /// Serve the built web UI (Stage 4.3). Unknown non-API paths fall back to

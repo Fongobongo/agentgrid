@@ -67,7 +67,6 @@ pub enum NodeWsMsg {
 pub const WS_CLOSE_UNAUTHORIZED: u16 = 4001;
 pub const WS_CLOSE_BAD_PROTOCOL: u16 = 4002;
 pub const WS_CLOSE_SUPERSEDED: u16 = 4003;
-pub const WS_CLOSE_DRAIN: u16 = 4004;
 
 #[cfg(test)]
 mod tests {

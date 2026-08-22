@@ -27,7 +27,7 @@ pub use backend::{
     ResourceLimits, SpawnRequest,
 };
 
-use agentgrid_common::{EventKind, EventType};
+use agentgrid_common::EventType;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,26 +48,6 @@ pub fn to_event_type(t: &str) -> EventType {
         "result" => EventType::Result,
         "error" => EventType::Error,
         _ => EventType::Stdout,
-    }
-}
-
-/// Map the 3.1 envelope `kind` string to the richer [`EventKind`]. Unknown
-/// kinds are preserved as `EventKind::Other` (never a fatal error).
-pub fn to_event_kind(t: &str) -> EventKind {
-    match t {
-        "plan" => EventKind::Plan,
-        "tool_call" => EventKind::ToolCall,
-        "tool_result" => EventKind::ToolResult,
-        "file_change" => EventKind::FileChange,
-        "permission_request" => EventKind::PermissionRequest,
-        "usage" => EventKind::Usage,
-        "handoff" => EventKind::Handoff,
-        "status" => EventKind::Status,
-        "log" => EventKind::Log,
-        "progress" => EventKind::Progress,
-        "result" => EventKind::Result,
-        "error" => EventKind::Error,
-        other => EventKind::Other(other.to_string()),
     }
 }
 

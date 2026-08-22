@@ -41,30 +41,6 @@ impl CommandGuard {
         Self { deny, allow }
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn from_env() -> Self {
-        let deny = std::env::var("AGENTGRID_GUARD_DENY")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let allow = std::env::var("AGENTGRID_GUARD_ALLOW")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self::new(deny, allow)
-    }
-
     /// Decide whether `cmd` is permitted. Substring match, case-sensitive.
     pub fn decide(&self, cmd: &str) -> GuardDecision {
         for pat in &self.deny {
