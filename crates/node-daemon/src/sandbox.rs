@@ -37,6 +37,41 @@ impl SandboxKind {
     }
 }
 
+/// Deterministic per-attempt sandbox container name (audit ND-6): enables
+/// `remove_sandbox_container` to kill the actual container on
+/// cancel/timeout — killing the attached `docker run` client leaves the
+/// container running (see `docker_run_head`).
+pub fn container_name(attempt_id: &str) -> String {
+    format!("agentgrid-{attempt_id}")
+}
+
+/// Best-effort `rm -f` of the attempt's sandbox container. No-op when the
+/// daemon is not running a container sandbox (mirrors the env the startup
+/// config parsed `SandboxKind` from). Failures only warn: the startup orphan
+/// sweep remains the backstop.
+pub async fn remove_sandbox_container(attempt_id: &str) {
+    let sandbox = std::env::var("AGENTGRID_SANDBOX").unwrap_or_default();
+    if sandbox.is_empty() || sandbox == "none" {
+        return;
+    }
+    let runtime =
+        std::env::var("AGENTGRID_SANDBOX_RUNTIME").unwrap_or_else(|_| "docker".to_string());
+    let name = container_name(attempt_id);
+    match tokio::process::Command::new(&runtime)
+        .args(["rm", "-f", &name])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => tracing::warn!(
+            attempt_id,
+            "sandbox container rm -f failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => tracing::warn!(attempt_id, "sandbox container rm -f spawn failed: {e}"),
+    }
+}
+
 /// Prefix args + program to run `program ...` inside the configured sandbox,
 /// rooted at `workdir`. Used by the legacy wrapper-binary spawn path (Stage
 /// 11.2 / line 358): `SpawnRequest { bin: program,
@@ -54,11 +89,13 @@ pub fn sandbox_prefix(
     program: &str,
     network_mode: Option<&str>,
     read_only_worktree: bool,
+    container_name: Option<&str>,
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), vec![]),
         SandboxKind::Docker => {
-            let mut prefix = docker_run_head(workdir, network_mode, read_only_worktree);
+            let mut prefix =
+                docker_run_head(workdir, network_mode, read_only_worktree, container_name);
             prefix.push(image_ref());
             prefix.push(program.into());
             ("docker".into(), prefix)
@@ -138,6 +175,7 @@ fn docker_run_head(
     workdir: &std::path::Path,
     network_mode: Option<&str>,
     read_only_worktree: bool,
+    container_name: Option<&str>,
 ) -> Vec<String> {
     let mut v = vec![
         "run".to_string(),
@@ -152,6 +190,15 @@ fn docker_run_head(
         "--cap-drop=ALL".to_string(),
         "--security-opt=no-new-privileges".to_string(),
     ];
+    // Audit ND-6: a deterministic per-attempt name so cancel/timeout can
+    // `docker rm -f` the actual container. Killing the attached `docker run`
+    // client only proxies SIGTERM; the 10s SIGKILL escalation kills the
+    // client without forwarding, and the client's death leaves the container
+    // running on the worktree mount.
+    if let Some(name) = container_name {
+        v.push("--name".to_string());
+        v.push(name.to_string());
+    }
     // Plan §25: stamp the owning daemon on every container so a hard-crashed
     // daemon's orphaned containers are findable/removable at next startup.
     if let Some(node_id) = NODE_ID.get() {
@@ -271,11 +318,13 @@ pub fn sandbox_command(
     workdir: &std::path::Path,
     network_mode: Option<&str>,
     read_only_worktree: bool,
+    container_name: Option<&str>,
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), args.to_vec()),
         SandboxKind::Docker => {
-            let mut out = docker_run_head(workdir, network_mode, read_only_worktree);
+            let mut out =
+                docker_run_head(workdir, network_mode, read_only_worktree, container_name);
             out.push(image_ref());
             out.push(program.to_string());
             out.extend(args.iter().cloned());
@@ -482,6 +531,7 @@ mod tests {
             std::path::Path::new("/w"),
             None,
             false,
+            None,
         );
         assert_eq!(p, "claude");
         assert_eq!(a, vec!["--acp"]);
@@ -500,6 +550,7 @@ mod tests {
             std::path::Path::new("/w"),
             None,
             false,
+            None,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -531,6 +582,7 @@ mod tests {
             "adapter-x",
             None,
             false,
+            None,
         );
         assert_eq!(p, "adapter-x");
         assert!(a.is_empty());
@@ -555,6 +607,7 @@ mod tests {
             std::path::Path::new("/w"),
             None,
             false,
+            None,
         );
         clear_sandbox_env();
         let idx = a
@@ -581,6 +634,7 @@ mod tests {
             "adapter-claude",
             None,
             false,
+            None,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -617,6 +671,7 @@ mod tests {
             "c",
             None,
             false,
+            None,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -631,6 +686,7 @@ mod tests {
             "c",
             None,
             false,
+            None,
         );
         clear_sandbox_env();
         assert_eq!(a2[a2.len() - 2], "img:1@sha256:f00d");
@@ -651,6 +707,7 @@ mod tests {
             std::path::Path::new("/work"),
             None,
             true,
+            None,
         );
         clear_sandbox_env();
         let vol = a
@@ -669,6 +726,7 @@ mod tests {
             std::path::Path::new("/work"),
             None,
             false,
+            None,
         );
         let vol2 = a2
             .iter()
@@ -764,6 +822,7 @@ mod tests {
             std::path::Path::new("/w"),
             None,
             false,
+            None,
         );
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
@@ -787,6 +846,7 @@ mod tests {
                 std::path::Path::new("/w"),
                 mode,
                 false,
+                None,
             );
             let i = a.iter().position(|x| x == "--network").unwrap() + 1;
             a[i].clone()
@@ -851,6 +911,7 @@ mod tests {
             std::path::Path::new("/w"),
             None,
             false,
+            None,
         );
         clear_sandbox_env();
         assert!(

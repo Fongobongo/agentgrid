@@ -83,6 +83,9 @@ pub async fn supervise_adapter(
             Outcome::Exited(c) => (c, None),
             Outcome::Timeout => {
                 terminate_group(pid);
+                // Audit ND-6: killing the `docker run` client leaves the
+                // container itself running — remove it by per-attempt name.
+                crate::sandbox::remove_sandbox_container(attempt_id).await;
                 let status = child.wait().await?;
                 (status.code().unwrap_or(-1), Some("timeout"))
             }
@@ -97,6 +100,7 @@ pub async fn supervise_adapter(
                 )
                 .await;
                 terminate_group(pid);
+                crate::sandbox::remove_sandbox_container(attempt_id).await;
                 let status = child.wait().await?;
                 (status.code().unwrap_or(-1), Some("cancelled"))
             }

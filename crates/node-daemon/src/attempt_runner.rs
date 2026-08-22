@@ -688,6 +688,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         &bin,
         assignment.network_mode.as_deref(),
         assignment.read_only,
+        Some(&sandbox::container_name(&assignment.attempt_id)),
     );
     // Plan §27: egress audit — log the effective isolation applied to this
     // attempt (task mode + resolved docker network) so operators can verify

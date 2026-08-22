@@ -108,6 +108,7 @@ async fn drive_acp_session(
         ws_path,
         assignment.network_mode.as_deref(),
         assignment.read_only,
+        Some(&sandbox::container_name(&assignment.attempt_id)),
     );
     let mut cmd = tokio::process::Command::new(&program);
     cmd.args(&args);
@@ -353,6 +354,9 @@ async fn drive_acp_session(
             .await;
             // Bound the reap for the same reason as the timeout branch.
             terminate_group(pid);
+            // Audit ND-6: the kill above stops the `docker run` client, not
+            // necessarily the container — remove it by name.
+            sandbox::remove_sandbox_container(&assignment.attempt_id).await;
             let _ = tokio::time::timeout(
                 Duration::from_secs(12),
                 child.wait(),
@@ -362,6 +366,7 @@ async fn drive_acp_session(
         }
         _ = tokio::time::sleep(timeout) => {
             terminate_group(pid);
+            sandbox::remove_sandbox_container(&assignment.attempt_id).await;
             // Bound the reap so a child that ignores SIGTERM (or a pidfd that
             // never fires) can't park the session forever. terminate_group
             // escalates to SIGKILL after 10s, so allow a little slack.

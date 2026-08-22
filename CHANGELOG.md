@@ -54,6 +54,35 @@
   same issue/CI failure/PR. The delivery GUID (`X-GitHub-Delivery`) is now
   recorded in a `webhook_deliveries` table (INSERT OR IGNORE) before any
   task creation across all three webhook handlers.
+- **A redelivered assignment with an undelivered completion re-ran the whole
+  agent.** The in-flight redelivery guard is dropped the moment
+  `run_attempt` returns, but a completion that never got a CP ack (outage
+  longer than the retry budget, or a non-retryable 4xx) leaves the CP
+  showing the attempt running — the redelivery then passed the guard and
+  started a duplicate execution instead of replaying the durable
+  completion the node already held. `dispatch_batch` now redelivers the
+  recorded completion for such attempts (shared with startup recovery via
+  `redeliver_completion`) instead of spawning a second runner.
+- **The WS control session stalled under over-subscription.** The
+  assignment handler awaited `dispatch_batch`, which waits on the
+  concurrency semaphore per assignment — with a full node the session
+  stopped answering pings and processing Cancel/ConfigUpdate until the
+  connection flapped, then re-entered the same stall after reconnect. The
+  dispatch is now spawned; the receipt ack confirms delivery only and the
+  runner's HTTP ack stays the authoritative "started" signal.
+- **Cancel/timeout killed the `docker run` client, not the container.**
+  SIGTERM is proxied, but the 10s SIGKILL escalation kills the client
+  without forwarding and the client's death leaves the container running —
+  writing into the worktree being finalized/cleaned and burning CPU until
+  the next startup orphan sweep. Sandbox containers now carry a
+  deterministic per-attempt `--name`, and all cancel/timeout paths
+  best-effort `rm -f` it after killing the client.
+- **Fenced-off artifact uploads were retried forever with a doomed token.**
+  A 409/412 (stale writer) left the artifact staged "for retry", but the
+  only retry is startup recovery, which sends an empty fencing token —
+  guaranteed to fail again for token-bearing attempts, once per restart
+  until the 24h orphan reaper. Fencing rejections are now terminal: the
+  staged copy is dropped immediately.
 - **A workflow step wedged `running` forever when its task link was
   missing.** The pending→running claim commits in its own transaction and
   the task create/link run outside it; a crash in between (or one transient

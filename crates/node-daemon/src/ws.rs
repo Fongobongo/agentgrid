@@ -113,7 +113,20 @@ async fn handle_msg(
                 .iter()
                 .map(|a| a.fencing_token.clone())
                 .collect();
-            dispatch_batch(cfg, client, sem, assignments).await?;
+            // Audit ND-5: spawned, not awaited — dispatch_batch waits on the
+            // concurrency semaphore per assignment, and awaiting it inside
+            // the message handler stalls the whole session (no pings
+            // answered, no Cancel/ConfigUpdate processing) whenever the CP
+            // over-subscribes the node, flapping the connection into the
+            // same stall after each reconnect.
+            let cfg2 = cfg.clone();
+            let client2 = client.clone();
+            let sem2 = sem.clone();
+            tokio::spawn(async move {
+                if let Err(e) = dispatch_batch(&cfg2, &client2, &sem2, assignments).await {
+                    tracing::error!("ws dispatch_batch failed: {e}");
+                }
+            });
             // Receipt ack; the authoritative "agent started" ack still comes
             // from the attempt runner over HTTP.
             let ack = NodeWsMsg::Ack {

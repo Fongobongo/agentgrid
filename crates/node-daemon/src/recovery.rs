@@ -9,6 +9,40 @@ use crate::artifact_spool;
 use crate::config::Config;
 use crate::polling::{send_with_retry, upload_if_exists};
 
+/// Redeliver one durable completion record by attempt id (no-op when none is
+/// pending). Shared by startup recovery and by `dispatch_batch` (audit ND-4):
+/// an assignment arriving for an attempt whose completion is still
+/// undelivered must redeliver that completion, never re-run the agent —
+/// otherwise a CP outage longer than the retry budget (or a non-retryable
+/// 4xx) turns the redelivery into a full duplicate execution.
+pub async fn redeliver_completion(cfg: &Config, client: &Client, attempt_id: &str) {
+    let Some(c) = cfg
+        .completion_outbox
+        .pending()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|c| c.attempt_id == attempt_id)
+    else {
+        return;
+    };
+    let req = c.to_request();
+    tracing::info!(attempt_id = %c.attempt_id, "redelivering durable completion");
+    let url = format!("{}/v1/node/attempts/{}/complete", cfg.server, c.attempt_id);
+    let mut post = client.post(&url).json(&req);
+    // Hardening P0 item 8: redeliver with the recorded fencing token so the
+    // CP accepts (or 409-rejects) the stale writer just like a fresh send.
+    if !c.fencing_token.is_empty() {
+        post = post.header("x-agentgrid-fencing-token", &c.fencing_token);
+    }
+    match send_with_retry(post, 20).await {
+        Ok(s) if s.is_success() => {
+            let _ = cfg.completion_outbox.ack(&c.attempt_id);
+        }
+        Ok(s) => tracing::warn!("completion redelivery got {s} for {}", c.attempt_id),
+        Err(e) => tracing::warn!("completion redelivery failed for {}: {e}", c.attempt_id),
+    }
+}
+
 /// Stage 2.1 + Hardening P1 item 11: run crash-recovery once at daemon startup.
 ///
 /// 1. Redeliver any completion records a prior (killed) run recorded but never
@@ -24,22 +58,7 @@ pub async fn startup_recovery(cfg: &Config, client: &Client) {
     // /v1/node/attempts/{id}/complete route authenticates. complete_attempt is
     // idempotent on terminal attempts, so this is safe.
     for c in cfg.completion_outbox.pending().unwrap_or_default() {
-        let req = c.to_request();
-        tracing::info!(attempt_id = %c.attempt_id, "redelivering durable completion");
-        let url = format!("{}/v1/node/attempts/{}/complete", cfg.server, c.attempt_id);
-        let mut post = client.post(&url).json(&req);
-        // Hardening P0 item 8: redeliver with the recorded fencing token so the
-        // CP accepts (or 409-rejects) the stale writer just like a fresh send.
-        if !c.fencing_token.is_empty() {
-            post = post.header("x-agentgrid-fencing-token", &c.fencing_token);
-        }
-        match send_with_retry(post, 20).await {
-            Ok(s) if s.is_success() => {
-                let _ = cfg.completion_outbox.ack(&c.attempt_id);
-            }
-            Ok(s) => tracing::warn!("completion redelivery got {s} for {}", c.attempt_id),
-            Err(e) => tracing::warn!("completion redelivery failed for {}: {e}", c.attempt_id),
-        }
+        redeliver_completion(cfg, client, &c.attempt_id).await;
     }
 
     // Hardening P1 item 11: recover orphaned artifact spool entries from

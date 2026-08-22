@@ -626,7 +626,13 @@ impl Store {
             .await?;
         tx.commit().await?;
         let _ = self
-            .audit("attempt", Some(attempt_id), "attempt.node_rejected", Some(reason), None)
+            .audit(
+                "attempt",
+                Some(attempt_id),
+                "attempt.node_rejected",
+                Some(reason),
+                None,
+            )
             .await;
         Ok(true)
     }

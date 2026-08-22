@@ -131,6 +131,19 @@ pub async fn dispatch_batch(
     sem: &Arc<Semaphore>,
     batch: Vec<agentgrid_common::Assignment>,
 ) -> Result<()> {
+    // Audit ND-4: an attempt with a durable completion still undelivered must
+    // not re-run. Once run_attempt returned, the in-flight guard below is
+    // gone, so a CP that never saw the completion redelivers the assignment
+    // and would start a full second runner (fresh worktree, second agent
+    // execution, interleaved event streams). Redeliver the recorded
+    // completion instead — complete_attempt is idempotent on the CP side.
+    let undelivered: std::collections::HashSet<String> = cfg
+        .completion_outbox
+        .pending()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| c.attempt_id)
+        .collect();
     for a in batch {
         {
             let mut in_flight = IN_FLIGHT.lock().await;
@@ -141,6 +154,20 @@ pub async fn dispatch_batch(
                 );
                 continue;
             }
+        }
+        if undelivered.contains(&a.attempt_id) {
+            tracing::warn!(
+                attempt_id = %a.attempt_id,
+                "assignment redelivered but its durable completion is still undelivered; \
+                 redelivering the completion instead of re-running the agent"
+            );
+            let cfg2 = cfg.clone();
+            let client2 = client.clone();
+            let aid = a.attempt_id.clone();
+            tokio::spawn(async move {
+                crate::recovery::redeliver_completion(&cfg2, &client2, &aid).await;
+            });
+            continue;
         }
         let permit = match sem.clone().try_acquire_owned() {
             Ok(p) => p,
@@ -224,6 +251,21 @@ pub async fn upload_if_exists(
     }
     match send_with_retry(post.body(bytes), 10).await {
         Ok(s) if s.is_success() => {
+            let _ = artifact_spool::remove(spool_root, attempt_id, name);
+        }
+        Ok(s) if s.status() == reqwest::StatusCode::CONFLICT
+            || s.status() == reqwest::StatusCode::PRECONDITION_FAILED =>
+        {
+            // Audit ND-8: a fencing rejection is TERMINAL — this writer is
+            // stale (the attempt was reverted/reassigned), and no retry can
+            // ever succeed. Startup recovery would re-send it with an empty
+            // token (guaranteed to fail again for token-bearing attempts)
+            // once per restart until the 24h orphan reaper deletes it, with
+            // pending_artifacts advertising it the whole time. Drop it now.
+            tracing::warn!(
+                "artifact {name} for {attempt_id} fenced off by the CP ({}); dropping staged copy",
+                s.status()
+            );
             let _ = artifact_spool::remove(spool_root, attempt_id, name);
         }
         Ok(s) => {
