@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Nothing yet.
+
+## [v0.3.5] — 2026-08-22
+
 ### Fixed
 
 - **Flaky unit tests under the CI churn job (high-parallelism, repeat).**
@@ -40,6 +44,18 @@
   spawn head now adds `--entrypoint ""` so the explicit command wins for any
   image (regression test `sandbox::tests::docker_clears_image_entrypoint`).
 
+- **`deploy/install-control-plane.sh`: broken echo at the tail.** The final
+  hint line shipped as one `echo` with a stray escaped quote (mangled by the
+  CRLF round-trip through PowerShell during the Windows lab) and printed
+  garbage; split back into two clean `echo` lines (`bash -n` clean).
+- **Scheduled CI (Miri) red since 08-17.** The three
+  `external_provider_fail_closed_*` tests in `agentgrid-common` spawn a
+  subprocess (`false`/`true`/missing binary); a Miri nightly update stopped
+  shimming `posix_spawnattr_init`, so the scheduled UB job died on
+  "unsupported operation: can't call foreign function". The spawning tests
+  are now `#[cfg_attr(miri, ignore)]` — they exercise the fail-closed error
+  path, not UB, and keep running under the normal test job.
+
 ### Changed
 
 - **Windows deploy checklist, track B (podman sandbox)** — verified on the
@@ -52,6 +68,19 @@
   marked the track complete. Also fixed the stale `ghcr.io/…/agent-sandbox`
   default-image reference in `docs/deploy/sandbox-benchmark.md` (the actual
   default is `ubuntu:24.04`).
+- **Windows deploy checklist, track C (Hyper-V VM) + rollback.** Verified on
+  the lab VM: rootful podman inside the hardened node unit needs an explicit
+  relaxation chain (`ReadWritePaths=/var/cache/containers`,
+  `ProtectControlGroups=false`+`Delegate=yes`, `PrivateDevices=false`,
+  `ProtectHostname=false`, `NoNewPrivileges=false`) on top of track B's
+  drop-in, and node/CP binaries >= v0.3.4 (the v0.3.2 probe without
+  `--network none` false-reports "adapter missing in sandbox image" under the
+  hardened unit). Acceptance re-run: mock task `succeeded` in a digest-pinned
+  container (`network none`, label stamped, `--rm` clean), `ag nodes doctor`
+  OK. The rollback section was audited against live host state and then
+  executed in full (WSL distros unregistered, VM removed, Hyper-V disabled,
+  Docker Desktop uninstalled); reconstruction stays documented in the
+  checklist.
 
 ## [v0.3.4] — 2026-08-17
 

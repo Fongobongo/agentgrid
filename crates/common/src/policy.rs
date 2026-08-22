@@ -557,6 +557,7 @@ mod tests {
     }
 
     #[test]
+#[cfg_attr(miri, ignore = "spawns a subprocess; Miri cannot emulate posix_spawn")]
     fn external_provider_fail_closed_on_missing_binary() {
         use super::ExternalPolicyProvider;
         let p = ExternalPolicyProvider::new("/no/such/policy-binary", "0.1");
@@ -567,6 +568,7 @@ mod tests {
     }
 
     #[test]
+#[cfg_attr(miri, ignore = "spawns a subprocess; Miri cannot emulate posix_spawn")]
     fn external_provider_fail_closed_on_nonzero_exit() {
         use super::ExternalPolicyProvider;
         // `false` exits 1 — a non-success exit must fail-closed to Ask.
@@ -577,6 +579,7 @@ mod tests {
     }
 
     #[test]
+#[cfg_attr(miri, ignore = "spawns a subprocess; Miri cannot emulate posix_spawn")]
     fn external_provider_fail_closed_on_garbage_stdout() {
         use super::ExternalPolicyProvider;
         // `true` prints nothing — empty stdout is not valid PolicyVerdict JSON.
