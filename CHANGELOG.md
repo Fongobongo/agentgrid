@@ -10,6 +10,14 @@
 
 ### Fixed
 
+- **The claim/link wedge recovery itself could duplicate step tasks (audit
+  X-C2b).** The v0.3.6 wedge reset treated *any* running step without a
+  task link as wedged — but the window between a winning CAS claim and
+  `set_role_run_task` is exactly that shape while `create_task` is slow
+  under contention (20 concurrent ticks produced 3 spawns). The reset now
+  requires the claim to be older than a 60 s grace period (measured from
+  `started_at`), so healthy in-flight claims are never disturbed and true
+  crash-wedges still recover.
 - **The gateway bot froze for up to 300 s on every `/run` (audit X-G1).**
   Update handling ran inline in the Telegram poll loop, so awaiting a task's
   answer blocked everything — including `/cancel` from any chat — until it

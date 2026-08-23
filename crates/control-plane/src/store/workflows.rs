@@ -1328,19 +1328,27 @@ impl Store {
                     let task_link = self.step_task_id(&step.id).await?;
                     if task_link.is_none() {
                         // Audit CP-5 (wedge recovery): a Running step with no
-                        // task link means the pending→running claim committed
-                        // but create_task/set_role_run_task never did (crash
-                        // between them, or a transient DB error after the
-                        // task existed). No later branch of this tick can
-                        // progress or terminate such a step, so the run would
-                        // sit `running` forever with the ticker spinning on
-                        // it. Reset to Pending; the next tick re-claims and
-                        // re-creates the task.
+                        // task link usually means the pending→running claim
+                        // committed but create_task/set_role_run_task never
+                        // did (crash between them) — without recovery the run
+                        // wedges forever. Audit X-C2b: the claim→link window
+                        // is ALSO how a healthy in-flight tick looks while
+                        // create_task is slow (20 concurrent ticks produced 3
+                        // duplicate spawns before the grace period below).
+                        // Only recover a claim that has been running longer
+                        // than WEDGE_GRACE_SECS; a live claim re-links within
+                        // milliseconds, a true wedge stays stale forever.
+                        const WEDGE_GRACE_SECS: i64 = 60;
                         let reset = sqlx::query(
-                            "UPDATE workflow_steps SET status = 'pending' \
-                             WHERE id = ? AND status = 'running'",
+                            "UPDATE workflow_steps SET status = 'pending', \
+                             started_at = NULL \
+                             WHERE id = ? AND status = 'running' \
+                             AND COALESCE(started_at, '') <> '' \
+                             AND julianday(started_at) * 86400.0 \
+                                 < julianday('now') * 86400.0 - ?",
                         )
                         .bind(&step.id)
+                        .bind(WEDGE_GRACE_SECS)
                         .execute(&self.pool)
                         .await?
                         .rows_affected()
@@ -1348,11 +1356,14 @@ impl Store {
                         if reset {
                             tracing::warn!(
                                 step = %step.id,
-                                "running step had no task link; reset to pending \
-                                 (claim/link wedge recovery)"
+                                "running step had no task link past the grace \
+                                 period; reset to pending (wedge recovery)"
                             );
-                            status_by_id.insert(&step.step_id, WorkflowStepStatus::Pending);
+                            status_by_id
+                                .insert(&step.step_id, WorkflowStepStatus::Pending);
                         }
+                        continue;
+                    }
                         continue;
                     }
                     if let Some(task_id) = task_link {
