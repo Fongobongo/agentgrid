@@ -1364,8 +1364,6 @@ impl Store {
                         }
                         continue;
                     }
-                        continue;
-                    }
                     if let Some(task_id) = task_link {
                         if let Some(ts) = self.get_task_status(&task_id).await? {
                             match ts {
