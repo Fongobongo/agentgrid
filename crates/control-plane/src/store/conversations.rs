@@ -82,6 +82,69 @@ impl Store {
         Ok(seq)
     }
 
+    /// Audit X-C6b: close the conversation loop after a task succeeds —
+    /// `compose_conversation_prompt` renders `assistant:` turns, but nothing
+    /// ever wrote them, so multi-turn prompts silently omitted what the
+    /// agent had answered. Echoes the attempt's latest `result` event as an
+    /// assistant turn on the conversation that spawned the task. Best-effort
+    /// by contract: callers log failures and move on. The NOT EXISTS guard
+    /// makes completion redelivery idempotent (no duplicate turns).
+    pub async fn append_conversation_assistant_for_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<()> {
+        let Some((task_id, conversation_id)): Option<(String, String)> = sqlx::query_as(
+            "SELECT t.id, c.conversation_id \
+             FROM attempts a \
+             JOIN tasks t ON t.id = a.task_id \
+             JOIN conversation_messages c ON c.task_id = t.id \
+             WHERE a.id = ? AND t.status = 'succeeded' \
+               AND NOT EXISTS (\
+                   SELECT 1 FROM conversation_messages m \
+                    WHERE m.task_id = t.id AND m.role = 'assistant') \
+             ORDER BY c.seq ASC LIMIT 1",
+        )
+        .bind(attempt_id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(());
+        };
+        // The answer text is the latest `result` event payload: either a bare
+        // string or an object carrying `text` (same shapes the gateway's
+        // answer watcher understands).
+        let payload: Option<String> = sqlx::query_scalar(
+            "SELECT payload FROM task_events \
+             WHERE attempt_id = ? AND type = 'result' \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .bind(attempt_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let text = payload
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
+            .map(|v| match v {
+                serde_json::Value::String(s) => s,
+                ref v => v
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| v.to_string()),
+            })
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        self.append_conversation_message(
+            &conversation_id,
+            "assistant",
+            &text,
+            Some(&task_id),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_conversation_messages(
         &self,
         conversation_id: &str,

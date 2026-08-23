@@ -30,15 +30,25 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
       setSearchHits(null);
       return;
     }
+    // Audit X-W5: a slow earlier query could resolve after a newer one and
+    // overwrite the fresher results. The cleanup marks this run stale, so
+    // only the latest in-flight response may land.
+    let stale = false;
     const t = setTimeout(() => {
       searchTasks(q)
         .then((hits) => {
+          if (stale) return;
           setError(null);
           setSearchHits(hits);
         })
-        .catch((e) => setError(e as Error));
+        .catch((e) => {
+          if (!stale) setError(e as Error);
+        });
     }, 250);
-    return () => clearTimeout(t);
+    return () => {
+      stale = true;
+      clearTimeout(t);
+    };
   }, [query]);
 
   if (!tasks || !nodes) {

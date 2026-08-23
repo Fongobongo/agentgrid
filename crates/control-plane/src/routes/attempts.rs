@@ -148,7 +148,19 @@ pub async fn complete_attempt(
     // Plan 534: completing an attempt also advances the owning workflow run
     // (if any) and wakes the scheduler for spawned step tasks.
     match state.lifecycle.complete_attempt(&attempt_id, &req).await {
-        Ok(true) => StatusCode::OK.into_response(),
+        Ok(true) => {
+            // Audit X-C6b: best-effort conversation echo — a task spawned
+            // from a conversation gets its result appended as an `assistant`
+            // turn so the next turn's composed prompt includes it.
+            if let Err(e) = state
+                .store
+                .append_conversation_assistant_for_attempt(&attempt_id)
+                .await
+            {
+                tracing::warn!(attempt = %attempt_id, "assistant conversation echo failed: {e}");
+            }
+            StatusCode::OK.into_response()
+        }
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             // Hardening P1 item 13: map invalid state transition to 409 Conflict

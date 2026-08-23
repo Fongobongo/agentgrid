@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Conversation turns never recorded the agent's answer (audit X-C6b).**
+  `compose_conversation_prompt` renders `assistant:` turns from history, but
+  nothing ever wrote that role — every follow-up prompt silently omitted
+  what the agent had answered before. A successful completion now echoes
+  the attempt's latest `result` event as an assistant message on the
+  conversation that spawned the task (best-effort; a NOT EXISTS guard makes
+  completion redelivery idempotent).
+- **The Dashboard FTS search had a response-ordering race (audit X-W5)** —
+  a slow earlier query could resolve after a newer one and overwrite the
+  fresher results. Only the latest in-flight response lands now.
 - **The ACP server read loop had no frame-size cap (audit X-A1).** The
   client side bounds one inbound line at 1 MiB, but the server used
   `BufReader::lines()` — a runaway or malicious peer streaming one
