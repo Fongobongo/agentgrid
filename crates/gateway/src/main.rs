@@ -178,12 +178,12 @@ impl ControlPlane {
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
         self.client
             .get(format!("{}{}", self.base, path))
-            .bearer_auth(self.token)
+            .bearer_auth(&self.token)
     }
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
         self.client
             .post(format!("{}{}", self.base, path))
-            .bearer_auth(self.token)
+            .bearer_auth(&self.token)
     }
 
     async fn nodes(&self) -> Result<String> {
@@ -316,7 +316,9 @@ impl ControlPlane {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let events = self
-                .get(&format!("/v1/tasks/{task_id}/events?after_sequence={last_seq}"))
+                .get(&format!(
+                    "/v1/tasks/{task_id}/events?after_sequence={last_seq}"
+                ))
                 .send()
                 .await?
                 .json::<serde_json::Value>()
@@ -656,8 +658,7 @@ then send /nodes\n\
                     let ctl2 = ctl.clone();
                     let conv2 = Arc::clone(&conv);
                     let client2 = Arc::clone(&client);
-                    let reply_url =
-                        format!("https://api.telegram.org/bot{}/sendMessage", tg.token);
+                    let reply_url = format!("https://api.telegram.org/bot{}/sendMessage", tg.token);
                     tokio::spawn(async move {
                         let reply = dispatch(&ctl2, &text, chat_id, &conv2).await;
                         let _ = client2
