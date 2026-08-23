@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **The gateway bot froze for up to 300 s on every `/run` (audit X-G1).**
+  Update handling ran inline in the Telegram poll loop, so awaiting a task's
+  answer blocked everything — including `/cancel` from any chat — until it
+  finished. `ControlPlane` is owned/`Clone` now and each update is handled
+  on its own task; the poll loop never blocks.
+- **The gateway's answer watcher counted events positionally (audit
+  X-G2)** — `.skip(seen)` over a full re-fetch of the events list desynced
+  if the response was ever windowed or trimmed, skipping or double-counting
+  turns. It resumes by `after_sequence` cursor now.
 - **Adapter/oracle probes could hang the heartbeat and WS session
   indefinitely (audit X-B10).** `--version` probes and the opencode config
   oracle ran unbounded `.output().await`s inside sequential loops; one wedged

@@ -127,10 +127,12 @@ async fn main() -> Result<()> {
 }
 
 async fn run(args: RunArgs) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?;
-    let ctl = ControlPlane::new(&client, &args.control_plane, &args.token);
+    let client = Arc::new(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()?,
+    );
+    let ctl = ControlPlane::new(Arc::clone(&client), &args.control_plane, &args.token);
 
     let provider: Box<dyn ChatProvider> = if let Some(tok) = args.telegram.as_deref() {
         Box::new(Telegram::new(tok.to_string()))
@@ -143,24 +145,34 @@ async fn run(args: RunArgs) -> Result<()> {
         args.control_plane
     );
     let conv: ConvState = Arc::new(Mutex::new(HashMap::new()));
-    provider.run(&client, &ctl, &conv).await
+    provider.run(Arc::clone(&client), ctl, conv).await
 }
 
 type ConvState = Arc<Mutex<HashMap<i64, String>>>;
 
 /// A control-plane HTTP client for the handful of endpoints the gateway uses.
-struct ControlPlane<'a> {
-    client: &'a reqwest::Client,
-    base: &'a str,
-    token: &'a str,
+///
+/// Audit X-G1: owned + `Clone` (the client is an `Arc`) so per-update
+/// handling can be spawned onto the runtime — the borrowed version forced
+/// every update through one serial loop, and a `/run` blocked the whole bot
+/// on its 300 s answer wait.
+#[derive(Clone)]
+struct ControlPlane {
+    client: Arc<reqwest::Client>,
+    base: String,
+    token: String,
 }
 
-impl<'a> ControlPlane<'a> {
-    fn new(client: &'a reqwest::Client, base: &'a str, token: &'a str) -> Self {
+impl ControlPlane {
+    fn new(
+        client: Arc<reqwest::Client>,
+        base: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
         Self {
             client,
-            base,
-            token,
+            base: base.into(),
+            token: token.into(),
         }
     }
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
@@ -285,7 +297,11 @@ impl<'a> ControlPlane<'a> {
     /// emitted one, else the last `log`/`error` line, else the final status.
     async fn await_task_answer(&self, task_id: &str) -> Result<String> {
         let deadline = std::time::Instant::now() + Duration::from_secs(300);
-        let mut seen = 0usize;
+        // Audit X-G2: resume by sequence cursor instead of re-reading the
+        // whole event list and skipping positionally — a trimmed or windowed
+        // events response used to desync the skip counter (events skipped or
+        // double-counted).
+        let mut last_seq: i64 = 0;
         loop {
             let status = self
                 .get(&format!("/v1/tasks/{task_id}"))
@@ -300,7 +316,7 @@ impl<'a> ControlPlane<'a> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let events = self
-                .get(&format!("/v1/tasks/{task_id}/events"))
+                .get(&format!("/v1/tasks/{task_id}/events?after_sequence={last_seq}"))
                 .send()
                 .await?
                 .json::<serde_json::Value>()
@@ -309,8 +325,8 @@ impl<'a> ControlPlane<'a> {
             let arr = events.as_array().cloned().unwrap_or_default();
             let mut answer: Option<String> = None;
             let mut last_log = String::new();
-            for e in arr.iter().skip(seen) {
-                seen += 1;
+            for e in arr.iter() {
+                last_seq = last_seq.max(e.get("sequence").and_then(|v| v.as_i64()).unwrap_or(0));
                 let ty = e.get("type").and_then(|v| v.as_str()).unwrap_or("?");
                 let payload = e.get("payload").cloned().unwrap_or(serde_json::Value::Null);
                 let text = payload
@@ -356,21 +372,21 @@ impl<'a> ControlPlane<'a> {
 }
 
 /// A chat platform the gateway can speak to: receive messages and reply.
-trait ChatProvider: Send {
+trait ChatProvider: Send + 'static {
     /// Run the receive/dispatch loop until the process is asked to stop.
-    fn run<'a>(
+    fn run(
         self: Box<Self>,
-        client: &'a reqwest::Client,
-        ctl: &'a ControlPlane<'a>,
-        conv: &'a ConvState,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+        client: Arc<reqwest::Client>,
+        ctl: ControlPlane,
+        conv: ConvState,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 }
 
 fn allowed(chat_id: i64) -> bool {
     load_admins().contains(&chat_id)
 }
 
-async fn dispatch(ctl: &ControlPlane<'_>, text: &str, chat_id: i64, conv: &ConvState) -> String {
+async fn dispatch(ctl: &ControlPlane, text: &str, chat_id: i64, conv: &ConvState) -> String {
     let mut parts = text.split_whitespace();
     let cmd = parts.next().unwrap_or("");
     // strip an optional leading bot mention like "/nodes@botname"
@@ -542,12 +558,12 @@ impl Telegram {
 }
 
 impl ChatProvider for Telegram {
-    fn run<'a>(
+    fn run(
         self: Box<Self>,
-        client: &'a reqwest::Client,
-        ctl: &'a ControlPlane<'a>,
-        conv: &'a ConvState,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        client: Arc<reqwest::Client>,
+        ctl: ControlPlane,
+        conv: ConvState,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
         let tg = self;
         Box::pin(async move {
             loop {
@@ -633,12 +649,23 @@ then send /nodes\n\
                     }
                     let preview: String = text.chars().take(100).collect();
                     tracing::info!("tg {chat_id}: {preview}");
-                    let reply = dispatch(ctl, &text, chat_id, conv).await;
-                    let _ = client
-                        .post(tg.url("sendMessage"))
-                        .json(&serde_json::json!({"chat_id": chat_id, "text": reply}))
-                        .send()
-                        .await;
+                    // Audit X-G1: handle each update on its own task —
+                    // dispatch can wait up to 300 s for a task's answer, and
+                    // awaiting it inline froze the whole bot (no /cancel, no
+                    // other chat) for that window.
+                    let ctl2 = ctl.clone();
+                    let conv2 = Arc::clone(&conv);
+                    let client2 = Arc::clone(&client);
+                    let reply_url =
+                        format!("https://api.telegram.org/bot{}/sendMessage", tg.token);
+                    tokio::spawn(async move {
+                        let reply = dispatch(&ctl2, &text, chat_id, &conv2).await;
+                        let _ = client2
+                            .post(reply_url)
+                            .json(&serde_json::json!({"chat_id": chat_id, "text": reply}))
+                            .send()
+                            .await;
+                    });
                 }
             }
         })
