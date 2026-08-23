@@ -828,9 +828,10 @@ async fn main() -> Result<()> {
         // Audit X-D6: a non-ASCII/corrupt token used to be silently DROPPED
         // here, sending unauthenticated requests that fail with confusing
         // 401s. Surface the corruption instead.
-        let v = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| {
-            anyhow::anyhow!("stored session token is not a valid header value: {e}")
-        })?;
+        let v =
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| {
+                anyhow::anyhow!("stored session token is not a valid header value: {e}")
+            })?;
         headers.insert(reqwest::header::AUTHORIZATION, v);
         client_builder = client_builder.default_headers(headers);
     }
