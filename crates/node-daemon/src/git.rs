@@ -799,6 +799,15 @@ pub fn cleanup_workspace(
     }
     if ws_path.exists() {
         let _ = std::fs::remove_dir_all(ws_path);
+        // Audit X-B15: the bare mirror still holds the gitlink when only the
+        // dir was rm'd — a retry reusing this attempt id failed `worktree
+        // add` until the startup-only prune. Prune now, scoped to this repo.
+        if let Some(repo) = repo_dir {
+            let _ = Command::new("git")
+                .args(["worktree", "prune"])
+                .current_dir(repo)
+                .status();
+        }
     }
 }
 
@@ -827,6 +836,12 @@ pub fn prune_stale_workspaces(
     let cutoff = std::time::SystemTime::now() - retention;
     if let Ok(entries) = std::fs::read_dir(workspace_root) {
         for e in entries.flatten() {
+            // Audit X-B17: the quarantine dir is pruner-owned state, not a
+            // stale workspace — recursing into it produced rename-on-self
+            // warn spam on every startup.
+            if e.file_name() == ".quarantine" {
+                continue;
+            }
             if let Ok(md) = e.metadata() {
                 if md.is_dir() {
                     if let Ok(mtime) = md.modified() {

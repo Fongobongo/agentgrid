@@ -711,7 +711,22 @@ pub fn completion_rows(dir: &Path) -> std::io::Result<u64> {
         return Ok(0);
     }
     let content = std::fs::read_to_string(path)?;
-    Ok(content.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+    // Audit X-B19: ack `{"drop":...}` markers are not pending rows, and a
+    // record whose id was dropped must not be counted either.
+    let mut dropped = std::collections::HashSet::new();
+    for l in content.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(l.trim()) {
+            if let Some(d) = v.get("drop").and_then(|d| d.as_str()) {
+                dropped.insert(d.to_string());
+            }
+        }
+    }
+    Ok(content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<CompletionLine>(l).ok())
+        .filter(|c| !dropped.contains(&c.attempt_id))
+        .count() as u64)
 }
 
 /// Hardening P0 item 10: atomically rewrite `path` with only `clean` lines and

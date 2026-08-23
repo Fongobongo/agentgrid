@@ -218,19 +218,24 @@ pub async fn apply_config(config_json: &str) -> Result<String> {
 /// The binary is best-effort — when `opencode` isn't in PATH (e.g. only
 /// mock adapters run today) the check is skipped, not failed.
 pub async fn debug_config_oracle() -> Result<Option<String>> {
-    match tokio::process::Command::new("opencode")
+    // Audit X-B10: bounded oracle — a wedged binary stalled the WS
+    // ConfigUpdate handler (no pings answered) until the socket flapped.
+    let run = tokio::process::Command::new("opencode")
         .args(["debug", "config"])
-        .output()
-        .await
-    {
-        Ok(out) if out.status.success() => {
+        .output();
+    match tokio::time::timeout(std::time::Duration::from_secs(15), run).await {
+        Ok(Ok(out)) if out.status.success() => {
             Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
         }
-        Ok(out) => anyhow::bail!(
+        Ok(Ok(out)) => anyhow::bail!(
             "opencode debug config failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ),
-        Err(_) => Ok(None), // binary not installed — skip oracle
+        Ok(Err(_)) => Ok(None), // binary not installed — skip oracle
+        Err(_) => {
+            tracing::warn!("opencode debug config oracle timed out");
+            Ok(None)
+        }
     }
 }
 

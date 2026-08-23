@@ -32,7 +32,9 @@ const CONFIG_ERR_PATTERNS: &[&str] = &[
     "invalid model",
     "unknown model",
     "404 model",
-    "401",
+    // Audit X-B18: bare "401" substring-matched byte offsets / ids / line
+    // numbers inside arbitrary payloads; require the JSON-quoted form.
+    "\"401\"",
     "unauthorized",
     "forbidden",
     "rate_limit_exceeded",

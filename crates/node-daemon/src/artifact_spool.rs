@@ -77,6 +77,13 @@ pub fn pending(root: &Path) -> Result<Vec<(String, String, PathBuf)>> {
                 continue;
             }
             let name = file.file_name().to_string_lossy().to_string();
+            // Audit X-B8: a torn `.tmp` stage file (crash between File::create
+            // and the publish rename) is not an artifact — uploading it under
+            // its temp name produced bogus entries advertised in
+            // pending_artifacts forever.
+            if name.ends_with(".tmp") {
+                continue;
+            }
             out.push((aid.clone(), name, file.path()));
         }
     }

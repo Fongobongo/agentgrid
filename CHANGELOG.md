@@ -4,6 +4,39 @@
 
 ### Fixed
 
+- **Adapter/oracle probes could hang the heartbeat and WS session
+  indefinitely (audit X-B10).** `--version` probes and the opencode config
+  oracle ran unbounded `.output().await`s inside sequential loops; one wedged
+  binary stopped all heartbeats (node swept offline) or stalled pings until
+  the socket flapped. Both are time-bounded now.
+- **Torn `.tmp` stage files were uploaded as bogus artifacts (audit X-B8)** —
+  a crash between staging and publish left a partial file that startup
+  recovery shipped under its temp name and `pending_artifacts` advertised
+  forever. Spool listing skips them.
+- **Definitively-rejected completions were retried forever (audit X-B12).**
+  A 4xx fencing/transition rejection left the durable record in place to be
+  re-sent with a doomed token once per restart. Mirror of the artifact
+  policy: definitive statuses (400/401/404/409/412/413/422) drop the record
+  in both the live send and startup redelivery paths.
+- **The outbox drain deadline was soft by ~26 s per stuck chunk (audit
+  X-B14)** — each chunk carried the full retry budget. Drains are best-effort;
+  they use a short budget now (the durable outbox retains the rest).
+- **A worktree removed via the rm-fallback kept its stale gitlink until the
+  next restart prune (audit X-B15)** — a same-id retry failed `worktree add`
+  in between. Prune runs right after the fallback removal now.
+- **The pruner recursed into its own `.quarantine` dir (audit X-B17)**,
+  producing rename-on-self warn spam every startup. Skipped.
+- **The config-error classifier substring-matched noise (audit X-B18)** — a
+  bare `"401"` pattern fired on byte offsets / ids / line numbers inside
+  arbitrary error payloads, incrementing the self-heal streak spuriously.
+  It requires the JSON-quoted form now.
+- **The `completion_rows` heartbeat gauge counted ack drop-markers as
+  pending rows (audit X-B19)**, over-reporting after every ack-before-
+  compaction. Markers and dropped records are excluded now.
+- **`remote_head_at_start` was captured after the agent finished (audit
+  X-B9)**, making it identical to the finish value and voiding the drift
+  audit field. It is captured at attempt start and also populated on the
+  ACP path, which used to hardcode None.
 - **Conversation turns never recorded the agent's answer (audit X-C6b).**
   `compose_conversation_prompt` renders `assistant:` turns from history, but
   nothing ever wrote that role — every follow-up prompt silently omitted

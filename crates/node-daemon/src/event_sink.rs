@@ -429,7 +429,12 @@ impl EventSink {
                 if !self.fence.is_empty() {
                     post = post.header(agentgrid_common::FENCING_TOKEN_HEADER, &self.fence);
                 }
-                match send_with_retry(post, 10).await {
+                // Audit X-B14: the drain deadline is only checked between
+                // chunks, so the full 10-attempt retry budget (~26 s of
+                // backoff) used to overshoot it per stuck chunk. A drain is
+                // best-effort by design — the durable outbox retains whatever
+                // this pass could not deliver.
+                match send_with_retry(post, 2).await {
                     Ok(s) if s.is_success() => {
                         if let Err(e) = self.outbox.ack(&seqs) {
                             tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");

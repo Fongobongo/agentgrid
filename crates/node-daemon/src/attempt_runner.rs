@@ -214,6 +214,20 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     .await??;
     tracing::info!(attempt_id = %assignment.attempt_id, git = ws.is_git, "starting attempt");
 
+    // Hardening P1 item 32 / audit X-B9: capture the remote HEAD at attempt
+    // *start* — the capture used to sit after the agent finished, making it
+    // identical to the finish value and voiding the start→finish drift audit
+    // field. Best-effort — None on any git failure; never blocks the attempt.
+    let remote_head_at_start = if ws.is_git {
+        let repo_dir = ws.repo_dir.clone();
+        tokio::task::spawn_blocking(move || repo_dir.as_deref().and_then(git::remote_head_at))
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
     // Stage 2.1: a durable event outbox for this attempt, so a daemon kill no
     // longer drops the in-flight event tail (redelivered on next startup;
     // CP ingest is idempotent on (attempt_id, sequence)).
@@ -522,7 +536,10 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             res.session_id.clone(),
             None,
             None,
-            None,
+            // Audit X-B9: the start-side capture is now taken at attempt
+            // start (shared above), so the ACP completion carries real drift
+            // data instead of a hardcoded None.
+            remote_head_at_start.clone(),
             None,
             assignment.provenance.clone().or_else(provenance_from_env),
             pending_artifacts,
@@ -974,18 +991,6 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // Hardening P2 item 32-5: capture the resolved base before `ws` is moved
     // into `finalize_workspace`, so the completion can persist it.
     let resolved_base_sha = ws.base_commit.clone();
-    // Hardening P1 item 32: capture the remote HEAD at attempt *start* (right
-    // after prepare_workspace fetched origin). Best-effort — None on any git
-    // failure; audit data must never block the attempt.
-    let remote_head_at_start = if ws.is_git {
-        let repo_dir = ws.repo_dir.clone();
-        tokio::task::spawn_blocking(move || repo_dir.as_deref().and_then(git::remote_head_at))
-            .await
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
     // Audit ND-3 (wrapper branch, same as the ACP one): a finalize failure
     // used to `?`-abort run_attempt with no completion report and no
     // worktree cleanup, stranding the attempt `running` until the reaper.

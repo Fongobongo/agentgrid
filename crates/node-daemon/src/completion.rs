@@ -147,6 +147,21 @@ pub async fn report_complete(
                 tracing::warn!("completion outbox ack failed for {attempt_id}: {e}");
             }
         }
+        // Audit X-B12: a definitive rejection can never succeed on redelivery
+        // (fenced-off writer, attempt reaped/cancelled, malformed payload).
+        // The record used to stay durable and be re-sent with a doomed token
+        // once per restart. Mirror the artifact policy: drop it now.
+        Ok(s) if matches!(
+            s.as_u16(),
+            400 | 401 | 404 | 409 | 412 | 413 | 422
+        ) =>
+        {
+            tracing::error!(
+                "complete report got {s} for {attempt_id}; dropping durable record \
+                 (definitive rejection)"
+            );
+            let _ = completion_outbox.ack(attempt_id);
+        }
         Ok(s) => tracing::error!("complete report got {s} for {attempt_id}; not retrying"),
         Err(e) => tracing::error!("complete report failed for {attempt_id}: {e}"),
     }

@@ -38,6 +38,17 @@ pub async fn redeliver_completion(cfg: &Config, client: &Client, attempt_id: &st
         Ok(s) if s.is_success() => {
             let _ = cfg.completion_outbox.ack(&c.attempt_id);
         }
+        // Audit X-B12: same definitive-rejection policy as report_complete —
+        // a fenced-off/reaped attempt's record can never succeed, and
+        // startup used to re-send it with a doomed token once per restart.
+        Ok(s) if matches!(s.as_u16(), 400 | 401 | 404 | 409 | 412 | 413 | 422) => {
+            tracing::warn!(
+                "completion redelivery got {s} for {}; dropping durable record \
+                 (definitive rejection)",
+                c.attempt_id
+            );
+            let _ = cfg.completion_outbox.ack(&c.attempt_id);
+        }
         Ok(s) => tracing::warn!("completion redelivery got {s} for {}", c.attempt_id),
         Err(e) => tracing::warn!("completion redelivery failed for {}: {e}", c.attempt_id),
     }
