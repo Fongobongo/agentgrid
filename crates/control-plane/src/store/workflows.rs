@@ -2,8 +2,8 @@
 //! (Stage 6 / 8 / 14). Extracted from `store.rs`.
 
 use super::{
-    from_snake, iso_to_unix, now_iso, parse_autonomy_level, role_str_status, schedule_from_row,
-    unix_to_iso, workflow_budget_from_col,
+    from_snake, iso_to_unix, now_iso, page_limit, parse_autonomy_level, role_str_status,
+    schedule_from_row, unix_to_iso, workflow_budget_from_col, KEYSET_ORDER, KEYSET_PREDICATE,
 };
 use crate::Store;
 use agentgrid_common::{
@@ -75,15 +75,14 @@ impl Store {
         after: Option<(String, String)>,
         limit: Option<u64>,
     ) -> Result<Vec<WorkflowTemplate>> {
-        const MAX_TEMPLATES: i64 = 1000;
-        let limit = limit.unwrap_or(100).min(MAX_TEMPLATES as u64) as i64;
+        let limit = page_limit(limit);
         let mut sql = String::from(
             "SELECT id, name, steps_json, budget_json, created_at FROM workflow_templates WHERE 1=1",
         );
         if after.is_some() {
-            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+            sql.push_str(KEYSET_PREDICATE);
         }
-        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        sql.push_str(KEYSET_ORDER);
         // audited: clauses are compile-time constants; values are bound
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some((created_at, id)) = &after {
@@ -215,16 +214,15 @@ impl Store {
         after: Option<(String, String)>,
         limit: Option<u64>,
     ) -> Result<Vec<WorkflowRun>> {
-        const MAX_RUNS: i64 = 1000;
-        let limit = limit.unwrap_or(100).min(MAX_RUNS as u64) as i64;
+        let limit = page_limit(limit);
         let mut sql = String::from(
             "SELECT id, template_id, status, context, repository, base_commit, created_at, finished_at \
              FROM workflow_runs WHERE 1=1",
         );
         if after.is_some() {
-            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+            sql.push_str(KEYSET_PREDICATE);
         }
-        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        sql.push_str(KEYSET_ORDER);
         // audited: clauses are compile-time constants; values are bound
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some((created_at, id)) = &after {
@@ -330,8 +328,7 @@ impl Store {
         after: Option<(String, String)>,
         limit: Option<u64>,
     ) -> Result<Vec<WorkflowSchedule>> {
-        const MAX_SCHEDULES: i64 = 1000;
-        let limit = limit.unwrap_or(100).min(MAX_SCHEDULES as u64) as i64;
+        let limit = page_limit(limit);
         let mut sql = String::from(
             "SELECT id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at \
                  FROM workflow_schedules WHERE 1=1",
@@ -340,9 +337,9 @@ impl Store {
             sql.push_str(" AND template_id = ?");
         }
         if after.is_some() {
-            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+            sql.push_str(KEYSET_PREDICATE);
         }
-        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        sql.push_str(KEYSET_ORDER);
         // audited: clauses are compile-time constants; values are bound
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(tid) = template_id {

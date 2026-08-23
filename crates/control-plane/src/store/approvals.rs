@@ -1,6 +1,6 @@
 //! Durable approval flow storage (Stage 5). Extracted from `store.rs`.
 
-use super::{approval_from_row, iso_plus_secs, now_iso};
+use super::{approval_from_row, iso_plus_secs, now_iso, page_limit, KEYSET_ORDER, KEYSET_PREDICATE};
 use crate::Store;
 use agentgrid_common::{next_approval, ApprovalEvent, ApprovalStatus, ApprovalView};
 use anyhow::Result;
@@ -108,8 +108,7 @@ impl Store {
         after: Option<(String, String)>,
         limit: Option<u64>,
     ) -> Result<Vec<ApprovalView>> {
-        const MAX_APPROVALS: i64 = 1000;
-        let limit = limit.unwrap_or(100).min(MAX_APPROVALS as u64) as i64;
+        let limit = page_limit(limit);
         let mut sql = String::from(
             "SELECT id, task_id, attempt_id, session_id, permission, status, reason, \
                 created_at, expires_at, decided_at, scope \
@@ -119,9 +118,9 @@ impl Store {
             sql.push_str(" AND status = ?");
         }
         if after.is_some() {
-            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+            sql.push_str(KEYSET_PREDICATE);
         }
-        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        sql.push_str(KEYSET_ORDER);
         // audited: clauses are compile-time constants; values are bound
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(s) = &status {

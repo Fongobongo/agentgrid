@@ -27,6 +27,10 @@
 
 ### Changed
 
+- Shared keyset-pagination scaffolding (`KEYSET_PREDICATE` / `KEYSET_ORDER`
+  / `page_limit`) replaces six copy-pasted copies across the workflow,
+  task, repository, and approval list queries — the copies had already
+  drifted (only one carried the binding-order note).
 - Deduplication pass (audit): one shared `agentgrid_common::sha256_hex`
   replaces the four independent implementations and inline digests
   (control-plane store/opencode profiles/routes, node-daemon polling/

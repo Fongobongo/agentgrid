@@ -1,6 +1,9 @@
 //! Task CRUD + events. Extracted from `store.rs`.
 
-use super::{event_type_of, now_iso, row_to_task_view, Store, DEFAULT_EVENT_PAGE};
+use super::{
+    event_type_of, now_iso, page_limit, row_to_task_view, Store, DEFAULT_EVENT_PAGE,
+    KEYSET_ORDER, KEYSET_PREDICATE,
+};
 use agentgrid_common::{CreateTaskRequest, TaskEvent, TaskStatus, TaskView};
 use anyhow::Result;
 use sqlx::Row;
@@ -137,8 +140,7 @@ impl Store {
         after: Option<(String, String)>,
         limit: Option<u64>,
     ) -> Result<Vec<TaskView>> {
-        const MAX_TASKS: i64 = 1000;
-        let limit = limit.unwrap_or(100).min(MAX_TASKS as u64) as i64;
+        let limit = page_limit(limit);
         // Build the query with only the present filters as bound params. The
         // `node_id` filter joins the latest attempt's node via a correlated
         // subquery on `assigned_attempt_id`.
@@ -149,7 +151,7 @@ impl Store {
              FROM tasks WHERE 1=1",
         );
         if after.is_some() {
-            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+            sql.push_str(KEYSET_PREDICATE);
         }
         if status.is_some() {
             sql.push_str(" AND status = ?");
@@ -160,7 +162,7 @@ impl Store {
         if node_id.is_some() {
             sql.push_str(" AND assigned_attempt_id IN (SELECT id FROM attempts WHERE node_id = ?)");
         }
-        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        sql.push_str(KEYSET_ORDER);
         // audited: clauses are compile-time constants; values are bound
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some((created_at, id)) = &after {

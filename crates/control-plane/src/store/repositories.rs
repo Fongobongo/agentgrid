@@ -1,6 +1,6 @@
 //! Repository registry. Extracted from `store.rs`.
 
-use super::{now_iso, Store};
+use super::{now_iso, page_limit, Store, KEYSET_ORDER, KEYSET_PREDICATE};
 use agentgrid_common::{CreateRepositoryRequest, RepositoryView};
 use anyhow::Result;
 use sqlx::Row;
@@ -46,15 +46,14 @@ impl Store {
         after: Option<(String, String)>,
         limit: Option<u64>,
     ) -> Result<Vec<RepositoryView>> {
-        const MAX_REPOS: i64 = 1000;
-        let limit = limit.unwrap_or(100).min(MAX_REPOS as u64) as i64;
+        let limit = page_limit(limit);
         let mut sql = String::from(
             "SELECT id, name, git_url, default_branch, validation_command, created_at FROM repositories WHERE 1=1",
         );
         if after.is_some() {
-            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+            sql.push_str(KEYSET_PREDICATE);
         }
-        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        sql.push_str(KEYSET_ORDER);
         // audited: clauses are compile-time constants; values are bound
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some((created_at, id)) = &after {
