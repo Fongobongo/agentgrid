@@ -1,6 +1,8 @@
 //! Durable approval flow storage (Stage 5). Extracted from `store.rs`.
 
-use super::{approval_from_row, iso_plus_secs, now_iso, page_limit, KEYSET_ORDER, KEYSET_PREDICATE};
+use super::{
+    approval_from_row, iso_plus_secs, now_iso, page_limit, KEYSET_ORDER, KEYSET_PREDICATE,
+};
 use crate::Store;
 use agentgrid_common::{next_approval, ApprovalEvent, ApprovalStatus, ApprovalView};
 use anyhow::Result;

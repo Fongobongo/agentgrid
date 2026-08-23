@@ -104,15 +104,13 @@ fn now_iso() -> String {
 /// carry copy-pasted copies of the cursor predicate / order clause / page
 /// cap, which had already drifted (only tasks.rs carried the binding-order
 /// comment). A cursor-semantics fix now lands once.
-pub(super) const KEYSET_PREDICATE: &str =
-    " AND (created_at > ? OR (created_at = ? AND id > ?))";
+pub(super) const KEYSET_PREDICATE: &str = " AND (created_at > ? OR (created_at = ? AND id > ?))";
 pub(super) const KEYSET_ORDER: &str = " ORDER BY created_at ASC, id ASC LIMIT ?";
 
 /// Server-side page cap + default for every keyset list (hardening P2 item 20).
 pub(super) fn page_limit(limit: Option<u64>) -> i64 {
     limit.unwrap_or(100).min(1000) as i64
 }
-
 
 /// True when an sqlx error is a SQLite lock-contention failure (`database is
 /// locked` / `database table is locked`), which is safe to retry with backoff.
