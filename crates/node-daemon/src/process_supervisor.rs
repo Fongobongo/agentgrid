@@ -69,8 +69,7 @@ pub async fn supervise_adapter(
     ));
 
     let (code, kill_reason): (i32, Option<&'static str>) = {
-        match wait_bounded(&mut child, timeout, attempt_id, cancel_client, cancel_url).await?
-        {
+        match wait_bounded(&mut child, timeout, attempt_id, cancel_client, cancel_url).await? {
             BoundedExit::Exited(c) => (c, None),
             BoundedExit::TimedOut => {
                 terminate_group(pid);
