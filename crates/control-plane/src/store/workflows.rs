@@ -1359,8 +1359,7 @@ impl Store {
                                 "running step had no task link past the grace \
                                  period; reset to pending (wedge recovery)"
                             );
-                            status_by_id
-                                .insert(&step.step_id, WorkflowStepStatus::Pending);
+                            status_by_id.insert(&step.step_id, WorkflowStepStatus::Pending);
                         }
                         continue;
                     }
