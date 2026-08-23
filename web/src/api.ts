@@ -343,15 +343,16 @@ export interface StreamHandle {
   close: () => void;
 }
 
-export function streamTask(
-  taskId: string,
-  opts: {
-    after?: number;
-    onEvent: (e: TaskEvent) => void;
-    onError?: (err: Error) => void;
-  },
+// Audit X-D5b: shared SSE reconnect loop. Both streams used to carry
+// near-identical copies of the backoff schedule, the 401→login handling and
+// the line-buffered reader pump; they drifted (only one surfaced errors).
+// `path` may be a function so task streams can rebuild their resume cursor
+// after every reconnect.
+function sseConnect(
+  path: string | (() => string),
+  onLine: (line: string) => void,
+  onError?: (err: Error) => void,
 ): StreamHandle {
-  let lastIngest = opts.after ?? 0;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let backoff = 500;
@@ -364,12 +365,8 @@ export function streamTask(
   const run = async () => {
     if (closed) return;
     try {
-      // Hardening P0 item 9: resume on the global ingest cursor so a retry
-      // never reorders or re-delivers events across attempts.
-      const r = await fetch(
-        `/v1/tasks/${taskId}/events/stream?after_ingest=${lastIngest}`,
-        { credentials: 'include' },
-      );
+      const p = typeof path === 'function' ? path() : path;
+      const r = await fetch(p, { credentials: 'include' });
       if (r.status === 401) {
         // Cookie expired: same handling as req() — back to login, no retry loop.
         markUnauthed();
@@ -389,26 +386,16 @@ export function streamTask(
         while ((idx = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, idx).trim();
           buf = buf.slice(idx + 1);
-          if (line.startsWith('data:')) {
-            const data = line.slice(5).trim();
-            if (!data) continue;
-            try {
-              const e = JSON.parse(data) as TaskEvent;
-              if (e.ingest_id > lastIngest) lastIngest = e.ingest_id;
-              opts.onEvent(e);
-            } catch {
-              /* ignore malformed */
-            }
-          }
+          onLine(line);
         }
       }
     } catch (err) {
       if (closed) return;
-      opts.onError?.(err as Error);
+      onError?.(err as Error);
       if (!closed) schedule(run);
       return;
     }
-    // Stream closed by server: resume from lastIngest to stay live.
+    // Stream closed by server: resume from the caller's cursor to stay live.
     if (!closed) schedule(run);
   };
 
@@ -419,6 +406,35 @@ export function streamTask(
       if (timer) clearTimeout(timer);
     },
   };
+}
+
+export function streamTask(
+  taskId: string,
+  opts: {
+    after?: number;
+    onEvent: (e: TaskEvent) => void;
+    onError?: (err: Error) => void;
+  },
+): StreamHandle {
+  let lastIngest = opts.after ?? 0;
+  // Hardening P0 item 9: resume on the global ingest cursor so a retry never
+  // reorders or re-delivers events across attempts.
+  return sseConnect(
+    () => `/v1/tasks/${taskId}/events/stream?after_ingest=${lastIngest}`,
+    (line) => {
+      if (!line.startsWith('data:')) return;
+      const data = line.slice(5).trim();
+      if (!data) return;
+      try {
+        const e = JSON.parse(data) as TaskEvent;
+        if (e.ingest_id > lastIngest) lastIngest = e.ingest_id;
+        opts.onEvent(e);
+      } catch {
+        /* ignore malformed */
+      }
+    },
+    opts.onError,
+  );
 }
 
 // Plan 3.4: audit trail (who decided what) with an action filter.
@@ -443,56 +459,10 @@ export function listAudit(action?: string, limit = 100): Promise<AuditEvent[]> {
 // and `change` whenever the task/node/workflow-run status fingerprint moves;
 // lists refetch only on those events, so an idle UI makes zero requests.
 export function streamChanges(onChange: () => void): StreamHandle {
-  let closed = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let backoff = 500;
-
-  const schedule = (fn: () => void) => {
-    timer = setTimeout(fn, backoff);
-    backoff = Math.min(backoff * 2, 5000);
-  };
-
-  const run = async () => {
-    if (closed) return;
-    try {
-      const r = await fetch('/v1/stream', { credentials: 'include' });
-      if (r.status === 401) {
-        markUnauthed();
-        if (typeof window !== 'undefined') window.location.reload();
-        return;
-      }
-      if (!r.ok || !r.body) throw new ApiError(r.status, `stream -> ${r.status}`);
-      backoff = 500;
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      while (!closed) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, idx).trim();
-          buf = buf.slice(idx + 1);
-          // hello/change frames both mean "lists may have moved".
-          if (line.startsWith('event:') && /hello|change/.test(line)) onChange();
-        }
-      }
-    } catch (err) {
-      if (closed) return;
-      schedule(run);
-      return;
-    }
-    if (!closed) schedule(run);
-  };
-
-  run();
-  return {
-    close() {
-      closed = true;
-      if (timer) clearTimeout(timer);
-    },
-  };
+  return sseConnect('/v1/stream', (line) => {
+    // hello/change frames both mean "lists may have moved".
+    if (line.startsWith('event:') && /hello|change/.test(line)) onChange();
+  });
 }
 
 

@@ -79,6 +79,10 @@
 
 ### Changed
 
+- The two SSE reconnect loops (`streamTask` / `streamChanges`) are extracted
+  into one shared `sseConnect` helper — same backoff, 401→login handling,
+  and reader pump; `streamChanges` now also surfaces connection errors
+  through the optional callback instead of swallowing them.
 - Shared keyset-pagination scaffolding (`KEYSET_PREDICATE` / `KEYSET_ORDER`
   / `page_limit`) replaces six copy-pasted copies across the workflow,
   task, repository, and approval list queries — the copies had already
