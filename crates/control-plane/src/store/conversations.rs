@@ -89,10 +89,7 @@ impl Store {
     /// assistant turn on the conversation that spawned the task. Best-effort
     /// by contract: callers log failures and move on. The NOT EXISTS guard
     /// makes completion redelivery idempotent (no duplicate turns).
-    pub async fn append_conversation_assistant_for_attempt(
-        &self,
-        attempt_id: &str,
-    ) -> Result<()> {
+    pub async fn append_conversation_assistant_for_attempt(&self, attempt_id: &str) -> Result<()> {
         let Some((task_id, conversation_id)): Option<(String, String)> = sqlx::query_as(
             "SELECT t.id, c.conversation_id \
              FROM attempts a \
@@ -135,13 +132,8 @@ impl Store {
         if text.trim().is_empty() {
             return Ok(());
         }
-        self.append_conversation_message(
-            &conversation_id,
-            "assistant",
-            &text,
-            Some(&task_id),
-        )
-        .await?;
+        self.append_conversation_message(&conversation_id, "assistant", &text, Some(&task_id))
+            .await?;
         Ok(())
     }
 
