@@ -77,21 +77,16 @@ pub async fn probe_adapter(bin: &str) -> AdapterProbe {
     // Try to get version via `--version` flag.
     // Audit X-B10: bounded probe — a wedged binary used to hang the
     // sequential heartbeat loop and sweep the node offline.
-    let output =
-        match tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            tokio::process::Command::new(&path)
-                .arg("--version")
-                .output()
-                .await
-        })
-        .await
-        {
-            Ok(o) => o.ok(),
-            Err(_) => {
-                tracing::warn!(bin = %bin, "adapter --version probe timed out");
-                None
-            }
-        };
+    let probe = tokio::process::Command::new(&path)
+        .arg("--version")
+        .output();
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
+        Ok(o) => o.ok(),
+        Err(_) => {
+            tracing::warn!(bin = %bin, "adapter --version probe timed out");
+            None
+        }
+    };
     let version = output
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())

@@ -151,11 +151,7 @@ pub async fn report_complete(
         // (fenced-off writer, attempt reaped/cancelled, malformed payload).
         // The record used to stay durable and be re-sent with a doomed token
         // once per restart. Mirror the artifact policy: drop it now.
-        Ok(s) if matches!(
-            s.as_u16(),
-            400 | 401 | 404 | 409 | 412 | 413 | 422
-        ) =>
-        {
+        Ok(s) if matches!(s.as_u16(), 400 | 401 | 404 | 409 | 412 | 413 | 422) => {
             tracing::error!(
                 "complete report got {s} for {attempt_id}; dropping durable record \
                  (definitive rejection)"
