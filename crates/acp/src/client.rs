@@ -138,12 +138,21 @@ where
         let id = Id::Num(self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) as i64);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
-        self.send(Message::Request {
-            id: id.clone(),
-            method: method.to_string(),
-            params,
-        })
-        .await?;
+        // Audit X-A2: if the send fails (broken pipe, closed transport), the
+        // entry must not stay in the pending map — the reader task only
+        // drains it on transport teardown, so a fast send failure would
+        // otherwise wedge this id until then.
+        if let Err(e) = self
+            .send(Message::Request {
+                id: id.clone(),
+                method: method.to_string(),
+                params,
+            })
+            .await
+        {
+            self.pending.lock().unwrap().remove(&id);
+            return Err(e);
+        }
         let msg = rx.await.map_err(|_| AcpError::ChannelClosed)?;
         match msg {
             Message::Response { result, .. } => match result {

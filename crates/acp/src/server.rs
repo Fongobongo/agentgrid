@@ -16,7 +16,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 /// Handle the agent uses to stream `session/update` notifications to the
@@ -171,9 +171,42 @@ where
             Arc::new(Mutex::new(HashMap::new()));
         let idgen = Arc::new(AtomicU64::new(1));
 
-        let mut lines = BufReader::new(self.reader).lines();
+        // Audit X-A1: bound one inbound frame like the client side does
+        // (1 MiB). `BufReader::lines()` had no cap — a runaway or malicious
+        // peer streaming a single unterminated line grew server memory
+        // without bound. An oversized frame is drained (to the next newline)
+        // and skipped; the session survives.
+        const MAX_LINE_BYTES: usize = 1024 * 1024;
+        let mut reader = BufReader::new(self.reader);
         let agent = self.agent;
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let mut buf: Vec<u8> = Vec::with_capacity(512);
+            let n = (&mut reader)
+                .take(MAX_LINE_BYTES as u64 + 1)
+                .read_until(b'\n', &mut buf)
+                .await
+                .unwrap_or(0);
+            if n == 0 {
+                break; // EOF
+            }
+            if !buf.ends_with(b"\n") {
+                // Cap hit mid-frame: drain the rest of the line so the next
+                // iteration reads a fresh frame, then continue.
+                let mut sink = [0u8; 8192];
+                loop {
+                    let k = reader.read(&mut sink).await.unwrap_or(0);
+                    if k == 0 || sink[..k].contains(&b'\n') {
+                        break;
+                    }
+                }
+                tracing::warn!("dropped oversized ACP frame (> {} bytes)", MAX_LINE_BYTES);
+                continue;
+            }
+            buf.pop(); // trailing '\n'
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            let line = String::from_utf8_lossy(&buf).into_owned();
             let msg = match decode_line(&line) {
                 Ok(m) => m,
                 Err(_) => continue,

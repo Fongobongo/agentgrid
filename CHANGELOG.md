@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The ACP server read loop had no frame-size cap (audit X-A1).** The
+  client side bounds one inbound line at 1 MiB, but the server used
+  `BufReader::lines()` — a runaway or malicious peer streaming one
+  unterminated line grew server memory without bound. Frames are now capped
+  like the client's; an oversized frame is drained to its end and skipped,
+  and the session survives.
+- **A failed request send leaked its entry in the ACP client's pending map
+  (audit X-A2).** The id was inserted before the write; on a fast send
+  failure it stayed until transport teardown. It is now removed on the
+  error path.
+- **The workflow-run badge rendered unstyled for failed/running runs
+  (audit X-W1).** The Workflows view kept a second, drifting `statusClass`
+  whose `err`/`run` classes have no badge styles; the run summary now uses
+  the shared vocabulary from `util`.
+- **Opening a running task never revealed its diff/review section when the
+  task finished (audit X-W3).** The task object was fetched once on mount;
+  a terminal status event on the live stream now re-fetches it.
+- **OpencodeProfiles hand-rolled four `fetch()` calls around the central
+  API client (audit X-W4)** — losing the shared expired-session handling.
+  They route through `req()` now.
+
 ### Changed
 
 - Deduplication pass (audit): one shared `agentgrid_common::sha256_hex`

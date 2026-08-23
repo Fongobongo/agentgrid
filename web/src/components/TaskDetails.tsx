@@ -70,6 +70,17 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
               next.push(e);
               return next;
             });
+            // Audit X-W3: `task` was fetched once on mount, so a run that
+            // reached a terminal state while this page stayed open never
+            // refreshed it — the diff / review section (keyed off
+            // task.status) never appeared without a manual reload.
+            if (e.type === 'status' && typeof e.payload === 'string' && TERMINAL.includes(e.payload)) {
+              getTask(taskId)
+                .then((t) =>
+                  setTask((cur) => (cur && TERMINAL.includes(cur.status) ? cur : t)),
+                )
+                .catch(() => {});
+            }
           },
         });
       })

@@ -107,7 +107,10 @@ export class ApiError extends Error {
   }
 }
 
-async function req(method: string, path: string, body?: unknown): Promise<Response> {
+// Audit X-D5: exported so components that need raw status handling (e.g.
+// 204 No Content deletes) still route through the central 401 handling
+// instead of hand-rolled fetch() calls.
+export async function req(method: string, path: string, body?: unknown): Promise<Response> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const r = await fetch(path, {

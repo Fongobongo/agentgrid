@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getJson, postJson } from '../api';
+import { getJson, postJson, req } from '../api';
 import { ErrorBox, Loading, fmtTime } from './util';
 
 // Feature "opencode profiles": control-plane-hosted opencode configuration —
@@ -125,19 +125,15 @@ export default function OpencodeProfiles() {
     }
     try {
       const cfg = JSON.parse(editBody);
-      const body = JSON.stringify({
+      const payload = {
         config: cfg,
         expires_at: editExpires.trim() ? editExpires.trim() : null,
         pinned_skills: editPins.split(',').map((s) => s.trim()).filter(Boolean),
-      });
-      const r = await fetch(
+      };
+      const r = await req(
+        'PUT',
         `/v1/opencode-profiles/${encodeURIComponent(editName.trim())}?dry_run=true`,
-        {
-          method: 'PUT',
-          headers: { 'content-type': 'application/json' },
-          credentials: 'include',
-          body,
-        },
+        payload,
       );
       const data = await r.json();
       if (!r.ok) throw new Error(`dry-run failed: ${r.status}`);
@@ -161,17 +157,16 @@ export default function OpencodeProfiles() {
     }
     try {
       const cfg = JSON.parse(editBody);
-      const body = JSON.stringify({
+      const payload = {
         config: cfg,
         expires_at: editExpires.trim() ? editExpires.trim() : null,
         pinned_skills: editPins.split(',').map((s) => s.trim()).filter(Boolean),
-      });
-      const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(editName.trim())}`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        credentials: 'include',
-        body,
-      });
+      };
+      const r = await req(
+        'PUT',
+        `/v1/opencode-profiles/${encodeURIComponent(editName.trim())}`,
+        payload,
+      );
       if (!r.ok) throw new Error(`upsert failed: ${r.status}`);
       setMsg('profile saved');
       setEditBody('');
@@ -221,10 +216,7 @@ export default function OpencodeProfiles() {
     );
     if (fallback === null) return;
     const q = fallback.trim() ? `?fallback=${encodeURIComponent(fallback.trim())}` : '';
-    const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(name)}${q}`, {
-      method: 'DELETE',
-      credentials: 'include',
-    });
+    const r = await req('DELETE', `/v1/opencode-profiles/${encodeURIComponent(name)}${q}`);
     if (r.status === 204 || r.ok) load();
     else setMsg(`delete failed: ${r.status}`);
   };
@@ -241,12 +233,7 @@ export default function OpencodeProfiles() {
 
   const rollback = async (name: string) => {
     if (!window.confirm(`Roll back profile "${name}" to the previous revision?`)) return;
-    const r = await fetch(`/v1/opencode-profiles/${encodeURIComponent(name)}/rollback`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'content-type': 'application/json' },
-      body: '{}',
-    });
+    const r = await req('POST', `/v1/opencode-profiles/${encodeURIComponent(name)}/rollback`, {});
     if (r.ok) {
       setMsg('rolled back');
       load();

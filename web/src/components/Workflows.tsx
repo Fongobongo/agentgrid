@@ -11,7 +11,7 @@ import {
   approveWorkflowPlan,
   listRepos,
 } from '../api';
-import { useLiveRefresh } from './util';
+import { useLiveRefresh, statusClass as sharedStatusClass } from './util';
 
 // Stage 11.6: workflow run viewer with a DAG. Layers are computed by
 // dependency depth from `depends_on`. Leaves render rightmost; the run id,
@@ -283,7 +283,10 @@ export function WorkflowDetails({ runId }: { runId: string }) {
       <div className="wf-summary">
         <h2>Run <span className="mono">{run.id.slice(0, 8)}</span></h2>
         <div className="wf-badges">
-          <span className={`badge ${statusClass(run.status)}`}>{run.status}</span>
+          {/* Shared badge vocabulary (util.statusClass) — the local wf-*
+              variant lacks `.err`/`.run` badge styles, so failed/running
+              runs rendered unstyled here. */}
+          <span className={`badge ${sharedStatusClass(run.status)}`}>{run.status}</span>
           {run.repository && <span className="badge">repo: {run.repository}</span>}
           {run.base_commit && <span className="badge mono">base: {run.base_commit.slice(0, 8)}</span>}
           {run.status.toLowerCase() === 'plan_ready' && (
