@@ -208,7 +208,7 @@ pub async fn check_fencing_token(
 /// Extract the node-presented fencing token from the request headers
 /// (`X-AgentGrid-Fencing-Token`). None when absent (N-1 nodes).
 pub fn fencing_token_header(h: &HeaderMap) -> Option<String> {
-    h.get("x-agentgrid-fencing-token")
+    h.get(agentgrid_common::FENCING_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
 }

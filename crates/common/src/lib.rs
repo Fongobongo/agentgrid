@@ -17,6 +17,21 @@ pub use workflow::{
 
 use serde::{Deserialize, Serialize};
 
+/// Header the node must present on every attempt mutation (hardening P0
+/// item 8). One shared literal — a typo in a per-site copy would silently
+/// bypass fencing (audit X-D3).
+pub const FENCING_TOKEN_HEADER: &str = "x-agentgrid-fencing-token";
+
+/// Lowercase-hex SHA-256 of `data`. Single shared implementation: the
+/// opencode-profile hash round-trips CP↔node to detect config drift, so
+/// every hashing site must agree on canonicalization (audit X-D1).
+pub fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    format!("{:x}", h.finalize())
+}
+
 /// Task lifecycle status (control-plane view of a user request).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -8,16 +8,13 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{DiscoveredSkill, SkillSource};
 
 /// Deterministic sha256 hex of skill content (used for lock verification).
 pub fn compute_skill_hash(content: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(content.as_bytes());
-    format!("{:x}", h.finalize())
+    agentgrid_common::sha256_hex(content.as_bytes())
 }
 
 /// Decides which skills may activate. Project skills are untrusted by default

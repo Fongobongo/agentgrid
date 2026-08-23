@@ -139,7 +139,7 @@ pub async fn report_complete(
     // failures with backoff. The durable outbox also covers the daemon-kill gap.
     let mut post = client.post(&url).json(&req);
     if !fence.is_empty() {
-        post = post.header("x-agentgrid-fencing-token", fence);
+        post = post.header(agentgrid_common::FENCING_TOKEN_HEADER, fence);
     }
     match send_with_retry(post, 20).await {
         Ok(s) if s.is_success() => {
@@ -177,7 +177,7 @@ pub async fn ack_attempt(
     let url = format!("{}/v1/node/attempts/{}/ack", server, attempt_id);
     let mut req = client.post(&url);
     if !fence.is_empty() {
-        req = req.header("x-agentgrid-fencing-token", fence);
+        req = req.header(agentgrid_common::FENCING_TOKEN_HEADER, fence);
     }
     match req.send().await {
         Err(e) => {
@@ -212,7 +212,7 @@ pub async fn create_agent_session(
     };
     let mut req = client.post(&url).json(&body);
     if !fence.is_empty() {
-        req = req.header("x-agentgrid-fencing-token", fence);
+        req = req.header(agentgrid_common::FENCING_TOKEN_HEADER, fence);
     }
     if let Err(e) = req.send().await {
         tracing::warn!("agent session create failed for {attempt_id}: {e}");

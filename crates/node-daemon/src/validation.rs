@@ -59,7 +59,7 @@ pub async fn run_validation(
             .post(format!(
                 "{server}/v1/node/attempts/{attempt_id}/begin_validate"
             ))
-            .header("x-agentgrid-fencing-token", fence);
+            .header(agentgrid_common::FENCING_TOKEN_HEADER, fence);
         match send_with_retry(post, 2).await {
             Ok(s) if s.is_success() => {}
             Ok(s) => tracing::warn!(

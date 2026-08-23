@@ -293,20 +293,12 @@ mod opaque_id_tests {
 }
 
 fn sha256_hex(s: &str) -> String {
-    sha256_bytes_hex(s.as_bytes())
+    agentgrid_common::sha256_hex(s.as_bytes())
 }
 
 /// SHA-256 of raw bytes as lowercase hex (used for artifact integrity).
 fn sha256_bytes_hex(b: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b);
-    let out = h.finalize();
-    let mut s = String::with_capacity(out.len() * 2);
-    for byte in out {
-        s.push_str(&format!("{byte:02x}"));
-    }
-    s
+    agentgrid_common::sha256_hex(b)
 }
 
 /// Error from [`Store::save_artifact_bytes`]. `HashMismatch` means the

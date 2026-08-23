@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Deduplication pass (audit): one shared `agentgrid_common::sha256_hex`
+  replaces the four independent implementations and inline digests
+  (control-plane store/opencode profiles/routes, node-daemon polling/
+  opencode-config, skills hash) — the opencode-profile hash round-trips
+  CP↔node, so all sites must agree on canonicalization. The fencing-token
+  header literal is now a single shared constant (`FENCING_TOKEN_HEADER`)
+  across both crates instead of eight copies. The CLI no longer silently
+  drops an invalid stored session token (which produced unauthenticated
+  requests with confusing 401s) — it fails fast with a clear error.
+  Intentionally kept: explicit `CreateTaskRequest` literals (compile errors
+  on new fields force a conscious decision per call site).
+
 ### Removed
 
 - Dead code sweep (audit): the unused `to_event_kind` adapter mapping

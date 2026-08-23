@@ -825,9 +825,14 @@ async fn main() -> Result<()> {
     // Attach a stored session token to all user-authenticated requests.
     if let Some(token) = load_token() {
         let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) {
-            headers.insert(reqwest::header::AUTHORIZATION, v);
-        }
+        // Audit X-D6: a non-ASCII/corrupt token used to be silently DROPPED
+        // here, sending unauthenticated requests that fail with confusing
+        // 401s. Surface the corruption instead.
+        let v = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|e| {
+                anyhow::anyhow!("stored session token is not a valid header value: {e}")
+            })?;
+        headers.insert(reqwest::header::AUTHORIZATION, v);
         client_builder = client_builder.default_headers(headers);
     }
     let client = client_builder.build()?;

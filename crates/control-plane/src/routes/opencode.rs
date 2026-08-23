@@ -87,8 +87,7 @@ fn dry_run_response(config: serde_json::Value) -> Result<Json<UpsertDryRun>, Sta
     let effective = sanitize_config(&config).map_err(|_| StatusCode::BAD_REQUEST)?;
     let dropped = last_dropped_keys();
     let json_string = serde_json::to_string(&effective).map_err(|_| StatusCode::BAD_REQUEST)?;
-    use sha2::Digest;
-    let hash = format!("{:x}", sha2::Sha256::digest(json_string.as_bytes()));
+    let hash = agentgrid_common::sha256_hex(json_string.as_bytes());
     Ok(Json(UpsertDryRun {
         would_set_hash: hash,
         effective_config: effective,

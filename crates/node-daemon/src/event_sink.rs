@@ -314,7 +314,7 @@ impl EventSink {
         };
         let mut post = self.client.post(&url).json(&req);
         if !self.fence.is_empty() {
-            post = post.header("x-agentgrid-fencing-token", &self.fence);
+            post = post.header(agentgrid_common::FENCING_TOKEN_HEADER, &self.fence);
         }
         let max_attempts = if retry { 10 } else { 1 };
         match send_with_retry(post, max_attempts).await {
@@ -427,7 +427,7 @@ impl EventSink {
                 let req = IngestEventsRequest { events: chunk };
                 let mut post = self.client.post(&url).json(&req);
                 if !self.fence.is_empty() {
-                    post = post.header("x-agentgrid-fencing-token", &self.fence);
+                    post = post.header(agentgrid_common::FENCING_TOKEN_HEADER, &self.fence);
                 }
                 match send_with_retry(post, 10).await {
                     Ok(s) if s.is_success() => {

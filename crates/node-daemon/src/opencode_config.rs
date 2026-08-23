@@ -19,7 +19,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use sha2::Digest;
 use std::sync::Mutex;
 
 /// Track the most recently applied profile hash so the heartbeat can report
@@ -165,7 +164,7 @@ pub async fn pull_and_apply(
 pub async fn current_hash() -> Option<String> {
     let path = opencode_config_path();
     let bytes = tokio::fs::read(&path).await.ok()?;
-    Some(format!("{:x}", sha2::Sha256::digest(bytes)))
+    Some(agentgrid_common::sha256_hex(&bytes))
 }
 
 /// Apply the profile: write `<hash>.opencode.json.tmp` → fsync → rename over
@@ -175,7 +174,7 @@ pub async fn apply_config(config_json: &str) -> Result<String> {
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
-    let new_hash = format!("{:x}", sha2::Sha256::digest(config_json.as_bytes()));
+    let new_hash = agentgrid_common::sha256_hex(config_json.as_bytes());
     // Skip no-op writes: the disk-side hash matches what we were about to
     // write. Profiles are PUT-idempotent server-side, this is the read side.
     if current_hash().await.as_deref() == Some(new_hash.as_str()) {
@@ -297,6 +296,7 @@ pub async fn build_override_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     // Tests must not race on the process-wide AG_OPENCODE_HOME env var;
     // a process-local mutex serializes them.

@@ -282,7 +282,7 @@ pub async fn upload_if_exists(
         .header("x-artifact-media-type", media)
         .header("x-artifact-sha256", sha.as_str());
     if !fence.is_empty() {
-        post = post.header("x-agentgrid-fencing-token", fence);
+        post = post.header(agentgrid_common::FENCING_TOKEN_HEADER, fence);
     }
     match send_with_retry(post.body(bytes), 10).await {
         Ok(s) if s.is_success() => {
@@ -325,11 +325,7 @@ fn artifact_media_type(name: &str) -> &'static str {
 /// Hex SHA-256 of a byte slice (hardening P1 item 11: artifact upload
 /// verification header).
 fn sha256_hex_bytes(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    let out = h.finalize();
-    out.iter().map(|b| format!("{b:02x}")).collect()
+    agentgrid_common::sha256_hex(bytes)
 }
 
 /// Whether an HTTP status from the control plane is worth retrying from the

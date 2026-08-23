@@ -102,10 +102,7 @@ fn normalize_config(v: serde_json::Value) -> Result<(String, String)> {
         obj.retain(|k, _| ALLOWED_TOP_LEVEL.contains(&k.as_str()));
     }
     let json = serde_json::to_string(&v)?;
-    let hash = {
-        use sha2::Digest;
-        format!("{:x}", sha2::Sha256::digest(json.as_bytes()))
-    };
+    let hash = agentgrid_common::sha256_hex(json.as_bytes());
     Ok((json, hash))
 }
 

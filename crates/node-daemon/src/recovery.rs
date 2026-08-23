@@ -32,7 +32,7 @@ pub async fn redeliver_completion(cfg: &Config, client: &Client, attempt_id: &st
     // Hardening P0 item 8: redeliver with the recorded fencing token so the
     // CP accepts (or 409-rejects) the stale writer just like a fresh send.
     if !c.fencing_token.is_empty() {
-        post = post.header("x-agentgrid-fencing-token", &c.fencing_token);
+        post = post.header(agentgrid_common::FENCING_TOKEN_HEADER, &c.fencing_token);
     }
     match send_with_retry(post, 20).await {
         Ok(s) if s.is_success() => {
