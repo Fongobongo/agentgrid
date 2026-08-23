@@ -1,8 +1,8 @@
 //! Task CRUD + events. Extracted from `store.rs`.
 
 use super::{
-    event_type_of, now_iso, page_limit, row_to_task_view, Store, DEFAULT_EVENT_PAGE,
-    KEYSET_ORDER, KEYSET_PREDICATE,
+    event_type_of, now_iso, page_limit, row_to_task_view, Store, DEFAULT_EVENT_PAGE, KEYSET_ORDER,
+    KEYSET_PREDICATE,
 };
 use agentgrid_common::{CreateTaskRequest, TaskEvent, TaskStatus, TaskView};
 use anyhow::Result;
