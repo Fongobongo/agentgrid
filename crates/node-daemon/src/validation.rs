@@ -11,7 +11,7 @@ use anyhow::Result;
 use reqwest::Client;
 use serde_json::json;
 
-use crate::completion::{terminate_group, wait_for_cancel};
+use crate::completion::{terminate_group, wait_bounded, BoundedExit};
 use crate::event_sink::{read_stream, EventSink};
 use crate::polling::send_with_retry;
 
@@ -141,19 +141,10 @@ pub async fn run_validation(
         g2,
     ));
 
-    enum VOutcome {
-        Exited(i32),
-        Timeout,
-        Cancel,
-    }
-    let verdict = tokio::select! {
-        status = child.wait() => VOutcome::Exited(status?.code().unwrap_or(-1)),
-        _ = tokio::time::sleep(timeout) => VOutcome::Timeout,
-        _ = wait_for_cancel(attempt_id, client.clone(), cancel_url) => VOutcome::Cancel,
-    };
+    let verdict = wait_bounded(&mut child, timeout, attempt_id, client.clone(), cancel_url).await?;
     let (code, timed_out, cancelled) = match verdict {
-        VOutcome::Exited(c) => (c, false, false),
-        VOutcome::Timeout => {
+        BoundedExit::Exited(c) => (c, false, false),
+        BoundedExit::TimedOut => {
             terminate_group(pid);
             let status = child.wait().await;
             (
@@ -162,7 +153,7 @@ pub async fn run_validation(
                 false,
             )
         }
-        VOutcome::Cancel => {
+        BoundedExit::Cancelled => {
             sink.push(
                 EventType::Status,
                 json!({ "status": "cancelled", "phase": "validation", "reason": "user_requested" }),

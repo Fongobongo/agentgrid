@@ -163,6 +163,33 @@ pub async fn report_complete(
     }
 }
 
+/// Audit X-D4: shared bounded-wait core for supervised subprocesses (adapter
+/// runs and validation). The three-way select was duplicated verbatim; only
+/// the post-exit handling differs. On `TimedOut`/`Cancelled` the caller owns
+/// group-kill + container cleanup, then reaps with a final `child.wait()`.
+pub enum BoundedExit {
+    Exited(i32),
+    TimedOut,
+    Cancelled,
+}
+
+pub async fn wait_bounded(
+    child: &mut tokio::process::Child,
+    timeout: std::time::Duration,
+    attempt_id: &str,
+    cancel_client: reqwest::Client,
+    cancel_url: String,
+) -> anyhow::Result<BoundedExit> {
+    tokio::select! {
+        status = child.wait() => {
+            let code = status?.code().unwrap_or(-1);
+            Ok(BoundedExit::Exited(code))
+        }
+        _ = tokio::time::sleep(timeout) => Ok(BoundedExit::TimedOut),
+        _ = wait_for_cancel(attempt_id, cancel_client, cancel_url) => Ok(BoundedExit::Cancelled),
+    }
+}
+
 /// Outcome of the assignment ack. `Rejected` means the CP definitively
 /// refused the lease (404/409 — reverted by the ack-deadline reaper,
 /// cancelled, or fenced off): the assignment must be dropped, never run,

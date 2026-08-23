@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::command_guard::CommandGuard;
-use crate::completion::{terminate_group, wait_for_cancel};
+use crate::completion::{terminate_group, wait_bounded, BoundedExit};
 use crate::event_sink::{read_stream, EventSink};
 
 /// Outcome of a supervised adapter run: the process exit code plus why it was
@@ -68,20 +68,18 @@ pub async fn supervise_adapter(
         g2,
     ));
 
-    enum Outcome {
-        Exited(i32),
-        Timeout,
-        Cancel,
-    }
     let (code, kill_reason): (i32, Option<&'static str>) = {
-        let outcome = tokio::select! {
-            status = child.wait() => Outcome::Exited(status?.code().unwrap_or(-1)),
-            _ = tokio::time::sleep(timeout) => Outcome::Timeout,
-            _ = wait_for_cancel(attempt_id, cancel_client, cancel_url) => Outcome::Cancel,
-        };
-        match outcome {
-            Outcome::Exited(c) => (c, None),
-            Outcome::Timeout => {
+        match wait_bounded(
+            &mut child,
+            timeout,
+            attempt_id,
+            cancel_client,
+            cancel_url,
+        )
+        .await?
+        {
+            BoundedExit::Exited(c) => (c, None),
+            BoundedExit::TimedOut => {
                 terminate_group(pid);
                 // Audit ND-6: killing the `docker run` client leaves the
                 // container itself running — remove it by per-attempt name.
@@ -89,7 +87,7 @@ pub async fn supervise_adapter(
                 let status = child.wait().await?;
                 (status.code().unwrap_or(-1), Some("timeout"))
             }
-            Outcome::Cancel => {
+            BoundedExit::Cancelled => {
                 sink.push(
                     EventKind::Cancel.to_event_type(),
                     json!({
