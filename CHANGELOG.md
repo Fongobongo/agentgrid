@@ -49,6 +49,16 @@
   sequence, and only the loop ran approval expiry — a restart silently
   skipped it. The loop now calls `tick_maintenance`; backups and the WAL
   checkpoint cadence stay on the loop side.
+- **Small control-plane fixes.** The per-node event-rate map grew without
+  bound (one entry per enrolled node; now pruned past 1024 keys like the
+  login limiter). The one-time setup token was consumed before the first
+  user was created — a transient DB failure burnt the bootstrap token until
+  restart (now consumed only after a successful create).
+  `assign_percent_between` used a deferred transaction, bypassing the
+  single-writer gate other mutations hold (`SQLITE_BUSY_SNAPSHOT` exposure;
+  now `write_txn`). A session-revocation check failure mapped every request
+  to 401 without logging — still fail-closed, but the root cause is logged
+  now.
 
 ### Added
 

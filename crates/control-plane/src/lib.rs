@@ -303,6 +303,9 @@ impl AppState {
 
     /// Validate a JWT and return the username and role, or None if
     /// revoked/invalid. Checks revoked_sessions blocklist (Stage 4.2).
+    /// A storage failure is fail-closed (None → 401) like a revocation, but
+    /// it is logged — silently mapping every DB blip to mass 401s hid the
+    /// root cause from operators.
     pub(crate) async fn verify_token(&self, token: &str) -> Option<(String, String)> {
         let claims = decode::<Claims>(
             token,
@@ -311,15 +314,14 @@ impl AppState {
         )
         .ok()?;
         // Check if this jti has been revoked
-        if self
-            .store
-            .is_session_revoked(&claims.claims.jti)
-            .await
-            .ok()?
-        {
-            return None;
+        match self.store.is_session_revoked(&claims.claims.jti).await {
+            Ok(true) => None,
+            Ok(false) => Some((claims.claims.sub, claims.claims.role)),
+            Err(e) => {
+                tracing::error!("session revocation check failed (failing closed): {e}");
+                None
+            }
         }
-        Some((claims.claims.sub, claims.claims.role))
     }
 
     /// Read the current one-time setup token (if live) for tests / operators

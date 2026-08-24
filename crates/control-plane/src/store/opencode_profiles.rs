@@ -424,7 +424,7 @@ impl Store {
         let total = node_ids.len();
         let keep_n = total * percent as usize / 100;
         let mut out = Vec::with_capacity(node_ids.len());
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_txn().await?;
         for (i, node_id) in node_ids.iter().enumerate() {
             let target = if i < keep_n { keep_id } else { other_id };
             sqlx::query("UPDATE nodes SET opencode_profile_id = ? WHERE id = ?")

@@ -302,18 +302,17 @@ pub async fn auth_setup(
     // Hardening P0: require the one-time setup token minted at first start.
     // Rejects missing/expired/already-consumed tokens; the comparison is
     // constant-time-ish via a simple byte eq (token is high-entropy and
-    // short-lived, so timing leakage is not a practical concern).
-    {
-        let mut guard = state.setup_token.lock().await;
-        let valid = match guard.as_ref() {
-            Some(t) if t.is_live() => t.token == req.setup_token.as_deref().unwrap_or(""),
-            _ => false,
-        };
-        if !valid {
-            return Err(StatusCode::FORBIDDEN);
-        }
-        // Consume: the token is single-use.
-        *guard = None;
+    // short-lived, so timing leakage is not a practical concern). The token
+    // stays held under the mutex until the user is created — consuming it
+    // first would burn the bootstrap on a transient create_user failure and
+    // leave the operator locked out of first-admin creation until restart.
+    let mut guard = state.setup_token.lock().await;
+    let valid = match guard.as_ref() {
+        Some(t) if t.is_live() => t.token == req.setup_token.as_deref().unwrap_or(""),
+        _ => false,
+    };
+    if !valid {
+        return Err(StatusCode::FORBIDDEN);
     }
     match state
         .store
@@ -327,6 +326,9 @@ pub async fn auth_setup(
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
+    // Consume: the token is single-use, released only after a successful create.
+    *guard = None;
+    drop(guard);
     // The bootstrapped first user is always an admin.
     let token = state
         .issue_token(&req.username, agentgrid_common::ROLE_ADMIN)

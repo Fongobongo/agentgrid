@@ -115,8 +115,14 @@ impl EventRate {
     }
 
     /// `true` if this request is under the per-node budget; the first request of
-    /// a new window resets the counter.
+    /// a new window resets the counter. Stale entries are pruned opportunistically
+    /// past 1024 keys — enrollment mints one node id per node, so the map would
+    /// otherwise grow without bound on long-lived installs with node churn.
     pub(crate) fn admit(&mut self, node_id: &str, now: i64) -> bool {
+        if self.per_node.len() > 1024 {
+            let window = self.window_secs;
+            self.per_node.retain(|_, (start, _)| now - *start < window);
+        }
         let entry = self.per_node.entry(node_id.to_string()).or_insert((now, 0));
         if now - entry.0 >= self.window_secs {
             entry.0 = now;
