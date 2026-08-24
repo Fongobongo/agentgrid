@@ -402,8 +402,23 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         let cleanup_branch =
             (ws.is_git && ws.branch.is_some()).then(|| ws.branch.clone().unwrap_or_default());
         let cleanup_path = ws.path.clone();
+        // Wrapper parity: capture the resolved base before `ws` moves into
+        // finalize, and the finish-side remote HEAD after the agent ran —
+        // the ACP completion used to hardcode both to None (plus drop the
+        // captured plan), voiding the X-B9 drift audit on every ACP attempt
+        // and silently disabling the Stage-13 PlanReady pause.
+        let resolved_base_sha = ws.base_commit.clone();
         let (commit_sha, finalize_failed) =
             finalize_or_fail(ws, cfg.node_name.clone(), &assignment.attempt_id).await;
+        let remote_head_at_finish = {
+            let repo_dir = cleanup_repo.clone();
+            tokio::task::spawn_blocking(move || {
+                repo_dir.as_deref().and_then(crate::git::remote_head_at)
+            })
+            .await
+            .ok()
+            .flatten()
+        };
         // Run the optional validation command — the ACP path used to skip it,
         // silently leaving validation_command unenforced for ACP agents. The
         // diff is already committed so it survives a validation failure.
@@ -552,13 +567,16 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             commit_sha,
             error_code,
             res.session_id.clone(),
-            None,
-            None,
+            // Wrapper parity (audit follow-up): ship the captured Stage-13
+            // plan, the resolved base and the finish-side remote head — all
+            // three were hardcoded None on this path.
+            sink.take_plan(),
+            resolved_base_sha,
             // Audit X-B9: the start-side capture is now taken at attempt
             // start (shared above), so the ACP completion carries real drift
             // data instead of a hardcoded None.
             remote_head_at_start.clone(),
-            None,
+            remote_head_at_finish,
             assignment.provenance.clone().or_else(provenance_from_env),
             pending_artifacts,
             &cfg.completion_outbox,

@@ -81,6 +81,12 @@
   helper. Related: in `cleanup_workspace` itself the `branch -D` sat behind
   the fallible `worktree remove`, so any remove failure skipped the delete;
   it runs best-effort regardless now.
+- **ACP completions dropped plan / base commit / finish remote head
+  (node-daemon).** The ACP `report_complete` call hardcoded `None` for the
+  Stage-13 plan, `resolved_base_sha` and `remote_head_at_finish`, so the
+  PlanReady pause never fired for any ACP adapter (the primary protocol)
+  and the start→finish drift audit was void on every ACP attempt. All
+  three are captured and shipped like the wrapper path already did.
 
 ### Added
 
