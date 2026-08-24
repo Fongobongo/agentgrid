@@ -73,6 +73,14 @@
   whole task. A spawn failure now returns the same `infrastructure_failed`
   result as the missing-binary arm, flowing through the normal
   finalize/report/cleanup path.
+- **Worktree + branch leaks on early-exit attempt paths (node-daemon).**
+  The ack-rejected (ACP and wrapper) and adapter-missing paths returned
+  after `prepare_workspace` but before `cleanup_workspace` — the worktree
+  dir/gitlink survived to the 24 h prune and the `agent/<task>/<n>` branch
+  was never reclaimed. All post-prepare exits now reclaim via a shared
+  helper. Related: in `cleanup_workspace` itself the `branch -D` sat behind
+  the fallible `worktree remove`, so any remove failure skipped the delete;
+  it runs best-effort regardless now.
 
 ### Added
 

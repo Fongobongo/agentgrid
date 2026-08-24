@@ -169,6 +169,23 @@ async fn finalize_or_fail(
 
 /// Run one task attempt assigned by the control plane.
 pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) -> Result<()> {
+    /// Reclaim the worktree + branch on an early exit AFTER prepare_workspace
+    /// but BEFORE the normal finalize path (ack-rejected / adapter-missing).
+    /// Without this those paths leaked the worktree dir/gitlink to the 24 h
+    /// prune and the `agent/<task>/<n>` branch forever.
+    async fn drop_workspace_early(ws: &crate::git::Workspace, attempt_id: &str) {
+        let path = ws.path.clone();
+        let repo = ws.repo_dir.clone();
+        let branch =
+            (ws.is_git && ws.branch.is_some()).then(|| ws.branch.clone().unwrap_or_default());
+        tokio::task::spawn_blocking(move || {
+            crate::git::cleanup_workspace(&path, repo.as_deref(), branch.as_deref());
+        })
+        .await
+        .ok();
+        tracing::info!(attempt_id, "reclaimed workspace on early exit");
+    }
+
     // WS Cancel messages wake the supervisor via this notifier (plan 0.3 2.3);
     // unregistered automatically when the attempt finishes.
     let _cancel_guard = crate::completion::CancelGuard::new(&assignment.attempt_id);
@@ -334,6 +351,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 "ack rejected: lease reverted or cancelled on the CP; dropping assignment \
                  before spawning the agent"
             );
+            drop_workspace_early(&ws, &assignment.attempt_id).await;
             return Ok(());
         }
         create_agent_session(
@@ -633,6 +651,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 &assignment.fencing_token,
             )
             .await;
+            drop_workspace_early(&ws, &assignment.attempt_id).await;
             return Ok(());
         }
     };
@@ -691,6 +710,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             "ack rejected: lease reverted or cancelled on the CP; dropping assignment \
              before spawning the agent"
         );
+        drop_workspace_early(&ws, &assignment.attempt_id).await;
         return Ok(());
     }
     create_agent_session(

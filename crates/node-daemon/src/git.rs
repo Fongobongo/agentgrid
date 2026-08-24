@@ -778,24 +778,26 @@ pub fn cleanup_workspace(
         return;
     }
     if let (Some(repo), Some(branch)) = (repo_dir, branch) {
-        if let Err(e) = (|| -> Result<()> {
-            git(
-                repo,
-                &[
-                    "worktree",
-                    "remove",
-                    "--force",
-                    ws_path.to_str().unwrap_or(""),
-                ],
-            )?;
-            let _ = Command::new("git")
-                .args(["branch", "-D", branch])
-                .current_dir(repo)
-                .status();
-            Ok(())
-        })() {
+        // Audit follow-up: the branch delete used to sit behind the
+        // fallible `worktree remove` with `?`, so any remove failure
+        // (locked worktree, partial state) skipped it and the attempt
+        // branch leaked forever — nothing else ever deletes attempt
+        // branches. The delete is best-effort and runs regardless.
+        if let Err(e) = git(
+            repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                ws_path.to_str().unwrap_or(""),
+            ],
+        ) {
             tracing::warn!(?ws_path, "worktree remove failed: {e}; falling back to rm");
         }
+        let _ = Command::new("git")
+            .args(["branch", "-D", branch])
+            .current_dir(repo)
+            .status();
     }
     if ws_path.exists() {
         let _ = std::fs::remove_dir_all(ws_path);
