@@ -59,6 +59,12 @@
   now `write_txn`). A session-revocation check failure mapped every request
   to 401 without logging — still fail-closed, but the root cause is logged
   now.
+- **The builtin command-policy classifier missed obvious danger.** A plain
+  `curl` (no literal `-X POST`) fell through to ExecuteLocal and was
+  auto-allowed at L2+; `rm --recursive --force` bypassed the short-flag
+  destructive check; `echo` and `git` were dead entries in the read list
+  (shadowed by earlier arms). Every curl is now NetworkWrite, rm's long
+  flags count as destructive, and the dead read-list arms are gone.
 
 ### Added
 

@@ -270,10 +270,17 @@ fn classify(tokens: &[String]) -> RiskClass {
 
     // Destructive: anything that can irreversibly destroy host/workspace state.
     // `rm` only counts as destructive with a force flag; the rest are always.
+    // Long-form flags (`--recursive`, `--force`, `--recursive --force`) count
+    // the same as their short forms.
     if head == "rm"
-        && tokens
-            .iter()
-            .any(|t| t == "-rf" || t == "-fr" || t == "-r" || t == "-f")
+        && tokens.iter().any(|t| {
+            t == "-rf"
+                || t == "-fr"
+                || t == "-r"
+                || t == "-f"
+                || t == "--recursive"
+                || t == "--force"
+        })
     {
         return RiskClass::Destructive;
     }
@@ -287,7 +294,8 @@ fn classify(tokens: &[String]) -> RiskClass {
         return RiskClass::Destructive;
     }
     // `chmod`/`chown` recursive on system paths.
-    if (head == "chmod" || head == "chown") && tokens.iter().any(|t| t == "-R" || t == "-r") {
+    if (head == "chmod" || head == "chown") && tokens.iter().any(|t| t == "-R" || t == "-r")
+    {
         return RiskClass::Destructive;
     }
 
@@ -305,26 +313,26 @@ fn classify(tokens: &[String]) -> RiskClass {
         return RiskClass::PackageInstall;
     }
 
-    // Git remote operations touch a remote ref.
+    // Git remote operations touch a remote ref. (The git arm is checked
+    // before the read list, so a bare `git` in the read list below is dead.)
     if head == "git" {
         if let Some(sub) = tokens.get(1).map(|s| s.as_str()) {
             match sub {
                 "push" | "fetch" | "pull" | "clone" | "submodule" | "remote" => {
                     return RiskClass::GitRemote
                 }
-                "commit" | "add" | "checkout" | "merge" | "rebase" | "status" | "diff" | "log"
-                | "show" | "reset" | "branch" | "mv" | "rm" => return RiskClass::EditWorkspace,
                 _ => return RiskClass::EditWorkspace,
             }
         }
         return RiskClass::EditWorkspace;
     }
 
-    // Network write to a peer.
-    if (head == "curl" && joined.contains("-X POST"))
-        || (head == "curl" && (joined.contains("ftp") || joined.contains("--upload")))
-        || matches!(head, "scp" | "rsync" | "sftp" | "wget" | "ftp")
-    {
+    // Network write to a peer. Any curl that targets the network with a body,
+    // an upload, an explicit method or a plain URL fetch mutates a peer or
+    // exfiltrates data — classify conservatively as NetworkWrite; GET-only
+    // inspection via curl still leaves the host untouched but the response
+    // feeds the agent, so it stays asked at L2+.
+    if head == "curl" || matches!(head, "scp" | "rsync" | "sftp" | "wget" | "ftp") {
         return RiskClass::NetworkWrite;
     }
 
@@ -386,7 +394,9 @@ fn classify(tokens: &[String]) -> RiskClass {
         return RiskClass::EditWorkspace;
     }
 
-    // Plain reads / inspection.
+    // Plain reads / inspection. (`echo` is classified EditWorkspace above;
+    // `git` never reaches this list — the git arm above catches every git
+    // invocation.)
     if matches!(
         head,
         "cat"
@@ -400,7 +410,6 @@ fn classify(tokens: &[String]) -> RiskClass {
             | "which"
             | "whoami"
             | "env"
-            | "echo"
             | "wc"
             | "sort"
             | "uniq"
@@ -408,7 +417,6 @@ fn classify(tokens: &[String]) -> RiskClass {
             | "file"
             | "stat"
             | "date"
-            | "git"
     ) {
         return RiskClass::Read;
     }
@@ -466,6 +474,43 @@ mod tests {
         let v = verdict("curl -X POST https://example.com/hook -d '{}'");
         assert_eq!(v.risk_class, RiskClass::NetworkWrite);
         assert_eq!(v.decision, PolicyDecision::Ask);
+        // Audit follow-up: the old classifier only fired on a literal
+        // "-X POST" — a plain curl (GET/PUT/-d without -X) slipped through to
+        // ExecuteLocal and was ALLOWED at L2+. Every curl is a network touch.
+        let v2 = verdict("curl https://example.com/hook -d '{\"a\":1}'");
+        assert_eq!(v2.risk_class, RiskClass::NetworkWrite);
+        let v3 = verdict("curl -o out.bin https://example.com/file");
+        assert_eq!(v3.risk_class, RiskClass::NetworkWrite);
+    }
+
+    #[test]
+    fn rm_long_flags_are_destructive() {
+        // Audit follow-up: `rm --recursive --force` bypassed the short-flag
+        // check and landed in ExecuteLocal.
+        for cmd in ["rm --recursive --force x", "rm --force x", "rm --recursive x"] {
+            let v = verdict(cmd);
+            assert_eq!(v.risk_class, RiskClass::Destructive, "cmd: {cmd}");
+            assert_eq!(v.decision, PolicyDecision::Deny);
+        }
+        // A plain rm without force flags is unknown-head territory (rm is not
+        // in the edit list) — still not destructive, which is what matters.
+        let v = verdict("rm x.txt");
+        assert_ne!(v.risk_class, RiskClass::Destructive);
+    }
+
+    #[test]
+    fn echo_is_edit_and_git_status_is_edit_not_read() {
+        // `echo` writes (redirect targets), classified EditWorkspace; a bare
+        // `git <anything>` is EditWorkspace via the git arm — both were dead
+        // entries in the read list before.
+        assert_eq!(
+            verdict("echo hi").risk_class,
+            RiskClass::EditWorkspace
+        );
+        assert_eq!(
+            verdict("git status").risk_class,
+            RiskClass::EditWorkspace
+        );
     }
 
     #[test]
