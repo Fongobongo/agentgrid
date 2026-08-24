@@ -25,6 +25,12 @@
   exceeding `max_tasks`. The spend read, budget check, trail row and insert
   now commit in one `BEGIN IMMEDIATE`; 8 concurrent creations against a
   budget of 3 land exactly 3.
+- **Artifact quota check failed open on a storage error.** The upload path
+  read the used-bytes figure with `.unwrap_or(0)`, so during a DB incident
+  every upload passed the quota check; it also re-read
+  `AGENTGRID_ARTIFACT_QUOTA_MB` from the env per upload. The quota is now
+  captured once at startup (`Limits.artifact_quota_bytes`) and a failed
+  usage read maps to 503 instead of "0 bytes used".
 
 ### Added
 

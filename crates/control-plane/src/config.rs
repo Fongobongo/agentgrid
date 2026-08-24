@@ -12,6 +12,10 @@ pub(crate) struct Limits {
     /// giant request or O(events) inserts in a single transaction.
     pub(crate) event_batch_count: usize,
     pub(crate) event_batch_bytes: usize,
+    /// Hardening P1 item 15: artifact storage quota in bytes (0 = unlimited).
+    /// Read once from `AGENTGRID_ARTIFACT_QUOTA_MB` at startup; atomic so
+    /// tests can override it on a shared `AppState`.
+    pub(crate) artifact_quota_bytes: std::sync::atomic::AtomicU64,
 }
 
 /// One-time bootstrap setup token (hardening P0). Printed to stdout once on

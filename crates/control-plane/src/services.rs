@@ -291,16 +291,23 @@ impl ArtifactService {
         if bytes.len() > state.limits.artifact {
             return Err(ArtifactError::TooLarge);
         }
-        // Hardening P1 item 15: artifact storage quota (0 = unlimited).
-        if let Some(quota_mb) = std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
-            if quota_mb > 0 {
-                let used = state.store.artifact_storage_bytes().await.unwrap_or(0);
-                if used + bytes.len() as u64 > quota_mb * 1024 * 1024 {
-                    return Err(ArtifactError::InsufficientStorage);
-                }
+        // Hardening P1 item 15: artifact storage quota (0 = unlimited). The
+        // quota is captured at startup (`Limits.artifact_quota_bytes`); a
+        // storage-layer failure here must NOT read as "0 bytes used" — that
+        // failed the quota check open during DB incidents, so the error
+        // propagates as Internal (503) instead.
+        let quota = state
+            .limits
+            .artifact_quota_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if quota > 0 {
+            let used = state
+                .store
+                .artifact_storage_bytes()
+                .await
+                .map_err(|_| ArtifactError::Internal)?;
+            if used + bytes.len() as u64 > quota {
+                return Err(ArtifactError::InsufficientStorage);
             }
         }
         state

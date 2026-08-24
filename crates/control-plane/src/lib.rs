@@ -193,6 +193,14 @@ impl AppState {
             artifact: env_usize("AGENTGRID_MAX_ARTIFACT_MB", 50) * 1024 * 1024,
             event_batch_count: env_usize("AGENTGRID_MAX_EVENT_BATCH", 500),
             event_batch_bytes: env_usize("AGENTGRID_MAX_EVENT_BATCH_KB", 4096) * 1024,
+            // Hardening P1 item 15 (0 = unlimited).
+            artifact_quota_bytes: std::sync::atomic::AtomicU64::new(
+                std::env::var("AGENTGRID_ARTIFACT_QUOTA_MB")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0)
+                    .saturating_mul(1024 * 1024),
+            ),
         };
         let assignment_notify = Arc::new(Notify::new());
         let lifecycle = services::TaskLifecycleService::new(
@@ -263,6 +271,15 @@ impl AppState {
     /// (the source of cross-test 429 flakes — see `EventRate::with_limits`).
     pub async fn set_event_rate_limits(&self, max: u32, window_secs: i64) {
         *self.event_rate.lock().await = EventRate::with_limits(max, window_secs);
+    }
+
+    /// Override the artifact storage quota (bytes) on this state. Tests use
+    /// this instead of re-reading `AGENTGRID_ARTIFACT_QUOTA_MB` per upload —
+    /// the quota is captured once in `Limits` at startup.
+    pub fn set_artifact_quota_bytes(&self, bytes: u64) {
+        self.limits
+            .artifact_quota_bytes
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Issue a 12h JWT for `username` (Stage 4.1).
