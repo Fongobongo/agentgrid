@@ -36,6 +36,14 @@
   `last_run_at`, created the run, then stamped it — three separate
   statements. The fire slot is now claimed first with a CAS on
   `last_run_at`; only the tick that moves the row creates the run.
+- **The batch scheduler ran N+1 queries inside the single-writer
+  transaction.** `try_assign_batch` resolved role, attempt-count, eval-case
+  and repository lookups per candidate while holding the process-wide write
+  gate — a full 100-slot batch issued ~500 statements and queued every other
+  write behind it. The invariant lookups are now four bulk `IN (...)`
+  queries before the flip loop; the txn keeps only the CAS UPDATE + INSERT.
+  The duplicated per-candidate `attempt_count` (computed twice) collapsed
+  into the bulk count.
 
 ### Added
 

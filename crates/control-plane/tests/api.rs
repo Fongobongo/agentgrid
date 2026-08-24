@@ -3000,10 +3000,26 @@ async fn overlapping_schedule_ticks_fire_exactly_one_run() {
 
     // Two ticks at the SAME now (the maintenance-loop vs startup-reconcile
     // overlap): both pass the interval check; only one may create a run.
-    let a = state.store.tick_workflow_schedules(1_000_000_000).await.unwrap();
-    let b = state.store.tick_workflow_schedules(1_000_000_000).await.unwrap();
+    let a = state
+        .store
+        .tick_workflow_schedules(1_000_000_000)
+        .await
+        .unwrap();
+    let b = state
+        .store
+        .tick_workflow_schedules(1_000_000_000)
+        .await
+        .unwrap();
     assert_eq!(a.len() + b.len(), 1, "exactly one tick wins the slot");
-    assert_eq!(state.store.list_workflow_runs(None, None).await.unwrap().len(), 1);
+    assert_eq!(
+        state
+            .store
+            .list_workflow_runs(None, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

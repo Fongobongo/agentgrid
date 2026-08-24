@@ -224,6 +224,123 @@ impl Store {
             created_at: String,
         }
         let mut batch: Vec<Pending> = Vec::new();
+        // Audit follow-up (N+1 under the single-writer gate): every per-
+        // candidate lookup below used to run its own query INSIDE the
+        // BEGIN IMMEDIATE transaction (~4-5 statements x candidates while
+        // holding the only writer permit). They are invariant during the
+        // flip loop, so resolve them in bulk BEFORE it and keep only the
+        // cheap CAS UPDATE + INSERT per candidate inside the txn.
+        let cap_ids: Vec<String> = cands
+            .iter()
+            .take(cap)
+            .map(|c| c.try_get::<String, _>("id"))
+            .collect::<std::result::Result<_, _>>()?;
+        let placeholders = |n: usize| {
+            let mut s = String::new();
+            for i in 0..n {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push('?');
+            }
+            s
+        };
+        let mut in_sql = String::new();
+        in_sql.push_str(
+            "SELECT rr.task_id AS tid, ws.role AS role FROM role_runs rr \
+             JOIN workflow_steps ws ON ws.id = rr.step_run_id \
+             WHERE rr.task_id IN (",
+        );
+        in_sql.push_str(&placeholders(cap_ids.len()));
+        in_sql.push(')');
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(in_sql.as_str()));
+        for id in &cap_ids {
+            q = q.bind(id);
+        }
+        let mut roles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for r in q.fetch_all(&mut *tx).await? {
+            roles.insert(r.try_get("tid")?, r.try_get("role")?);
+        }
+
+        let mut cnt_sql = String::new();
+        cnt_sql.push_str("SELECT task_id AS tid, COUNT(*) AS c FROM attempts WHERE task_id IN (");
+        cnt_sql.push_str(&placeholders(cap_ids.len()));
+        cnt_sql.push_str(") GROUP BY task_id");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(cnt_sql.as_str()));
+        for id in &cap_ids {
+            q = q.bind(id);
+        }
+        let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for r in q.fetch_all(&mut *tx).await? {
+            counts.insert(r.try_get("tid")?, r.try_get("c")?);
+        }
+
+        // Eval cases matter only for retries (next_number > 1); one query for
+        // exactly those tasks.
+        let retry_ids: Vec<&String> = cap_ids
+            .iter()
+            .filter(|id| counts.get(*id).copied().unwrap_or(0) + 1 > 1)
+            .collect();
+        let mut eval_cases_by_task: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if !retry_ids.is_empty() {
+            let mut ev_sql = String::new();
+            ev_sql.push_str(
+                "SELECT at.task_id AS tid, a.name AS name FROM artifacts a \
+                 JOIN attempts at ON at.id = a.attempt_id \
+                 WHERE at.task_id IN (",
+            );
+            ev_sql.push_str(&placeholders(retry_ids.len()));
+            ev_sql.push_str(") AND a.name LIKE 'eval-case-%' ORDER BY a.name");
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(ev_sql.as_str()));
+            for id in &retry_ids {
+                q = q.bind(id);
+            }
+            for r in q.fetch_all(&mut *tx).await? {
+                eval_cases_by_task
+                    .entry(r.try_get::<String, _>("tid")?)
+                    .or_default()
+                    .push(r.try_get("name")?);
+            }
+        }
+
+        // Repository rows (absent for plain-dir tasks) in one query.
+        let repo_names: Vec<String> = cands
+            .iter()
+            .take(cap)
+            .map(|c| c.try_get::<String, _>("repository"))
+            .collect::<std::result::Result<_, _>>()?;
+        struct RepoRow {
+            git_url: String,
+            default_branch: String,
+            validation_command: Option<String>,
+        }
+        let mut repos: std::collections::HashMap<String, RepoRow> =
+            std::collections::HashMap::new();
+        if !repo_names.is_empty() {
+            let mut rp_sql = String::new();
+            rp_sql.push_str(
+                "SELECT name, git_url, default_branch, validation_command FROM repositories \
+                 WHERE name IN (",
+            );
+            rp_sql.push_str(&placeholders(repo_names.len()));
+            rp_sql.push(')');
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(rp_sql.as_str()));
+            for n in &repo_names {
+                q = q.bind(n);
+            }
+            for r in q.fetch_all(&mut *tx).await? {
+                repos.insert(
+                    r.try_get("name")?,
+                    RepoRow {
+                        git_url: r.try_get("git_url")?,
+                        default_branch: r.try_get("default_branch")?,
+                        validation_command: r.try_get("validation_command")?,
+                    },
+                );
+            }
+        }
+
         for c in &cands {
             if batch.len() >= cap {
                 break;
@@ -246,15 +363,7 @@ impl Store {
             // `verifier`, mark the assignment read-only so the node bind-
             // mounts the worktree with `:ro`. A verifier validates; it must
             // not silently edit the code it is checking.
-            let role = sqlx::query_scalar::<_, String>(
-                "SELECT ws.role FROM role_runs rr \
-                 JOIN workflow_steps ws ON ws.id = rr.step_run_id \
-                 WHERE rr.task_id = ? LIMIT 1",
-            )
-            .bind(&task_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let read_only = role.as_deref() == Some("verifier");
+            let read_only = roles.get(&task_id).map(String::as_str) == Some("verifier");
 
             // Plan 2.9 (#20): consensus run tag — when the task was created
             // as part of an `--consensus N --models ...` batch the columns
@@ -272,33 +381,18 @@ impl Store {
             // can probe the new fix against the accumulated suite. Naming
             // `eval-case-<attempt>-<n>.yaml` is deterministic, set by the CP
             // when it records a passed attempt.
-            let next_number = self.attempt_count(&mut tx, &task_id).await? + 1;
-            let eval_cases: Vec<String> = if next_number > 1 {
-                sqlx::query_scalar(
-                    "SELECT a.name FROM artifacts a \
-                     JOIN attempts at ON at.id = a.attempt_id \
-                     WHERE at.task_id = ? AND a.name LIKE 'eval-case-%' \
-                     ORDER BY a.name",
-                )
-                .bind(&task_id)
-                .fetch_all(&mut *tx)
-                .await?
-            } else {
-                Vec::new()
-            };
+            let next_number = counts.get(&task_id).copied().unwrap_or(0) + 1;
+            let eval_cases = eval_cases_by_task
+                .get(&task_id)
+                .cloned()
+                .unwrap_or_default();
 
             // Resolve repository git info (absent for plain-dir tasks).
-            let repo = sqlx::query(
-                "SELECT git_url, default_branch, validation_command FROM repositories WHERE name = ?",
-            )
-            .bind(&repository)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let (git_url, default_branch, validation_command) = match repo {
+            let (git_url, default_branch, validation_command) = match repos.get(&repository) {
                 Some(r) => (
-                    r.try_get::<String, _>("git_url")?,
-                    r.try_get::<String, _>("default_branch")?,
-                    r.try_get::<Option<String>, _>("validation_command")?,
+                    r.git_url.clone(),
+                    r.default_branch.clone(),
+                    r.validation_command.clone(),
                 ),
                 None => (String::new(), String::new(), None),
             };
@@ -319,7 +413,7 @@ impl Store {
             // node echoes it back on every mutation; the CP rejects a stale
             // token (reassigned/lost) with 409.
             let fencing_token = Uuid::new_v4().to_string();
-            let number = self.attempt_count(&mut tx, &task_id).await? + 1;
+            let number = next_number;
             let lease = iso_plus_secs(ASSIGNMENT_LEASE_SECS);
             let ack_deadline = iso_plus_secs(ACK_DEADLINE_SECS);
             let now = now_iso();
