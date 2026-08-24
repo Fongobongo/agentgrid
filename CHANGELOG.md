@@ -44,6 +44,11 @@
   queries before the flip loop; the txn keeps only the CAS UPDATE + INSERT.
   The duplicated per-candidate `attempt_count` (computed twice) collapsed
   into the bulk count.
+- **Two maintenance pipelines had drifted.** `tick_maintenance` (startup
+  reconcile) and the spawned background loop reimplemented the same
+  sequence, and only the loop ran approval expiry — a restart silently
+  skipped it. The loop now calls `tick_maintenance`; backups and the WAL
+  checkpoint cadence stay on the loop side.
 
 ### Added
 

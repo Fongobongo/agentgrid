@@ -551,14 +551,6 @@ impl Store {
         Ok(out)
     }
 
-    async fn attempt_count(&self, tx: &mut sqlx::SqliteConnection, task_id: &str) -> Result<i64> {
-        let row = sqlx::query("SELECT COUNT(*) AS c FROM attempts WHERE task_id = ?")
-            .bind(task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        Ok(row.try_get::<i64, _>("c")?)
-    }
-
     /// Stage 2.4: per-node eligibility for a task plus a `no_eligible_nodes`
     /// summary (why it stays queued). Returns None if the task does not exist.
     pub async fn task_eligibility(&self, task_id: &str) -> Result<Option<TaskEligibility>> {

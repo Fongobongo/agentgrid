@@ -9,8 +9,10 @@ use std::time::Duration;
 
 impl Store {
     /// Background maintenance: revert unconfirmed assignments (lease expired)
-    /// and mark silent nodes offline. Runs one tick (the background loop calls
-    /// this repeatedly; also exposed for tests/ops).
+    /// and mark silent nodes offline. Runs one tick. The background loop
+    /// (`start_maintenance`) calls this every 15s; startup reconcile calls it
+    /// once, so both paths share ONE pipeline (audit follow-up: they had
+    /// drifted — approval expiry only ran on the loop side).
     pub async fn tick_maintenance(&self) -> Result<()> {
         let now = now_iso();
         let reverted = revert_expired_leases(&self.pool, &now).await?;
@@ -19,14 +21,17 @@ impl Store {
                 .fetch_add(reverted as u64, std::sync::atomic::Ordering::Relaxed);
         }
         mark_offline_nodes(&self.pool, &now).await?;
+        // Approval expiry + scheduled-workflow triggers fire on the shared
+        // cadence; without them scheduled workflows would never fire and
+        // approvals would never expire in production.
+        self.tick_approval_expiry().await?;
+        let _ = self
+            .tick_workflow_schedules(chrono::Utc::now().timestamp())
+            .await;
         // Housekeeping: drop expired artifacts and truncate the WAL so the
         // database file does not grow without bound.
         let _ = self.cleanup_artifacts(168).await;
         let _ = self.wal_checkpoint().await;
-        // Stage 13: fire any due scheduled-workflow triggers.
-        let _ = self
-            .tick_workflow_schedules(chrono::Utc::now().timestamp())
-            .await;
         Ok(())
     }
 
@@ -57,41 +62,19 @@ impl Store {
         tokio::spawn(async move {
             // Tick every 15s: node-staleness is 30s, so a 15s cadence still
             // marks a dead node offline within ~45s of its last heartbeat.
-            // Run the WAL checkpoint only every 4th tick (~60s): a checkpoint
-            // takes the writer briefly (TRUNCATE) and serializes against user
-            // BEGIN IMMEDIATE writes — running it every tick caused
-            // `database is locked` (SQLITE_BUSY) on retry_task under load.
+            // The tick body is `tick_maintenance` — one shared pipeline with
+            // the startup reconcile path. The WAL checkpoint cadence lives
+            // here (every 4th tick ~60s): running it every tick takes the
+            // writer briefly and serializes against user BEGIN IMMEDIATE
+            // writes (`database is locked` under load), and backups run on
+            // their own interval below.
             let mut tick = 0u32;
             let mut last_backup = std::time::Instant::now();
             loop {
                 tokio::time::sleep(Duration::from_secs(15)).await;
-                let now = now_iso();
-                match revert_expired_leases(&store.pool, &now).await {
-                    Ok(n) if n > 0 => {
-                        store
-                            .lease_reverts
-                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    Err(e) => tracing::warn!("lease maintenance failed: {e}"),
-                    _ => {}
+                if let Err(e) = store.tick_maintenance().await {
+                    tracing::warn!("maintenance tick failed: {e}");
                 }
-                if let Err(e) = mark_offline_nodes(&store.pool, &now).await {
-                    tracing::warn!("node maintenance failed: {e}");
-                }
-                // Approval expiry + scheduled-workflow triggers must fire on
-                // the background cadence too; tick_maintenance only runs at
-                // startup, so without these scheduled workflows would never
-                // fire and approvals would never expire in production.
-                if let Err(e) = store.tick_approval_expiry().await {
-                    tracing::warn!("approval expiry failed: {e}");
-                }
-                if let Err(e) = store
-                    .tick_workflow_schedules(chrono::Utc::now().timestamp())
-                    .await
-                {
-                    tracing::warn!("workflow schedule tick failed: {e}");
-                }
-                let _ = store.cleanup_artifacts(168).await;
                 tick = tick.wrapping_add(1);
                 if tick % 4 == 0 {
                     let _ = store.wal_checkpoint().await;
