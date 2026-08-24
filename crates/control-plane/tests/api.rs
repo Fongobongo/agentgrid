@@ -9062,6 +9062,91 @@ async fn resume_digest_bm25_after_failure() {
     );
 }
 
+/// Regression: the digest fragment cap cut at byte offset 1024, which panics
+/// on a char boundary when a BM25 fragment carries non-ASCII text (Cyrillic /
+/// CJK log lines) — the retry path died with a 500 for such tasks. The cap
+/// must land on a char boundary and keep the retry working.
+#[tokio::test]
+async fn resume_digest_multibyte_fragment_does_not_panic() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let task_view = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            // Cyrillic prompt so the BM25 query itself is multibyte.
+            prompt: "починить гонку в сети сервера".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let (node_id, _cred) = enroll(
+        &build_router(state.clone()),
+        "n-ctx-ru",
+        vec!["mock".into()],
+        vec!["demo".into()],
+    )
+    .await;
+    let a1 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a1.attempt_id).await.unwrap();
+
+    // One long Cyrillic log line (> 1 KiB of payload text) — the old byte
+    // slice at 1024 landed mid-codepoint and panicked.
+    let line = "Ошибка сети в модуле обработки запросов ".repeat(40);
+    let events: Vec<agentgrid_common::IncomingEvent> = vec![agentgrid_common::IncomingEvent {
+        sequence: 1,
+        r#type: agentgrid_common::EventType::Error,
+        payload: serde_json::json!({ "text": line }),
+    }];
+    state
+        .store
+        .ingest_events(
+            &a1.attempt_id,
+            &agentgrid_common::IngestEventsRequest { events },
+        )
+        .await
+        .unwrap();
+    let _ = state
+        .store
+        .complete_attempt(
+            &a1.attempt_id,
+            &agentgrid_common::CompleteAttemptRequest {
+                exit_code: 1,
+                error_code: Some("validation_failed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // The retry must succeed end-to-end (no panic → no 500) and the digest
+    // artifact must exist with the fragment capped on a char boundary.
+    assert!(state.store.retry_task(&task_view.id).await.unwrap());
+    let name = format!("resume-context-{}.md", task_view.id);
+    let artifact = state
+        .store
+        .read_artifact_for_attempt(&a1.attempt_id, &name)
+        .await
+        .unwrap()
+        .expect("resume digest artifact must land after retry_task");
+    for frag in artifact.split("---\n").skip(1) {
+        assert!(
+            frag.get(..1024.min(frag.len())).is_some(),
+            "fragment cut mid-char-boundary would panic here"
+        );
+    }
+}
+
 /// Feature "opencode profiles": PUT creates, GET returns, DELETE removes,
 /// and a node with an assigned profile picks it up via the pull endpoint.
 /// The audit row lands when the node reports the apply (via

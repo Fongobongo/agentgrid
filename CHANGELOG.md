@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+> Пост-релизный аудит v0.3.6: баги логики/долговечности, найденные
+> повторным проходом по control-plane, node-daemon, web UI и deploy.
+
+### Fixed
+
+- **Retry path panicked on non-ASCII event payloads.** The resume-digest
+  fragment cap sliced the BM25 payload at byte offset 1024; a Cyrillic/CJK
+  log line whose codepoint straddles that offset panicked inside
+  `bake_resume_digest`, so `POST /v1/tasks/{id}/retry` returned 500 and the
+  task could never be retried. The cap now lands on a char boundary.
+
 ## [v0.3.6] — 2026-08-23
 
 > Аудит качества после стабилизации v0.3.5: 16 подтверждённых ошибок логики

@@ -924,12 +924,16 @@ impl Store {
         let mut digest = String::from("# Resume digest (BM25 top-3)\n\n");
         for (frag, _score) in &rows {
             // Cap each fragment at 1 KiB so pathological events cannot blow
-            // the retry prompt past the validation budget.
-            let frag = if frag.len() > 1024 {
-                &frag[..1024]
-            } else {
-                frag
-            };
+            // the retry prompt past the validation budget. Cut on a char
+            // boundary — a byte-index slice would panic mid-codepoint (any
+            // non-ASCII log line) and break the retry path.
+            let cap = frag
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= 1024)
+                .last()
+                .unwrap_or(0);
+            let frag = &frag[..cap];
             digest.push_str("---\n");
             digest.push_str(frag);
             digest.push('\n');
