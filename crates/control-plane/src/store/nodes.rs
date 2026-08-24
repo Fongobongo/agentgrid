@@ -168,9 +168,14 @@ impl Store {
         .await?
         .rows_affected();
         if affected == 1 && status == NodeStatus::Offline {
-            let mut t = self.write_txn().await?;
-            lose_node_attempts(&mut t, node_id).await?;
-            t.commit().await?;
+            // Race-safe (same discipline as `mark_offline_nodes`): the flip
+            // above and the loss sweep are not atomic together, so a poll
+            // (`register_or_touch_node`) can re-online the node in the
+            // window and the scheduler can hand it FRESH assignments — which
+            // an unguarded sweep would fail as `node_lost`. The sweep
+            // re-checks inside its own write transaction and only fires on a
+            // node still holding `offline`.
+            self.lose_node_attempts_if_offline(node_id).await?;
         }
         // Opencode-config drift detector: when the node reports an applied
         // hash that doesn't match its assigned profile's hash, log+wite an
@@ -274,6 +279,25 @@ impl Store {
         .await?
         .rows_affected();
         Ok(affected == 1)
+    }
+
+    /// Lose a node's in-flight attempts only when the node still holds
+    /// `offline`, checked inside the same `BEGIN IMMEDIATE` transaction as the
+    /// sweep. The heartbeat's status flip and this sweep are separate
+    /// transactions; without the re-check, a poll re-onlining the node in the
+    /// window (and the scheduler handing it FRESH assignments) would see those
+    /// new attempts failed as `node_lost` by the stale sweep.
+    pub async fn lose_node_attempts_if_offline(&self, node_id: &str) -> Result<()> {
+        let mut t = self.write_txn().await?;
+        let cur: Option<String> = sqlx::query_scalar("SELECT status FROM nodes WHERE id = ?")
+            .bind(node_id)
+            .fetch_optional(&mut *t)
+            .await?;
+        if cur.as_deref() == Some("offline") {
+            lose_node_attempts(&mut t, node_id).await?;
+        }
+        t.commit().await?;
+        Ok(())
     }
 
     /// Mark a node offline (unless already revoked) and lose its in-flight

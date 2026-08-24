@@ -2162,14 +2162,120 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
     assert_eq!(st, "online", "fresh heartbeat beats offline sweep");
 }
 
+/// Audit follow-up (heartbeat offline TOCTOU): the heartbeat's status flip
+/// and its `lose_node_attempts` sweep run in separate transactions. If a poll
+/// re-onlines the node in that window and the scheduler hands it FRESH
+/// assignments, an unguarded sweep fails those new attempts as `node_lost`.
+/// The sweep (`lose_node_attempts_if_offline`) now re-checks inside its own
+/// write transaction: a node whose row is no longer `offline` is skipped.
+#[tokio::test]
+async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-race-hb", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+    assert_eq!(
+        ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await,
+        StatusCode::OK
+    );
+
+    // The race shape, step by step:
+    // 1. Heartbeat: node reports offline -> row flips + in-flight attempt
+    //    is lost (the normal path, must keep working).
+    let hb = agentgrid_common::HeartbeatRequest {
+        status: Some(agentgrid_common::NodeStatus::Offline),
+        name: "node-race-hb".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 1,
+        agent_version: "mock".into(),
+        active_attempts: 0,
+        load_avg: 0.0,
+        free_disk_mb: 1000,
+        capabilities: vec![],
+        protocol_version: None,
+        discovered_skills: vec![],
+        unsafe_active: false,
+        permission_interception: "wrapper".into(),
+        outbox_bytes: 0,
+        artifact_spool_bytes: 0,
+        outbox_rows: 0,
+        outbox_oldest_pending_age_ms: 0,
+        outbox_corruption_count: 0,
+        outbox_completion_rows: 0,
+        repo_lock_wait_ms: 0,
+        sandbox_backend: "none".into(),
+        enforced_limits: false,
+        repo_cache_bytes: 0,
+        workspace_bytes: 0,
+        network_mode: "none".into(),
+        account_usage: vec![],
+        applied_opencode_hash: None,
+        active_rss_mib: 0,
+        max_rss_mib: 0,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            serde_json::to_string(&hb).unwrap(),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let tv = show_task_view(&app, &assign.task_id).await;
+    assert_eq!(tv.status, TaskStatus::Failed);
+    assert_eq!(tv.error_code.as_deref(), Some("node_lost"));
+
+    // 2. Race window: a poll re-onlines the node and the scheduler hands it
+    //    a FRESH assignment before a stale sweep would run.
+    sqlx::query("UPDATE nodes SET status = 'online' WHERE id = ?")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    let assign2 = create_and_assign(&app, &node_id, &cred, "write:hello2.txt:hi").await;
+    assert_eq!(
+        ack_attempt(&app, &assign2.attempt_id, &cred, &assign2.fencing_token).await,
+        StatusCode::OK
+    );
+
+    // 3. A stale offline sweep fires now. With the guard it sees
+    //    status='online' inside its txn and skips; the fresh attempt survives.
+    state
+        .store
+        .lose_node_attempts_if_offline(&node_id)
+        .await
+        .unwrap();
+    let tv = show_task_view(&app, &assign2.task_id).await;
+    assert_eq!(
+        tv.status,
+        TaskStatus::Running,
+        "fresh attempt survives the stale sweep"
+    );
+
+    // Control: when the node IS still offline, the same sweep loses it.
+    sqlx::query("UPDATE nodes SET status = 'offline' WHERE id = ?")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    state
+        .store
+        .lose_node_attempts_if_offline(&node_id)
+        .await
+        .unwrap();
+    let tv = show_task_view(&app, &assign2.task_id).await;
+    assert_eq!(tv.status, TaskStatus::Failed);
+    assert_eq!(tv.error_code.as_deref(), Some("node_lost"));
+}
+
 /// Stage 1.2: a node going offline with an in-flight attempt must lose it
 /// (attempt=lost, task=failed/node_lost, capacity freed) and the task must be
 /// retryable once the node is back online.
 #[tokio::test]
 async fn node_offline_loses_attempt_then_retry_succeeds() {
-    // Stage 1.2: a node going offline with an in-flight attempt must lose it
-    // (attempt=lost, task=failed/node_lost, capacity freed) and the task must
-    // be retryable once the node is back online.
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state.clone());
     let (node_id, cred) = enroll(&app, "node-o", vec!["mock".into()], vec!["*".into()]).await;

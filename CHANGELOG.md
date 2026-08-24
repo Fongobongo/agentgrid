@@ -12,6 +12,13 @@
   log line whose codepoint straddles that offset panicked inside
   `bake_resume_digest`, so `POST /v1/tasks/{id}/retry` returned 500 and the
   task could never be retried. The cap now lands on a char boundary.
+- **A self-reported-offline heartbeat could kill FRESH attempts.** The
+  heartbeat's status flip and its `lose_node_attempts` sweep ran in two
+  separate transactions; a poll re-onlining the node inside the window (and
+  the scheduler handing it new assignments) saw those attempts failed as
+  `node_lost` by the stale sweep. The sweep now re-checks the status inside
+  its own write transaction and only fires on a still-`offline` node — same
+  discipline `mark_offline_nodes` already used.
 
 ### Added
 
