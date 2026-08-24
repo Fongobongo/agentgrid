@@ -327,3 +327,60 @@ impl Store {
         Ok(row.try_get::<Option<f64>, _>("age")?)
     }
 }
+
+/// Insert a queued task inside the caller's transaction. Same shape as
+/// [`Store::create_task`]; shared by the atomic agent-budget path so the
+/// budget check and the attributed insert commit together.
+pub(crate) async fn insert_task_tx(
+    req: &CreateTaskRequest,
+    tx: &mut sqlx::SqliteConnection,
+) -> Result<TaskView> {
+    let id = Uuid::new_v4().to_string();
+    let now = now_iso();
+    let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
+    sqlx::query(
+        "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&req.repository)
+    .bind(&req.prompt)
+    .bind(&req.adapter)
+    .bind(&req.requested_node_id)
+    .bind(&req.base_commit)
+    .bind(&req.parent_acp_session_id)
+    .bind(&req.network_mode)
+    .bind(&now)
+    .bind(timeout_secs)
+    .bind(&req.validation_command)
+    .bind(&req.security_profile)
+    .bind(&req.group_id)
+    .bind(&req.agent_id)
+    .bind(&req.consensus_group_id)
+    .bind(&req.consensus_member)
+    .bind(req.opencode_override.as_ref().map(|o| serde_json::to_string(o).unwrap_or_default()))
+    .execute(tx)
+    .await?;
+    Ok(TaskView {
+        id,
+        repository: req.repository.clone(),
+        prompt: req.prompt.clone(),
+        adapter: req.adapter.clone(),
+        status: TaskStatus::Queued,
+        created_at: now,
+        finished_at: None,
+        assigned_attempt_id: None,
+        validation_command: req.validation_command.clone(),
+        error_code: None,
+        requested_node_id: req.requested_node_id.clone(),
+        base_commit: req.base_commit.clone(),
+        parent_acp_session_id: req.parent_acp_session_id.clone(),
+        network_mode: req.network_mode.clone(),
+        security_profile: req.security_profile.clone(),
+        group_id: req.group_id.clone(),
+        agent_id: req.agent_id.clone(),
+        consensus_group_id: None,
+        consensus_member: None,
+        opencode_override: req.opencode_override.clone(),
+    })
+}

@@ -3515,6 +3515,52 @@ mod agent_tests {
     }
 
     #[tokio::test]
+    async fn agent_budget_hard_stop_is_atomic_under_concurrency() {
+        // Audit follow-up: the budget check and the attributed insert must be
+        // one transaction. 8 concurrent creations against max_tasks = 3 must
+        // land exactly 3 tasks — the old check-then-act let racing callers
+        // both observe spend = max-1 and both insert.
+        use std::sync::Arc;
+        let s = Arc::new(temp_store().await);
+        let agent = s
+            .create_agent(&AgentCreate {
+                name: "racer".into(),
+                role: "worker".into(),
+                prompt: "p".into(),
+                skills: vec![],
+                budget_usd: 0.0,
+                max_tasks: Some(3),
+                heartbeat_interval_secs: None,
+            })
+            .await
+            .unwrap();
+        let base = CreateTaskRequest {
+            prompt: "x".into(),
+            repository: "*".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        };
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s2 = Arc::clone(&s);
+            let agent_id = agent.id.clone();
+            let req = base.clone();
+            handles.push(tokio::spawn(async move {
+                s2.create_agent_task(&agent_id, &req).await.is_ok()
+            }));
+        }
+        let mut created = 0;
+        for h in handles {
+            if h.await.unwrap() {
+                created += 1;
+            }
+        }
+        assert_eq!(created, 3, "exactly max_tasks creations may win");
+        let fresh = s.get_agent(&agent.id).await.unwrap().unwrap();
+        assert_eq!(fresh.tasks_spent, 3);
+    }
+
+    #[tokio::test]
     async fn agent_heartbeat_due_and_fire_creates_task() {
         // Plan 2.1 (#18): an agent with a heartbeat interval is due when
         // last_heartbeat_at is NULL; firing records the heartbeat and the

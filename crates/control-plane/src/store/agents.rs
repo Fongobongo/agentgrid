@@ -131,36 +131,62 @@ impl Store {
     /// When the agent's `max_tasks` is exhausted the task is rejected
     /// (Err) and a `budget_exceeded` trail row is written. A missing agent id
     /// also rejects (attribution must reference a real agent).
+    ///
+    /// Atomic (audit follow-up): the spend read, the budget check, the trail
+    /// row and the attributed insert all run in one `BEGIN IMMEDIATE`
+    /// transaction. The previous check-then-act let two concurrent creations
+    /// both observe `tasks_spent = max - 1` and both insert, exceeding
+    /// `max_tasks`.
     pub async fn create_agent_task(
         &self,
         agent_id: &str,
         req: &CreateTaskRequest,
     ) -> Result<agentgrid_common::TaskView> {
-        let Some(agent) = self.get_agent(agent_id).await? else {
+        if self.get_agent(agent_id).await?.is_none() {
             anyhow::bail!("unknown agent {agent_id}");
-        };
-        if let Some(max) = agent.max_tasks {
-            if agent.tasks_spent >= max {
-                self.log_agent_action(agent_id, "budget_exceeded", "task rejected")
-                    .await?;
-                anyhow::bail!(
-                    "agent {agent_id} budget exhausted ({} >= {max})",
-                    agent.tasks_spent
-                );
-            }
         }
-        self.log_agent_action(
-            agent_id,
-            "task_created",
-            &format!(
-                "task prompt: {}",
-                req.prompt.chars().take(60).collect::<String>()
-            ),
-        )
-        .await?;
         let mut r = req.clone();
         r.agent_id = Some(agent_id.to_string());
-        self.create_task(&r).await
+        let mut tx = self.write_txn().await?;
+        // Spend counted inside the same transaction as the insert.
+        let tasks_spent: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE agent_id = ?")
+            .bind(agent_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let max_tasks: Option<i64> =
+            sqlx::query_scalar("SELECT max_tasks FROM agents WHERE id = ?")
+                .bind(agent_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if let Some(max) = max_tasks {
+            if tasks_spent >= max {
+                sqlx::query(
+                    "INSERT INTO agent_actions (id, agent_id, action, detail, created_at) VALUES (?, ?, 'budget_exceeded', 'task rejected', ?)",
+                )
+                .bind(Uuid::new_v4().to_string())
+                .bind(agent_id)
+                .bind(now_iso())
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                anyhow::bail!("agent {agent_id} budget exhausted ({tasks_spent} >= {max})");
+            }
+        }
+        sqlx::query(
+            "INSERT INTO agent_actions (id, agent_id, action, detail, created_at) VALUES (?, ?, 'task_created', ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(agent_id)
+        .bind(format!(
+            "task prompt: {}",
+            req.prompt.chars().take(60).collect::<String>()
+        ))
+        .bind(now_iso())
+        .execute(&mut *tx)
+        .await?;
+        let view = super::tasks::insert_task_tx(&r, &mut *tx).await?;
+        tx.commit().await?;
+        Ok(view)
     }
 
     /// Agents whose heartbeat is due at `now_unix` (interval set and

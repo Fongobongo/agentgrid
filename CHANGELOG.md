@@ -19,6 +19,12 @@
   `node_lost` by the stale sweep. The sweep now re-checks the status inside
   its own write transaction and only fires on a still-`offline` node — same
   discipline `mark_offline_nodes` already used.
+- **Agent budget hard-stop was check-then-act.** `create_agent_task` read
+  the spend and inserted the task in separate statements, so two concurrent
+  creations could both observe `tasks_spent = max - 1` and both insert,
+  exceeding `max_tasks`. The spend read, budget check, trail row and insert
+  now commit in one `BEGIN IMMEDIATE`; 8 concurrent creations against a
+  budget of 3 land exactly 3.
 
 ### Added
 
