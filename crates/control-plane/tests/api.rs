@@ -2940,6 +2940,72 @@ async fn workflow_schedule_fires_run_on_tick() {
     assert!(again3.is_empty(), "deleted schedule never fires");
 }
 
+/// Audit follow-up: the schedule tick runs from both the maintenance loop and
+/// startup reconcile, so two overlapping ticks can observe the same due
+/// slot. The CAS claim on `last_run_at` must let exactly one of them fire.
+#[tokio::test]
+async fn overlapping_schedule_ticks_fire_exactly_one_run() {
+    use agentgrid_common::{
+        CreateWorkflowRequest, WorkflowRole, WorkflowScheduleCreate, WorkflowStep,
+    };
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+    let steps = vec![WorkflowStep {
+        id: "a".into(),
+        prompt: "p".into(),
+        depends_on: vec![],
+        role: WorkflowRole::Worker,
+        adapter: None,
+        requested_node_id: None,
+        base_commit: None,
+        retryable: None,
+        max_attempts: None,
+        expandable: None,
+    }];
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/workflows",
+            serde_json::to_string(&CreateWorkflowRequest {
+                name: "tick-race".into(),
+                steps,
+                context: None,
+                budget: None,
+            })
+            .unwrap(),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tpl: agentgrid_common::WorkflowTemplate =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let create = serde_json::to_string(&WorkflowScheduleCreate {
+        interval_seconds: 2,
+        autonomy: "l2".into(),
+        enabled: true,
+    })
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/v1/workflows/{}/schedules", tpl.id),
+            create,
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Two ticks at the SAME now (the maintenance-loop vs startup-reconcile
+    // overlap): both pass the interval check; only one may create a run.
+    let a = state.store.tick_workflow_schedules(1_000_000_000).await.unwrap();
+    let b = state.store.tick_workflow_schedules(1_000_000_000).await.unwrap();
+    assert_eq!(a.len() + b.len(), 1, "exactly one tick wins the slot");
+    assert_eq!(state.store.list_workflow_runs(None, None).await.unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn l4_schedule_ratify_gate_refuses_without_budget_accepts_with() {
     // Stage 13 L4 ratify: a fully-autonomous (l4) schedule is fail-closed

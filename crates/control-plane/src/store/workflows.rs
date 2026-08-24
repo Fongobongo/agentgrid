@@ -365,8 +365,15 @@ impl Store {
     /// Stage 13: for each enabled schedule whose interval has elapsed since
     /// `last_run_at`, create a new `WorkflowRun` and stamp `last_run_at`.
     /// Returns the created run ids (mostly for tests).
+    ///
+    /// Race-safe (audit follow-up): the tick is invoked from the maintenance
+    /// loop AND from startup reconcile, so two overlapping ticks could both
+    /// pass the interval check and double-fire a run. The slot is claimed
+    /// first with a CAS on `last_run_at`; the run is only created by the tick
+    /// that actually moved the row.
     pub async fn tick_workflow_schedules(&self, now_unix: i64) -> Result<Vec<String>> {
         let schedules = self.list_workflow_schedules(None, None, None).await?;
+        let now_iso = unix_to_iso(now_unix);
         let mut created = Vec::new();
         for s in schedules {
             if !s.enabled {
@@ -381,25 +388,34 @@ impl Store {
             if now_unix - last < s.interval_seconds {
                 continue;
             }
+            // Claim the fire slot atomically: only the tick that moves
+            // last_run_at FROM its observed value creates the run. A racing
+            // tick's CAS matches 0 rows and skips.
+            let claimed = sqlx::query(
+                "UPDATE workflow_schedules SET last_run_at = ? WHERE id = ? AND last_run_at = ?",
+            )
+            .bind(&now_iso)
+            .bind(&s.id)
+            .bind(&s.last_run_at)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if claimed != 1 {
+                continue;
+            }
             // Create a fresh run; context/repo/commit come from the template
             // defaults only if stored (Stage 13: per-schedule overrides are a
             // follow-up; the MVP runs the template as-is).
-            let run = match self
+            match self
                 .create_workflow_run(&s.template_id, None, None, None)
                 .await
             {
-                Ok(r) => r,
+                Ok(r) => created.push(r.id),
                 Err(e) => {
                     tracing::warn!(schedule = %s.id, "tick skipped bad template: {e}");
                     continue;
                 }
-            };
-            created.push(run.id);
-            sqlx::query("UPDATE workflow_schedules SET last_run_at = ? WHERE id = ?")
-                .bind(unix_to_iso(now_unix))
-                .bind(&s.id)
-                .execute(&self.pool)
-                .await?;
+            }
         }
         Ok(created)
     }

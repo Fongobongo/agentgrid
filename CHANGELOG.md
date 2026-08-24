@@ -31,6 +31,11 @@
   `AGENTGRID_ARTIFACT_QUOTA_MB` from the env per upload. The quota is now
   captured once at startup (`Limits.artifact_quota_bytes`) and a failed
   usage read maps to 503 instead of "0 bytes used".
+- **Overlapping schedule ticks could double-fire a workflow run.** The tick
+  ran from both the maintenance loop and startup reconcile, read
+  `last_run_at`, created the run, then stamped it — three separate
+  statements. The fire slot is now claimed first with a CAS on
+  `last_run_at`; only the tick that moves the row creates the run.
 
 ### Added
 
