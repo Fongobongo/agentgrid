@@ -194,7 +194,27 @@ async fn drive_acp_session(
             rate_limited: false,
         });
     }
-    let mut child = cmd.spawn()?;
+    // Audit follow-up: a spawn failure used to propagate via `?` and skip
+    // the caller's completion/outbox-drain/cleanup entirely — the attempt
+    // sat `running` until the CP reaper, the worktree leaked, and ND-4
+    // redelivery later re-ran the whole task. A spawn failure is an
+    // infrastructure failure result like the missing-binary arm above.
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(
+                attempt_id = %assignment.attempt_id,
+                adapter = %assignment.adapter,
+                "ACP agent spawn failed: {e}"
+            );
+            return Ok(AcpResult {
+                success: false,
+                error_code: Some("infrastructure_failed".into()),
+                session_id: None,
+                rate_limited: false,
+            });
+        }
+    };
     let stdout = child.stdout.take().expect("piped stdout");
     let stdin = child.stdin.take().expect("piped stdin");
     // Audit ND-10: drain the piped stderr through the same redacting

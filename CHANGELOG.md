@@ -65,6 +65,14 @@
   destructive check; `echo` and `git` were dead entries in the read list
   (shadowed by earlier arms). Every curl is now NetworkWrite, rm's long
   flags count as destructive, and the dead read-list arms are gone.
+- **An ACP spawn failure skipped completion, outbox drain and worktree
+  cleanup (node-daemon).** `drive_acp_session` propagated the
+  `cmd.spawn()` io error with `?`, so on EMFILE / a binary vanishing
+  between resolve and exec the attempt sat `running` until the CP reaper,
+  the worktree leaked to the 24 h prune, and ND-4 redelivery re-ran the
+  whole task. A spawn failure now returns the same `infrastructure_failed`
+  result as the missing-binary arm, flowing through the normal
+  finalize/report/cleanup path.
 
 ### Added
 

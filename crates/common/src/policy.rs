@@ -294,8 +294,7 @@ fn classify(tokens: &[String]) -> RiskClass {
         return RiskClass::Destructive;
     }
     // `chmod`/`chown` recursive on system paths.
-    if (head == "chmod" || head == "chown") && tokens.iter().any(|t| t == "-R" || t == "-r")
-    {
+    if (head == "chmod" || head == "chown") && tokens.iter().any(|t| t == "-R" || t == "-r") {
         return RiskClass::Destructive;
     }
 
@@ -487,7 +486,11 @@ mod tests {
     fn rm_long_flags_are_destructive() {
         // Audit follow-up: `rm --recursive --force` bypassed the short-flag
         // check and landed in ExecuteLocal.
-        for cmd in ["rm --recursive --force x", "rm --force x", "rm --recursive x"] {
+        for cmd in [
+            "rm --recursive --force x",
+            "rm --force x",
+            "rm --recursive x",
+        ] {
             let v = verdict(cmd);
             assert_eq!(v.risk_class, RiskClass::Destructive, "cmd: {cmd}");
             assert_eq!(v.decision, PolicyDecision::Deny);
@@ -503,14 +506,8 @@ mod tests {
         // `echo` writes (redirect targets), classified EditWorkspace; a bare
         // `git <anything>` is EditWorkspace via the git arm — both were dead
         // entries in the read list before.
-        assert_eq!(
-            verdict("echo hi").risk_class,
-            RiskClass::EditWorkspace
-        );
-        assert_eq!(
-            verdict("git status").risk_class,
-            RiskClass::EditWorkspace
-        );
+        assert_eq!(verdict("echo hi").risk_class, RiskClass::EditWorkspace);
+        assert_eq!(verdict("git status").risk_class, RiskClass::EditWorkspace);
     }
 
     #[test]
