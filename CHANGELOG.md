@@ -13,6 +13,13 @@
   `bake_resume_digest`, so `POST /v1/tasks/{id}/retry` returned 500 and the
   task could never be retried. The cap now lands on a char boundary.
 
+### Added
+
+- **Index `role_runs(task_id)`** (migration 0073). The scheduler role probe,
+  unacked assignments, workflow routing on attempt completion and the run
+  projection all filter `role_runs` by `task_id`; only the `step_run_id`
+  index existed, so each lookup scanned the full workflow history.
+
 ## [v0.3.6] — 2026-08-23
 
 > Аудит качества после стабилизации v0.3.5: 16 подтверждённых ошибок логики
