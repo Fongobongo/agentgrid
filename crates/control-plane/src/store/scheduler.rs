@@ -435,7 +435,7 @@ impl Store {
         )
         .bind(&attempt_id)
         .bind(&task_id)
-        .bind(number as i64)
+        .bind(number)
         .bind(node_id)
         .bind(&lease)
         .bind(&ack_deadline)

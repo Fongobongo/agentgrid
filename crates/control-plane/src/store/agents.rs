@@ -184,7 +184,7 @@ impl Store {
         .bind(now_iso())
         .execute(&mut *tx)
         .await?;
-        let view = super::tasks::insert_task_tx(&r, &mut *tx).await?;
+        let view = super::tasks::insert_task_tx(&r, &mut tx).await?;
         tx.commit().await?;
         Ok(view)
     }
