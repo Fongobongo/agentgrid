@@ -70,11 +70,15 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
               next.push(e);
               return next;
             });
-            // Audit X-W3: `task` was fetched once on mount, so a run that
-            // reached a terminal state while this page stayed open never
-            // refreshed it — the diff / review section (keyed off
-            // task.status) never appeared without a manual reload.
-            if (e.type === 'status' && typeof e.payload === 'string' && TERMINAL.includes(e.payload)) {
+            // Audit X-W3 (fixed shape): status events carry OBJECT payloads
+            // (`{"status":"validating",...}` from the node, permission
+            // decisions, etc.) — the string check here could never fire, so a
+            // task completing while the page stayed open never refreshed and
+            // the diff/review sections never appeared without a reload. Any
+            // terminal-status event refetches the task; the guard below
+            // keeps an already-terminal view stable.
+            const st = e.payload && typeof e.payload === 'object' ? (e.payload as { status?: unknown }).status : undefined;
+            if (e.type === 'status' && typeof st === 'string' && TERMINAL.includes(st)) {
               getTask(taskId)
                 .then((t) =>
                   setTask((cur) => (cur && TERMINAL.includes(cur.status) ? cur : t)),
@@ -90,6 +94,14 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
       handle?.close();
     };
   }, [taskId]);
+
+  // Audit follow-up: the eligibility banner was fetched once on mount — a
+  // queued task whose nodes come online kept showing "no eligible node"
+  // until remount. Refetch while queued on every event batch.
+  useEffect(() => {
+    if (task?.status !== 'queued') return;
+    getEligibility(taskId).then(setElig).catch(() => {});
+  }, [taskId, task?.status, events.length]);
 
   // Fetch artifacts once the task is terminal.
   useEffect(() => {

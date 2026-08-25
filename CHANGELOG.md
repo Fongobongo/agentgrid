@@ -120,6 +120,13 @@
   `limit`, so task #101 onward was invisible with no indication. `listGet`
   now auto-pages through the server's keyset cursor
   (`after_created_at`/`after_id`) until the page runs short.
+- **The task-details terminal refresh trigger could never fire (web).**
+  The status-event handler checked for a string payload, but every status
+  event carries an object payload (`{"status":"validating",...}`) — a task
+  completing while the page stayed open never refreshed, so the
+  diff/review sections never appeared without a manual reload. The queued
+  eligibility banner also stayed stale forever; it refetches on events
+  while the task is queued.
 
 ### Added
 
