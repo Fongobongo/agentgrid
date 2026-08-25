@@ -127,6 +127,17 @@ export async function req(method: string, path: string, body?: unknown): Promise
   return r;
 }
 
+/**
+ * Await a mutation response and throw a typed ApiError on non-OK. Audit
+ * follow-up: every view hand-rolled `if (!r.ok) setError(new Error(...))`
+ * with drifted messages that lost the status code; callers now just
+ * `await reqOk(...)` inside their existing try/catch.
+ */
+export async function reqOk(r: Response): Promise<Response> {
+  if (!r.ok) throw new ApiError(r.status, `${r.url.replace(location.origin, '')} -> ${r.status}`);
+  return r;
+}
+
 export async function getJson<T>(path: string): Promise<T> {
   const r = await req('GET', path);
   if (!r.ok) throw new ApiError(r.status, `GET ${path} -> ${r.status}`);

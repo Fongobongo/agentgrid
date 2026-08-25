@@ -1,16 +1,14 @@
 import { useEffect, useState } from 'react';
-import { listSkills, setSkillTrust, SkillTrustView } from '../api';
+import { listSkills, reqOk, setSkillTrust, SkillTrustView } from '../api';
 import { ConfirmModal } from './Modal';
-import { ErrorBox, Loading, fmtTime } from './util';
+import { ErrorBox, Loading, fmtTime, useLiveRefresh } from './util';
 
 // Stage 9.2 skill trust ledger: list recorded trust decisions and flip a
 // skill between trusted/untrusted. Fail-closed: a skill absent from the
-// ledger is untrusted (the agent may not load/execute it). Auto-polls every
-// 5s — node-side skill discovery wiring is a follow-up; for now the table
-// shows whatever the operator has decided plus anything a future node report
-// back-fills.
-
-const POLL_MS = 5000;
+// ledger is untrusted (the agent may not load/execute it). Refreshes on the
+// control-plane change stream; node-side skill discovery wiring is a
+// follow-up — for now the table shows whatever the operator has decided
+// plus anything a future node report back-fills.
 
 export default function Skills() {
   const [items, setItems] = useState<SkillTrustView[] | null>(null);
@@ -26,20 +24,15 @@ export default function Skills() {
       })
       .catch(setError);
   };
-  useEffect(() => {
-    load();
-    const t = setInterval(load, POLL_MS);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(load, []);
+  useLiveRefresh(load);
 
   const toggle = async (s: SkillTrustView) => {
     const next = !s.trusted;
-    const verb = next ? 'Trust' : 'Untrust';
     setBusy(`${s.name}/${s.source}`);
     try {
-      const r = await setSkillTrust(s.name, s.source, next);
-      if (!r.ok) setError(new Error(`${verb} failed (${r.status})`));
-      else load();
+      await reqOk(await setSkillTrust(s.name, s.source, next));
+      load();
     } catch (e) {
       setError(e);
     } finally {

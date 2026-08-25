@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listTasks, TaskView } from '../api';
-import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
+import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
 
 // Plan 2.13 (#26): Background-specialist panel.
 //
@@ -8,10 +8,9 @@ import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
 // tasks whose tags include a specialist marker, or whose prompts cover a
 // specialty like "security-review" / "eval-case") are currently in-flight.
 // We avoid adding new API surface — `listTasks` already returns every
-// TaskView; the filters below keep the HUD cheap on client-CPU so it can
-// refresh every 2 s.
+// TaskView; the filters below keep the HUD cheap on client-CPU. Refreshes
+// on the control-plane change stream (idle = no requests).
 
-const REFRESH_MS = 2000;
 // Tasks that the engine currently considers "background" — anything not
 // yet terminal. Terminal statuses hide a specialist from the HUD (they're
 // done thinking).
@@ -43,11 +42,8 @@ export default function Background() {
       .then(setAll)
       .catch(setError);
   };
-  useEffect(() => {
-    load();
-    const t = setInterval(load, REFRESH_MS);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(load, []);
+  useLiveRefresh(load);
 
   if (!all) {
     if (error) return <ErrorBox err={error} />;
@@ -80,7 +76,7 @@ export default function Background() {
     <section>
       <h2>Background specialists</h2>
       <p className="muted">
-        Live HUD of in-flight attempts by capability tag. Refreshes every {REFRESH_MS / 1000}s. The
+        Live HUD of in-flight attempts by capability tag. Refreshes on control-plane changes. The
         "all-active" cell shows tasks whose status is in <code>{ACTIVE_STATUSES.join(', ')}</code>.
       </p>
       <div className="filter-row">

@@ -157,6 +157,14 @@
   touches a `heartbeat.stamp` marker under AGENTGRID_DATA_DIR after every
   iteration, and the image's HEALTHCHECK fails when the stamp is older
   than 30 s (3× the default interval).
+- **Four web views polled on timers, defeating the change-stream design.**
+  Approvals (3 s), Skills (5 s), Background (2 s) and OpencodeProfiles
+  (5 s) re-fetched on intervals while Dashboard/Nodes/Audit/Workflows used
+  the `/v1/stream` fingerprint channel; the polling views now use
+  `useLiveRefresh` too — idle pages make no requests, changes land in under
+  a second. The hand-rolled `if (!r.ok) setError(...)` blocks (drifted
+  messages that lost the status) collapse into a shared `reqOk` helper /
+  typed `ApiError`.
 
 ### Added
 

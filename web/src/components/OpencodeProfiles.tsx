@@ -1,15 +1,12 @@
 import { useEffect, useState } from 'react';
-import { listNodes, listOpencodeProfiles, NodeView, OpencodeProfile, postJson, req } from '../api';
-import { ErrorBox, Loading, fmtTime } from './util';
+import { ApiError, listNodes, listOpencodeProfiles, NodeView, OpencodeProfile, postJson, req } from '../api';
+import { ErrorBox, Loading, fmtTime, useLiveRefresh } from './util';
 
 // Feature "opencode profiles": control-plane-hosted opencode configuration —
 // list every stored profile, view one in detail, paste a config body to
 // upsert (PUT), assign it to a node (POST /v1/nodes/:id/opencode-profile),
-// delete. Polls — the apply states refresh as nodes pull over the WS push.
-// Types come from ../api (the local duplicates drifted from the canonical
-// shapes and assumed the list envelope directly).
-
-const POLL_MS = 5000;
+// delete. Refreshes on the control-plane change stream (the apply states
+// arrive as nodes pull over the WS push). Types come from ../api.
 
 // Line diff between two pretty-printed JSON configs. Small inputs
 // (tens of lines), so an O(n*m) LCS is fine and dependency-free.
@@ -81,11 +78,8 @@ export default function OpencodeProfiles() {
     }).catch(setError);
     listNodes().then((n) => setNodes(n)).catch(() => undefined);
   };
-  useEffect(() => {
-    load();
-    const t = setInterval(load, POLL_MS);
-    return () => clearInterval(t);
-  }, []);
+  useEffect(load, []);
+  useLiveRefresh(load);
 
   // The upsert formatter validates JSON locally before any server round
   // trip (`dry_run` shows the post-sanitisation shape when keys are
@@ -119,7 +113,7 @@ export default function OpencodeProfiles() {
         payload,
       );
       const data = await r.json();
-      if (!r.ok) throw new Error(`dry-run failed: ${r.status}`);
+      if (!r.ok) throw new ApiError(r.status, `dry-run failed: ${r.status}`);
       setDryResult({
         hash: data.would_set_hash as string,
         dropped: (data.dropped_keys as string[]) ?? [],
@@ -150,7 +144,7 @@ export default function OpencodeProfiles() {
         `/v1/opencode-profiles/${encodeURIComponent(editName.trim())}`,
         payload,
       );
-      if (!r.ok) throw new Error(`upsert failed: ${r.status}`);
+      if (!r.ok) throw new ApiError(r.status, `upsert failed: ${r.status}`);
       setMsg('profile saved');
       setEditBody('');
       setEditName('');

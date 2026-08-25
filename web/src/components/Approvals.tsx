@@ -1,14 +1,13 @@
 import { useEffect, useState } from 'react';
-import { answerApproval, ApprovalView, listApprovals } from '../api';
+import { answerApproval, ApprovalView, listApprovals, reqOk } from '../api';
 import { PromptModal } from './Modal';
-import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
+import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
 
 // Stage 9.2 operator approval UI: list pending approvals, allow/deny with a
-// recorded reason. Auto-polls every 3s so a fresh request_permission surfaces
-// without an operator refresh; terminal approvals (allowed/denied/expired)
-// are shown briefly for context then hidden on next fetch.
-
-const POLL_MS = 3000;
+// recorded reason. Refreshes on the control-plane change stream so a fresh
+// request_permission surfaces without an operator refresh and idle pages
+// make no requests; terminal approvals (allowed/denied/expired) are shown
+// briefly for context then hidden on next fetch.
 
 export default function Approvals({ filter = 'pending' }: { filter?: string }) {
   const [items, setItems] = useState<ApprovalView[] | null>(null);
@@ -24,12 +23,8 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
       })
       .catch(setError);
   };
-  useEffect(() => {
-    load();
-    const t = setInterval(load, POLL_MS);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter]);
+  useEffect(load, [filter]);
+  useLiveRefresh(load);
 
   const submit = async (reason: string) => {
     if (!pending) return;
@@ -37,9 +32,8 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
     setPending(null);
     setBusy(a.id);
     try {
-      const r = await answerApproval(a.id, decision, reason.trim() || undefined);
-      if (!r.ok) setError(new Error(`${decision} failed (${r.status})`));
-      else load();
+      await reqOk(await answerApproval(a.id, decision, reason.trim() || undefined));
+      load();
     } catch (e) {
       setError(e);
     } finally {
