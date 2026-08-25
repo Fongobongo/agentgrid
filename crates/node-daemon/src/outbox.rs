@@ -18,6 +18,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use agentgrid_common::{CompleteAttemptRequest, IncomingEvent};
 use anyhow::{Context, Result};
@@ -614,6 +615,59 @@ pub fn total_bytes(dir: &Path) -> std::io::Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// Audit follow-up: delete crash leftovers the quota accounting never sees —
+/// orphaned `*.tmp` stage-file siblings (a crash between write and rename in
+/// ack/record/compact) and quarantine entries older than 24 h. Without this
+/// they accumulate forever: invisible to `total_bytes`, never swept. Best-
+/// effort; called from startup recovery.
+pub fn sweep_crash_leftovers(dir: &Path, max_age: Duration) -> (u64, u64) {
+    let mut removed_files = 0u64;
+    let mut removed_bytes = 0u64;
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d,
+        Err(_) => return (0, 0),
+    };
+    let mut sweep_dir = |d: &Path, tmp_only: bool| {
+        let Ok(entries) = std::fs::read_dir(d) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if !ft.is_file() {
+                continue;
+            }
+            let name_ok = entry
+                .file_name()
+                .to_str()
+                .map(|n| n.contains(".tmp") || n.ends_with(".jsonl.tmp"))
+                .unwrap_or(false);
+            if tmp_only && !name_ok {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|m| now.saturating_sub(m) > max_age)
+                .unwrap_or(false);
+            if !stale {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(entry.path()).is_ok() {
+                removed_files += 1;
+                removed_bytes += size;
+            }
+        }
+    };
+    // Top level: only .tmp stage siblings; live .jsonl spools are untouched.
+    sweep_dir(dir, true);
+    // Quarantine: age-cap every entry.
+    sweep_dir(&dir.join("quarantine"), false);
+    (removed_files, removed_bytes)
 }
 
 /// Hardening P0 item 10: total pending event rows across all per-attempt spools.

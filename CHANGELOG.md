@@ -102,6 +102,13 @@
   the group still belonged to our child — a recycled pgid would have been
   killed; escalation now stops early when waitpid reaps or loses the
   child.
+- **Git token validation missed leading dashes; outbox crash leftovers
+  were never swept (node-daemon).** A CP-supplied token starting with `-`
+  would parse as an option, not a rev, in `git cherry-pick <sha>` /
+  `git fetch origin <sha>` (defense-in-depth; rejected now). Orphaned
+  `.tmp` stage siblings from ack/record/compact crashes and stale
+  quarantine entries accumulated forever — invisible to the quota's
+  `.jsonl` filter; startup recovery sweeps them past the orphan age cap.
 
 ### Added
 

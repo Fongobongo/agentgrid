@@ -7,6 +7,7 @@ use reqwest::Client;
 
 use crate::artifact_spool;
 use crate::config::Config;
+use crate::outbox;
 use crate::polling::{send_with_retry, upload_if_exists};
 
 /// Redeliver one durable completion record by attempt id (no-op when none is
@@ -86,6 +87,16 @@ pub async fn startup_recovery(cfg: &Config, client: &Client) {
         if removed > 0 {
             tracing::info!(removed, "cleaned up orphaned artifact spool entries");
         }
+    }
+
+    // Audit follow-up: sweep crash leftovers the quota accounting never
+    // sees — orphaned .tmp stage siblings and stale quarantine entries.
+    let (files, bytes) = outbox::sweep_crash_leftovers(
+        &cfg.outbox_root,
+        Duration::from_secs(orphan_max_age_hours * 3600),
+    );
+    if files > 0 {
+        tracing::info!(files, bytes, "swept outbox crash leftovers");
     }
 
     // Hardening P1 item 11: retry artifacts staged by a prior (killed) run

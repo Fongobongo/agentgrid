@@ -300,12 +300,15 @@ fn worktree_git_info_exclude(ws: &Path) -> Option<PathBuf> {
 
 /// Reject git ref / slug tokens that could enable traversal or shell injection.
 /// Git is invoked without a shell, so this is defense-in-depth against malformed
-/// control-plane input (Stage 2.3).
+/// control-plane input (Stage 2.3). A leading `-` is rejected too: a token
+/// landing in `git cherry-pick <sha>` / `git fetch origin <sha>` would
+/// otherwise parse as an option, not a rev.
 fn validate_token(s: &str) -> Result<()> {
     if s.is_empty()
         || s.chars().any(|c| "\"';|&$()`><\\\n\t{}".contains(c))
         || s.contains("..")
         || s.starts_with('/')
+        || s.starts_with('-')
     {
         anyhow::bail!("unsafe git token: {s:?}");
     }
