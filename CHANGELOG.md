@@ -145,6 +145,13 @@
   the new `idx_events_type` index (migration 0074) over the small `metric`
   subset; the repeated-handoff scan keeps full semantics (a pre-broadcast
   streak must survive) and stays on the indexed `(run_id, sequence)` range.
+- **The workflow run projection endpoint was N+1 across steps.** Every
+  `GET /v1/workflow-runs/{id}/projection` (polled by the UI and ACP)
+  issued ~4 queries per step: role_runs lookup, task status, latest
+  attempt and latest result text. The role_runs and latest-attempt
+  lookups are bulk queries now (window-function ROW_NUMBER for "latest"),
+  leaving O(1) round trips plus one capped result-text read per linked
+  task.
 
 ### Added
 

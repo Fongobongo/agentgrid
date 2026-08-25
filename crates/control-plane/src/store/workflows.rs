@@ -504,6 +504,11 @@ impl Store {
 
     /// Stage 8 ACP plan projection: the live view of a run's roles, steps,
     /// placement, spawned tasks, assigned nodes and latest verdicts.
+    ///
+    /// Audit follow-up: the per-step lookups are batched — role_runs and the
+    /// latest attempt per task come from two bulk queries (window-function
+    /// `MAX(number)` for "latest"), so the endpoint is O(1) queries instead
+    /// of ~4 × steps. The UI polls this view.
     pub async fn get_workflow_run_projection(
         &self,
         run_id: &str,
@@ -513,40 +518,95 @@ impl Store {
             None => return Ok(None),
         };
         let steps = self.get_workflow_run_steps(run_id).await?;
+        // Bulk: step_run_id -> task_id for every step of the run. Rows with a
+        // NULL task_id are pending claims (set_role_run_task links later) —
+        // skipped so an unlinked row never shadows a linked one.
+        let mut rr_sql = String::from(
+            "SELECT step_run_id, task_id FROM role_runs WHERE task_id IS NOT NULL AND step_run_id IN (",
+        );
+        for i in 0..steps.len() {
+            if i > 0 {
+                rr_sql.push(',');
+            }
+            rr_sql.push('?');
+        }
+        rr_sql.push(')');
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(rr_sql.as_str()));
+        for s in &steps {
+            q = q.bind(&s.id);
+        }
+        let mut task_by_step: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for r in q.fetch_all(&self.pool).await? {
+            let sid: String = r.try_get("step_run_id")?;
+            let tid: String = r.try_get("task_id")?;
+            task_by_step.insert(sid, tid);
+        }
+
+        // Bulk: latest attempt per task (window function picks MAX(number)).
+        let task_ids: Vec<&String> = task_by_step.values().collect();
+        struct AttRow {
+            node_id: Option<String>,
+            error_code: Option<String>,
+            commit_sha: Option<String>,
+        }
+        let mut atts: std::collections::HashMap<String, AttRow> = std::collections::HashMap::new();
+        if !task_ids.is_empty() {
+            let mut att_sql = String::from(
+                "SELECT task_id, node_id, error_code, commit_sha FROM (\
+                    SELECT task_id, node_id, error_code, commit_sha, \
+                           ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY number DESC) AS rn \
+                    FROM attempts WHERE task_id IN (",
+            );
+            for i in 0..task_ids.len() {
+                if i > 0 {
+                    att_sql.push(',');
+                }
+                att_sql.push('?');
+            }
+            att_sql.push_str(")) WHERE rn = 1");
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(att_sql.as_str()));
+            for tid in &task_ids {
+                q = q.bind(tid);
+            }
+            for r in q.fetch_all(&self.pool).await? {
+                let tid: String = r.try_get("task_id")?;
+                atts.insert(
+                    tid,
+                    AttRow {
+                        node_id: r.try_get::<Option<String>, _>("node_id").ok().flatten(),
+                        error_code: r.try_get::<Option<String>, _>("error_code").ok().flatten(),
+                        commit_sha: r.try_get::<Option<String>, _>("commit_sha").ok().flatten(),
+                    },
+                );
+            }
+        }
+
         let mut out = Vec::with_capacity(steps.len());
         for s in &steps {
-            let task_row = sqlx::query("SELECT task_id FROM role_runs WHERE step_run_id = ?")
-                .bind(&s.id)
-                .fetch_optional(&self.pool)
-                .await?;
-            let task_id: Option<String> =
-                task_row.and_then(|r| r.try_get::<Option<String>, _>("task_id").ok().flatten());
+            let task_id = task_by_step.get(&s.id).cloned();
             let (node_id, verdict, error_code, commit_sha, result) = match &task_id {
                 Some(tid) => {
                     let ts = self
                         .get_task_status(tid)
                         .await?
                         .unwrap_or(agentgrid_common::TaskStatus::Queued);
-                    let att = sqlx::query(
-                        "SELECT id, node_id, error_code, commit_sha FROM attempts \
-                         WHERE task_id = ? ORDER BY number DESC LIMIT 1",
-                    )
-                    .bind(tid)
-                    .fetch_optional(&self.pool)
-                    .await?;
-                    let node_id = att
-                        .as_ref()
-                        .and_then(|r| r.try_get::<Option<String>, _>("node_id").ok().flatten());
-                    let error_code = att
-                        .as_ref()
-                        .and_then(|r| r.try_get::<Option<String>, _>("error_code").ok().flatten());
-                    let commit_sha = att
-                        .as_ref()
-                        .and_then(|r| r.try_get::<Option<String>, _>("commit_sha").ok().flatten());
+                    let att = atts.get(tid);
+                    let node_id = att.and_then(|a| a.node_id.clone());
+                    let error_code = att.and_then(|a| a.error_code.clone());
+                    let commit_sha = att.and_then(|a| a.commit_sha.clone());
                     // Latest adapter `result` event of the newest attempt =
                     // the step's outcome text (plan 3.3). Capped inside the
                     // helper so a verbose agent cannot bloat the projection.
-                    let attempt_id = att.as_ref().and_then(|r| r.try_get::<String, _>("id").ok());
+                    let attempt_id: Option<String> = match att {
+                        Some(_) => sqlx::query_scalar(
+                            "SELECT id FROM attempts WHERE task_id = ? ORDER BY number DESC LIMIT 1",
+                        )
+                        .bind(tid)
+                        .fetch_optional(&self.pool)
+                        .await?,
+                        None => None,
+                    };
                     let mut result: Option<String> = None;
                     if let Some(aid) = attempt_id {
                         result = latest_result_text(&self.pool, &aid).await?;
