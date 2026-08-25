@@ -127,6 +127,12 @@
   diff/review sections never appeared without a manual reload. The queued
   eligibility banner also stayed stale forever; it refetches on events
   while the task is queued.
+- **Nodes audit rows could render under the wrong node (web).** Rapid
+  A→B expander toggles let A's slow response resolve after B's and
+  overwrite the audit table; rows now carry their owning node id and a
+  stale response renders as "loading". `sseConnect.close()` now cancels
+  the in-flight reader instead of waiting up to ~15 s for the next server
+  keep-alive, and the expanded row's colSpan matches the 12-column table.
 
 ### Added
 

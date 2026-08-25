@@ -387,6 +387,7 @@ function sseConnect(
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let backoff = 500;
+  let activeReader: { cancel: () => Promise<unknown> } | null = null;
 
   const schedule = (fn: () => void) => {
     timer = setTimeout(fn, backoff);
@@ -407,6 +408,7 @@ function sseConnect(
       if (!r.ok || !r.body) throw new ApiError(r.status, `stream -> ${r.status}`);
       backoff = 500;
       const reader = r.body.getReader();
+      activeReader = reader;
       const decoder = new TextDecoder();
       let buf = '';
       while (!closed) {
@@ -435,6 +437,10 @@ function sseConnect(
     close() {
       closed = true;
       if (timer) clearTimeout(timer);
+      // Cancel the in-flight read so the pending reader.read() resolves
+      // immediately — otherwise the socket stayed open until the next
+      // server keep-alive (up to ~15 s) after route switches.
+      activeReader?.cancel().catch(() => {});
     },
   };
 }

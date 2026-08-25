@@ -12,7 +12,10 @@ export default function Nodes() {
   // rest of the page; the WS push sequence on the CP also surfaces as a new
   // audit row immediately after the node applies it).
   const [auditNode, setAuditNode] = useState<string | null>(null);
-  const [auditRows, setAuditRows] = useState<OpencodeAuditEntry[] | null>(null);
+  // Audit follow-up: audit responses raced — a slow fetch for node A could
+  // resolve after node B's and render A's history under B's expanded row.
+  // The rows now carry their owning node id and only render when they match.
+  const [auditRows, setAuditRows] = useState<{ nodeId: string; rows: OpencodeAuditEntry[] } | null>(null);
   const [profiles, setProfiles] = useState<OpencodeProfile[] | null>(null);
   const [assignBusy, setAssignBusy] = useState<string | null>(null);
 
@@ -25,7 +28,9 @@ export default function Nodes() {
       .catch(setError);
     listOpencodeProfiles().then(setProfiles).catch(() => undefined);
     if (auditNode) {
-      getOpencodeAudit(auditNode).then(setAuditRows).catch(() => setAuditRows([]));
+      getOpencodeAudit(auditNode)
+        .then((rows) => setAuditRows({ nodeId: auditNode, rows }))
+        .catch(() => setAuditRows({ nodeId: auditNode, rows: [] }));
     }
   };
 
@@ -54,9 +59,10 @@ export default function Nodes() {
     setAuditRows(null);
     try {
       const rows = await getOpencodeAudit(nodeId);
-      setAuditRows(rows);
+      // Drop a stale response whose node is no longer the open one.
+      setAuditRows((cur) => (cur === null ? { nodeId, rows } : cur));
     } catch (e) {
-      setAuditRows([]);
+      setAuditRows({ nodeId, rows: [] });
       setError(e);
     }
   };
@@ -196,10 +202,10 @@ export default function Nodes() {
               </tr>
               {auditNode === n.id && (
                 <tr>
-                  <td colSpan={11}>
-                    {auditRows === null ? (
+                  <td colSpan={12}>
+                    {auditRows === null || auditRows.nodeId !== n.id ? (
                       <div className="muted">loading…</div>
-                    ) : auditRows.length === 0 ? (
+                    ) : auditRows.rows.length === 0 ? (
                       <div className="muted">no opencode-config applies yet</div>
                     ) : (
                       <table className="grid">
@@ -212,7 +218,7 @@ export default function Nodes() {
                           </tr>
                         </thead>
                         <tbody>
-                          {auditRows.map((a) => (
+                          {auditRows.rows.map((a) => (
                             <tr key={a.id}>
                               <td>{fmtTime(a.at)}</td>
                               <td>{a.trigger}</td>
