@@ -1152,6 +1152,12 @@ impl Store {
     /// loop). Auto-emitted broadcast `output` to `*` is skipped, since a
     /// normal step-succeeded broadcast streak is a healthy flow and not a
     /// solo ping-pong; only truly repeated step-to-step handoffs count.
+    ///
+    /// ponytail (audit follow-up): the scan is bounded by the indexed
+    /// `(run_id, sequence)` range and the streak semantics require full
+    /// history (a pre-broadcast streak must survive), so an incremental
+    /// aggregate would need a persisted watermark — deferred until tick
+    /// cost actually shows up in profiles.
     pub async fn workflow_repeated_handoffs(&self, run_id: &str) -> Result<u32> {
         let rows = sqlx::query(
             "SELECT from_step_id, to_step_id FROM workflow_messages \
@@ -1187,26 +1193,26 @@ impl Store {
     /// 1.4: sum tokens / cost reported by adapters (`progress` events stored
     /// as `metric`) across every attempt of this run's step tasks. Payloads
     /// without the fields contribute 0, so older adapters stay compatible.
+    ///
+    /// Audit follow-up: this used to fetch every metric payload of the run
+    /// into Rust on every budget tick (every 5 s per running run) — O(run
+    /// lifetime). SQLite's json_extract does the aggregation server-side and
+    /// the `idx_events_type` index (migration 0074) drives from the small
+    /// `metric` subset.
     pub async fn workflow_tokens_cost(&self, run_id: &str) -> Result<(u64, u64)> {
-        let rows = sqlx::query(
-            "SELECT te.payload FROM task_events te \
+        let (tokens, cost): (i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(CAST(json_extract(te.payload, '$.tokens') AS INTEGER)), 0), \
+                    COALESCE(SUM(CAST(json_extract(te.payload, '$.cost_cents') AS INTEGER)), 0) \
+             FROM task_events te \
              JOIN attempts a ON a.id = te.attempt_id \
              JOIN role_runs rr ON rr.task_id = a.task_id \
              JOIN workflow_steps ws ON ws.id = rr.step_run_id \
              WHERE ws.run_id = ? AND te.type = 'metric'",
         )
         .bind(run_id)
-        .fetch_all(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        let (mut tokens, mut cost) = (0u64, 0u64);
-        for r in rows {
-            let payload: String = r.try_get("payload")?;
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                tokens += v.get("tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                cost += v.get("cost_cents").and_then(|x| x.as_u64()).unwrap_or(0);
-            }
-        }
-        Ok((tokens, cost))
+        Ok((tokens.max(0) as u64, cost.max(0) as u64))
     }
 
     /// Current status of a task, if it exists.

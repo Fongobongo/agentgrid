@@ -138,6 +138,13 @@
   hand — it uses the canonical `api.ts` types and helpers now (the
   revision fields moved into the shared interface). The capability
   vocabulary in Background is module-local, not an unused export.
+- **The workflow budget tick re-read the whole run history every 5 s
+  per running run.** `workflow_tokens_cost` fetched every metric event
+  payload into Rust to sum tokens/cost — O(run lifetime) on a fixed
+  cadence. SQLite's `json_extract` aggregates server-side now, driven by
+  the new `idx_events_type` index (migration 0074) over the small `metric`
+  subset; the repeated-handoff scan keeps full semantics (a pre-broadcast
+  streak must survive) and stays on the indexed `(run_id, sequence)` range.
 
 ### Added
 
