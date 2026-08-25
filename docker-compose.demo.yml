@@ -21,7 +21,9 @@ services:
       - control-plane
     environment:
       AGENTGRID_SERVER: http://control-plane:7800
-      AGENTGRID_ENROLL_TOKEN: ${NODE1_TOKEN:-}
+      # Required: without a real enroll token the node crash-loops with no
+      # hint. Mint tokens via `ag token create` and export NODE1_TOKEN.
+      AGENTGRID_ENROLL_TOKEN: ${NODE1_TOKEN:?set NODE1_TOKEN (ag token create)}
       AGENTGRID_NODE_NAME: node-1
       AGENTGRID_MAX_CONCURRENCY: "2"
       # Keep workspace/repo state on the mounted volume, not the container fs.
@@ -37,7 +39,7 @@ services:
       - control-plane
     environment:
       AGENTGRID_SERVER: http://control-plane:7800
-      AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:-}
+      AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:?set NODE2_TOKEN (ag token create)}
       AGENTGRID_NODE_NAME: node-2
       AGENTGRID_MAX_CONCURRENCY: "2"
       AGENTGRID_WORKSPACE_ROOT: /var/lib/agentgrid/data/workspace

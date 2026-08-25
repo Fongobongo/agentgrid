@@ -44,7 +44,10 @@ ENV AGENTGRID_LISTEN=0.0.0.0:7800 \
     AGENTGRID_ARTIFACT_ROOT=/var/lib/agentgrid/artifacts \
     AGENTGRID_WEB_ROOT=/var/lib/agentgrid/web
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:7800/health/ready || exit 1
+# No HEALTHCHECK: the final stage is `FROM scratch` (no shell, no wget), so a
+# HEALTHCHECK CMD can never succeed and the container reports permanently
+# unhealthy. Liveness is enforced by the orchestrator (restart policy /
+# k8s probes against the binary's own HTTP listener), not an in-container
+# check.
 
 ENTRYPOINT ["agentgrid-control-plane"]

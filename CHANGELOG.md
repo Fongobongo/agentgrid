@@ -109,6 +109,12 @@
   `.tmp` stage siblings from ack/record/compact crashes and stale
   quarantine entries accumulated forever — invisible to the quota's
   `.jsonl` filter; startup recovery sweeps them past the orphan age cap.
+- **The musl image's HEALTHCHECK could never succeed (deploy).** The final
+  stage is `FROM scratch` — no shell, no wget — so the check always failed
+  and the container reported permanently unhealthy. Removed; liveness is
+  the orchestrator's job. The demo compose also started nodes with an
+  empty enroll-token default that crash-looped without a hint; both tokens
+  are required (`:?`) like the production compose now.
 
 ### Added
 
