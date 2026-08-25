@@ -39,6 +39,8 @@ fn ws_url(server: &str) -> String {
 }
 
 /// Connect and send the `Hello` handshake; returns the open socket.
+/// The handshake is time-bounded (10 s connect, 15 s overall): an accepting-
+/// but-silent CP used to park the WS session setup forever.
 async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream> {
     let url = format!("{}/v1/node/ws", ws_url(&cfg.server));
     let mut req = url.into_client_request()?;
@@ -46,7 +48,12 @@ async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream> 
         "authorization",
         format!("Bearer {}", cred.credential).parse()?,
     );
-    let (mut sock, _resp) = tokio_tungstenite::connect_async(req).await?;
+    let (mut sock, _resp) = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("ws handshake timed out"))??;
     let hello = NodeWsMsg::Hello {
         node_id: cred.node_id.clone(),
         name: cfg.node_name.clone(),

@@ -87,6 +87,12 @@
   PlanReady pause never fired for any ACP adapter (the primary protocol)
   and the start→finish drift audit was void on every ACP attempt. All
   three are captured and shipped like the wrapper path already did.
+- **No HTTP/WebSocket timeouts anywhere in the node-daemon.** reqwest and
+  tungstenite default to no timeout, so a connection that accepted but
+  never answered parked the poll loop, heartbeat, event flusher or WS
+  session setup forever — `send_with_retry`'s attempt-count bound never
+  fired. All production clients now carry a 10 s connect + 120 s total
+  timeout, and the WS handshake is bounded at 15 s.
 
 ### Added
 

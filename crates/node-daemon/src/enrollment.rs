@@ -1,7 +1,6 @@
 //! Node enrollment: credential persistence, token scrubbing.
 
 use anyhow::Result;
-use reqwest::Client;
 
 use crate::config::{adapter_permission_interception, Config, SavedCredential};
 use agentgrid_common::{EnrollRequest, EnrollResponse};
@@ -34,7 +33,7 @@ pub async fn load_or_enroll(cfg: &Config) -> Result<SavedCredential> {
 
 /// Enroll this node with the control plane.
 async fn enroll_node(cfg: &Config) -> Result<SavedCredential> {
-    let client = Client::new();
+    let client = crate::polling::daemon_http_client()?;
     let body = EnrollRequest {
         token: cfg.enroll_token.clone().unwrap_or_default(),
         name: cfg.node_name.clone(),

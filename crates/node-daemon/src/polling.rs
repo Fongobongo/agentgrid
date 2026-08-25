@@ -15,6 +15,19 @@ use crate::config::{Config, Transport};
 use crate::heartbeat;
 use crate::recovery;
 
+/// The daemon-wide HTTP client: bounded connect (10 s) + total-request
+/// (120 s) timeouts. reqwest defaults to NO timeout, so a connection that
+/// accepts but never answers parked the poll loop / heartbeat / event
+/// flusher forever and `send_with_retry`'s attempt-count bound never fired.
+/// Production paths build through this; tests keep their own plain clients
+/// against dummy servers.
+pub fn daemon_http_client() -> Result<Client> {
+    Ok(Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()?)
+}
+
 /// Transport entry point (plan 0.3 2.3): one-time startup (recovery,
 /// heartbeat) runs once regardless of transport, then the node runs the
 /// selected channel: long polling, WebSocket, or auto (WS with poll fallback).
@@ -24,7 +37,11 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {}", cred.credential))?,
     );
-    let client = Client::builder().default_headers(headers).build()?;
+    let client = Client::builder()
+        .default_headers(headers)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()?;
     let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
 
     // Startup recovery: redeliver durable completions, reap orphaned artifact

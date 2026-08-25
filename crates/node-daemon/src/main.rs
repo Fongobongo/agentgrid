@@ -683,7 +683,7 @@ async fn main() -> Result<()> {
     {
         let cfg_init = cfg.clone();
         let cred_init = cred.clone();
-        let client_init = reqwest::Client::new();
+        let client_init = polling::daemon_http_client()?;
         tokio::spawn(async move {
             if let Err(e) = crate::opencode_config::pull_and_apply(
                 &cfg_init,
@@ -711,7 +711,7 @@ async fn main() -> Result<()> {
                 // The credential is refreshed per tick via process_credential —
                 // enrol-side restores after a CP restart deliver a fresh bearer
                 // without restarting the daemon.
-                let client_i = reqwest::Client::new();
+                let client_i = polling::daemon_http_client()?;
                 tracing::info!(
                     interval_secs = secs,
                     "opencode-config interval pull enabled"
