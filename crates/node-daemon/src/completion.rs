@@ -80,7 +80,10 @@ pub async fn wait_for_cancel(attempt_id: &str, client: Client, url: String) {
     }
 }
 
-/// SIGTERM the whole process group, then SIGKILL after a 10s grace period.
+/// SIGTERM the whole process group, then SIGKILL after a 10s grace period —
+/// but only if the child is still alive at escalation time. If the child
+/// died on SIGTERM and the kernel recycled its pgid, the blind killpg would
+/// SIGKILL an unrelated process group.
 pub fn terminate_group(pid: u32) {
     if pid == 0 {
         return;
@@ -90,9 +93,21 @@ pub fn terminate_group(pid: u32) {
         libc::killpg(pid as i32, libc::SIGTERM);
     }
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            // SAFETY: probing our own child's liveness; WNOHANG never blocks.
+            let alive = unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
+            if alive as u32 == pid
+                || (alive == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
+            {
+                // Reaped by us (or already waited elsewhere): the group is
+                // gone — no SIGKILL escalation needed or safe.
+                return;
+            }
+        }
         unsafe {
-            // SAFETY: same process group; SIGKILL after grace period is safe.
+            // SAFETY: the group still belongs to our un-reaped child; SIGKILL after grace is safe.
             libc::killpg(pid as i32, libc::SIGKILL);
         }
     });

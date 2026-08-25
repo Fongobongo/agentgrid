@@ -142,16 +142,23 @@ pub async fn run_validation(
     ));
 
     let verdict = wait_bounded(&mut child, timeout, attempt_id, client.clone(), cancel_url).await?;
+    // Bounded reap (same discipline as the ACP path): a killed child in
+    // uninterruptible disk sleep survives SIGKILL and would park the
+    // validation — and with it the whole attempt — forever.
+    async fn reaped(child: &mut tokio::process::Child) -> i32 {
+        tokio::time::timeout(std::time::Duration::from_secs(15), child.wait())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .and_then(|s| s.code())
+            .unwrap_or(-1)
+    }
     let (code, timed_out, cancelled) = match verdict {
         BoundedExit::Exited(c) => (c, false, false),
         BoundedExit::TimedOut => {
             terminate_group(pid);
-            let status = child.wait().await;
-            (
-                status.ok().and_then(|s| s.code()).unwrap_or(-1),
-                true,
-                false,
-            )
+            let code = reaped(&mut child).await;
+            (code, true, false)
         }
         BoundedExit::Cancelled => {
             sink.push(
@@ -160,12 +167,8 @@ pub async fn run_validation(
             )
             .await;
             terminate_group(pid);
-            let status = child.wait().await;
-            (
-                status.ok().and_then(|s| s.code()).unwrap_or(-1),
-                false,
-                true,
-            )
+            let code = reaped(&mut child).await;
+            (code, false, true)
         }
     };
     let _ = r1.await;

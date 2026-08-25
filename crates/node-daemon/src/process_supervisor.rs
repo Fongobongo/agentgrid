@@ -76,8 +76,14 @@ pub async fn supervise_adapter(
                 // Audit ND-6: killing the `docker run` client leaves the
                 // container itself running — remove it by per-attempt name.
                 crate::sandbox::remove_sandbox_container(attempt_id).await;
-                let status = child.wait().await?;
-                (status.code().unwrap_or(-1), Some("timeout"))
+                // Bound the reap: a child in uninterruptible disk sleep
+                // survives SIGKILL and would park run_attempt forever,
+                // leaking the concurrency slot (same bound as the ACP path).
+                let status = tokio::time::timeout(std::time::Duration::from_secs(15), child.wait())
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                (status.and_then(|s| s.code()).unwrap_or(-1), Some("timeout"))
             }
             BoundedExit::Cancelled => {
                 sink.push(
@@ -91,8 +97,14 @@ pub async fn supervise_adapter(
                 .await;
                 terminate_group(pid);
                 crate::sandbox::remove_sandbox_container(attempt_id).await;
-                let status = child.wait().await?;
-                (status.code().unwrap_or(-1), Some("cancelled"))
+                let status = tokio::time::timeout(std::time::Duration::from_secs(15), child.wait())
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                (
+                    status.and_then(|s| s.code()).unwrap_or(-1),
+                    Some("cancelled"),
+                )
             }
         }
     };

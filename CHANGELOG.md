@@ -93,6 +93,15 @@
   session setup forever — `send_with_retry`'s attempt-count bound never
   fired. All production clients now carry a 10 s connect + 120 s total
   timeout, and the WS handshake is bounded at 15 s.
+- **Unbounded child reaps and a blind SIGKILL escalation
+  (node-daemon).** The wrapper-supervisor and validation paths waited on a
+  killed child forever — a process in uninterruptible disk sleep survives
+  SIGKILL and would park the attempt, leaking its concurrency slot (the
+  ACP path already bounded this); all reaps are capped at 15 s now.
+  `terminate_group` also escalated to SIGKILL after 10 s without checking
+  the group still belonged to our child — a recycled pgid would have been
+  killed; escalation now stops early when waitpid reaps or loses the
+  child.
 
 ### Added
 
