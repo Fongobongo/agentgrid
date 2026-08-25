@@ -252,6 +252,10 @@ impl Store {
         if orphans > 0 {
             tracing::warn!(orphans, "orphan rows detected on startup");
         }
+        // Audit follow-up: replay handoff streaks once for runs created
+        // before migration 0075 — the persisted columns start at defaults,
+        // so a breaker reading them blind would under-count.
+        self.rebuild_handoff_streaks().await?;
         let _ = self
             .audit(
                 "system",

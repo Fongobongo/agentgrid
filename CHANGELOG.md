@@ -165,6 +165,13 @@
   a second. The hand-rolled `if (!r.ok) setError(...)` blocks (drifted
   messages that lost the status) collapse into a shared `reqOk` helper /
   typed `ApiError`.
+- **The repeated-handoff circuit breaker is O(1) now (migration 0075).**
+  Every budget tick rescanned the run's whole `workflow_messages` history
+  to recompute the streak. `emit_workflow_message` maintains the live
+  streak, its all-time max and the last `(from, to)` pair in the same
+  transaction as the insert — the breaker reads the max column (a runaway
+  stays tripped even after a healthy broadcast resets the live streak).
+  Startup reconcile replays history once for runs predating the migration.
 
 ### Added
 

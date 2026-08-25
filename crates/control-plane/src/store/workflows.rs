@@ -1107,6 +1107,11 @@ impl Store {
     /// Stage 13: append a typed `AgentMessage` from one step of a run to another
     /// (or `"*"` to broadcast). The orchestrator publishes here, never an
     /// agent. Allocates a monotonic per-run sequence.
+    ///
+    /// Audit follow-up: the repeated-handoff streak is maintained here, in
+    /// the same transaction as the insert (broadcast `to = '*'` resets it;
+    /// an identical consecutive `(from, to)` pair extends it) — the budget
+    /// tick reads three columns instead of rescanning the whole history.
     pub(crate) async fn emit_workflow_message(
         &self,
         run_id: &str,
@@ -1145,7 +1150,111 @@ impl Store {
         .bind(&now)
         .execute(&mut *tx)
         .await?;
+        // Advance the persisted handoff streak with the same rule the old
+        // full-scan reader applied: a broadcast resets the live streak, an
+        // identical consecutive (from, to) pair extends it, and the breaker
+        // reads the all-time max (a runaway must stay tripped even after a
+        // healthy broadcast).
+        sqlx::query(
+            "UPDATE workflow_runs SET \
+               handoff_streak = CASE \
+                 WHEN ? = '*' THEN 0 \
+                 WHEN handoff_last_to IS NOT NULL AND handoff_last_to != '*' \
+                      AND handoff_last_from = ? AND handoff_last_to = ? \
+                 THEN handoff_streak + 1 \
+                 ELSE 1 END, \
+               handoff_streak_max = MAX(handoff_streak_max, CASE \
+                 WHEN ? = '*' THEN handoff_streak \
+                 WHEN handoff_last_to IS NOT NULL AND handoff_last_to != '*' \
+                      AND handoff_last_from = ? AND handoff_last_to = ? \
+                 THEN handoff_streak + 1 \
+                 ELSE 1 END), \
+               handoff_last_from = ?, \
+               handoff_last_to = ? \
+             WHERE id = ?",
+        )
+        .bind(to_step_id)
+        .bind(from_step_id)
+        .bind(to_step_id)
+        .bind(to_step_id)
+        .bind(from_step_id)
+        .bind(to_step_id)
+        .bind(from_step_id)
+        .bind(to_step_id)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Rebuild the persisted handoff-streak columns by replaying each
+    /// non-terminal run's message history once. Startup reconcile calls this
+    /// so runs created before migration 0075 (streak columns still at their
+    /// defaults while messages exist past them) read correct values. A run
+    /// is only rebuilt when its stored last-sequence watermark lags — the
+    /// cheap check keeps steady-state startup O(1) per run.
+    pub(crate) async fn rebuild_handoff_streaks(&self) -> Result<()> {
+        let run_ids: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM workflow_runs WHERE status IN ('pending', 'running')")
+                .fetch_all(&self.pool)
+                .await?;
+        for (run_id,) in run_ids {
+            // Skip runs with no messages at all (columns already at defaults).
+            let has_msgs: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM workflow_messages WHERE run_id = ?)",
+            )
+            .bind(&run_id)
+            .fetch_one(&self.pool)
+            .await?;
+            if has_msgs == 0 {
+                continue;
+            }
+            let rows = sqlx::query(
+                "SELECT from_step_id, to_step_id FROM workflow_messages \
+                 WHERE run_id = ? ORDER BY sequence ASC",
+            )
+            .bind(&run_id)
+            .fetch_all(&self.pool)
+            .await?;
+            let mut longest: u32 = 0;
+            let mut cur: u32 = 0;
+            let mut last: (Option<String>, Option<String>) = (None, None);
+            let mut tail_from: Option<String> = None;
+            let mut tail_to: Option<String> = None;
+            for r in rows {
+                let from: Option<String> = r.try_get("from_step_id").ok();
+                let to: Option<String> = r.try_get("to_step_id").ok();
+                if to.as_deref() == Some("*") {
+                    cur = 0;
+                    last = (from.clone(), to.clone());
+                    tail_from = from;
+                    tail_to = to;
+                    continue;
+                }
+                if last == (from.clone(), to.clone()) && cur > 0 {
+                    cur += 1;
+                } else {
+                    cur = 1;
+                }
+                longest = longest.max(cur);
+                last = (from.clone(), to.clone());
+                tail_from = from;
+                tail_to = to;
+            }
+            sqlx::query(
+                "UPDATE workflow_runs SET handoff_streak = ?, handoff_streak_max = ?, \
+                     handoff_last_from = ?, handoff_last_to = ? \
+                 WHERE id = ?",
+            )
+            .bind(cur)
+            .bind(longest)
+            .bind(tail_from)
+            .bind(tail_to)
+            .bind(&run_id)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 
@@ -1213,41 +1322,20 @@ impl Store {
     /// normal step-succeeded broadcast streak is a healthy flow and not a
     /// solo ping-pong; only truly repeated step-to-step handoffs count.
     ///
-    /// ponytail (audit follow-up): the scan is bounded by the indexed
-    /// `(run_id, sequence)` range and the streak semantics require full
-    /// history (a pre-broadcast streak must survive), so an incremental
-    /// aggregate would need a persisted watermark — deferred until tick
-    /// cost actually shows up in profiles.
+    /// Audit follow-up: O(1) now — `emit_workflow_message` maintains
+    /// `(handoff_streak, handoff_last_from, handoff_last_to)` in the insert
+    /// transaction, and startup reconcile replays history once for runs that
+    /// predate migration 0075.
     pub async fn workflow_repeated_handoffs(&self, run_id: &str) -> Result<u32> {
-        let rows = sqlx::query(
-            "SELECT from_step_id, to_step_id FROM workflow_messages \
-             WHERE run_id = ? ORDER BY sequence ASC",
+        // The breaker reads the all-time max: a runaway ping-pong must stay
+        // tripped even after a healthy broadcast resets the live streak.
+        let max: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(handoff_streak_max, 0) FROM workflow_runs WHERE id = ?",
         )
         .bind(run_id)
-        .fetch_all(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        let mut longest: u32 = 0;
-        let mut cur: u32 = 0;
-        let mut last: (Option<String>, Option<String>) = (None, None);
-        for r in rows {
-            let from: Option<String> = r.try_get("from_step_id").ok();
-            let to: Option<String> = r.try_get("to_step_id").ok();
-            // Skip broadcast outputs to `*` so a normal all-to-all broadcast
-            // streak never trips the breaker (see method doc).
-            if to.as_deref() == Some("*") {
-                cur = 0;
-                last = (from, to);
-                continue;
-            }
-            if last == (from.clone(), to.clone()) && cur > 0 {
-                cur += 1;
-            } else {
-                cur = 1;
-            }
-            longest = longest.max(cur);
-            last = (from, to);
-        }
-        Ok(longest)
+        Ok(max.max(0) as u32)
     }
 
     /// 1.4: sum tokens / cost reported by adapters (`progress` events stored
