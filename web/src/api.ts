@@ -509,6 +509,11 @@ export interface OpencodeProfile {
   name: string;
   hash: string;
   config: Record<string, unknown>;
+  /** Previous revision (profile revisions feature). */
+  prev?: { hash: string; config: Record<string, unknown> } | null;
+  expires_at?: string | null;
+  apply_count?: number | null;
+  pinned_skills?: string[] | null;
   created_at: string;
   updated_at: string;
 }

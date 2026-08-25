@@ -1,30 +1,13 @@
 import { useEffect, useState } from 'react';
-import { getJson, postJson, req } from '../api';
+import { listNodes, listOpencodeProfiles, NodeView, OpencodeProfile, postJson, req } from '../api';
 import { ErrorBox, Loading, fmtTime } from './util';
 
 // Feature "opencode profiles": control-plane-hosted opencode configuration —
 // list every stored profile, view one in detail, paste a config body to
 // upsert (PUT), assign it to a node (POST /v1/nodes/:id/opencode-profile),
 // delete. Polls — the apply states refresh as nodes pull over the WS push.
-
-interface OpencodeProfile {
-  id: string;
-  name: string;
-  hash: string;
-  config: Record<string, unknown>;
-  prev?: { hash: string; config: Record<string, unknown> } | null;
-  expires_at?: string | null;
-  apply_count?: number | null;
-  pinned_skills?: string[] | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface NodeView {
-  id: string;
-  name: string;
-  opencode_profile_id: string | null;
-}
+// Types come from ../api (the local duplicates drifted from the canonical
+// shapes and assumed the list envelope directly).
 
 const POLL_MS = 5000;
 
@@ -92,11 +75,11 @@ export default function OpencodeProfiles() {
   const [msg, setMsg] = useState('');
 
   const load = () => {
-    getJson<{ items: OpencodeProfile[] }>('/v1/opencode-profiles').then((r) => {
-      setProfiles(r.items);
+    listOpencodeProfiles().then((r) => {
+      setProfiles(r);
       setError(null);
     }).catch(setError);
-    getJson<{ items: NodeView[] }>('/v1/nodes').then((r) => setNodes(r.items)).catch(() => undefined);
+    listNodes().then((n) => setNodes(n)).catch(() => undefined);
   };
   useEffect(() => {
     load();

@@ -133,6 +133,11 @@
   stale response renders as "loading". `sseConnect.close()` now cancels
   the in-flight reader instead of waiting up to ~15 s for the next server
   keep-alive, and the expanded row's colSpan matches the 12-column table.
+- **Web cleanup.** OpencodeProfiles re-declared `OpencodeProfile` /
+  `NodeView` locally with drifted fields and read the list envelope by
+  hand — it uses the canonical `api.ts` types and helpers now (the
+  revision fields moved into the shared interface). The capability
+  vocabulary in Background is module-local, not an unused export.
 
 ### Added
 

@@ -17,12 +17,14 @@ const REFRESH_MS = 2000;
 // done thinking).
 const ACTIVE_STATUSES = ['assigned', 'running', 'pending', 'retry'];
 
-export interface SpecialistCapability {
+// Local capability vocabulary for the HUD filter. Not exported — no other
+// view consumes it.
+interface SpecialistCapability {
   tag: string;
   description: string;
 }
 
-export const SPECIALIST_CAPABILITIES: SpecialistCapability[] = [
+const SPECIALIST_CAPABILITIES: SpecialistCapability[] = [
   { tag: 'security-review', description: 'Reads skills, MCP bundles, or task prompts for injection patterns' },
   { tag: 'eval-case', description: 'Probes failing attempts against stamped eval scripts' },
   { tag: 'consensus', description: 'Runs N-of-M majority votes across adapter models' },
