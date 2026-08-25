@@ -162,17 +162,48 @@ export function getTask(id: string) {
 
 interface ListResponse<T> { items: T[]; next_cursor?: string | null }
 
-async function listGet<T>(path: string): Promise<T[]> {
-  const raw = await getJson<unknown>(path);
-  if (Array.isArray(raw)) return raw as T[];
-  if (raw && typeof raw === 'object' && Array.isArray((raw as ListResponse<T>).items)) {
-    return (raw as ListResponse<T>).items;
+/**
+ * GET a list endpoint, auto-paging through the keyset cursor until the
+ * server reports no more pages. Audit follow-up: `next_cursor` was declared
+ * but never read, so every list silently truncated at the server's default
+ * page cap (~100 rows) with no indication. The cursor is the opaque
+ * `"created_at,id"` pair the server emits; it round-trips as the
+ * `after_created_at` / `after_id` query parts. A bare-array response (old
+ * servers) stops paging after one request.
+ */
+async function listGet<T>(path: string, limit?: number): Promise<T[]> {
+  const out: T[] = [];
+  let cursor: string | null = null;
+  let first = true;
+  while (first || cursor) {
+    const params = new URLSearchParams();
+    const base = path.includes('?') ? path.slice(0, path.indexOf('?')) : path;
+    for (const [k, v] of new URLSearchParams(path.includes('?') ? path.slice(path.indexOf('?') + 1) : '')) {
+      params.set(k, v);
+    }
+    if (limit !== undefined && first) params.set('limit', String(limit));
+    if (cursor) {
+      const idx = cursor.indexOf(',');
+      if (idx <= 0) break; // malformed cursor — stop rather than loop
+      params.set('after_created_at', cursor.slice(0, idx));
+      params.set('after_id', cursor.slice(idx + 1));
+    }
+    const raw = await getJson<unknown>(`${base}?${params.toString()}`);
+    first = false;
+    if (Array.isArray(raw)) {
+      out.push(...(raw as T[]));
+      break;
+    }
+    const resp = raw as ListResponse<T>;
+    if (!resp || !Array.isArray(resp.items)) break;
+    out.push(...resp.items);
+    cursor = resp.next_cursor ?? null;
   }
-  return [];
+  return out;
 }
 
-export function listTasks(): Promise<TaskView[]> {
-  return listGet<TaskView>('/v1/tasks');
+export function listTasks(limit?: number): Promise<TaskView[]> {
+  return listGet<TaskView>('/v1/tasks', limit);
 }
 
 /** Plan 1.3: FTS5 full-text search over tasks. */

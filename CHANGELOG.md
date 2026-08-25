@@ -115,6 +115,11 @@
   the orchestrator's job. The demo compose also started nodes with an
   empty enroll-token default that crash-looped without a hint; both tokens
   are required (`:?`) like the production compose now.
+- **The web UI silently truncated every list at ~100 rows (web).** The
+  `next_cursor` field was declared but never read and no caller passed a
+  `limit`, so task #101 onward was invisible with no indication. `listGet`
+  now auto-pages through the server's keyset cursor
+  (`after_created_at`/`after_id`) until the page runs short.
 
 ### Added
 
