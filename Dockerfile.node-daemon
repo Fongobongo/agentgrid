@@ -50,4 +50,9 @@ RUN if [ -n "$OPENCODE_VERSION" ]; then \
       && rm -rf /tmp/oc /tmp/opencode.tar.gz; \
     fi
 USER agentgrid
+# Liveness: the daemon touches /var/lib/agentgrid/data/heartbeat.stamp after
+# every heartbeat loop iteration (default every 10 s). A wedged loop stops
+# touching it and the check fails — restart: unless-stopped then recovers it.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+  CMD test $(( $(date +%s) - $(stat -c %Y /var/lib/agentgrid/data/heartbeat.stamp 2>/dev/null || echo 0) )) -lt 30 || exit 1
 ENTRYPOINT ["agentgrid-node-daemon"]

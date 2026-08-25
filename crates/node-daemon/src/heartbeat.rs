@@ -257,6 +257,14 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 tracing::warn!("heartbeat failed: {e}");
             }
 
+            // Liveness marker (deploy healthcheck): the container HEALTHCHECK
+            // compares this file's mtime against 3x the heartbeat interval —
+            // a wedged loop stops touching it and the orchestrator restarts
+            // the daemon. Best-effort; failure only loses the signal. Lives
+            // next to the outbox under AGENTGRID_DATA_DIR.
+            let marker = cfg.outbox_root.join("../heartbeat.stamp");
+            let _ = std::fs::write(&marker, chrono::Utc::now().to_rfc3339().as_bytes());
+
             // Interval until the next heartbeat.
             tokio::time::sleep(Duration::from_secs(cfg.heartbeat_secs)).await;
         }

@@ -152,6 +152,11 @@
   lookups are bulk queries now (window-function ROW_NUMBER for "latest"),
   leaving O(1) round trips plus one capped result-text read per linked
   task.
+- **The node-daemon image shipped no HEALTHCHECK (deploy).** `restart:
+  unless-stopped` cannot catch a hung daemon. The heartbeat loop now
+  touches a `heartbeat.stamp` marker under AGENTGRID_DATA_DIR after every
+  iteration, and the image's HEALTHCHECK fails when the stamp is older
+  than 30 s (3× the default interval).
 
 ### Added
 
