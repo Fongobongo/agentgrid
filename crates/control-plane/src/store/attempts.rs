@@ -138,6 +138,40 @@ impl Store {
             .bind(attempt_id)
             .execute(&mut *tx)
             .await?;
+        // Competitor-gap feature (babysitter-style verification note): on a
+        // final `Succeeded` (never on a cancelled/failed attempt), cross-check
+        // what the agent CLAIMED (its events) against what it actually
+        // PRODUCED (the commit). Deterministic and audit-only — the note never
+        // changes the outcome:
+        //   - a commit without a `result` event = silent success (diff exists,
+        //     nobody claimed the finish)
+        //   - a `result` event without a commit = declared success but nothing
+        //     landed in git (plain-dir task or a no-op run)
+        // Inserted directly inside this write txn (the ingest path rejects
+        // events for terminal attempts), indexed by the events_fts triggers,
+        // visible in the event log and `GET /v1/search/events`.
+        if task_target == TaskStatus::Succeeded {
+            let result_events: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM task_events WHERE attempt_id = ? AND type = 'result'",
+            )
+            .bind(attempt_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let note = match (req.commit_sha.is_some(), result_events > 0) {
+                (true, false) => Some(
+                    "verification: attempt produced a commit but no adapter result event \
+                     (silent success — diff exists without a claimed finish)",
+                ),
+                (false, true) => Some(
+                    "verification: adapter reported a result but no commit was produced \
+                     (plain-dir task or a no-op run)",
+                ),
+                _ => None,
+            };
+            if let Some(text) = note {
+                insert_verification_note(&mut tx, attempt_id, text).await?;
+            }
+        }
         // Hardening P2 item 35: validation metrics. Only record when the attempt
         // actually went through the `validating` state (begin_validate set
         // `validated_at`); a `running`-only completion carries no validation.
@@ -1076,4 +1110,49 @@ impl Store {
             })
             .collect())
     }
+}
+
+/// Competitor-gap feature (verification note): insert an audit-only
+/// `verification_note` event directly into `task_events` inside the caller's
+/// write txn. The sequence is the attempt's next contiguous slot, so the note
+/// reads as the final line of the attempt's event stream; the events_fts
+/// triggers index it like any other event (searchable via
+/// `GET /v1/search/events`).
+async fn insert_verification_note(
+    tx: &mut sqlx::SqliteConnection,
+    attempt_id: &str,
+    text: &str,
+) -> Result<()> {
+    let seq: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_events WHERE attempt_id = ?",
+    )
+    .bind(attempt_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    // Allocate the ingest_id from the shared counter (not MAX+1) so a future
+    // event batch can never reuse the same global cursor value; the unique
+    // index `ux_events_ingest` and the events_fts rowid depend on it.
+    let ingest_id: i64 = sqlx::query_scalar(
+        "UPDATE event_ingest_counter SET next_val = next_val + 1 \
+         WHERE id = 1 RETURNING next_val",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at, ingest_id) \
+         VALUES (?, ?, ?, 'stdout', ?, ?, ?) \
+         ON CONFLICT(attempt_id, sequence) DO NOTHING",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(attempt_id)
+    .bind(seq)
+    .bind(serde_json::to_string(&serde_json::json!({
+        "kind": "verification_note",
+        "text": text,
+    }))?)
+    .bind(now_iso())
+    .bind(ingest_id)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
 }

@@ -5407,6 +5407,151 @@ fn complete_fail_req() -> CompleteAttemptRequest {
     r
 }
 
+/// Competitor-gap feature (verification note): a successful completion
+/// cross-checks the agent's claimed finish (result event) against the actual
+/// commit, and appends an audit-only `verification_note` event on mismatch.
+#[tokio::test]
+async fn verification_note_flags_silent_success_and_claim_without_commit() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+    let (node_id, _cred) = enroll(&app, "n-verify", vec!["mock".into()], vec!["demo".into()]).await;
+    let task = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "verification fixture".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Case 1: commit WITHOUT a result event -> silent-success note.
+    let a = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a.attempt_id).await.unwrap();
+    let mut req = complete_req();
+    req.commit_sha = Some("deadbeef".into());
+    state.store.complete_attempt(&a.attempt_id, &req).await.unwrap();
+    let events = state
+        .store
+        .get_events(&task.id, None, 0, Some(100))
+        .await
+        .unwrap();
+    let note = events
+        .iter()
+        .find(|e| e.payload.to_string().contains("verification_note"))
+        .expect("silent success must emit a verification note");
+    assert!(
+        note.payload.to_string().contains("no adapter result event"),
+        "note must explain the silent success: {}",
+        note.payload
+    );
+
+    // Case 2 (fresh task): result event WITHOUT a commit -> claim-only note.
+    let task2 = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "verification fixture 2".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let b = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&b.attempt_id).await.unwrap();
+    state
+        .store
+        .ingest_events(
+            &b.attempt_id,
+            &agentgrid_common::IngestEventsRequest {
+                events: vec![agentgrid_common::IncomingEvent {
+                    sequence: 1,
+                    r#type: agentgrid_common::EventType::Result,
+                    payload: serde_json::json!({ "text": "done" }),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .store
+        .complete_attempt(&b.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    let events2 = state
+        .store
+        .get_events(&task2.id, None, 0, Some(100))
+        .await
+        .unwrap();
+    let note2 = events2
+        .iter()
+        .find(|e| e.payload.to_string().contains("verification_note"))
+        .expect("claim-without-commit must emit a verification note");
+    assert!(
+        note2.payload.to_string().contains("no commit was produced"),
+        "note must explain the missing commit: {}",
+        note2.payload
+    );
+
+    // Case 3: both present -> no note at all.
+    let task3 = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "verification fixture 3".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let c = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&c.attempt_id).await.unwrap();
+    state
+        .store
+        .ingest_events(
+            &c.attempt_id,
+            &agentgrid_common::IngestEventsRequest {
+                events: vec![agentgrid_common::IncomingEvent {
+                    sequence: 1,
+                    r#type: agentgrid_common::EventType::Result,
+                    payload: serde_json::json!({ "text": "done" }),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let mut req3 = complete_req();
+    req3.commit_sha = Some("beef".into());
+    state
+        .store
+        .complete_attempt(&c.attempt_id, &req3)
+        .await
+        .unwrap();
+    let events3 = state
+        .store
+        .get_events(&task3.id, None, 0, Some(100))
+        .await
+        .unwrap();
+    assert!(
+        !events3
+            .iter()
+            .any(|e| e.payload.to_string().contains("verification_note")),
+        "a consistent success (commit + result) must not get a verification note"
+    );
+}
+
 #[tokio::test]
 async fn cross_node_cannot_ingest_events() {
     let state = AppState::open_temp().await.unwrap();
