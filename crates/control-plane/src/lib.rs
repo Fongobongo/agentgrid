@@ -421,6 +421,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::webhooks::github_pull_request_webhook),
         )
         .route("/v1/search", get(routes::tasks::search_tasks))
+        .route("/v1/search/events", get(routes::tasks::search_events))
         .route("/v1/tasks/{id}/events", get(routes::events::get_events))
         .route(
             "/v1/tasks/{id}/events/stream",

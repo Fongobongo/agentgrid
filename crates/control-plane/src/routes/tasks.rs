@@ -127,6 +127,28 @@ pub async fn search_tasks(
     }
 }
 
+/// Competitor-gap feature: `GET /v1/search/events?q=...&limit=...` —
+/// full-text search over past task events (FTS5 bm25 ranking, page cap 1000).
+#[derive(Debug, serde::Deserialize)]
+pub struct EventsSearchQuery {
+    pub q: String,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+pub async fn search_events(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<EventsSearchQuery>,
+) -> Result<Json<Vec<agentgrid_common::EventSearchHit>>, StatusCode> {
+    match state.store.search_events(&q.q, q.limit).await {
+        Ok(items) => Ok(Json(items)),
+        Err(e) => {
+            tracing::error!("search_events failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 pub async fn show_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

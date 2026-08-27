@@ -99,6 +99,11 @@ Only the `claude` adapter is wired end-to-end today (see
        ag logs <task-id> --follow
        ag task show <task-id>
 
+5. Search past work — task prompts or agent event payloads (FTS5):
+
+       ag search "login bug"
+       ag search --events "checkpoint saved"
+
 By default the adapter runs **without** permission bypass, so an unattended
 run will pause at the first interactive prompt. For unattended operation use a
 sandbox (`AGENTGRID_SANDBOX=docker`) plus the explicit opt-in

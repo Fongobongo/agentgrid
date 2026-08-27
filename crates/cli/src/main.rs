@@ -116,11 +116,16 @@ struct StorageArgs {
     command: StorageSub,
 }
 
-/// Plan 1.3: FTS5 search over task prompt/repository.
+/// Plan 1.3: FTS5 search over task prompt/repository; `--events` switches
+/// to full-text search over past task events.
 #[derive(Args)]
 struct SearchArgs {
     /// Query text (words to match).
     query: String,
+
+    /// Search task events (agent logs/output) instead of task prompts.
+    #[arg(long)]
+    events: bool,
 }
 
 /// Plan 1.3: resume an attempt — new attempt inheriting the task's prompt.
@@ -951,8 +956,12 @@ async fn cmd_storage(
     Ok(())
 }
 
-/// Plan 1.3: FTS5 task search (`ag search <query>`).
+/// Plan 1.3: FTS5 task search (`ag search <query>`) — or event search
+/// (`ag search --events <query>`) over past agent output.
 async fn cmd_search(client: &reqwest::Client, base: &str, a: SearchArgs, json: bool) -> Result<()> {
+    if a.events {
+        return cmd_search_events(client, base, &a.query, json).await;
+    }
     let url = format!("{base}/v1/search?q={}", urlencode(&a.query));
     let resp = client
         .get(&url)
@@ -973,6 +982,48 @@ async fn cmd_search(client: &reqwest::Client, base: &str, a: SearchArgs, json: b
     }
     for t in &hits {
         println!("{:>12}  {:>10}  {}", t.id, t.status, t.prompt);
+    }
+    Ok(())
+}
+
+/// Competitor-gap feature: full-text search over task events.
+async fn cmd_search_events(
+    client: &reqwest::Client,
+    base: &str,
+    query: &str,
+    json: bool,
+) -> Result<()> {
+    let url = format!("{base}/v1/search/events?q={}", urlencode(query));
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("event search request failed")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("event search failed ({})", resp.status());
+    }
+    let hits: Vec<agentgrid_common::EventSearchHit> =
+        resp.json().await.context("parse event search response")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("no events match '{query}'");
+        return Ok(());
+    }
+    for h in &hits {
+        let payload: String = h.payload.chars().take(200).collect();
+        let payload = if h.payload.chars().count() > 200 {
+            format!("{payload}…")
+        } else {
+            payload
+        };
+        println!(
+            "{:>12}  {:>12}  {:>8}  {}",
+            h.task_id, h.attempt_id, h.sequence, h.event_type
+        );
+        println!("    {payload}");
     }
     Ok(())
 }

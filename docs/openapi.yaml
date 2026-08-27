@@ -134,6 +134,24 @@ paths:
           in: query
           required: true
           schema: { type: string }
+  /v1/search/events:
+    get:
+      summary: Full-text search over past task events (FTS5)
+      description: |
+        Competitor-gap feature: matches agent event payloads via the
+        contentless `events_fts` mirror, ranked by bm25. The hit carries the
+        owning task id, attempt id, sequence, stored event type and raw
+        payload (joined back through `task_events`). `limit` caps the page
+        (default 100, server ceiling 1000).
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000 }
   /v1/attempts/{id}:
     get:
       summary: Fetch a single attempt (prompt included)

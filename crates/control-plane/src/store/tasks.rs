@@ -4,7 +4,7 @@ use super::{
     event_type_of, now_iso, page_limit, row_to_task_view, Store, DEFAULT_EVENT_PAGE, KEYSET_ORDER,
     KEYSET_PREDICATE,
 };
-use agentgrid_common::{CreateTaskRequest, TaskEvent, TaskStatus, TaskView};
+use agentgrid_common::{CreateTaskRequest, EventSearchHit, TaskEvent, TaskStatus, TaskView};
 use anyhow::Result;
 use sqlx::Row;
 use uuid::Uuid;
@@ -211,7 +211,48 @@ impl Store {
         Ok(rows.iter().map(row_to_task_view).collect())
     }
 
-    /// Plan 1.3 (#13): list tags for a task.
+    /// Competitor-gap feature: full-text search over past task events (agent
+    /// logs, tool calls, results) via the `events_fts` mirror (migration
+    /// 0063). Ranked by bm25; the payload comes from `task_events` (joined
+    /// through `attempts` for the owning task), so the contentless FTS index
+    /// never needs a back-join on its own.
+    pub async fn search_events(
+        &self,
+        query: &str,
+        limit: Option<u64>,
+    ) -> Result<Vec<EventSearchHit>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Same sanitization as search_tasks: strip literal quotes so user
+        // punctuation cannot break out of the FTS5 phrase syntax.
+        let clean: String = q.chars().filter(|c| *c != '"').collect();
+        let fts = format!("\"{clean}\"");
+        let limit = page_limit(limit);
+        let rows = sqlx::query(
+            "SELECT a.task_id, te.attempt_id, te.sequence, te.type, te.payload \
+             FROM task_events te \
+             JOIN attempts a ON a.id = te.attempt_id \
+             JOIN events_fts ON events_fts.rowid = te.ingest_id \
+             WHERE events_fts.payload_text MATCH ? \
+             ORDER BY bm25(events_fts) LIMIT ?",
+        )
+        .bind(&fts)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| EventSearchHit {
+                task_id: r.try_get("task_id").unwrap_or_default(),
+                attempt_id: r.try_get("attempt_id").unwrap_or_default(),
+                sequence: r.try_get("sequence").unwrap_or_default(),
+                event_type: r.try_get("type").unwrap_or_default(),
+                payload: r.try_get("payload").unwrap_or_default(),
+            })
+            .collect())
+    }
     pub async fn list_tags(&self, task_id: &str) -> Result<Vec<String>> {
         let rows = sqlx::query("SELECT tag FROM task_tags WHERE task_id = ? ORDER BY tag")
             .bind(task_id)

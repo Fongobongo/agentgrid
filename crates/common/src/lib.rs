@@ -1249,6 +1249,18 @@ pub struct ReworkResponse {
     pub task_id: String,
 }
 
+/// Competitor-gap feature: one hit of `GET /v1/search/events` — a task event
+/// whose payload matched the FTS5 query. `event_type` is the stored string
+/// form of [`EventType`] (snake_case); the payload is the raw event JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventSearchHit {
+    pub task_id: String,
+    pub attempt_id: String,
+    pub sequence: i64,
+    pub event_type: String,
+    pub payload: String,
+}
+
 /// ── opencode-config management (feature "opencode profiles") ──────────
 ///
 /// The control plane is the source of truth for per-node opencode

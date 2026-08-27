@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Events search: `GET /v1/search/events`, `ag search --events`, dashboard
+  toggle.** Competitor-gap feature — the contentless `events_fts` mirror
+  (migration 0063) previously only fed the retry resume-digest; past agent
+  events (logs, tool calls, results) are now publicly searchable. Hits join
+  `task_events` → `attempts` for the owning task id and carry sequence +
+  stored event type + raw payload, ranked by bm25 with a server page cap of
+  1000. UI gets a Tasks/Events toggle on the dashboard search box.
+
 ## [v0.3.7] — 2026-08-26
 
 > Пост-релизный аудит v0.3.6: 20+ подтверждённых ошибок логики,

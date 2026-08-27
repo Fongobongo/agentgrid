@@ -222,6 +222,18 @@ export function searchTasks(q: string): Promise<TaskView[]> {
   return listGet<TaskView>(`/v1/search?q=${encodeURIComponent(q)}`);
 }
 
+export interface EventSearchHit {
+  task_id: string;
+  attempt_id: string;
+  sequence: number;
+  event_type: string;
+  payload: string;
+}
+
+export function searchEvents(q: string): Promise<EventSearchHit[]> {
+  return listGet<EventSearchHit>(`/v1/search/events?q=${encodeURIComponent(q)}`);
+}
+
 export function listNodes(): Promise<NodeView[]> {
   return listGet<NodeView>('/v1/nodes');
 }

@@ -161,6 +161,17 @@ button.link, a.link {
   font-size: 14px;
 }
 
+.search-row { display: flex; align-items: center; gap: 12px; }
+
+.search-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .grid {
   width: 100%;
   border-collapse: collapse;

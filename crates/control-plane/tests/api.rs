@@ -8493,6 +8493,96 @@ async fn search_finds_task_by_prompt_word() {
     assert!(!hits.iter().any(|t| t.id == task.id));
 }
 
+/// Competitor-gap feature: `GET /v1/search/events` finds past agent events
+/// by payload word via the events_fts mirror.
+#[tokio::test]
+async fn search_events_finds_event_by_payload_word() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+    let (node_id, _cred) =
+        enroll(&app, "n-evsearch", vec!["mock".into()], vec!["demo".into()]).await;
+
+    let task = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "event search fixture".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let a = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a.attempt_id).await.unwrap();
+
+    state
+        .store
+        .ingest_events(
+            &a.attempt_id,
+            &agentgrid_common::IngestEventsRequest {
+                events: vec![
+                    agentgrid_common::IncomingEvent {
+                        sequence: 1,
+                        r#type: agentgrid_common::EventType::Stdout,
+                        payload: serde_json::json!({"text": "INFO pulling deps"}),
+                    },
+                    agentgrid_common::IncomingEvent {
+                        sequence: 2,
+                        r#type: agentgrid_common::EventType::Error,
+                        payload: serde_json::json!({"text": "quagga protocol handshake failed"}),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+    // Distinctive word finds the error event and carries the owning task id.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/search/events?q=quagga", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hits: Vec<agentgrid_common::EventSearchHit> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].task_id, task.id);
+    assert_eq!(hits[0].attempt_id, a.attempt_id);
+    assert_eq!(hits[0].sequence, 2);
+    assert_eq!(hits[0].event_type, "error");
+    assert!(hits[0].payload.contains("quagga"));
+
+    // A word that does not appear yields no hits.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/search/events?q=zebra", &token))
+        .await
+        .unwrap();
+    let hits: Vec<agentgrid_common::EventSearchHit> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(hits.is_empty());
+
+    // Empty query is a clean empty result, not an error.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/search/events?q=", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 /// Plan 1.3 (#13): attempt detail + tag CRUD via the API.
 #[tokio::test]
 async fn attempt_detail_and_tag_crud() {
