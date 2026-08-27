@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Egress firewall for restricted-mode sandboxes (`deploy/egress-proxy/`).**
+  Competitor-gap feature — docker has no native per-domain egress filter, so
+  `network_mode=restricted` collapsed to `--network none` (safe, but network
+  fully off). A squid sidecar now restores "internet but allowlisted domains
+  only": with `AGENTGRID_SANDBOX_EGRESS_NETWORK` +
+  `AGENTGRID_SANDBOX_EGRESS_PROXY` set, restricted attempts attach to the
+  proxy network and get `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` injected; the
+  proxy (read-only, cap-dropped, no caching) denies everything not in
+  `squid.allowlist.conf`, including RFC1918 LAN ranges. Unrestricted/none
+  attempts never inherit the proxy env, and the heartbeat's
+  `enforced_limits` stays honest (restricted-on-proxy still counts as
+  egress-isolated).
+
 - **Events search: `GET /v1/search/events`, `ag search --events`, dashboard
   toggle.** Competitor-gap feature — the contentless `events_fts` mirror
   (migration 0063) previously only fed the retry resume-digest; past agent

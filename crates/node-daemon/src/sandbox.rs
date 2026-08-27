@@ -115,15 +115,50 @@ fn valid_allowlist_spec(net: &str) -> bool {
 
 /// The docker-native network a task-level mode resolves to, without the
 /// env fallback (used for egress audit logging so operators see the actual
-/// isolation applied): `none`→`none`, `restricted`→`none` (docker cannot do
-/// per-range egress filtering), `unrestricted`→`bridge`, anything else passes
-/// through. Mirrors the mapping in [`docker_run_head`].
-pub fn resolved_network_mode(mode: &str) -> &'static str {
+/// isolation applied): `none`→`none`, `restricted`→the configured egress-proxy
+/// network when one is set, else `none` (docker cannot do per-range egress
+/// filtering), `unrestricted`→`bridge`, anything else passes through. Mirrors
+/// the mapping in [`docker_run_head`].
+pub fn resolved_network_mode(mode: &str) -> String {
     match mode {
-        "restricted" => "none",
-        "unrestricted" => "bridge",
-        "none" => "none",
-        _ => "none",
+        "restricted" => egress_proxy_network().unwrap_or_else(|| "none".to_string()),
+        "unrestricted" => "bridge".to_string(),
+        "none" => "none".to_string(),
+        _ => "none".to_string(),
+    }
+}
+
+/// Competitor-gap feature (egress firewall): the operator-configured docker
+/// network that hosts an egress proxy sidecar (see `deploy/egress-proxy/`).
+/// When set, `network_mode=restricted` attempts attach to this network and get
+/// the proxy URL injected (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`) instead of
+/// being collapsed to `--network none` — so "internet but no LAN" becomes
+/// enforceable through the proxy's allowlist instead of turning the network
+/// fully off.
+pub fn egress_proxy_network() -> Option<String> {
+    std::env::var("AGENTGRID_SANDBOX_EGRESS_NETWORK")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The egress-proxy URL injected into restricted-mode sandbox containers, if
+/// the operator configured one.
+pub fn egress_proxy_url() -> Option<String> {
+    std::env::var("AGENTGRID_SANDBOX_EGRESS_PROXY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// True when the effective egress is isolated: `none`, or a `restricted`
+/// attempt attached to a configured egress-proxy network (the proxy enforces
+/// the allowlist, so isolation is preserved even though the docker network is
+/// not `none`).
+pub fn effective_egress_isolated(mode: &str) -> bool {
+    match mode {
+        "restricted" => egress_proxy_network().is_some(),
+        other => other == "none",
     }
 }
 
@@ -213,18 +248,27 @@ fn docker_run_head(
     // Plan §27: translate the task-level mode (none|restricted|unrestricted)
     // into a docker-native network. `restricted` cannot be enforced as
     // "internet but no LAN" with the docker CLI alone (no per-range egress
-    // filter), so it maps to `none` — strictly more isolated than promised,
-    // never less (a previously raw `--network restricted` would just fail
-    // the container). Real LAN-blocking-with-internet needs the egress-proxy
-    // upgrade path (same as the allowlist refusal).
+    // filter); it collapses to `none` — strictly more isolated than promised,
+    // never less — UNLESS the operator wired an egress-proxy sidecar
+    // (competitor-gap feature): then restricted attempts attach to the proxy
+    // network and get HTTP(S)_PROXY injected, and the proxy enforces the
+    // allowlist.
     let net = match net.as_str() {
         "none" => "none".to_string(),
         "restricted" => {
-            tracing::debug!(
-                "network_mode=restricted maps to --network none (docker has no \
-                 per-range egress filter; egress proxy is the upgrade path)"
-            );
-            "none".to_string()
+            if let Some(egress) = egress_proxy_network() {
+                tracing::debug!(
+                    network = %egress,
+                    "network_mode=restricted attaches to the egress-proxy network"
+                );
+                egress
+            } else {
+                tracing::debug!(
+                    "network_mode=restricted maps to --network none (docker has no \
+                     per-range egress filter; egress proxy is the upgrade path)"
+                );
+                "none".to_string()
+            }
         }
         "unrestricted" => "bridge".to_string(),
         // Fail closed for TASK-supplied modes only: an unknown string from an
@@ -241,6 +285,18 @@ fn docker_run_head(
     };
     v.push("--network".to_string());
     v.push(net);
+    // Competitor-gap feature (egress firewall): inject the proxy URL so
+    // restricted-mode adapters route through the sidecar (which enforces the
+    // domain allowlist). Only applied when a restricted attempt attached to
+    // the egress network — an unrestricted/none attempt must not inherit it.
+    if network_mode == Some("restricted") && egress_proxy_network().is_some() {
+        if let Some(proxy) = egress_proxy_url() {
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+                v.push("--env".to_string());
+                v.push(format!("{key}={proxy}"));
+            }
+        }
+    }
     if std::env::var("AGENTGRID_SANDBOX_READ_ONLY")
         .map(|x| x == "1" || x.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -654,6 +710,8 @@ mod tests {
             "AGENTGRID_SANDBOX_MEMORY",
             "AGENTGRID_SANDBOX_CPUS",
             "AGENTGRID_SANDBOX_ARTIFACT_DIR",
+            "AGENTGRID_SANDBOX_EGRESS_NETWORK",
+            "AGENTGRID_SANDBOX_EGRESS_PROXY",
         ] {
             std::env::remove_var(k);
         }
@@ -861,6 +919,51 @@ mod tests {
         // (or any garbage) must never reach --network verbatim.
         assert_eq!(net_of(Some("host")), "none");
         assert_eq!(net_of(Some("made-up")), "none");
+    }
+
+    #[test]
+    fn restricted_mode_uses_egress_proxy_network_when_configured() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_EGRESS_NETWORK", "agentgrid-egress");
+        std::env::set_var("AGENTGRID_SANDBOX_EGRESS_PROXY", "http://egress:3128");
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            Some("restricted"),
+            false,
+            None,
+        );
+        clear_sandbox_env();
+        let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
+        assert_eq!(
+            a[at("--network")], "agentgrid-egress",
+            "restricted attaches to the egress-proxy network"
+        );
+        // Proxy env is injected for restricted attempts on the egress network.
+        let envs: Vec<&String> = a.iter().filter(|x| x.starts_with("HTTP_PROXY=")).collect();
+        assert_eq!(envs, vec![&"HTTP_PROXY=http://egress:3128".to_string()]);
+        let envs: Vec<&String> = a.iter().filter(|x| x.starts_with("HTTPS_PROXY=")).collect();
+        assert_eq!(envs, vec![&"HTTPS_PROXY=http://egress:3128".to_string()]);
+
+        // An unrestricted attempt on the same node must NOT inherit the proxy.
+        let (_, a2) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            Some("unrestricted"),
+            false,
+            None,
+        );
+        let at2 = |flag: &str| a2.iter().position(|x| x == flag).unwrap() + 1;
+        assert_eq!(a2[at2("--network")], "bridge");
+        assert!(
+            !a2.iter().any(|x| x.starts_with("HTTP_PROXY=")),
+            "unrestricted attempt must not inherit the egress proxy env"
+        );
     }
 
     #[test]

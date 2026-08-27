@@ -231,11 +231,13 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 // Plan 960: report exactly what is applied. Docker always
                 // applies cap-drop + no-new-privileges; `enforced_limits` is
                 // true when resource limits are actually set AND the effective
-                // network is isolated (none). A `--network bridge` override
-                // means egress isolation is NOT applied, so the flag reflects
-                // that honestly.
+                // egress is isolated — `none`, or a `restricted` mode attached
+                // to a configured egress-proxy network (competitor-gap
+                // feature; the proxy enforces the allowlist). A `--network
+                // bridge` override means egress isolation is NOT applied, so
+                // the flag reflects that honestly.
                 enforced_limits: matches!(cfg.sandbox, sandbox::SandboxKind::Docker)
-                    && sandbox::resolved_network_mode(&cfg.network_mode) == "none"
+                    && sandbox::effective_egress_isolated(&cfg.network_mode)
                     && (std::env::var("AGENTGRID_SANDBOX_PIDS_LIMIT").is_ok()
                         || std::env::var("AGENTGRID_SANDBOX_MEMORY").is_ok()
                         || std::env::var("AGENTGRID_SANDBOX_CPUS").is_ok()),

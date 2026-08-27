@@ -1,0 +1,46 @@
+# Competitor-gap feature: egress firewall for restricted-mode sandboxes.
+#
+# A squid sidecar that enforces a domain allowlist for agent traffic. Docker
+# has no native per-domain/per-CIDR egress filter, so the node daemon
+# collapses `network_mode=restricted` to `--network none` by default. Wiring
+# this sidecar gives "internet but allowlisted domains only" back:
+#
+#   - the node daemon attaches restricted attempts to the `agentgrid-egress`
+#     docker network and injects HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
+#     (AGENTGRID_SANDBOX_EGRESS_NETWORK + AGENTGRID_SANDBOX_EGRESS_PROXY)
+#   - squid permits only the allowlisted domains and blocks every other
+#     destination, including RFC1918 LAN ranges (the whole point of
+#     "restricted": internet OK, LAN off-limits)
+#
+# Usage:
+#   docker compose -f deploy/egress-proxy/docker-compose.yml up -d
+#   AGENTGRID_SANDBOX_EGRESS_NETWORK=agentgrid-egress \
+#   AGENTGRID_SANDBOX_EGRESS_PROXY=http://egress-proxy:3128 \
+#     agentgrid-node-daemon
+#
+# Edit deploy/egress-proxy/squid.allowlist.conf to allow your domains.
+services:
+  egress-proxy:
+    image: ubuntu/squid:6.6-24.04_edge@sha256:b3a5d08db09638f1b7e26bc5751d6b32c61a6993f4b9d5521b9f4d9e48ff53a27
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev
+      - /var/spool/squid:mode=0777
+      - /var/run:mode=0777
+      - /var/cache/squid:mode=0777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./squid.allowlist.conf:/etc/squid/squid.conf:ro
+    networks:
+      - agentgrid-egress
+    expose:
+      - "3128"
+
+networks:
+  agentgrid-egress:
+    name: agentgrid-egress
+    internal: false
