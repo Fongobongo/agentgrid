@@ -142,34 +142,33 @@ impl Store {
         // final `Succeeded` (never on a cancelled/failed attempt), cross-check
         // what the agent CLAIMED (its events) against what it actually
         // PRODUCED (the commit). Deterministic and audit-only — the note never
-        // changes the outcome:
-        //   - a commit without a `result` event = silent success (diff exists,
-        //     nobody claimed the finish)
-        //   - a `result` event without a commit = declared success but nothing
-        //     landed in git (plain-dir task or a no-op run)
-        // Inserted directly inside this write txn (the ingest path rejects
-        // events for terminal attempts), indexed by the events_fts triggers,
-        // visible in the event log and `GET /v1/search/events`.
-        if task_target == TaskStatus::Succeeded {
+        // changes the outcome.
+        //
+        // Only ONE mismatch is detectable here: a commit without a `result`
+        // event = silent success (the diff exists, nobody claimed the finish).
+        // The mirror case ("result without commit") is NOT a mismatch — on a
+        // success `commit_sha=None` means a plain-dir task, which has no
+        // commit by design, so emitting a note there would be pure noise (and
+        // it broke stdout-sequence contiguity checks in e2e).
+        //
+        // The note is inserted directly inside this write txn (the ingest path
+        // rejects events for terminal attempts), indexed by the events_fts
+        // triggers, visible in the event log and `GET /v1/search/events`.
+        if task_target == TaskStatus::Succeeded && req.commit_sha.is_some() {
             let result_events: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM task_events WHERE attempt_id = ? AND type = 'result'",
             )
             .bind(attempt_id)
             .fetch_one(&mut *tx)
             .await?;
-            let note = match (req.commit_sha.is_some(), result_events > 0) {
-                (true, false) => Some(
+            if result_events == 0 {
+                insert_verification_note(
+                    &mut tx,
+                    attempt_id,
                     "verification: attempt produced a commit but no adapter result event \
                      (silent success — diff exists without a claimed finish)",
-                ),
-                (false, true) => Some(
-                    "verification: adapter reported a result but no commit was produced \
-                     (plain-dir task or a no-op run)",
-                ),
-                _ => None,
-            };
-            if let Some(text) = note {
-                insert_verification_note(&mut tx, attempt_id, text).await?;
+                )
+                .await?;
             }
         }
         // Hardening P2 item 35: validation metrics. Only record when the attempt

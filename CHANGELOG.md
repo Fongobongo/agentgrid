@@ -19,10 +19,12 @@
   the control plane cross-checks what the agent CLAIMED (a `result` event)
   against what it actually PRODUCED (a commit) and appends an audit-only
   `verification_note` event on mismatch: a commit without a result event is a
-  "silent success" (diff exists, nobody claimed the finish), a result without
-  a commit is a claim with nothing landed in git. The note never changes the
-  outcome, lands in the event log, and is searchable via
-  `GET /v1/search/events`.
+  "silent success" (diff exists, nobody claimed the finish). The note never
+  changes the outcome, lands in the event log, and is searchable via
+  `GET /v1/search/events`. The mirror case (result without commit) is
+  deliberately NOT flagged — on a success that means a plain-dir task with no
+  commit by design, and a note there was pure noise that broke stdout-sequence
+  contiguity checks in e2e.
 
 - **Egress firewall for restricted-mode sandboxes (`deploy/egress-proxy/`).**
   Competitor-gap feature — docker has no native per-domain egress filter, so

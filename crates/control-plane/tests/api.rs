@@ -5462,7 +5462,8 @@ async fn verification_note_flags_silent_success_and_claim_without_commit() {
         note.payload
     );
 
-    // Case 2 (fresh task): result event WITHOUT a commit -> claim-only note.
+    // Case 2 (fresh task): result event WITHOUT a commit (plain-dir task) —
+    // NOT a mismatch, must produce no note.
     let task2 = state
         .store
         .create_task(&agentgrid_common::CreateTaskRequest {
@@ -5499,14 +5500,11 @@ async fn verification_note_flags_silent_success_and_claim_without_commit() {
         .get_events(&task2.id, None, 0, Some(100))
         .await
         .unwrap();
-    let note2 = events2
-        .iter()
-        .find(|e| e.payload.to_string().contains("verification_note"))
-        .expect("claim-without-commit must emit a verification note");
     assert!(
-        note2.payload.to_string().contains("no commit was produced"),
-        "note must explain the missing commit: {}",
-        note2.payload
+        !events2
+            .iter()
+            .any(|e| e.payload.to_string().contains("verification_note")),
+        "a plain-dir success (no commit by design) must not get a verification note"
     );
 
     // Case 3: both present -> no note at all.
