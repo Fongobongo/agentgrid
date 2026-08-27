@@ -11,6 +11,14 @@
   `task_events` → `attempts` for the owning task id and carry sequence +
   stored event type + raw payload, ranked by bm25 with a server page cap of
   1000. UI gets a Tasks/Events toggle on the dashboard search box.
+- **Diff review: numbered, commentable diff + rework via annotations.**
+  Competitor-gap feature — the `patch_annotations` backend existed but the
+  web UI never used it. The changes.patch viewer now parses unified-diff
+  hunks into file + line-numbered rows, lets an operator click any added/
+  context line to attach an inline comment (persisted through
+  `POST /v1/attempts/{id}/annotations`), lists comments above the diff, and
+  "Request rework" now goes through `POST /v1/attempts/{id}/rework` (a fresh
+  task with all annotations folded into the prompt) instead of a bare retry.
 
 ## [v0.3.7] — 2026-08-26
 

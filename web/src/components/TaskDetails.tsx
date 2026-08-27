@@ -1,22 +1,29 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+  addAnnotation,
   answerApproval,
   ApiError,
   ApprovalView,
   ArtifactDownload,
   cancelTask,
+  CreateAnnotationRequest,
   getArtifact,
   getEligibility,
   getTask,
   getTaskEvents,
   getTaskReviewApproval,
+  listAnnotations,
+  PatchAnnotation,
   retryTask,
+  reworkAttempt,
   streamTask,
   TaskEligibility,
   TaskEvent,
   TaskView,
 } from '../api';
+import { parsePatchLines } from '../patch';
 import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
+import { TextAreaModal } from './Modal';
 
 function eventText(e: TaskEvent): string {
   const p = e.payload ?? {};
@@ -38,6 +45,10 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   const [busy, setBusy] = useState<string | null>(null);
   // Competitor plan 1.1 (diff review): pending patch-review approval, if any.
   const [reviewApproval, setReviewApproval] = useState<ApprovalView | null>(null);
+  // Competitor-gap feature: inline annotations on the latest attempt's diff
+  // + the modal state for composing one on a clicked line.
+  const [annotations, setAnnotations] = useState<PatchAnnotation[]>([]);
+  const [annotating, setAnnotating] = useState<{ file: string; line: number } | null>(null);
 
   const logRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -114,6 +125,45 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
     }
   }, [task, taskId]);
 
+  // Competitor-gap feature: load inline annotations for the latest attempt
+  // once the terminal task id is known (attempt ids arrive via events).
+  const latestAttemptId = useMemo(() => {
+    let id = task?.assigned_attempt_id ?? null;
+    for (const e of events) {
+      if (e.attempt_id) {
+        id = e.attempt_id;
+      }
+    }
+    return id;
+  }, [task?.assigned_attempt_id, events]);
+  useEffect(() => {
+    if (task && TERMINAL.includes(task.status) && latestAttemptId) {
+      listAnnotations(latestAttemptId).then(setAnnotations).catch(() => setAnnotations([]));
+    } else {
+      setAnnotations([]);
+    }
+  }, [task, taskId, latestAttemptId]);
+
+  const submitAnnotation = async (text: string) => {
+    if (!annotating || !latestAttemptId) return;
+    setBusy('annotate');
+    try {
+      const body: CreateAnnotationRequest = {
+        file: annotating.file,
+        line_start: annotating.line,
+        line_end: annotating.line,
+        comment: text,
+      };
+      const a = await addAnnotation(latestAttemptId, body);
+      setAnnotations((prev) => [...prev, a]);
+      setAnnotating(null);
+    } catch (e) {
+      setError(e as Error);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // Autoscroll the log to the bottom unless paused.
   useLayoutEffect(() => {
     if (!paused && atBottom.current && logRef.current) {
@@ -143,9 +193,8 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   // Competitor plan 1.1: operator decision on the patch-review approval.
   // - accept -> allow the approval, task stays succeeded (patch accepted)
   // - reject -> deny, human has seen the patch and rejected it
-  // - rework -> deny + retry the task (fresh attempt so the agent can
-  //   incorporate feedback; the denied approval records the operator's
-  //   rejection of this diff)
+  // - rework -> deny + send the annotated attempt for rework (the backend
+  //   folds all inline annotations into a fresh task's prompt)
   const reviewDecide = async (decision: 'accept' | 'reject' | 'rework') => {
     if (!reviewApproval) return;
     setBusy(decision);
@@ -158,8 +207,10 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
       );
       if (!r.ok) throw new ApiError(r.status, `review ${decision} failed (${r.status})`);
       if (decision === 'rework') {
-        const rr = await retryTask(taskId);
-        if (!rr.ok) throw new ApiError(rr.status, `rework retry failed (${rr.status})`);
+        if (!latestAttemptId) throw new ApiError(404, 'rework failed: no attempt to annotate');
+        const rr = await reworkAttempt(latestAttemptId);
+        window.location.hash = `#/task/${rr.task_id}`;
+        return;
       }
       setReviewApproval(null);
       getTask(taskId).then(setTask).catch(() => {});
@@ -198,6 +249,15 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
 
   return (
     <div className="task-details">
+      {annotating && (
+        <TextAreaModal
+          title={`Comment on ${annotating.file}:L${annotating.line}`}
+          label="Comment (Ctrl/Cmd+Enter to submit):"
+          submitLabel="Add comment"
+          onSubmit={submitAnnotation}
+          onCancel={() => setAnnotating(null)}
+        />
+      )}
       <div className="task-head">
         <h2>
           <StatusBadge status={task.status} /> {task.repository}
@@ -307,7 +367,23 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
                       </button>
                     </div>
                   )}
-                  <pre className="patch">{renderPatch(patch.text)}</pre>
+                  {/* Competitor-gap feature: inline annotations list. */}
+                  {annotations.length > 0 && (
+                    <div className="annotations">
+                      <b>Inline comments</b>
+                      {annotations.map((a) => (
+                        <div key={a.id} className="annotation">
+                          <span className="muted mono">
+                            {a.file}
+                            {a.line_start !== null && `:L${a.line_start}`}
+                            {a.line_start !== null && a.line_end !== null && a.line_end !== a.line_start && `-${a.line_end}`}
+                          </span>{' '}
+                          {a.comment}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <pre className="patch">{renderPatch(patch.text, setAnnotating)}</pre>
                 </>
               )}
             </>
@@ -336,16 +412,29 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   );
 }
 
-function renderPatch(patch: string) {
-  return patch.split('\n').map((line, i) => {
+function renderPatch(
+  patch: string,
+  onAnnotate: (loc: { file: string; line: number }) => void,
+) {
+  const lines = parsePatchLines(patch);
+  return lines.map((l, i) => {
     let cls = 'pl';
-    if (line.startsWith('+++') || line.startsWith('---')) cls = 'ph';
-    else if (line.startsWith('@@')) cls = 'ph';
-    else if (line.startsWith('+')) cls = 'pa';
-    else if (line.startsWith('-')) cls = 'pd';
+    if (l.kind === 'file' || l.kind === 'hunk') cls = 'ph';
+    else if (l.kind === 'add') cls = 'pa';
+    else if (l.kind === 'del') cls = 'pd';
+    else if (l.kind === 'meta') cls = 'ph';
+    const canComment = (l.kind === 'add' || l.kind === 'ctx') && l.newLine !== null && l.file !== '';
     return (
-      <div key={i} className={cls}>
-        {line || ' '}
+      <div
+        key={i}
+        className={cls + (canComment ? ' annotatable' : '')}
+        title={canComment ? 'Click to comment on this line' : undefined}
+        onClick={canComment ? () => onAnnotate({ file: l.file, line: l.newLine as number }) : undefined}
+      >
+        <span className="ln">{l.newLine ?? ''}</span>
+        <span className="lt">
+          {l.kind === 'hunk' || l.kind === 'file' || l.kind === 'meta' ? l.text : (l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' ') + (l.text || ' ')}
+        </span>
       </div>
     );
   });

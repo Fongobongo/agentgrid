@@ -359,6 +359,42 @@ export function getTaskReviewApproval(taskId: string) {
   return getJson<ApprovalView | null>(`/v1/tasks/${taskId}/review-approval`);
 }
 
+// Competitor-gap feature (diff review): inline annotations on an attempt's
+// diff/plan, plus "send for rework" — a fresh task with the annotations
+// folded into the prompt.
+export interface PatchAnnotation {
+  id: string;
+  attempt_id: string;
+  file: string;
+  line_start: number | null;
+  line_end: number | null;
+  comment: string;
+  created_at: string;
+}
+
+export interface CreateAnnotationRequest {
+  file: string;
+  line_start?: number | null;
+  line_end?: number | null;
+  comment: string;
+}
+
+export interface ReworkResponse {
+  task_id: string;
+}
+
+export function listAnnotations(attemptId: string): Promise<PatchAnnotation[]> {
+  return getJson<PatchAnnotation[]>(`/v1/attempts/${attemptId}/annotations`);
+}
+
+export function addAnnotation(attemptId: string, body: CreateAnnotationRequest): Promise<PatchAnnotation> {
+  return postJson<PatchAnnotation>(`/v1/attempts/${attemptId}/annotations`, body);
+}
+
+export function reworkAttempt(attemptId: string): Promise<ReworkResponse> {
+  return postJson<ReworkResponse>(`/v1/attempts/${attemptId}/rework`, {});
+}
+
 export function listApprovals(status?: string): Promise<ApprovalView[]> {
   return listGet<ApprovalView>(status ? `/v1/approvals?status=${encodeURIComponent(status)}` : '/v1/approvals');
 }

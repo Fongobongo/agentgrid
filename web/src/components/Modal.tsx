@@ -124,3 +124,59 @@ export function PromptModal({
     />
   );
 }
+
+/** Multiline variant of PromptModal (Ctrl/Cmd+Enter submits). */
+export function TextAreaModal({
+  title,
+  label,
+  submitLabel = 'Submit',
+  onSubmit,
+  onCancel,
+}: {
+  title: string;
+  label?: string;
+  submitLabel?: string;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState('');
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+  const valid = value.trim() !== '';
+  const submit = () => {
+    if (valid) onSubmit(value);
+  };
+
+  return (
+    <Modal
+      title={title}
+      body={
+        <label>
+          {label}
+          <textarea
+            ref={ref}
+            rows={5}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit();
+            }}
+          />
+        </label>
+      }
+      onClose={onCancel}
+      actions={
+        <>
+          <button disabled={!valid} onClick={submit}>
+            {submitLabel}
+          </button>
+          <button className="secondary" onClick={onCancel}>
+            Cancel
+          </button>
+        </>
+      }
+    />
+  );
+}

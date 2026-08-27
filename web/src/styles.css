@@ -304,6 +304,33 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--accent, #4af); 
 .patch .pd { color: #ff9d96; }
 .patch .ph { color: var(--muted); }
 
+/* Competitor-gap feature (diff review): numbered, clickable diff lines. */
+.patch .ln {
+  display: inline-block;
+  width: 4ch;
+  margin-right: 12px;
+  text-align: right;
+  color: #4a5568;
+  user-select: none;
+}
+.patch .lt { display: inline; }
+.patch .annotatable { cursor: pointer; }
+.patch .annotatable:hover { background: rgba(88, 166, 255, 0.12); }
+
+/* Competitor-gap feature (diff review): inline comment list. */
+.annotations {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.annotations .annotation {
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.annotations .annotation:first-of-type { border-top: none; }
+
 /* Competitor plan 1.1: patch review actions */
 .review-bar {
   display: flex;
@@ -411,13 +438,14 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--accent, #4af); 
 .modal h3 { margin: 0 0 10px; }
 .modal-body { margin-bottom: 14px; }
 .modal-body label { display: flex; flex-direction: column; gap: 4px; }
-.modal-body input {
+.modal-body input, .modal-body textarea {
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--fg);
   padding: 8px;
   border-radius: 6px;
 }
+.modal-body textarea { resize: vertical; font-family: inherit; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--border); }
 
