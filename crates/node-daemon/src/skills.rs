@@ -129,3 +129,59 @@ pub fn render_trusted_skills_block(
     }
     out
 }
+
+/// Competitor-gap feature (project brain): render a persistent project-memory
+/// file (`AGENTS-BRAIN.md` in the worktree root) into a "Project brain" block
+/// appended to the prompt, so a repo's accumulated decisions/constraints are
+/// visible to every attempt without breaking per-attempt worktree isolation
+/// (the file lives in the repo and is cloned like any tracked file).
+///
+/// Returns an empty string when the file is absent or unreadable — the brain
+/// is a hint, never a hard dependency. Capped at 8 KiB so a bloated brain
+/// cannot silently eat the prompt budget.
+pub async fn compose_brain_block(ws_path: &Path) -> String {
+    const BRAIN_FILE: &str = "AGENTS-BRAIN.md";
+    const CAP: usize = 8 * 1024;
+    let path = ws_path.join(BRAIN_FILE);
+    let text = match tokio::fs::read_to_string(&path).await {
+        Ok(t) => t,
+        Err(_) => return String::new(),
+    };
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    let truncated = text.len() > CAP;
+    let mut body: String = text.chars().take(CAP).collect();
+    if truncated {
+        body.push_str("\n…(truncated)\n");
+    }
+    format!("\n\nProject brain ({BRAIN_FILE}):\n{body}\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn brain_block_absent_empty_and_capped() {
+        let dir = std::env::temp_dir().join(format!("ag-brain-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Absent -> empty block (hint, never a hard dependency).
+        assert_eq!(compose_brain_block(&dir).await, "");
+        // Empty file -> empty block.
+        std::fs::write(dir.join("AGENTS-BRAIN.md"), "\n").unwrap();
+        assert_eq!(compose_brain_block(&dir).await, "");
+        // Present -> rendered with a header and the body.
+        std::fs::write(dir.join("AGENTS-BRAIN.md"), "use tabs, not spaces").unwrap();
+        let block = compose_brain_block(&dir).await;
+        assert!(block.contains("Project brain"));
+        assert!(block.contains("use tabs, not spaces"));
+        // Over the 8 KiB cap -> truncated marker.
+        let big = "x".repeat(9 * 1024);
+        std::fs::write(dir.join("AGENTS-BRAIN.md"), &big).unwrap();
+        let block = compose_brain_block(&dir).await;
+        assert!(block.contains("truncated"));
+        assert!(block.len() < big.len() + 100);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

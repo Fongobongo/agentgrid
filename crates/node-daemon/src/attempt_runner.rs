@@ -714,6 +714,10 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     let workdir = ws.path.clone();
     let validation_log = workdir.join("validation.log");
     let mut prompt = assignment.prompt.clone();
+    // Competitor-gap feature (project brain): append the repo's persistent
+    // project memory (AGENTS-BRAIN.md) when present in the worktree — same
+    // block as the ACP path, so both transports get the brain.
+    prompt.push_str(&crate::skills::compose_brain_block(&workdir).await);
     let mut last_code: i32;
     let mut last_kill_reason: Option<&'static str> = None;
     // Hardening P0 item 12: distinct validation verdicts (timeout/cancel) are

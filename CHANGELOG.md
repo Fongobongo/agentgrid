@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Project brain: `ag brain` + AGENTS-BRAIN.md prompt block.** Competitor-gap
+  feature — `ag brain <repo>` rebuilds a persistent `AGENTS-BRAIN.md` from the
+  repository's task history (prompt + outcome + error category per terminal
+  task). Every attempt (ACP and wrapper paths) appends the file as a "Project
+  brain" block to the prompt when it exists in the worktree — a persistent
+  project memory that survives per-attempt worktree isolation because it lives
+  in the repo like any tracked file. Absent/unreadable = no block (a hint,
+  never a hard dependency); the block is capped at 8 KiB so a bloated brain
+  cannot eat the prompt budget.
+
 - **Verification note: claimed finish vs actual commit.** Competitor-gap
   feature (babysitter-style deterministic check) — on a successful completion
   the control plane cross-checks what the agent CLAIMED (a `result` event)

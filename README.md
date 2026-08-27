@@ -104,6 +104,12 @@ Only the `claude` adapter is wired end-to-end today (see
        ag search "login bug"
        ag search --events "checkpoint saved"
 
+6. Persist project memory across attempts (optional):
+
+       ag brain <repo>            # writes AGENTS-BRAIN.md from task history
+       # commit it; every attempt then appends the file as a "Project brain"
+       # block to the prompt (absent file = no block, never a hard dependency)
+
 By default the adapter runs **without** permission bypass, so an unattended
 run will pause at the first interactive prompt. For unattended operation use a
 sandbox (`AGENTGRID_SANDBOX=docker`) plus the explicit opt-in

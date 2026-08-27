@@ -40,7 +40,7 @@ mod profiles;
 mod recovery;
 mod sandbox;
 mod secret_redactor;
-mod skills;
+pub(crate) mod skills;
 mod validation;
 mod ws;
 
@@ -54,7 +54,7 @@ use profiles::{
     agent_profile, check_adapter_compatibility, check_profile_secrets, effective_autonomy,
     fetch_agent_profile,
 };
-use skills::{compose_context_block, compose_skills_block};
+use skills::{compose_brain_block, compose_context_block, compose_skills_block};
 
 #[cfg(test)]
 use config::AdapterSpec;
@@ -357,6 +357,9 @@ async fn drive_acp_session(
     // Noop by default → empty body → agent proceeds without a digest.
     let ctx_provider = NoopContextProvider;
     prompt_text.push_str(&compose_context_block(&ctx_provider, assignment, &sink).await);
+    // Competitor-gap feature (project brain): append the repo's persistent
+    // project memory (AGENTS-BRAIN.md) when present in the worktree.
+    prompt_text.push_str(&compose_brain_block(ws_path).await);
     // Stage 9.2: append the operator-trusted skills discovered in this worktree
     // (fail-closed: untrusted skills are omitted, any lookup error = no block).
     prompt_text.push_str(&compose_skills_block(client, &cfg.server, ws_path).await);
