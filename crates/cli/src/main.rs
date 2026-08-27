@@ -2185,10 +2185,7 @@ async fn cmd_brain(client: &reqwest::Client, base: &str, a: BrainArgs) -> Result
             .lines()
             .next()
             .unwrap_or("");
-        let error = t
-            .get("error_code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let error = t.get("error_code").and_then(|v| v.as_str()).unwrap_or("");
         out.push_str(&format!(
             "- `{id}` [{status}] {prompt}{}\n",
             if error.is_empty() {
@@ -2199,11 +2196,7 @@ async fn cmd_brain(client: &reqwest::Client, base: &str, a: BrainArgs) -> Result
         ));
     }
     std::fs::write(&a.out, out).context("write brain file")?;
-    println!(
-        "wrote {} ({} terminal tasks)",
-        a.out,
-        terminal.len()
-    );
+    println!("wrote {} ({} terminal tasks)", a.out, terminal.len());
     Ok(())
 }
 

@@ -291,7 +291,14 @@ fn docker_run_head(
     // the egress network — an unrestricted/none attempt must not inherit it.
     if network_mode == Some("restricted") && egress_proxy_network().is_some() {
         if let Some(proxy) = egress_proxy_url() {
-            for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+            for key in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
                 v.push("--env".to_string());
                 v.push(format!("{key}={proxy}"));
             }
@@ -939,7 +946,8 @@ mod tests {
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
         assert_eq!(
-            a[at("--network")], "agentgrid-egress",
+            a[at("--network")],
+            "agentgrid-egress",
             "restricted attaches to the egress-proxy network"
         );
         // Proxy env is injected for restricted attempts on the egress network.

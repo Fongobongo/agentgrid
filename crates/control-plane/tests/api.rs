@@ -5424,7 +5424,7 @@ async fn verification_note_flags_silent_success_and_claim_without_commit() {
         .await
         .unwrap();
     let app = build_router(state.clone());
-    let token = test_token(&app).await;
+    let _token = test_token(&app).await;
     let (node_id, _cred) = enroll(&app, "n-verify", vec!["mock".into()], vec!["demo".into()]).await;
     let task = state
         .store
@@ -5442,7 +5442,11 @@ async fn verification_note_flags_silent_success_and_claim_without_commit() {
     state.store.ack_attempt(&a.attempt_id).await.unwrap();
     let mut req = complete_req();
     req.commit_sha = Some("deadbeef".into());
-    state.store.complete_attempt(&a.attempt_id, &req).await.unwrap();
+    state
+        .store
+        .complete_attempt(&a.attempt_id, &req)
+        .await
+        .unwrap();
     let events = state
         .store
         .get_events(&task.id, None, 0, Some(100))
