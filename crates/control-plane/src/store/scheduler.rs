@@ -25,6 +25,7 @@ impl Store {
                     t.validation_command AS task_validation, t.base_commit, \
                     t.parent_acp_session_id, t.network_mode, t.group_id, \
                     t.consensus_group_id, t.consensus_member, t.opencode_override, \
+                    t.github_push, t.github_repo, t.github_issue, t.github_base_ref, \
                     r.git_url, r.default_branch, r.validation_command AS repo_validation \
              FROM attempts a \
              JOIN tasks t ON t.id = a.task_id \
@@ -98,6 +99,10 @@ impl Store {
                     .and_then(|s| {
                         serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()
                     }),
+                github_push: c.try_get::<bool, _>("github_push").unwrap_or_default(),
+                github_repo: c.try_get("github_repo").ok().flatten(),
+                github_issue: c.try_get("github_issue").ok().flatten(),
+                github_base_ref: c.try_get("github_base_ref").ok().flatten(),
             });
         }
         Ok(out)
@@ -147,7 +152,7 @@ impl Store {
         }
         let mut tx = self.write_txn().await?;
         let cands = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id, consensus_group_id, consensus_member, opencode_override FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC",
         )
@@ -475,6 +480,10 @@ impl Store {
                         .and_then(|s| {
                             serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()
                         }),
+                    github_push: c.try_get::<bool, _>("github_push").unwrap_or_default(),
+                    github_repo: c.try_get("github_repo").ok().flatten(),
+                    github_issue: c.try_get("github_issue").ok().flatten(),
+                    github_base_ref: c.try_get("github_base_ref").ok().flatten(),
                 },
                 created_at,
             });

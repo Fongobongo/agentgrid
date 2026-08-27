@@ -353,6 +353,7 @@ mod tests {
             guard_deny: vec![],
             guard_allow: vec![],
             accounts: vec![],
+            github_token: None,
         }
     }
 

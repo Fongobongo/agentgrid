@@ -104,6 +104,13 @@ paths:
           schema: { type: integer }
     post:
       summary: Create a task
+      description: |
+        Competitor-gap feature (GitHub write-back): set `github_push: true`
+        with `github_repo` (`owner/name`), optional `github_issue` (number)
+        and `github_base_ref` so a successful attempt pushes its agent
+        branch, opens a PR and comments on the issue. Requires
+        `AGENTGRID_GITHUB_TOKEN` on the node; best-effort — a failure only
+        emits a log event.
   /v1/tasks/{id}:
     get:
       summary: Fetch a task by id

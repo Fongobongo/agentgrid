@@ -225,6 +225,10 @@ impl ControlPlane {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         let r = self.post("/v1/tasks").json(&req).send().await?;
         let status = r.status();

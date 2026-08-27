@@ -124,6 +124,10 @@ pub async fn append_conversation_message(
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     // Audit X-C6: persist the user turn FIRST, then create the task, then
     // link the two. The old order (create_task → append) meant a failed

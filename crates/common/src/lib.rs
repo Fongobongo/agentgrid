@@ -336,6 +336,22 @@ pub struct CreateTaskRequest {
     /// config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_override: Option<OpencodeOverride>,
+    /// Competitor-gap feature (GitHub write-back): when true, a successful
+    /// attempt pushes its agent branch to the origin remote, opens a PR, and
+    /// (if `github_issue` is set) comments on the issue. Best-effort: a
+    /// write-back failure never fails the task.
+    #[serde(default)]
+    pub github_push: bool,
+    /// GitHub repository `owner/name` for write-back (full_name from a
+    /// webhook payload or `gh repo view`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    /// GitHub issue number to comment on after a successful write-back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    /// Base ref the PR targets (falls back to the repository default branch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_base_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -395,6 +411,14 @@ pub struct TaskView {
     /// semantics — informational for dashboards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_override: Option<OpencodeOverride>,
+    /// Competitor-gap feature (GitHub write-back): echoed from
+    /// CreateTaskRequest so operators can see which tasks push + PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_base_ref: Option<String>,
 }
 
 /// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
@@ -605,6 +629,20 @@ pub struct Assignment {
     /// override can never leak into later attempts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_override: Option<OpencodeOverride>,
+    /// Competitor-gap feature (GitHub write-back): when true the node pushes
+    /// the attempt branch, opens a PR and comments on the linked issue after
+    /// a successful finish (best-effort; see attempt_runner).
+    #[serde(default)]
+    pub github_push: bool,
+    /// GitHub repository `owner/name` (PR + issue comment target).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    /// GitHub issue number to comment on after write-back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    /// Base ref for the PR (falls back to `default_branch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_base_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1484,8 +1522,30 @@ mod tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         assert_eq!(round_trip(&req), req);
+
+        // Competitor-gap feature (GitHub write-back): set fields round-trip;
+        // None fields are omitted from the wire form (skip_serializing_if).
+        let push_req = CreateTaskRequest {
+            github_push: true,
+            github_repo: Some("acme/demo".into()),
+            github_issue: Some(42),
+            github_base_ref: Some("main".into()),
+            ..req.clone()
+        };
+        assert_eq!(round_trip(&push_req), push_req);
+        let wire = serde_json::to_value(&req).unwrap();
+        assert!(wire.get("github_push").is_none() || wire["github_push"] == false);
+        assert!(wire.get("github_repo").is_none());
+        let wire_push = serde_json::to_value(&push_req).unwrap();
+        assert_eq!(wire_push["github_push"], true);
+        assert_eq!(wire_push["github_repo"], "acme/demo");
+        assert_eq!(wire_push["github_issue"], 42);
 
         let ev = TaskEvent {
             attempt_id: "a1".into(),
@@ -1528,6 +1588,10 @@ mod tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             }),
             assignments: vec![],
         };

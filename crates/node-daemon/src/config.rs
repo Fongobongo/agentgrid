@@ -130,6 +130,11 @@ pub struct Config {
     /// Parsed from `AGENTGRID_ACCOUNTS="ENV=tok1,tok2;ENV2=tok3"`.
     /// Empty (default) = no pool, the single token in `adapter_env` is used.
     pub accounts: Vec<AccountConfig>,
+    /// Competitor-gap feature (GitHub write-back): PAT used to push the agent
+    /// branch, open a PR and comment on the linked issue. Never logged or
+    /// forwarded to the adapter; None = write-back disabled (tasks with
+    /// `github_push` emit a log event explaining the missing token).
+    pub github_token: Option<String>,
 }
 
 /// One credential env-var and the tokens that back it for failover rotation.
@@ -292,6 +297,9 @@ pub fn config_from_env() -> Config {
             })
             .unwrap_or_default(),
         accounts: parse_accounts(&std::env::var("AGENTGRID_ACCOUNTS").unwrap_or_default()),
+        github_token: std::env::var("AGENTGRID_GITHUB_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty()),
     }
 }
 

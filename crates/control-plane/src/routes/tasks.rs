@@ -259,6 +259,10 @@ pub async fn rework_attempt(
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     match state.store.create_task(&req).await {
         Ok(view) => Ok((

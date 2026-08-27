@@ -546,6 +546,15 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             cfg.max_artifact_size,
         )
         .await;
+
+        // Competitor-gap feature (GitHub write-back), ACP parity: same
+        // best-effort semantics as the wrapper path — before cleanup, after
+        // a clean finish.
+        if assignment.github_push && exit_code == 0 && error_code.is_none() && commit_sha.is_some()
+        {
+            github_writeback(&cfg, &assignment, &sink, &cleanup_repo, &cleanup_branch).await;
+        }
+
         sink.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(60))
             .await;
         // Hardening P1 item 11 (wrapper parity): report which artifacts are
@@ -1097,6 +1106,15 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     )
     .await;
 
+    // Competitor-gap feature (GitHub write-back): on a successful git task
+    // flagged `github_push`, push the agent branch, open a PR and comment on
+    // the linked issue — BEFORE `cleanup_workspace` deletes the branch.
+    // Best-effort: any failure is emitted as a log event, never fails the
+    // task. The token is only used here; it is not logged or forwarded.
+    if assignment.github_push && code == 0 && error_code.is_none() && commit_sha.is_some() {
+        github_writeback(&cfg, &assignment, &sink, &cleanup_repo, &cleanup_branch).await;
+    }
+
     tracing::info!(attempt_id = %assignment.attempt_id, exit_code = code, "attempt finished");
     // Stage 2.1: drain all pending events from the durable outbox BEFORE the
     // completion so the CP sees the full event stream before marking the task
@@ -1166,6 +1184,113 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     .await
     .ok();
     Ok(())
+}
+
+/// Competitor-gap feature (GitHub write-back): push the agent branch, open a
+/// PR and comment on the linked issue. Best-effort — a failure is emitted as
+/// a log event with the reason, never fails the attempt (the task is already
+/// successful). Runs before the caller reclaims the worktree.
+async fn github_writeback(
+    cfg: &Config,
+    assignment: &Assignment,
+    sink: &EventSink,
+    cleanup_repo: &Option<std::path::PathBuf>,
+    cleanup_branch: &Option<String>,
+) {
+    let log = |kind: &'static str, text: String| async move {
+        sink.push(
+            EventKind::Log.to_event_type(),
+            json!({ "kind": kind.to_string(), "text": text }),
+        )
+        .await;
+    };
+
+    let Some(token) = cfg.github_token.as_deref() else {
+        log(
+            "github_writeback_skipped",
+            "AGENTGRID_GITHUB_TOKEN not set on the node; write-back skipped".into(),
+        )
+        .await;
+        return;
+    };
+    let Some(repo) = assignment.github_repo.as_deref() else {
+        log(
+            "github_writeback_skipped",
+            "task has github_push but no github_repo".into(),
+        )
+        .await;
+        return;
+    };
+    let (Some(repo_dir), Some(branch)) = (cleanup_repo.as_deref(), cleanup_branch.as_deref())
+    else {
+        log(
+            "github_writeback_skipped",
+            "no git worktree/branch to push (plain-dir task)".into(),
+        )
+        .await;
+        return;
+    };
+
+    // Push first — a PR referencing a non-existent branch is pointless.
+    match tokio::task::spawn_blocking({
+        let repo_dir = repo_dir.to_path_buf();
+        let repo = repo.to_string();
+        let branch = branch.to_string();
+        let token = token.to_string();
+        move || crate::github::push_branch(&repo_dir, &repo, &branch, &token)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            log("github_push_failed", format!("push failed: {e}")).await;
+            return;
+        }
+        Err(e) => {
+            log("github_push_failed", format!("push task join failed: {e}")).await;
+            return;
+        }
+    }
+
+    let base = assignment
+        .github_base_ref
+        .clone()
+        .unwrap_or_else(|| assignment.default_branch.clone());
+    match crate::github::create_pull_request(
+        repo,
+        branch,
+        &base,
+        &assignment.task_id,
+        &assignment.attempt_id,
+        token,
+    )
+    .await
+    {
+        Ok(url) => log("github_pr_created", format!("PR opened: {url}")).await,
+        Err(e) => {
+            log("github_pr_failed", format!("PR create failed: {e}")).await;
+            return;
+        }
+    }
+
+    if let Some(issue) = assignment.github_issue {
+        let comment = format!(
+            "Resolved by agentgrid — see the linked PR (`agent/{}`).",
+            assignment.task_id
+        );
+        match crate::github::comment_issue(repo, issue, &comment, token).await {
+            Ok(url) => {
+                log("github_issue_commented", format!("issue comment: {url}")).await;
+            }
+            Err(e) => {
+                log(
+                    "github_issue_comment_failed",
+                    format!("comment failed: {e}"),
+                )
+                .await
+            }
+        }
+    }
 }
 
 #[cfg(test)]

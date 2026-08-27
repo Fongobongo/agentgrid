@@ -269,6 +269,10 @@ impl AcpAgent for GatewayAgent {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         let task_id = self.create_task(&req).await?;
         if let Some(m) = self.sessions.lock().unwrap().get_mut(&p.session_id) {

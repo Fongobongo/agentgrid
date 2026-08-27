@@ -19,6 +19,17 @@
   `POST /v1/attempts/{id}/annotations`), lists comments above the diff, and
   "Request rework" now goes through `POST /v1/attempts/{id}/rework` (a fresh
   task with all annotations folded into the prompt) instead of a bare retry.
+- **GitHub write-back: push branch + open PR + comment on issue.**
+  Competitor-gap feature — the issue webhook (`agent` label) and
+  `ag issue run --push` now stamp the task with `github_push`,
+  `github_repo` (owner/name), `github_issue` and `github_base_ref`
+  (migration 0076, echoed in `TaskView`/`Assignment`/web/CLI). After a
+  successful finish the node pushes its agent branch from the bare mirror,
+  creates a PR via the REST API and comments on the linked issue — before
+  the worktree is reclaimed. Requires `AGENTGRID_GITHUB_TOKEN` on the node;
+  strictly best-effort: any failure emits a `github_*` log event and never
+  fails the task, and the token never reaches logs, git config or the
+  adapter.
 
 ## [v0.3.7] — 2026-08-26
 

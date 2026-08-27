@@ -316,8 +316,15 @@ enum AgentSub {
 #[derive(Subcommand)]
 enum IssueSub {
     /// Create a task from a GitHub issue (`gh issue view <N>` under the hood).
-    /// `[repo]` defaults to the current directory's GitHub repo.
-    Run { number: i64, repo: Option<String> },
+    /// `[repo]` defaults to the current directory's GitHub repo. `--push` also
+    /// pushes the agent branch, opens a PR and comments on the issue after a
+    /// successful run (needs AGENTGRID_GITHUB_TOKEN on the node).
+    Run {
+        number: i64,
+        repo: Option<String>,
+        #[arg(long)]
+        push: bool,
+    },
     /// List open issues (`gh issue list`).
     Ls { repo: Option<String> },
     /// Show an issue's title/body (`gh issue view <N>`).
@@ -1056,6 +1063,10 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1173,7 +1184,7 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
             print!("{out}");
             Ok(())
         }
-        IssueSub::Run { number, repo } => {
+        IssueSub::Run { number, repo, push } => {
             // Fetch title + body via gh (JSON) to build the task prompt.
             let json = gh_out(
                 repo.as_deref(),
@@ -1194,6 +1205,20 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
             } else {
                 format!("GitHub issue #{number}: {title}\n\n{body}")
             };
+            // Competitor-gap feature: resolve the `owner/name` full_name when
+            // write-back is requested (the node needs it for the PR call).
+            let full_name = if push {
+                let repo_json = gh_out(
+                    repo.as_deref(),
+                    &["repo", "view", "--json", "nameWithOwner"],
+                )
+                .ok();
+                repo_json
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| v["nameWithOwner"].as_str().map(String::from))
+            } else {
+                None
+            };
             let req = CreateTaskRequest {
                 prompt,
                 repository: "*".into(),
@@ -1210,6 +1235,10 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: push,
+                github_repo: full_name,
+                github_issue: Some(number),
+                github_base_ref: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1269,6 +1298,10 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 consensus_group_id: Some(group.clone()),
                 consensus_member: Some(member.clone()),
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1314,6 +1347,10 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         consensus_group_id: None,
         consensus_member: None,
         opencode_override,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1760,6 +1797,16 @@ async fn cmd_show(client: &reqwest::Client, base: &str, a: ShowArgs, json: bool)
             .unwrap_or_else(|| "-".into())
     );
     println!("created:   {}", task.created_at);
+    // Competitor-gap feature (GitHub write-back): show the target when set.
+    if let Some(repo) = &task.github_repo {
+        println!("github:    {repo}");
+        if let Some(issue) = task.github_issue {
+            println!("issue:     #{issue}");
+        }
+        if let Some(base) = &task.github_base_ref {
+            println!("base ref:  {base}");
+        }
+    }
     // Hardening P2 item 37: eligibility reasoning — shown for queued tasks by
     // default (explains why a task is stuck), and for ANY status with
     // `--explain` (why the scheduler picked / rejected nodes).

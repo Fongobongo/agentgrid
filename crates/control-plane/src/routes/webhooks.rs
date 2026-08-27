@@ -151,6 +151,19 @@ pub async fn github_issue_webhook(
         return Ok(StatusCode::OK);
     }
 
+    // Competitor-gap feature (GitHub write-back): capture the repository so a
+    // successful attempt can push its branch and open a PR back at GitHub.
+    let repo = v.get("repository").and_then(|r| r.as_object());
+    let full_name = repo
+        .and_then(|r| r.get("full_name"))
+        .and_then(|f| f.as_str())
+        .map(String::from);
+    let repo_name = repo
+        .and_then(|r| r.get("name"))
+        .and_then(|n| n.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| "*".into());
+
     let prompt = if body_text.trim().is_empty() {
         format!("GitHub issue #{number}: {title}")
     } else {
@@ -158,7 +171,7 @@ pub async fn github_issue_webhook(
     };
     let req = agentgrid_common::CreateTaskRequest {
         prompt,
-        repository: "*".into(),
+        repository: repo_name,
         adapter: "mock".into(),
         requested_node_id: None,
         timeout_secs: None,
@@ -172,6 +185,12 @@ pub async fn github_issue_webhook(
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        // Write-back: the node pushes the agent branch, opens a PR and
+        // comments on this issue after a successful finish.
+        github_push: full_name.is_some(),
+        github_repo: full_name,
+        github_issue: Some(number),
+        github_base_ref: None,
     };
     state
         .store
@@ -201,6 +220,10 @@ fn create_followup_task(prompt: String) -> agentgrid_common::CreateTaskRequest {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     }
 }
 
@@ -366,6 +389,10 @@ mod tests {
 
         let payload = serde_json::json!({
             "action": "opened",
+            "repository": {
+                "name": "demo",
+                "full_name": "acme/demo"
+            },
             "issue": {
                 "number": 42,
                 "title": "Fix the flaky login test",
@@ -395,6 +422,12 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert!(tasks[0].prompt.contains("Fix the flaky login test"));
         assert!(tasks[0].prompt.contains("flakes 1 in 10"));
+        // Competitor-gap feature (GitHub write-back): the webhook must capture
+        // the repository full_name + issue number so a successful attempt can
+        // push a branch, open a PR and comment on the issue.
+        assert_eq!(tasks[0].repository, "demo");
+        assert_eq!(tasks[0].github_repo.as_deref(), Some("acme/demo"));
+        assert_eq!(tasks[0].github_issue, Some(42));
     }
 
     #[tokio::test]

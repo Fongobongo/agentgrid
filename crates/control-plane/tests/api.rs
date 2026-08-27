@@ -219,6 +219,10 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -566,6 +570,10 @@ async fn validation_failure_must_not_report_success() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -686,6 +694,10 @@ async fn cancel_queued_marks_cancelled() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -1369,6 +1381,10 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .unwrap(),
             None,
@@ -1441,6 +1457,10 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .unwrap(),
             None,
@@ -1474,6 +1494,10 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .unwrap(),
             Some(&token),
@@ -1500,6 +1524,10 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -1601,6 +1629,10 @@ async fn login_sets_cookie_and_cookie_auths() {
                         consensus_group_id: None,
                         consensus_member: None,
                         opencode_override: None,
+                        github_push: false,
+                        github_repo: None,
+                        github_issue: None,
+                        github_base_ref: None,
                     })
                     .unwrap(),
                 ))
@@ -1723,6 +1755,10 @@ async fn oversized_prompt_returns_413() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -1754,6 +1790,10 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -2591,6 +2631,10 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let created = app
         .clone()
@@ -4329,6 +4373,10 @@ async fn artifact_get_rejects_traversal_name() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -5291,6 +5339,10 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -6865,6 +6917,10 @@ async fn list_tasks_filters_by_status_repository_node() {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         })
         .unwrap()
     };
@@ -7612,6 +7668,10 @@ async fn list_tasks_keyset_pagination() {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         })
         .unwrap()
     };
@@ -7777,6 +7837,10 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         })
         .unwrap();
         let r = app
@@ -7962,6 +8026,10 @@ async fn approvals_keyset_pagination() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let created = app
         .clone()
@@ -8140,6 +8208,10 @@ async fn strict_profile_refuses_wrapper_adapter() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -8454,6 +8526,10 @@ async fn search_finds_task_by_prompt_word() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -8607,6 +8683,10 @@ async fn attempt_detail_and_tag_crud() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     };
     let resp = app
         .clone()
@@ -8721,6 +8801,10 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .unwrap(),
             &token,
@@ -8868,6 +8952,10 @@ async fn agent_api_budget_stop_and_trail() {
         consensus_group_id: None,
         consensus_member: None,
         opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
     })
     .unwrap();
     let resp = app

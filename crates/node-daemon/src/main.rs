@@ -29,6 +29,7 @@ mod enrollment;
 pub mod evals;
 mod event_sink;
 mod git;
+mod github;
 mod heartbeat;
 mod mcp;
 mod opencode_config;
@@ -1338,6 +1339,7 @@ mod tests {
             guard_deny: vec![],
             guard_allow: vec![],
             accounts: vec![],
+            github_token: None,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-{}-{}",
@@ -1370,6 +1372,10 @@ mod tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1440,6 +1446,7 @@ mod tests {
             repository_root: std::env::temp_dir().join("ag-acp-repos-rl"),
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
+            github_token: None,
             // Two-token pool backing a credential env var the fake agent ignores —
             // rotation only swaps the value, which is enough to exercise the path.
             accounts: vec![crate::config::AccountConfig {
@@ -1501,6 +1508,10 @@ mod tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1614,6 +1625,7 @@ mod tests {
             guard_deny: vec![],
             guard_allow: vec![],
             accounts: vec![],
+            github_token: None,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-hang-{}-{}",
@@ -1646,6 +1658,10 @@ mod tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1727,6 +1743,7 @@ mod tests {
             guard_deny: vec![],
             guard_allow: vec![],
             accounts: vec![],
+            github_token: None,
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-cancel-{}-{}",
@@ -1760,6 +1777,10 @@ mod tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1909,6 +1930,7 @@ mod tests {
                 guard_deny: vec![],
                 guard_allow: vec![],
                 accounts: vec![],
+                github_token: None,
             };
 
             let ws = tmp.join("ws");
@@ -1945,6 +1967,10 @@ mod tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             };
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),

@@ -111,6 +111,10 @@ async fn migrations_serve_legacy_happy_path() {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         })
         .await
         .unwrap();
@@ -214,6 +218,10 @@ async fn foreign_keys_enforced_after_migration_0040() {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         })
         .await
         .unwrap();

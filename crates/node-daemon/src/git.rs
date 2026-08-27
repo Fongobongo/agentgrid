@@ -979,6 +979,10 @@ mod tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         }
     }
 
@@ -1289,6 +1293,10 @@ mod tests {
                     consensus_group_id: None,
                     consensus_member: None,
                     opencode_override: None,
+                    github_push: false,
+                    github_repo: None,
+                    github_issue: None,
+                    github_base_ref: None,
                 };
                 prepare_workspace(&repos, &ws_root, &a, &[], &[])
             }));

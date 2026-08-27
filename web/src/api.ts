@@ -21,6 +21,10 @@ export interface TaskView {
   validation_command?: string | null;
   // Hardening P2 item 36: security profile of the latest attempt.
   security_profile?: string | null;
+  // Competitor-gap feature (GitHub write-back): informational echo.
+  github_repo?: string | null;
+  github_issue?: number | null;
+  github_base_ref?: string | null;
 }
 
 export interface NodeView {

@@ -199,6 +199,18 @@ reproduce the web bundle in a pinned container image.
 - A warning is logged when an adapter exits 0 but produces no events, surfacing
   silent agents that yield empty "succeeded" tasks.
 
+### GitHub write-back (push + PR + issue comment)
+
+A task created with `github_push: true` (issue webhook with the `agent` label,
+or `ag issue run <N> --push`) makes the node push the agent branch to the
+origin remote, open a PR and comment on the linked issue after a successful
+finish. The node needs `AGENTGRID_GITHUB_TOKEN` (a GitHub PAT with repo +
+PR write scope) — without it the attempt emits a
+`github_writeback_skipped` log event and stays successful. Write-back is
+best-effort: a push/PR failure never fails the task, it only emits a log
+event. The token is used solely for the push URL and REST calls; it is never
+logged, stored in git config, or forwarded to the adapter.
+
 ### Trust & ownership model
 
 The control plane is the trust root. A node is only trusted for the attempt it

@@ -737,6 +737,13 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()),
+        // Competitor-gap feature (GitHub write-back): informational echo.
+        github_repo: r.try_get::<Option<String>, _>("github_repo").ok().flatten(),
+        github_issue: r.try_get::<Option<i64>, _>("github_issue").ok().flatten(),
+        github_base_ref: r
+            .try_get::<Option<String>, _>("github_base_ref")
+            .ok()
+            .flatten(),
     }
 }
 
@@ -2109,6 +2116,10 @@ mod workflow_tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -2124,6 +2135,64 @@ mod workflow_tests {
             before + 1,
             "an assignment must increment the scheduler metric"
         );
+    }
+
+    /// Competitor-gap feature (GitHub write-back): create + show round-trips
+    /// the new task columns (and the assignment carries them to the node).
+    #[tokio::test]
+    async fn github_writeback_fields_round_trip() {
+        let s = temp_store().await;
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node = EnrollRequest {
+            token,
+            name: "gh-node".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            agent_version: "test".into(),
+            protocol_version: None,
+            permission_interception: "wrapper".into(),
+        };
+        let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+        let view = s
+            .create_task(&CreateTaskRequest {
+                prompt: "push me".into(),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+                group_id: None,
+                agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
+                opencode_override: None,
+                github_push: true,
+                github_repo: Some("acme/demo".into()),
+                github_issue: Some(7),
+                github_base_ref: Some("develop".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(view.github_repo.as_deref(), Some("acme/demo"));
+        assert_eq!(view.github_issue, Some(7));
+
+        // show_task echoes the same columns.
+        let shown = s.show_task(&view.id).await.unwrap().unwrap();
+        assert_eq!(shown.github_repo.as_deref(), Some("acme/demo"));
+        assert_eq!(shown.github_issue, Some(7));
+        assert_eq!(shown.github_base_ref.as_deref(), Some("develop"));
+
+        // The assignment ships the metadata to the node.
+        let a = s.try_assign(&node_id).await.unwrap().unwrap();
+        assert!(a.github_push);
+        assert_eq!(a.github_repo.as_deref(), Some("acme/demo"));
+        assert_eq!(a.github_issue, Some(7));
+        assert_eq!(a.github_base_ref.as_deref(), Some("develop"));
     }
 
     // Plan 0.3 item 1.2: a batch of 100 assignments lands in ONE write
@@ -2164,6 +2233,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -2301,6 +2374,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -2357,6 +2434,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -2492,6 +2573,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -2605,6 +2690,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -2791,6 +2880,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -2875,6 +2968,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -3376,6 +3473,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -3424,6 +3525,10 @@ mod workflow_tests {
                 consensus_group_id: None,
                 consensus_member: None,
                 opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
             })
             .await
             .unwrap();
@@ -3497,6 +3602,10 @@ mod agent_tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         s.create_agent_task(&agent.id, &base).await.unwrap();
         let err = s.create_agent_task(&agent.id, &base).await.unwrap_err();
@@ -3601,6 +3710,10 @@ mod agent_tests {
             consensus_group_id: None,
             consensus_member: None,
             opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
         };
         let task = s.create_agent_task(&agent.id, &req).await.unwrap();
         assert_eq!(task.agent_id.as_deref(), Some(agent.id.as_str()));

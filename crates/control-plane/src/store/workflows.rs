@@ -1670,6 +1670,10 @@ impl Store {
                                             consensus_group_id: None,
                                             consensus_member: None,
                                             opencode_override: None,
+                                            github_push: false,
+                                            github_repo: None,
+                                            github_issue: None,
+                                            github_base_ref: None,
                                         };
                                         let tv = match self.create_task(&req).await {
                                             Ok(tv) => tv,
@@ -1784,6 +1788,10 @@ impl Store {
                                                     consensus_group_id: None,
                                                     consensus_member: None,
                                                     opencode_override: None,
+                                                    github_push: false,
+                                                    github_repo: None,
+                                                    github_issue: None,
+                                                    github_base_ref: None,
                                                 };
                                                 match self.create_task(&req).await {
                                                     Ok(tv) => {
@@ -1921,6 +1929,10 @@ impl Store {
                             consensus_group_id: None,
                             consensus_member: None,
                             opencode_override: None,
+                            github_push: false,
+                            github_repo: None,
+                            github_issue: None,
+                            github_base_ref: None,
                         };
                         // Claim the pending→running transition before creating
                         // the task: the background ticker and the
