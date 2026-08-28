@@ -297,6 +297,28 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        // Competitor-gap feature (task-level auto-retry, hatchet-inspired):
+        // a FAILED attempt with remaining retry budget re-queues the task
+        // instead of leaving it failed — same semantics as the manual
+        // `retry_task` (which also bakes a resume digest post-commit).
+        // Cancellation is never auto-retried. The attempt row stays failed
+        // (audit trail); the budget is the total number of attempts.
+        let mut auto_retry_prompt: Option<String> = None;
+        if task_target == TaskStatus::Failed {
+            let row = sqlx::query("SELECT max_attempts, prompt FROM tasks WHERE id = ?")
+                .bind(&task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            let max_attempts: i64 = row.try_get("max_attempts").unwrap_or(1);
+            let attempt_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM attempts WHERE task_id = ?")
+                    .bind(&task_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if max_attempts > 1 && attempt_count < max_attempts {
+                auto_retry_prompt = row.try_get("prompt").ok();
+            }
+        }
         // Normalize the failure category onto the task so the UI/CLI can show
         // WHY it failed without joining the producing attempt.
         let task_error_code: Option<String> = match task_target {
@@ -310,15 +332,24 @@ impl Store {
         // Hardening P1 item 13: a terminal task has no active attempt — clear
         // assigned_attempt_id so the invariant "terminal task has no active
         // attempt" / "assigned_attempt_id points at the same task" holds.
-        sqlx::query(
-            "UPDATE tasks SET status = ?, finished_at = ?, error_code = ?, assigned_attempt_id = NULL WHERE id = ?",
-        )
-        .bind(status_str(task_target))
-        .bind(&now)
-        .bind(&task_error_code)
-        .bind(&task_id)
-        .execute(&mut *tx)
-        .await?;
+        if auto_retry_prompt.is_some() {
+            sqlx::query(
+                "UPDATE tasks SET status = 'queued', finished_at = NULL, error_code = NULL, assigned_attempt_id = NULL WHERE id = ?",
+            )
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE tasks SET status = ?, finished_at = ?, error_code = ?, assigned_attempt_id = NULL WHERE id = ?",
+            )
+            .bind(status_str(task_target))
+            .bind(&now)
+            .bind(&task_error_code)
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query("UPDATE nodes SET active_attempts = MAX(0, active_attempts - 1) WHERE id = ?")
             .bind(&node_id)
             .execute(&mut *tx)
@@ -398,6 +429,17 @@ impl Store {
             {
                 tracing::warn!("eval-case stamp failed for {attempt_id}: {e}");
             }
+        }
+        // Competitor-gap feature (task-level auto-retry): post-commit, same as
+        // `retry_task` — bake the resume digest so the next attempt inherits
+        // context from the failed one, and audit the automatic re-queue.
+        if let Some(prompt) = auto_retry_prompt {
+            if let Err(e) = self.bake_resume_digest(&task_id, &prompt).await {
+                tracing::warn!("auto-retry resume digest bake failed: {e}");
+            }
+            let _ = self
+                .audit("task", Some(&task_id), "retry.auto", Some("queued"), None)
+                .await;
         }
         Ok(true)
     }

@@ -747,6 +747,13 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         // Competitor-gap feature (convergence metrics): the attempt this task
         // was reworked from, if any.
         rework_of: r.try_get::<Option<String>, _>("rework_of").ok().flatten(),
+        // Competitor-gap feature (task-level auto-retry): total attempts
+        // allowed (1 = no auto-retry; older rows carry the column default).
+        max_attempts: r
+            .try_get::<Option<i64>, _>("max_attempts")
+            .ok()
+            .flatten()
+            .unwrap_or(1) as u32,
     }
 }
 
@@ -2135,6 +2142,7 @@ mod workflow_tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -2190,6 +2198,7 @@ mod workflow_tests {
                 github_repo: Some("acme/demo".into()),
                 github_issue: Some(7),
                 github_base_ref: Some("develop".into()),
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -2252,6 +2261,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -2393,6 +2403,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -2454,6 +2465,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -2593,6 +2605,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -2710,6 +2723,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -2900,6 +2914,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -2988,6 +3003,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -3493,6 +3509,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -3545,6 +3562,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .await
             .unwrap();
@@ -3622,6 +3640,7 @@ mod agent_tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         };
         s.create_agent_task(&agent.id, &base).await.unwrap();
         let err = s.create_agent_task(&agent.id, &base).await.unwrap_err();
@@ -3730,6 +3749,7 @@ mod agent_tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         };
         let task = s.create_agent_task(&agent.id, &req).await.unwrap();
         assert_eq!(task.agent_id.as_deref(), Some(agent.id.as_str()));

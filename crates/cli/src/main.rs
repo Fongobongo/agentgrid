@@ -376,6 +376,11 @@ struct RunArgs {
     /// Per-task timeout in seconds.
     #[arg(long)]
     timeout: Option<u64>,
+    /// Competitor-gap feature (task-level auto-retry): total attempts allowed
+    /// (1 = no auto-retry). A failed attempt re-queues the task automatically
+    /// until the budget is exhausted.
+    #[arg(long, default_value_t = 1)]
+    max_attempts: u32,
     /// Plan 1.9 (#17): path to a `.agentgrid/workflows/*.yaml` file to run as
     /// a workflow. When `--workflow` is a directory, the first `*.yaml` inside
     /// it is used. Setting this ignores `prompt`/`adapter`.
@@ -1086,6 +1091,7 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1258,6 +1264,7 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 github_repo: full_name,
                 github_issue: Some(number),
                 github_base_ref: None,
+                max_attempts: 1,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1321,6 +1328,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1370,6 +1378,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: a.max_attempts,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))

@@ -273,6 +273,7 @@ impl AcpAgent for GatewayAgent {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         };
         let task_id = self.create_task(&req).await?;
         if let Some(m) = self.sessions.lock().unwrap().get_mut(&p.session_id) {

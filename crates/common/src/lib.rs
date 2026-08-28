@@ -352,6 +352,17 @@ pub struct CreateTaskRequest {
     /// Base ref the PR targets (falls back to the repository default branch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_base_ref: Option<String>,
+    /// Competitor-gap feature (task-level auto-retry, hatchet-inspired):
+    /// total attempts allowed for this task. `1` (default) = single attempt,
+    /// no auto-retry. When an attempt FAILS (never on cancel) and fewer than
+    /// `max_attempts` attempts have run, the task is re-queued automatically
+    /// instead of staying failed — same semantics as a manual `retry_task`.
+    #[serde(default = "default_task_max_attempts")]
+    pub max_attempts: u32,
+}
+
+fn default_task_max_attempts() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -425,6 +436,10 @@ pub struct TaskView {
     /// depth of a review loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rework_of: Option<String>,
+    /// Competitor-gap feature (task-level auto-retry): total attempts allowed
+    /// (echoed from CreateTaskRequest; 1 = no auto-retry).
+    #[serde(default = "default_task_max_attempts")]
+    pub max_attempts: u32,
 }
 
 /// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
@@ -1543,8 +1558,14 @@ mod tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         };
         assert_eq!(round_trip(&req), req);
+        // Competitor-gap feature (task-level auto-retry): absent on the wire
+        // -> serde default 1 (no auto-retry).
+        let parsed: CreateTaskRequest =
+            serde_json::from_str(r#"{"prompt":"p","repository":"r","adapter":"mock"}"#).unwrap();
+        assert_eq!(parsed.max_attempts, 1);
 
         // Competitor-gap feature (GitHub write-back): set fields round-trip;
         // None fields are omitted from the wire form (skip_serializing_if).

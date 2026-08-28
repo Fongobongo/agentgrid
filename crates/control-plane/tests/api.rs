@@ -223,6 +223,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -578,6 +579,7 @@ async fn validation_failure_must_not_report_success() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -703,6 +705,7 @@ async fn cancel_queued_marks_cancelled() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -1393,6 +1396,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .unwrap(),
             None,
@@ -1469,6 +1473,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .unwrap(),
             None,
@@ -1506,6 +1511,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .unwrap(),
             Some(&token),
@@ -1536,6 +1542,7 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -1641,6 +1648,7 @@ async fn login_sets_cookie_and_cookie_auths() {
                         github_repo: None,
                         github_issue: None,
                         github_base_ref: None,
+                        max_attempts: 1,
                     })
                     .unwrap(),
                 ))
@@ -1767,6 +1775,7 @@ async fn oversized_prompt_returns_413() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -1802,6 +1811,7 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -2645,6 +2655,7 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let created = app
         .clone()
@@ -4422,6 +4433,7 @@ async fn artifact_get_rejects_traversal_name() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -5388,6 +5400,7 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -7115,6 +7128,7 @@ async fn list_tasks_filters_by_status_repository_node() {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         })
         .unwrap()
     };
@@ -7868,6 +7882,7 @@ async fn list_tasks_keyset_pagination() {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         })
         .unwrap()
     };
@@ -8037,6 +8052,7 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         })
         .unwrap();
         let r = app
@@ -8226,6 +8242,7 @@ async fn approvals_keyset_pagination() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let created = app
         .clone()
@@ -8408,6 +8425,7 @@ async fn strict_profile_refuses_wrapper_adapter() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -8726,6 +8744,7 @@ async fn search_finds_task_by_prompt_word() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -8883,6 +8902,7 @@ async fn attempt_detail_and_tag_crud() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     let resp = app
         .clone()
@@ -9001,6 +9021,7 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                max_attempts: 1,
             })
             .unwrap(),
             &token,
@@ -9152,6 +9173,7 @@ async fn agent_api_budget_stop_and_trail() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     })
     .unwrap();
     let resp = app
@@ -10739,4 +10761,83 @@ async fn completion_persists_validation_rounds() {
         .unwrap()
         .unwrap();
     assert_eq!(bv.validation_rounds, 0, "default must stay single-shot");
+}
+
+/// Competitor-gap feature (task-level auto-retry, hatchet-inspired): with
+/// `max_attempts = 2` a failed attempt re-queues the task automatically; the
+/// second failure exhausts the budget and the task stays failed. A cancelled
+/// attempt is never auto-retried.
+#[tokio::test]
+async fn task_auto_retry_requeues_until_budget_exhausted() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+    let (node_id, _cred) = enroll(&app, "n-retry", vec!["mock".into()], vec!["demo".into()]).await;
+    let task = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "auto-retry fixture".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            max_attempts: 2,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(task.max_attempts, 2, "TaskView must echo max_attempts");
+
+    // Attempt 1 fails -> budget remains -> task re-queued automatically.
+    let a1 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a1.attempt_id).await.unwrap();
+    state
+        .store
+        .complete_attempt(&a1.attempt_id, &complete_fail_req())
+        .await
+        .unwrap();
+    let tv = state.store.show_task(&task.id).await.unwrap().unwrap();
+    assert_eq!(tv.status, TaskStatus::Queued, "first failure must re-queue");
+
+    // Attempt 2 fails -> budget exhausted -> task stays failed.
+    let a2 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    assert_ne!(a2.attempt_id, a1.attempt_id);
+    state.store.ack_attempt(&a2.attempt_id).await.unwrap();
+    state
+        .store
+        .complete_attempt(&a2.attempt_id, &complete_fail_req())
+        .await
+        .unwrap();
+    let tv = state.store.show_task(&task.id).await.unwrap().unwrap();
+    assert_eq!(tv.status, TaskStatus::Failed, "exhausted budget must fail");
+
+    // A default task (max_attempts = 1) fails on the first attempt.
+    let t1 = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "no-retry fixture".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let b = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&b.attempt_id).await.unwrap();
+    state
+        .store
+        .complete_attempt(&b.attempt_id, &complete_fail_req())
+        .await
+        .unwrap();
+    let tv = state.store.show_task(&t1.id).await.unwrap().unwrap();
+    assert_eq!(tv.status, TaskStatus::Failed, "default must not auto-retry");
+    let _ = tok;
 }

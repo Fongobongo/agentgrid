@@ -1674,6 +1674,7 @@ impl Store {
                                             github_repo: None,
                                             github_issue: None,
                                             github_base_ref: None,
+                                            max_attempts: 1,
                                         };
                                         let tv = match self.create_task(&req).await {
                                             Ok(tv) => tv,
@@ -1792,6 +1793,7 @@ impl Store {
                                                     github_repo: None,
                                                     github_issue: None,
                                                     github_base_ref: None,
+                                                    max_attempts: 1,
                                                 };
                                                 match self.create_task(&req).await {
                                                     Ok(tv) => {
@@ -1933,6 +1935,7 @@ impl Store {
                             github_repo: None,
                             github_issue: None,
                             github_base_ref: None,
+                            max_attempts: 1,
                         };
                         // Claim the pending→running transition before creating
                         // the task: the background ticker and the

@@ -191,6 +191,7 @@ pub async fn github_issue_webhook(
         github_repo: full_name,
         github_issue: Some(number),
         github_base_ref: None,
+        max_attempts: 1,
     };
     state
         .store
@@ -224,6 +225,7 @@ fn create_followup_task(prompt: String) -> agentgrid_common::CreateTaskRequest {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     }
 }
 

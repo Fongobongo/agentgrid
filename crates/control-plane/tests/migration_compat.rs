@@ -115,6 +115,7 @@ async fn migrations_serve_legacy_happy_path() {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         })
         .await
         .unwrap();
@@ -222,6 +223,7 @@ async fn foreign_keys_enforced_after_migration_0040() {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            max_attempts: 1,
         })
         .await
         .unwrap();

@@ -263,6 +263,7 @@ pub async fn rework_attempt(
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        max_attempts: 1,
     };
     match state.store.create_task(&req).await {
         Ok(view) => {
