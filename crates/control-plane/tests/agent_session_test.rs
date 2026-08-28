@@ -130,6 +130,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()

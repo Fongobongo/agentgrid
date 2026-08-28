@@ -623,6 +623,8 @@ mod tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -699,6 +701,8 @@ mod tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();

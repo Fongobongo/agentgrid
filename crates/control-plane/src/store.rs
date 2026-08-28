@@ -754,6 +754,14 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
             .ok()
             .flatten()
             .unwrap_or(1) as u32,
+        // Competitor-gap feature (consensus patch review): solve|review mode
+        // and the reviewed task id (both absent on older rows).
+        consensus_mode: r
+            .try_get::<Option<String>, _>("consensus_mode")
+            .ok()
+            .flatten()
+            .filter(|m| m != "solve"),
+        review_of: r.try_get::<Option<String>, _>("review_of").ok().flatten(),
     }
 }
 
@@ -2143,6 +2151,8 @@ mod workflow_tests {
             github_issue: None,
             github_base_ref: None,
             max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -2199,6 +2209,8 @@ mod workflow_tests {
                 github_issue: Some(7),
                 github_base_ref: Some("develop".into()),
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -2262,6 +2274,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -2404,6 +2418,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -2466,6 +2482,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -2606,6 +2624,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -2724,6 +2744,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -2915,6 +2937,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -3004,6 +3028,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -3510,6 +3536,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -3563,6 +3591,8 @@ mod workflow_tests {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .await
             .unwrap();
@@ -3641,6 +3671,8 @@ mod agent_tests {
             github_issue: None,
             github_base_ref: None,
             max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
         };
         s.create_agent_task(&agent.id, &base).await.unwrap();
         let err = s.create_agent_task(&agent.id, &base).await.unwrap_err();
@@ -3750,6 +3782,8 @@ mod agent_tests {
             github_issue: None,
             github_base_ref: None,
             max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
         };
         let task = s.create_agent_task(&agent.id, &req).await.unwrap();
         assert_eq!(task.agent_id.as_deref(), Some(agent.id.as_str()));

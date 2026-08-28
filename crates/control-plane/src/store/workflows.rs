@@ -1675,6 +1675,8 @@ impl Store {
                                             github_issue: None,
                                             github_base_ref: None,
                                             max_attempts: 1,
+                                            consensus_mode: None,
+                                            review_of: None,
                                         };
                                         let tv = match self.create_task(&req).await {
                                             Ok(tv) => tv,
@@ -1794,6 +1796,8 @@ impl Store {
                                                     github_issue: None,
                                                     github_base_ref: None,
                                                     max_attempts: 1,
+                                                    consensus_mode: None,
+                                                    review_of: None,
                                                 };
                                                 match self.create_task(&req).await {
                                                     Ok(tv) => {
@@ -1936,6 +1940,8 @@ impl Store {
                             github_issue: None,
                             github_base_ref: None,
                             max_attempts: 1,
+                            consensus_mode: None,
+                            review_of: None,
                         };
                         // Claim the pending→running transition before creating
                         // the task: the background ticker and the
@@ -2014,7 +2020,7 @@ impl Store {
 /// Newest `result` event text of an attempt, truncated to 2000 chars
 /// (plan 3.3 step outcome). Adapter result payloads are JSON with a `text`
 /// field; fall back to the raw payload if that shape changes.
-async fn latest_result_text(
+pub(crate) async fn latest_result_text(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     attempt_id: &str,
 ) -> Result<Option<String>> {

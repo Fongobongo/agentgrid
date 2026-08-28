@@ -312,6 +312,16 @@ pub struct CreateTaskRequest {
     pub consensus_group_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consensus_member: Option<String>,
+    /// Competitor-gap feature (consensus patch review, nitpicker-inspired):
+    /// `solve` (default) = N models solve one task, patches compared by SHA;
+    /// `review` = N models review one diff, verdicts compared. Review groups
+    /// set `review_of` to the task whose changes.patch they judge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_mode: Option<String>,
+    /// For `consensus_mode = "review"`: the task id whose changes.patch this
+    /// review group judges. `None` for solve groups and independent tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_of: Option<String>,
     /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
     /// Node policy sets max allowed mode; task requests a mode <= node max.
     #[serde(default)]
@@ -417,6 +427,13 @@ pub struct TaskView {
     pub consensus_group_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consensus_member: Option<String>,
+    /// Competitor-gap feature (consensus patch review): `solve` | `review`
+    /// (echoed from CreateTaskRequest; absent on older rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_mode: Option<String>,
+    /// For review groups: the task id whose changes.patch is judged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_of: Option<String>,
     /// Feature "opencode profiles": the per-task override attached to this
     /// task (echoed from CreateTaskRequest). Not part of scheduling
     /// semantics — informational for dashboards.
@@ -1559,6 +1576,8 @@ mod tests {
             github_issue: None,
             github_base_ref: None,
             max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
         };
         assert_eq!(round_trip(&req), req);
         // Competitor-gap feature (task-level auto-retry): absent on the wire

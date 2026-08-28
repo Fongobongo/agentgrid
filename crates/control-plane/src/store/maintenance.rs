@@ -211,6 +211,8 @@ impl Store {
                         github_issue: None,
                         github_base_ref: None,
                         max_attempts: 1,
+                        consensus_mode: None,
+                        review_of: None,
                     };
                     if let Err(e) = store.create_agent_task(&a.id, &req).await {
                         tracing::warn!("agent {} heartbeat spawn failed: {e}", a.id);

@@ -224,6 +224,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -580,6 +582,8 @@ async fn validation_failure_must_not_report_success() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -706,6 +710,8 @@ async fn cancel_queued_marks_cancelled() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -1397,6 +1403,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .unwrap(),
             None,
@@ -1474,6 +1482,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .unwrap(),
             None,
@@ -1512,6 +1522,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .unwrap(),
             Some(&token),
@@ -1543,6 +1555,8 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -1649,6 +1663,8 @@ async fn login_sets_cookie_and_cookie_auths() {
                         github_issue: None,
                         github_base_ref: None,
                         max_attempts: 1,
+                        consensus_mode: None,
+                        review_of: None,
                     })
                     .unwrap(),
                 ))
@@ -1776,6 +1792,8 @@ async fn oversized_prompt_returns_413() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -1812,6 +1830,8 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -2656,6 +2676,8 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let created = app
         .clone()
@@ -4434,6 +4456,8 @@ async fn artifact_get_rejects_traversal_name() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -5401,6 +5425,8 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -7129,6 +7155,8 @@ async fn list_tasks_filters_by_status_repository_node() {
             github_issue: None,
             github_base_ref: None,
             max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
         })
         .unwrap()
     };
@@ -7883,6 +7911,8 @@ async fn list_tasks_keyset_pagination() {
             github_issue: None,
             github_base_ref: None,
             max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
         })
         .unwrap()
     };
@@ -8053,6 +8083,8 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             github_issue: None,
             github_base_ref: None,
             max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
         })
         .unwrap();
         let r = app
@@ -8243,6 +8275,8 @@ async fn approvals_keyset_pagination() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let created = app
         .clone()
@@ -8426,6 +8460,8 @@ async fn strict_profile_refuses_wrapper_adapter() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -8745,6 +8781,8 @@ async fn search_finds_task_by_prompt_word() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -8903,6 +8941,8 @@ async fn attempt_detail_and_tag_crud() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = app
         .clone()
@@ -9022,6 +9062,8 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             })
             .unwrap(),
             &token,
@@ -9174,6 +9216,8 @@ async fn agent_api_budget_stop_and_trail() {
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     })
     .unwrap();
     let resp = app
@@ -10840,4 +10884,272 @@ async fn task_auto_retry_requeues_until_budget_exhausted() {
     let tv = state.store.show_task(&t1.id).await.unwrap().unwrap();
     assert_eq!(tv.status, TaskStatus::Failed, "default must not auto-retry");
     let _ = tok;
+}
+
+/// Competitor-gap feature (consensus patch review, nitpicker-inspired):
+/// review-mode consensus group. Unanimous APPROVE verdicts auto-approve the
+/// target task's pending patch review; a REJECT leaves it pending for a
+/// human. Collapse is idempotent (one decision per group).
+#[tokio::test]
+async fn review_consensus_verdicts_gate_patch_review() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let (node_id, _cred) = enroll(&app, "n-rev", vec!["mock".into()], vec!["demo".into()]).await;
+
+    // Target task succeeds -> pending patch review.
+    let target = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "target".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let a = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a.attempt_id).await.unwrap();
+    state
+        .store
+        .complete_attempt(&a.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    let approval = state
+        .store
+        .find_pending_patch_review(&target.id)
+        .await
+        .unwrap()
+        .expect("pending patch review");
+
+    // Two reviewers in a review-mode consensus group.
+    let group = uuid::Uuid::new_v4().to_string();
+    let mut members = Vec::new();
+    for m in ["rev-a", "rev-b"] {
+        let t = state
+            .store
+            .create_task(&agentgrid_common::CreateTaskRequest {
+                prompt: "review the diff".into(),
+                repository: "demo".into(),
+                adapter: "mock".into(),
+                consensus_group_id: Some(group.clone()),
+                consensus_member: Some(m.into()),
+                consensus_mode: Some("review".into()),
+                review_of: Some(target.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        members.push(t.id);
+    }
+
+    // Reviewer A approves; group not yet terminal -> no decision.
+    let a1 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    assert_eq!(a1.task_id, members[0]);
+    state.store.ack_attempt(&a1.attempt_id).await.unwrap();
+    state
+        .store
+        .ingest_events(
+            &a1.attempt_id,
+            &agentgrid_common::IngestEventsRequest {
+                events: vec![agentgrid_common::IncomingEvent {
+                    sequence: 1,
+                    r#type: agentgrid_common::EventType::Result,
+                    payload: serde_json::json!({ "text": "APPROVE: looks good" }),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .store
+        .complete_attempt(&a1.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    state
+        .store
+        .maybe_collapse_consensus(&members[0])
+        .await
+        .unwrap();
+    assert!(
+        state
+            .store
+            .find_pending_patch_review(&target.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "one reviewer in: patch review must stay pending"
+    );
+
+    // Reviewer B approves -> unanimous -> auto-approved.
+    let b1 = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    assert_eq!(b1.task_id, members[1]);
+    state.store.ack_attempt(&b1.attempt_id).await.unwrap();
+    state
+        .store
+        .ingest_events(
+            &b1.attempt_id,
+            &agentgrid_common::IngestEventsRequest {
+                events: vec![agentgrid_common::IncomingEvent {
+                    sequence: 1,
+                    r#type: agentgrid_common::EventType::Result,
+                    payload: serde_json::json!({ "text": "APPROVE" }),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    state
+        .store
+        .complete_attempt(&b1.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    state
+        .store
+        .maybe_collapse_consensus(&members[1])
+        .await
+        .unwrap();
+    assert!(
+        state
+            .store
+            .find_pending_patch_review(&target.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "unanimous APPROVE must auto-approve the patch review"
+    );
+    let decided = state
+        .store
+        .get_approval(&approval.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decided.status, ApprovalStatus::Allowed);
+
+    // Idempotent: re-running collapse changes nothing.
+    state
+        .store
+        .maybe_collapse_consensus(&members[1])
+        .await
+        .unwrap();
+    let again = state
+        .store
+        .get_approval(&approval.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.status, ApprovalStatus::Allowed);
+}
+
+/// Consensus patch review: a single REJECT keeps the patch review pending
+/// for a human decision.
+#[tokio::test]
+async fn review_consensus_reject_keeps_human_gate() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let (node_id, _cred) = enroll(&app, "n-rev2", vec!["mock".into()], vec!["demo".into()]).await;
+
+    let target = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "target".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let a = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a.attempt_id).await.unwrap();
+    state
+        .store
+        .complete_attempt(&a.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    assert!(state
+        .store
+        .find_pending_patch_review(&target.id)
+        .await
+        .unwrap()
+        .is_some());
+
+    let group = uuid::Uuid::new_v4().to_string();
+    let mut members = Vec::new();
+    for m in ["rev-a", "rev-b"] {
+        let t = state
+            .store
+            .create_task(&agentgrid_common::CreateTaskRequest {
+                prompt: "review the diff".into(),
+                repository: "demo".into(),
+                adapter: "mock".into(),
+                consensus_group_id: Some(group.clone()),
+                consensus_member: Some(m.into()),
+                consensus_mode: Some("review".into()),
+                review_of: Some(target.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        members.push(t.id);
+    }
+    for (i, verdict) in ["APPROVE: fine", "REJECT: null deref in handler"]
+        .iter()
+        .enumerate()
+    {
+        let asg = state.store.try_assign(&node_id).await.unwrap().unwrap();
+        assert_eq!(asg.task_id, members[i]);
+        state.store.ack_attempt(&asg.attempt_id).await.unwrap();
+        state
+            .store
+            .ingest_events(
+                &asg.attempt_id,
+                &agentgrid_common::IngestEventsRequest {
+                    events: vec![agentgrid_common::IncomingEvent {
+                        sequence: 1,
+                        r#type: agentgrid_common::EventType::Result,
+                        payload: serde_json::json!({ "text": verdict }),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .complete_attempt(&asg.attempt_id, &complete_req())
+            .await
+            .unwrap();
+        state
+            .store
+            .maybe_collapse_consensus(&members[i])
+            .await
+            .unwrap();
+    }
+    assert!(
+        state
+            .store
+            .find_pending_patch_review(&target.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "a REJECT must keep the patch review pending for a human"
+    );
 }

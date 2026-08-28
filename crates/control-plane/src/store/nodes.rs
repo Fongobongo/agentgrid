@@ -340,7 +340,7 @@ impl Store {
         Ok(())
     }
 
-    async fn audit_tx(
+    pub(crate) async fn audit_tx(
         &self,
         tx: &mut sqlx::SqliteConnection,
         actor_type: &str,

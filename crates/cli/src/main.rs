@@ -112,6 +112,11 @@ enum AgCommand {
     /// AGENTS-BRAIN.md from a repository's task history — the file every
     /// attempt then reads as project memory.
     Brain(BrainArgs),
+    /// Competitor-gap feature (consensus patch review, nitpicker-inspired):
+    /// N reviewer adapters judge one task's changes.patch; unanimous APPROVE
+    /// auto-approves the pending patch review, disagreement leaves it for a
+    /// human.
+    Review(ReviewArgs),
 }
 
 #[derive(Args)]
@@ -144,6 +149,20 @@ struct BrainArgs {
     /// Cap on tasks pulled for the digest (default 50).
     #[arg(long, default_value_t = 50)]
     limit: u64,
+}
+
+/// Competitor-gap feature (consensus patch review, nitpicker-inspired):
+/// `ag review <task> --models a,b` fires one review task per adapter over
+/// the task's changes.patch. Verdicts come from each reviewer's `result`
+/// event text; unanimous APPROVE auto-approves the pending patch review,
+/// any REJECT/unclear verdict leaves it for a human.
+#[derive(Args)]
+struct ReviewArgs {
+    /// Task id whose changes.patch is reviewed.
+    task: String,
+    /// Comma-separated reviewer adapters (>= 2), one review task each.
+    #[arg(long, value_delimiter = ',')]
+    models: Vec<String>,
 }
 
 /// Plan 1.3: resume an attempt — new attempt inheriting the task's prompt.
@@ -906,6 +925,7 @@ async fn main() -> Result<()> {
         AgCommand::Opencode(a) => cmd_opencode(&client, &base, a).await,
         AgCommand::Index(a) => index::cmd_index(a, cli.json),
         AgCommand::Brain(a) => cmd_brain(&client, &base, a).await,
+        AgCommand::Review(a) => cmd_review(&client, &base, a).await,
         AgCommand::Autopilot(a) => cmd_autopilot(&client, &base, a).await,
         AgCommand::Setup(a) => cmd_setup(&client, &base, a).await,
         AgCommand::Doctor => cmd_doctor(&client, &base, cli.json).await,
@@ -1092,6 +1112,8 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         github_issue: None,
         github_base_ref: None,
         max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1265,6 +1287,8 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 github_issue: Some(number),
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1329,6 +1353,8 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 github_issue: None,
                 github_base_ref: None,
                 max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1379,6 +1405,8 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         github_issue: None,
         github_base_ref: None,
         max_attempts: a.max_attempts,
+        consensus_mode: None,
+        review_of: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -2148,6 +2176,83 @@ async fn cmd_nodes(client: &reqwest::Client, base: &str, json: bool, a: NodeArgs
 /// the repo, renders one digest section per task (prompt + outcome + error
 /// category), and writes the file. The file is a hint, never a hard
 /// dependency: an agent simply does not get the block when it is absent.
+/// Competitor-gap feature (consensus patch review, nitpicker-inspired):
+/// fire one review task per adapter over a task's changes.patch. Unanimous
+/// APPROVE auto-approves the pending patch review on the CP side; any
+/// REJECT/unclear verdict leaves it for a human.
+async fn cmd_review(client: &reqwest::Client, base: &str, a: ReviewArgs) -> Result<()> {
+    if a.models.len() < 2 {
+        anyhow::bail!("--models needs at least 2 adapters for a consensus review");
+    }
+    let resp = client
+        .get(format!("{base}/v1/tasks/{}", a.task))
+        .send()
+        .await
+        .context("fetch task")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("task {} not found ({})", a.task, resp.status());
+    }
+    let target: TaskView = resp.json().await.context("parse task")?;
+    let resp = client
+        .get(format!(
+            "{base}/v1/tasks/{}/artifacts/changes.patch",
+            a.task
+        ))
+        .send()
+        .await
+        .context("fetch changes.patch")?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "task {} has no changes.patch artifact ({}) — only succeeded tasks with a diff can be reviewed",
+            a.task,
+            resp.status()
+        );
+    }
+    let mut patch = resp.text().await.context("read changes.patch")?;
+    const MAX_PATCH_CHARS: usize = 100_000;
+    if patch.chars().count() > MAX_PATCH_CHARS {
+        patch = patch.chars().take(MAX_PATCH_CHARS).collect::<String>()
+            + "\n... [diff truncated for review] ...";
+    }
+    let prompt = format!(
+        "You are a strict code reviewer. Review the diff below and reply with a verdict line \
+         starting with APPROVE or REJECT, then a one-paragraph reason. REJECT only for real \
+         problems (bugs, security issues, broken builds); style nits alone are not grounds to \
+         REJECT.\n\n```diff\n{patch}\n```"
+    );
+    let group = uuid::Uuid::new_v4().to_string();
+    let mut task_ids = Vec::new();
+    for member in &a.models {
+        let req = CreateTaskRequest {
+            prompt: prompt.clone(),
+            repository: target.repository.clone(),
+            adapter: member.clone(),
+            consensus_group_id: Some(group.clone()),
+            consensus_member: Some(member.clone()),
+            consensus_mode: Some("review".into()),
+            review_of: Some(a.task.clone()),
+            ..Default::default()
+        };
+        let resp = client
+            .post(format!("{base}/v1/tasks"))
+            .json(&req)
+            .send()
+            .await
+            .context("create review task")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("review task submit failed ({})", resp.status());
+        }
+        let task: TaskView = resp.json().await.context("parse")?;
+        task_ids.push(task.id);
+    }
+    println!("review consensus group {group} for task {}:", a.task);
+    for (m, id) in a.models.iter().zip(&task_ids) {
+        println!("  {m}: {id}");
+    }
+    println!("unanimous APPROVE auto-approves the pending patch review; any REJECT leaves it for a human");
+    Ok(())
+}
+
 async fn cmd_brain(client: &reqwest::Client, base: &str, a: BrainArgs) -> Result<()> {
     let url = format!(
         "{base}/v1/tasks?repository={}&limit={}",

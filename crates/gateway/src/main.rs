@@ -230,6 +230,8 @@ impl ControlPlane {
             github_issue: None,
             github_base_ref: None,
             max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
         };
         let r = self.post("/v1/tasks").json(&req).send().await?;
         let status = r.status();

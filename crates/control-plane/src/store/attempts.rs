@@ -5,8 +5,8 @@ use super::{
     attempt_status_str, from_snake, iso_plus_secs, now_iso, status_str, Store, StoreTransitionError,
 };
 use agentgrid_common::{
-    next_attempt_status, next_task_status, AgentSession, AttemptStatus, AttemptTransition,
-    CompleteAttemptRequest, InvalidTransition, TaskStatus, TaskTransition,
+    next_attempt_status, next_task_status, AgentSession, ApprovalEvent, AttemptStatus,
+    AttemptTransition, CompleteAttemptRequest, InvalidTransition, TaskStatus, TaskTransition,
 };
 use anyhow::Result;
 use sqlx::Row;
@@ -462,7 +462,7 @@ impl Store {
             return Ok(());
         };
         let rows = sqlx::query(
-            "SELECT id, status, consensus_member FROM tasks \
+            "SELECT id, status, consensus_member, consensus_mode, review_of FROM tasks \
              WHERE consensus_group_id = ? ORDER BY id",
         )
         .bind(&group_id)
@@ -476,6 +476,14 @@ impl Store {
             if !matches!(st.as_str(), "succeeded" | "failed" | "cancelled") {
                 return Ok(());
             }
+        }
+        // Competitor-gap feature (consensus patch review, nitpicker-inspired):
+        // review-mode groups aggregate reviewer verdicts, not patch SHAs.
+        let mode: String = rows[0]
+            .try_get("consensus_mode")
+            .unwrap_or_else(|_| "solve".into());
+        if mode == "review" {
+            return self.collapse_review_consensus(&group_id, &rows).await;
         }
         let mut patch_shas: Vec<(String, String)> = Vec::new();
         for r in &rows {
@@ -540,6 +548,108 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Competitor-gap feature (consensus patch review, nitpicker-inspired):
+    /// collapse for `consensus_mode = 'review'` groups. Each successful
+    /// member's latest `result` event carries the verdict text: REJECT anywhere
+    /// (or an unclear verdict, or a failed member) keeps the pending patch
+    /// review for a human; unanimous APPROVE auto-approves it. The decision
+    /// is recorded once per group (audit marker keyed by group id) so
+    /// concurrent member completions cannot double-fire.
+    async fn collapse_review_consensus(
+        &self,
+        group_id: &str,
+        rows: &[sqlx::sqlite::SqliteRow],
+    ) -> Result<()> {
+        let review_of: Option<String> = rows
+            .iter()
+            .find_map(|r| r.try_get::<Option<String>, _>("review_of").ok().flatten());
+        let Some(review_of) = review_of else {
+            return Ok(());
+        };
+        let mut verdicts: Vec<(String, &'static str)> = Vec::new();
+        for r in rows {
+            let st: String = r.try_get("status")?;
+            if st != "succeeded" {
+                // A reviewer that failed or was cancelled cannot vouch —
+                // treat the group as not unanimously approving.
+                let member: Option<String> = r.try_get("consensus_member")?;
+                verdicts.push((member.unwrap_or_default(), "absent"));
+                continue;
+            }
+            let member: Option<String> = r.try_get("consensus_member")?;
+            let member_task_id: String = r.try_get("id")?;
+            let attempt_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM attempts WHERE task_id = ? ORDER BY number DESC LIMIT 1",
+            )
+            .bind(&member_task_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            let text = match attempt_id {
+                Some(a) => super::workflows::latest_result_text(&self.pool, &a)
+                    .await?
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            let upper = text.to_uppercase();
+            let verdict = if upper.contains("REJECT") {
+                "reject"
+            } else if upper.contains("APPROVE") {
+                "approve"
+            } else {
+                "unclear"
+            };
+            verdicts.push((member.unwrap_or_default(), verdict));
+        }
+        if verdicts.is_empty() {
+            return Ok(());
+        }
+        let all_approve = verdicts.iter().all(|(_, v)| *v == "approve");
+        let summary = verdicts
+            .iter()
+            .map(|(m, v)| format!("{m}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        // One collapse decision per group: check + marker under the write gate.
+        let mut tx = self.write_txn().await?;
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE actor_id = ? AND action LIKE 'review_consensus.%'",
+        )
+        .bind(group_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if existing > 0 {
+            drop(tx);
+            return Ok(());
+        }
+        self.audit_tx(
+            &mut tx,
+            "consensus_group",
+            Some(group_id),
+            if all_approve {
+                "review_consensus.approved"
+            } else {
+                "review_consensus.disagreement"
+            },
+            Some(&review_of),
+            Some(&summary),
+        )
+        .await?;
+        tx.commit().await?;
+        if all_approve {
+            if let Some(approval) = self.find_pending_patch_review(&review_of).await? {
+                let _ = self
+                    .answer_approval(
+                        &approval.id,
+                        ApprovalEvent::Allow,
+                        Some(&format!("consensus review: {summary}")),
+                        "consensus-review",
+                    )
+                    .await;
+            }
+        }
         Ok(())
     }
 
