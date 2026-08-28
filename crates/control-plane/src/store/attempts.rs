@@ -257,6 +257,15 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        // Competitor-gap feature (convergence metrics): persist how many
+        // feedback-loop rounds the node needed (0 = single-shot).
+        if req.validation_rounds > 0 {
+            sqlx::query("UPDATE attempts SET validation_rounds = ? WHERE id = ?")
+                .bind(req.validation_rounds as i64)
+                .bind(attempt_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         // Stage 13: persist the external-origin provenance link when provided.
         let provenance_json: Option<String> = match &req.provenance {
             Some(p) => serde_json::to_string(p).ok(),
@@ -998,7 +1007,8 @@ impl Store {
         let row = sqlx::query(
             "SELECT attempts.id, attempts.task_id, attempts.number, attempts.node_id, attempts.status, \
                     attempts.started_at, attempts.finished_at, attempts.commit_sha, attempts.exit_code, \
-                    attempts.error_code, tasks.prompt, tasks.adapter, attempts.acp_session_id \
+                    attempts.error_code, tasks.prompt, tasks.adapter, attempts.acp_session_id, \
+                    attempts.validation_rounds \
              FROM attempts JOIN tasks ON tasks.id = attempts.task_id \
              WHERE attempts.id = ?",
         )
@@ -1028,6 +1038,11 @@ impl Store {
             prompt: row.try_get("prompt").unwrap_or_default(),
             adapter: row.try_get("adapter").unwrap_or_default(),
             parent_acp_session_id: row.try_get("acp_session_id").ok().flatten(),
+            validation_rounds: row
+                .try_get::<Option<i64>, _>("validation_rounds")
+                .ok()
+                .flatten()
+                .unwrap_or(0) as u32,
         }))
     }
 }

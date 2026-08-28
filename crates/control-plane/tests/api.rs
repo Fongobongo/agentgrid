@@ -363,6 +363,7 @@ async fn full_task_lifecycle() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -426,6 +427,7 @@ async fn succeeded_attempt_creates_patch_review_approval() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -483,6 +485,7 @@ async fn failure_marks_task_failed() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -524,6 +527,7 @@ async fn completion_propagates_provenance() {
                     security_profile: None,
                 }),
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -645,6 +649,7 @@ async fn validation_failure_must_not_report_success() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -766,6 +771,7 @@ async fn cancel_running_then_node_confirms_cancelled() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -803,6 +809,7 @@ async fn retry_failed_task_reques() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -1209,6 +1216,7 @@ async fn artifact_upload_and_read() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -2464,6 +2472,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -2509,6 +2518,7 @@ async fn complete_on_lost_attempt_is_idempotent() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -3234,6 +3244,7 @@ async fn architect_expandable_plan_pauses_planready_then_approve_expands_steps()
                 plan: Some(plan.into()),
                 provenance: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -3366,6 +3377,7 @@ async fn typed_mailbox_emits_output_and_renders_handoff_block_in_pending_step_pr
                 plan: None,
                 provenance: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -3516,6 +3528,7 @@ async fn workflow_golden_architect_workers_integrator_verifier() {
                         provenance: None,
                         plan: None,
                         pending_artifacts: vec![],
+                        validation_rounds: 0,
                     })
                     .unwrap(),
                     &cred,
@@ -3780,6 +3793,7 @@ async fn workflow_projection_endpoint_exposes_roles_and_verdicts() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -3891,6 +3905,13 @@ async fn annotation_and_rework_fold_feedback_into_new_task() {
     assert_ne!(new_task_id, assign.task_id, "rework must create a new task");
 
     let tv = show_task_view(&app, &new_task_id).await;
+    // Competitor-gap feature (convergence metrics): the rework task links
+    // back to the reviewed attempt.
+    assert_eq!(
+        tv.rework_of.as_deref(),
+        Some(assign.attempt_id.as_str()),
+        "rework task must carry rework_of = source attempt"
+    );
     assert!(
         tv.prompt.contains("[ANNOTATIONS]"),
         "rework prompt must carry the annotation block: {}",
@@ -5420,6 +5441,7 @@ fn complete_req() -> CompleteAttemptRequest {
         provenance: None,
         plan: None,
         pending_artifacts: vec![],
+        validation_rounds: 0,
     }
 }
 
@@ -6292,6 +6314,7 @@ async fn race_retry_vs_late_completion() {
         provenance: None,
         plan: None,
         pending_artifacts: vec![],
+        validation_rounds: 0,
     };
     assert!(state
         .store
@@ -7192,6 +7215,7 @@ async fn complete_persists_resolved_base_sha() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -7251,6 +7275,7 @@ async fn complete_persists_remote_head_at_start_and_finish() {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             })
             .unwrap(),
             &cred,
@@ -9225,6 +9250,7 @@ async fn self_healing_eval_case_stamped_and_shipped_on_retry() {
                 plan: None,
                 provenance: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -10634,4 +10660,83 @@ async fn opencode_profile_allowlist_strips_unknown_keys() {
         cfg.get("definitely_not_a_key").is_none(),
         "allowlist must strip unknown keys, got: {cfg}"
     );
+}
+
+/// Competitor-gap feature (convergence metrics, loop-engineering): the node
+/// reports how many feedback-loop rounds an attempt needed; the CP persists
+/// it on the attempt and surfaces it in `GET /v1/attempts/{id}`.
+#[tokio::test]
+async fn completion_persists_validation_rounds() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+    let (node_id, _cred) = enroll(&app, "n-rounds", vec!["mock".into()], vec!["demo".into()]).await;
+    state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "convergence fixture".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let a = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a.attempt_id).await.unwrap();
+    let mut req = complete_req();
+    req.validation_rounds = 3;
+    state
+        .store
+        .complete_attempt(&a.attempt_id, &req)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/attempts/{}", a.attempt_id), &tok))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let av: agentgrid_common::AttemptView =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        av.validation_rounds, 3,
+        "rounds must round-trip to the view"
+    );
+
+    // A completion without rounds stays 0 (single-shot / ACP path).
+    state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "convergence fixture 2".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let b = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&b.attempt_id).await.unwrap();
+    state
+        .store
+        .complete_attempt(&b.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    let bv = state
+        .store
+        .show_attempt(&b.attempt_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(bv.validation_rounds, 0, "default must stay single-shot");
 }

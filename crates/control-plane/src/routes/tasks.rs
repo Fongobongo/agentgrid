@@ -266,6 +266,13 @@ pub async fn rework_attempt(
     };
     match state.store.create_task(&req).await {
         Ok(view) => {
+            // Competitor-gap feature (convergence metrics): link the rework
+            // task back to the reviewed attempt so the review-loop depth is
+            // reconstructable. Best-effort: a failure here must not lose the
+            // rework task itself.
+            if let Err(e) = state.store.set_task_rework_of(&view.id, &id).await {
+                tracing::warn!(task_id = %view.id, attempt_id = %id, "set_task_rework_of failed: {e}");
+            }
             // Competitor-gap feature (auto-learnings): every review annotation
             // is a captured human judgement — persist it as a pending
             // repo-learning so the feedback loop does not die with the rework

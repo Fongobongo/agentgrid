@@ -376,6 +376,10 @@ pub struct CompletionLine {
     pub provenance: Option<agentgrid_common::ProvenanceRecord>,
     #[serde(default)]
     pub pending_artifacts: Vec<String>,
+    /// Competitor-gap feature (convergence metrics): feedback-loop rounds.
+    /// `#[serde(default)]` keeps pre-0077 `completions.jsonl` lines parseable.
+    #[serde(default)]
+    pub validation_rounds: u32,
 }
 
 impl CompletionOutbox {
@@ -410,6 +414,7 @@ impl CompletionOutbox {
             plan: req.plan.clone(),
             provenance: req.provenance.clone(),
             pending_artifacts: req.pending_artifacts.clone(),
+            validation_rounds: req.validation_rounds,
         };
         // Dedupe: drop any prior pending line for this attempt so we don't
         // redeliver a stale terminal state alongside the fresh one.
@@ -843,6 +848,7 @@ impl CompletionLine {
             plan: self.plan.clone(),
             provenance: self.provenance.clone(),
             pending_artifacts: self.pending_artifacts.clone(),
+            validation_rounds: self.validation_rounds,
         }
     }
 }
@@ -919,6 +925,7 @@ mod tests {
             plan: None,
             provenance: None,
             pending_artifacts: vec![],
+            validation_rounds: 0,
         };
         co.record("att-9", &req, "fence-1").unwrap();
         // Reopen (fresh process) — record survives.
@@ -953,6 +960,7 @@ mod tests {
             plan: None,
             provenance: None,
             pending_artifacts: vec![],
+            validation_rounds: 0,
         };
         co.record("att-1", &req, "f").unwrap();
         co.record("att-2", &req, "f").unwrap();
@@ -1189,6 +1197,7 @@ mod tests {
                 security_profile: None,
             }),
             pending_artifacts: vec!["changes.patch".into(), "validation.log".into()],
+            validation_rounds: 0,
         };
         co.record("att-full", &req, "f-1").unwrap();
         let pending = co.pending().unwrap();

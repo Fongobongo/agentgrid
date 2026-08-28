@@ -5,6 +5,7 @@ import {
   ApiError,
   ApprovalView,
   ArtifactDownload,
+  AttemptView,
   cancelTask,
   CreateAnnotationRequest,
   getArtifact,
@@ -16,6 +17,7 @@ import {
   PatchAnnotation,
   retryTask,
   reworkAttempt,
+  showAttempt,
   streamTask,
   TaskEligibility,
   TaskEvent,
@@ -49,6 +51,9 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   // + the modal state for composing one on a clicked line.
   const [annotations, setAnnotations] = useState<PatchAnnotation[]>([]);
   const [annotating, setAnnotating] = useState<{ file: string; line: number } | null>(null);
+  // Competitor-gap feature (convergence metrics): attempt detail for the
+  // validation-rounds counter.
+  const [attemptDetail, setAttemptDetail] = useState<AttemptView | null>(null);
 
   const logRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -139,8 +144,10 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   useEffect(() => {
     if (task && TERMINAL.includes(task.status) && latestAttemptId) {
       listAnnotations(latestAttemptId).then(setAnnotations).catch(() => setAnnotations([]));
+      showAttempt(latestAttemptId).then(setAttemptDetail).catch(() => setAttemptDetail(null));
     } else {
       setAnnotations([]);
+      setAttemptDetail(null);
     }
   }, [task, taskId, latestAttemptId]);
 
@@ -285,6 +292,14 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
         {/* Hardening P2 item 36: the security profile the agent ran under. */}
         {task.security_profile && (
           <span><b>Security profile</b> {task.security_profile}</span>
+        )}
+        {/* Competitor-gap feature (convergence metrics): rework depth + how
+            many feedback-loop rounds the attempt needed to converge. */}
+        {task.rework_of && (
+          <span><b>Rework of</b> {task.rework_of}</span>
+        )}
+        {(attemptDetail?.validation_rounds ?? 0) > 0 && (
+          <span><b>Validation rounds</b> {attemptDetail?.validation_rounds}</span>
         )}
       </div>
       <div className="prompt-box"><b>Prompt:</b> {task.prompt}</div>

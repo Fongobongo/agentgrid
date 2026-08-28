@@ -82,6 +82,7 @@ impl Store {
             github_repo: req.github_repo.clone(),
             github_issue: req.github_issue,
             github_base_ref: req.github_base_ref.clone(),
+            rework_of: None,
         })
     }
 
@@ -154,7 +155,7 @@ impl Store {
         let mut sql = String::from(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, network_mode, group_id, agent_id, \
                     (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
-                    consensus_group_id, consensus_member, opencode_override, github_repo, github_issue, github_base_ref \
+                    consensus_group_id, consensus_member, opencode_override, github_repo, github_issue, github_base_ref, rework_of \
              FROM tasks WHERE 1=1",
         );
         if after.is_some() {
@@ -208,7 +209,7 @@ impl Store {
                     tasks.base_commit, tasks.parent_acp_session_id, tasks.network_mode, tasks.group_id, tasks.agent_id, \
                     (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
                     tasks.consensus_group_id, tasks.consensus_member, tasks.opencode_override, \
-                    tasks.github_repo, tasks.github_issue, tasks.github_base_ref \
+                    tasks.github_repo, tasks.github_issue, tasks.github_base_ref, tasks.rework_of \
              FROM tasks JOIN tasks_fts ON tasks_fts.rowid = tasks.rowid \
              WHERE tasks_fts MATCH ? \
              ORDER BY bm25(tasks_fts) LIMIT 50",
@@ -298,13 +299,26 @@ impl Store {
         let row = sqlx::query(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, network_mode, group_id, agent_id, \
                     (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
-                    consensus_group_id, consensus_member, opencode_override, github_repo, github_issue, github_base_ref \
+                    consensus_group_id, consensus_member, opencode_override, github_repo, github_issue, github_base_ref, rework_of \
              FROM tasks WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.as_ref().map(row_to_task_view))
+    }
+
+    /// Competitor-gap feature (convergence metrics): link a rework task to
+    /// the attempt it was created from (`POST /v1/attempts/{id}/rework`).
+    /// Kept out of `CreateTaskRequest` on purpose — only the rework route
+    /// ever sets it, so the ~20 other constructors stay untouched.
+    pub async fn set_task_rework_of(&self, task_id: &str, attempt_id: &str) -> Result<()> {
+        sqlx::query("UPDATE tasks SET rework_of = ? WHERE id = ?")
+            .bind(attempt_id)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Hardening P0 item 9: read events for a task ordered by the global
@@ -438,5 +452,6 @@ pub(crate) async fn insert_task_tx(
         github_repo: req.github_repo.clone(),
         github_issue: req.github_issue,
         github_base_ref: req.github_base_ref.clone(),
+        rework_of: None,
     })
 }

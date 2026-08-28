@@ -744,6 +744,9 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
             .try_get::<Option<String>, _>("github_base_ref")
             .ok()
             .flatten(),
+        // Competitor-gap feature (convergence metrics): the attempt this task
+        // was reworked from, if any.
+        rework_of: r.try_get::<Option<String>, _>("rework_of").ok().flatten(),
     }
 }
 
@@ -1240,6 +1243,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1361,6 +1365,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1385,6 +1390,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1432,6 +1438,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1503,6 +1510,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1524,6 +1532,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1606,6 +1615,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1681,6 +1691,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1702,6 +1713,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1755,6 +1767,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1858,6 +1871,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -1910,6 +1924,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -2405,6 +2420,7 @@ mod workflow_tests {
                 provenance: None,
                 plan: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await
@@ -3828,6 +3844,7 @@ mod verifier_ro_tests {
                 plan: None,
                 provenance: None,
                 pending_artifacts: vec![],
+                validation_rounds: 0,
             },
         )
         .await

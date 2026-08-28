@@ -25,6 +25,9 @@ export interface TaskView {
   github_repo?: string | null;
   github_issue?: number | null;
   github_base_ref?: string | null;
+  // Competitor-gap feature (convergence metrics): attempt this task was
+  // reworked from, if any.
+  rework_of?: string | null;
 }
 
 export interface NodeView {
@@ -385,6 +388,19 @@ export interface CreateAnnotationRequest {
 
 export interface ReworkResponse {
   task_id: string;
+}
+
+// Competitor-gap feature (convergence metrics): single-attempt detail.
+export interface AttemptView {
+  id: string;
+  task_id: string;
+  number: number;
+  status: string;
+  validation_rounds?: number;
+}
+
+export function showAttempt(attemptId: string): Promise<AttemptView> {
+  return getJson<AttemptView>(`/v1/attempts/${attemptId}`);
 }
 
 export function listAnnotations(attemptId: string): Promise<PatchAnnotation[]> {

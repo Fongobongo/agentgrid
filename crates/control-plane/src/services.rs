@@ -540,6 +540,7 @@ mod tests {
             provenance: None,
             plan: None,
             pending_artifacts: vec![],
+            validation_rounds: 0,
         };
         assert!(svc.complete_attempt(&attempt_id, &req).await.unwrap());
 
@@ -653,6 +654,7 @@ mod tests {
             provenance: None,
             plan: None,
             pending_artifacts: vec![],
+            validation_rounds: 0,
         };
         assert!(svc
             .complete_attempt(&assign.attempt_id, &req)
@@ -725,6 +727,7 @@ mod tests {
             provenance: None,
             plan: None,
             pending_artifacts: vec![],
+            validation_rounds: 0,
         };
         assert!(svc
             .complete_attempt(&assign.attempt_id, &req)

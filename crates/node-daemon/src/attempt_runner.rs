@@ -588,6 +588,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             remote_head_at_finish,
             assignment.provenance.clone().or_else(provenance_from_env),
             pending_artifacts,
+            // ACP path is single-shot (no feedback loop) — always 0 rounds.
+            0,
             &cfg.completion_outbox,
             &assignment.fencing_token,
         )
@@ -674,6 +676,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 None,
                 assignment.provenance.clone().or_else(provenance_from_env),
                 vec![],
+                0,
                 &cfg.completion_outbox,
                 &assignment.fencing_token,
             )
@@ -890,6 +893,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 plan: None,
                 provenance: assignment.provenance.clone().or_else(provenance_from_env),
                 pending_artifacts: vec![],
+                validation_rounds: round as u32,
             };
             if let Err(e) = cfg.completion_outbox.record(
                 &assignment.attempt_id,
@@ -1162,6 +1166,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         remote_head_at_finish,
         assignment.provenance.clone().or_else(provenance_from_env),
         pending_artifacts,
+        // Competitor-gap feature (convergence metrics): how many feedback-loop
+        // rounds this attempt needed before converging.
+        round as u32,
         &cfg.completion_outbox,
         &assignment.fencing_token,
     )

@@ -128,6 +128,9 @@ pub async fn report_complete(
     remote_head_at_finish: Option<String>,
     provenance: Option<agentgrid_common::ProvenanceRecord>,
     pending_artifacts: Vec<String>,
+    // Competitor-gap feature (convergence metrics): feedback-loop rounds the
+    // node ran for this attempt (0 = single-shot / ACP path).
+    validation_rounds: u32,
     completion_outbox: &outbox::CompletionOutbox,
     fence: &str,
 ) {
@@ -143,6 +146,7 @@ pub async fn report_complete(
         plan,
         provenance,
         pending_artifacts,
+        validation_rounds,
     };
     // Stage 2.1: persist the completion durably so a daemon kill before the CP
     // acks it is redelivered on the next startup (complete_attempt is

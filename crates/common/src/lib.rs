@@ -419,6 +419,12 @@ pub struct TaskView {
     pub github_issue: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_base_ref: Option<String>,
+    /// Competitor-gap feature (convergence metrics, loop-engineering): the
+    /// attempt id this task was created from via `POST /v1/attempts/{id}/rework`.
+    /// NULL for original tasks. Walking the chain gives the rework-iteration
+    /// depth of a review loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rework_of: Option<String>,
 }
 
 /// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
@@ -440,6 +446,10 @@ pub struct AttemptView {
     pub prompt: String,
     pub adapter: String,
     pub parent_acp_session_id: Option<String>,
+    /// Competitor-gap feature (convergence metrics): feedback-loop rounds
+    /// this attempt needed before it converged (0 = single-shot).
+    #[serde(default)]
+    pub validation_rounds: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -994,6 +1004,13 @@ pub struct CompleteAttemptRequest {
     /// can see which artifacts are still owed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_artifacts: Vec<String>,
+    /// Competitor-gap feature (convergence metrics, loop-engineering): how
+    /// many feedback-loop rounds the node ran for this attempt (agent exit 0
+    /// but validation failed -> re-spawn with the error). 0 = no feedback
+    /// loop or the ACP path (single-shot). Lets operators see how hard a
+    /// task had to fight to converge.
+    #[serde(default)]
+    pub validation_rounds: u32,
 }
 
 /// A provenance link between an attempt and the external system that
