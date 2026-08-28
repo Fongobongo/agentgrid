@@ -920,7 +920,10 @@ pub fn remote_head_at(repo_dir: &Path) -> Option<String> {
 fn resolve_trivial_conflicts(ws_path: &str) -> Result<bool> {
     let script = match std::env::var("AGENTGRID_PRE_MERGE_RESOLVE") {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
-        _ => return Ok(false),
+        // Competitor-gap feature (GitWand-inspired): no operator script
+        // configured -> try the built-in deterministic patterns instead of
+        // giving up immediately.
+        _ => return builtin_resolve_trivial(ws_path),
     };
     if !Path::new(&script).exists() {
         tracing::warn!(
@@ -946,6 +949,158 @@ fn resolve_trivial_conflicts(ws_path: &str) -> Result<bool> {
         String::from_utf8_lossy(&out.stdout)
     );
     Ok(true)
+}
+
+/// Competitor-gap feature (GitWand-inspired built-in patterns): resolve
+/// conflict hunks that are provably safe without understanding the code —
+/// both sides identical, whitespace-only difference, or one side empty.
+/// Any non-trivial hunk (or an unreadable/binary conflicted file) aborts the
+/// whole pass with `Ok(false)` and leaves the tree untouched, so the manual
+/// path sees exactly the conflict git produced. On full success the files
+/// are staged, and an in-progress cherry-pick is completed.
+fn builtin_resolve_trivial(ws_path: &str) -> Result<bool> {
+    let out = Command::new("git")
+        .args(["diff", "--name-only", "--diff-filter=U", "-z"])
+        .current_dir(ws_path)
+        .output()?;
+    if !out.status.success() {
+        return Ok(false);
+    }
+    let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if files.is_empty() {
+        return Ok(false);
+    }
+    // Resolve in memory first: write nothing unless EVERY conflicted file is
+    // fully trivial, so a partial pass never leaves a half-resolved tree.
+    let mut resolved = Vec::with_capacity(files.len());
+    for f in &files {
+        let path = std::path::Path::new(ws_path).join(f);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return Ok(false); // binary or unreadable -> manual path
+        };
+        let Some(new) = resolve_conflict_markers(&content) else {
+            return Ok(false);
+        };
+        resolved.push((path, new));
+    }
+    for (path, new) in &resolved {
+        std::fs::write(path, new)?;
+    }
+    let mut add = Command::new("git");
+    add.arg("add")
+        .args(resolved.iter().map(|(p, _)| p))
+        .current_dir(ws_path);
+    if !add.status()?.success() {
+        return Ok(false);
+    }
+    // A cherry-pick left in progress would break the next integrator step —
+    // complete it. `git apply` conflicts have no sequencer state; the staged
+    // resolution simply becomes part of the worktree.
+    let gitdir = Command::new("git")
+        .args(["rev-parse", "--absolute-git-dir"])
+        .current_dir(ws_path)
+        .output()?;
+    if gitdir.status.success() {
+        let gitdir = String::from_utf8_lossy(&gitdir.stdout).trim().to_string();
+        if std::path::Path::new(&gitdir)
+            .join("CHERRY_PICK_HEAD")
+            .exists()
+        {
+            let cp = Command::new("git")
+                .args(["-c", "core.editor=true", "cherry-pick", "--continue"])
+                .current_dir(ws_path)
+                .output()?;
+            if !cp.status.success() {
+                return Ok(false);
+            }
+        }
+    }
+    tracing::info!(
+        files = files.len(),
+        "pre-merge-resolve: built-in trivial patterns resolved the conflict"
+    );
+    Ok(true)
+}
+
+/// Resolve the conflict hunks of one file's content. Returns `Some(new)`
+/// only when EVERY hunk is trivial:
+///
+/// * both sides identical -> keep one copy;
+/// * one side empty -> keep the other (add vs nothing);
+/// * whitespace-only difference (trailing spaces / blank lines) -> take the
+///   incoming side.
+///
+/// diff3-style `|||||||` base sections are tolerated (ignored); anything
+/// else non-trivial returns `None`. Pure — unit-tested without git.
+fn resolve_conflict_markers(content: &str) -> Option<String> {
+    if !content.contains("<<<<<<<") {
+        return None;
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
+        if !line.starts_with("<<<<<<<") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        // Hunk: ours until `|||||||`/`=======`, optional base, theirs until
+        // `>>>>>>>`.
+        let mut ours: Vec<&str> = Vec::new();
+        let mut theirs: Vec<&str> = Vec::new();
+        let mut in_base = false;
+        let mut in_theirs = false;
+        let mut closed = false;
+        for l in lines.by_ref() {
+            if l.starts_with("|||||||") && !in_theirs {
+                in_base = true; // base section: ignored
+                continue;
+            }
+            if l.starts_with("=======") && !in_theirs {
+                in_theirs = true;
+                in_base = false;
+                continue;
+            }
+            if l.starts_with(">>>>>>>") {
+                closed = true;
+                break;
+            }
+            if in_theirs {
+                theirs.push(l);
+            } else if !in_base {
+                ours.push(l);
+            }
+        }
+        if !closed || !in_theirs {
+            return None; // malformed hunk -> manual path
+        }
+        let norm = |v: &[&str]| -> Vec<String> {
+            v.iter()
+                .map(|l| l.trim_end().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        };
+        let keep: Vec<&str> = if ours == theirs {
+            ours.clone()
+        } else if ours.is_empty() {
+            theirs.clone()
+        } else if theirs.is_empty() {
+            ours.clone()
+        } else if norm(&ours) == norm(&theirs) {
+            theirs.clone()
+        } else {
+            return None;
+        };
+        for l in keep {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -1768,7 +1923,8 @@ mod tests {
         let conflicted = git_out(&dir, &["diff", "--name-only", "--diff-filter=U"]).unwrap();
         assert!(!conflicted.trim().is_empty(), "fixture must be conflicted");
 
-        // No script configured → old behavior (false).
+        // No script configured -> built-in patterns run, but this fixture
+        // (both sides add DIFFERENT lines) is non-trivial -> still false.
         std::env::remove_var("AGENTGRID_PRE_MERGE_RESOLVE");
         assert!(!resolve_trivial_conflicts(dir.to_str().unwrap()).unwrap());
 
@@ -1787,6 +1943,83 @@ mod tests {
         assert!(content.contains("import A") && content.contains("import B"));
 
         std::env::remove_var("AGENTGRID_PRE_MERGE_RESOLVE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_conflict_markers_trivial_cases() {
+        // Identical both-add -> one copy kept.
+        let c = "head\n<<<<<<< ours\nimport A\n=======\nimport A\n>>>>>>> theirs\ntail\n";
+        assert_eq!(
+            resolve_conflict_markers(c).unwrap(),
+            "head\nimport A\ntail\n"
+        );
+        // One side empty -> keep the other.
+        let c = "<<<<<<< ours\n=======\nnew line\n>>>>>>> theirs\n";
+        assert_eq!(resolve_conflict_markers(c).unwrap(), "new line\n");
+        let c = "<<<<<<< ours\nkept\n=======\n>>>>>>> theirs\n";
+        assert_eq!(resolve_conflict_markers(c).unwrap(), "kept\n");
+        // Whitespace-only difference -> incoming side wins.
+        let c = "<<<<<<< ours\nfoo   \n\n=======\nfoo\n>>>>>>> theirs\n";
+        assert_eq!(resolve_conflict_markers(c).unwrap(), "foo\n");
+        // diff3 base section tolerated.
+        let c = "<<<<<<< ours\nA\n||||||| base\nB\n=======\nA\n>>>>>>> theirs\n";
+        assert_eq!(resolve_conflict_markers(c).unwrap(), "A\n");
+    }
+
+    #[test]
+    fn resolve_conflict_markers_non_trivial_and_malformed() {
+        // Different content -> None.
+        let c = "<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n";
+        assert!(resolve_conflict_markers(c).is_none());
+        // Unclosed hunk -> None.
+        let c = "<<<<<<< ours\nA\n=======\nA\n";
+        assert!(resolve_conflict_markers(c).is_none());
+        // No markers -> None.
+        assert!(resolve_conflict_markers("plain file\n").is_none());
+    }
+
+    #[test]
+    fn builtin_resolve_handles_whitespace_conflict_without_script() {
+        let dir = std::env::temp_dir().join(format!("ag-pmr-bi-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "line1\nfoo\n").unwrap();
+        let gitc = |args: &[&str]| {
+            let mut full = vec!["-c", "user.name=t", "-c", "user.email=t@x"];
+            full.extend_from_slice(args);
+            git(&dir, &full).unwrap()
+        };
+        git(&dir, &["init", "-q", "-b", "main"]).unwrap();
+        gitc(&["add", "-A"]);
+        gitc(&["commit", "-q", "-m", "base"]);
+        // Both branches touch the same line with different trailing
+        // whitespace -> a real conflict that is whitespace-only equivalent.
+        git(&dir, &["checkout", "-q", "-b", "feat"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "line1\nfoo\t\n").unwrap();
+        gitc(&["add", "-A"]);
+        gitc(&["commit", "-q", "-m", "feat"]);
+        git(&dir, &["checkout", "-q", "main"]).unwrap();
+        std::fs::write(dir.join("f.txt"), "line1\nfoo \n").unwrap();
+        gitc(&["add", "-A"]);
+        gitc(&["commit", "-q", "-m", "main"]);
+        // Merge conflicts (exit 1) — allow the failure.
+        let _ = git(
+            &dir,
+            &["-c", "user.name=t", "-c", "user.email=t@x", "merge", "feat"],
+        );
+        let conflicted = git_out(&dir, &["diff", "--name-only", "--diff-filter=U"]).unwrap();
+        assert!(!conflicted.trim().is_empty(), "fixture must be conflicted");
+
+        std::env::remove_var("AGENTGRID_PRE_MERGE_RESOLVE");
+        assert!(
+            resolve_trivial_conflicts(dir.to_str().unwrap()).unwrap(),
+            "whitespace-only conflict must resolve via built-in patterns"
+        );
+        let out = git_out(&dir, &["diff", "--name-only", "--diff-filter=U"]).unwrap();
+        assert!(out.trim().is_empty(), "no conflicts must remain");
+        let content = std::fs::read_to_string(dir.join("f.txt")).unwrap();
+        assert_eq!(content, "line1\nfoo\t\n", "incoming side wins");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }
