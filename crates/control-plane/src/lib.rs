@@ -7,6 +7,7 @@
 mod auth;
 use auth::Claims;
 mod config;
+mod diff_scan;
 mod middleware;
 mod notify;
 mod routes;

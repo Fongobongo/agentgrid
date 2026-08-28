@@ -3911,6 +3911,30 @@ async fn annotation_and_rework_fold_feedback_into_new_task() {
         "rework prompt must keep the original prompt: {}",
         tv.prompt
     );
+
+    // Competitor-gap feature (auto-learnings): the annotation became a pending
+    // repo-learning tied to the reviewed attempt.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/repos/demo/learnings", &tok))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let learnings: Vec<agentgrid_common::RepoLearning> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let auto = learnings
+        .iter()
+        .find(|l| l.statement.contains("diff too big; split"))
+        .expect("rework annotation must become a repo-learning");
+    assert!(
+        !auto.approved,
+        "auto-learning starts pending human approval"
+    );
+    assert_eq!(
+        auto.source_attempt_id.as_deref(),
+        Some(assign.attempt_id.as_str())
+    );
+    assert!(auto.statement.contains("src/big.rs:L42"));
 }
 
 /// Plan 1.7 (#14): a review comment pasting a noisy log (10k identical

@@ -1155,3 +1155,44 @@ async fn insert_verification_note(
     .await?;
     Ok(())
 }
+
+impl Store {
+    /// Competitor-gap feature (diff pattern-scan): append an audit-only event
+    /// (e.g. a `diff_finding`) to the attempt's event stream outside any
+    /// caller transaction. Same invariants as `insert_verification_note`:
+    /// contiguous sequence slot, ingest_id from the shared counter, indexed by
+    /// the events_fts triggers (searchable via `GET /v1/search/events`).
+    pub async fn append_audit_event(&self, attempt_id: &str, kind: &str, text: &str) -> Result<()> {
+        let mut tx = super::begin_immediate(&self.pool).await?;
+        let seq: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_events WHERE attempt_id = ?",
+        )
+        .bind(attempt_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let ingest_id: i64 = sqlx::query_scalar(
+            "UPDATE event_ingest_counter SET next_val = next_val + 1 \
+             WHERE id = 1 RETURNING next_val",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO task_events (id, attempt_id, sequence, type, payload, created_at, ingest_id) \
+             VALUES (?, ?, ?, 'stdout', ?, ?, ?) \
+             ON CONFLICT(attempt_id, sequence) DO NOTHING",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(attempt_id)
+        .bind(seq)
+        .bind(serde_json::to_string(&serde_json::json!({
+            "kind": kind,
+            "text": text,
+        }))?)
+        .bind(now_iso())
+        .bind(ingest_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}

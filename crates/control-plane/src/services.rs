@@ -61,6 +61,27 @@ impl TaskLifecycleService {
             Some(t) => t,
             None => return Ok(true), // orphaned attempt; nothing to advance
         };
+        // Competitor-gap feature (diff pattern-scan): deterministic pre-pass
+        // over a successful attempt's changes.patch — secrets, private keys,
+        // binary blobs, oversized additions. The secret redactor masks agent
+        // LOGS; the committed diff itself was never checked. Findings are
+        // emitted as audit log events (searchable via /v1/search/events) and
+        // never change the outcome. Best-effort: a read failure is logged.
+        if req.exit_code == 0 && req.error_code.is_none() {
+            if let Ok(Some(patch)) = self.store.read_artifact(&task_id, "changes.patch").await {
+                let findings = crate::diff_scan::scan_patch(&patch);
+                for f in findings {
+                    let text = format!("[{}] {}: {}", f.rule, f.file, f.detail);
+                    if let Err(e) = self
+                        .store
+                        .append_audit_event(attempt_id, "diff_finding", &text)
+                        .await
+                    {
+                        tracing::warn!(attempt_id, error = %e, "diff-finding event failed");
+                    }
+                }
+            }
+        }
         // Plan 1.2 (competitor #22a): notify the operator on terminal states
         // (mobile-friendly push). Best-effort; failures are logged inside
         // `notify_task` and never abort the completion path.

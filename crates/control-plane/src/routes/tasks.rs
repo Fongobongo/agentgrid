@@ -265,10 +265,33 @@ pub async fn rework_attempt(
         github_base_ref: None,
     };
     match state.store.create_task(&req).await {
-        Ok(view) => Ok((
-            StatusCode::CREATED,
-            Json(agentgrid_common::ReworkResponse { task_id: view.id }),
-        )),
+        Ok(view) => {
+            // Competitor-gap feature (auto-learnings): every review annotation
+            // is a captured human judgement — persist it as a pending
+            // repo-learning so the feedback loop does not die with the rework
+            // task. `approved=0` keeps it human-gated (`ag learn approve`); the
+            // `source_attempt_id` ties it back to the reviewed attempt.
+            for a in &anns {
+                let loc = match (a.line_start, a.line_end) {
+                    (Some(s), Some(e)) if s != e => format!("{}:L{}-{}", a.file, s, e),
+                    (Some(s), _) => format!("{}:L{}", a.file, s),
+                    _ => a.file.clone(),
+                };
+                let (statement, _) =
+                    agentgrid_common::compress::compress(&format!("{loc}: {}", a.comment), 512);
+                if let Err(e) = state
+                    .store
+                    .add_learning(&req.repository, &statement, 0.6, Some(&id))
+                    .await
+                {
+                    tracing::warn!(attempt_id = %id, "auto-learning from annotation failed: {e}");
+                }
+            }
+            Ok((
+                StatusCode::CREATED,
+                Json(agentgrid_common::ReworkResponse { task_id: view.id }),
+            ))
+        }
         Err(e) => {
             tracing::error!("rework create_task failed: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
