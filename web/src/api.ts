@@ -28,6 +28,9 @@ export interface TaskView {
   // Competitor-gap feature (convergence metrics): attempt this task was
   // reworked from, if any.
   rework_of?: string | null;
+  // Competitor-gap feature (task-level auto-retry): total attempts allowed
+  // (1 = no auto-retry). Only present when > 1.
+  max_attempts?: number;
 }
 
 export interface NodeView {

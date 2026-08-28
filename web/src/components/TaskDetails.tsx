@@ -301,6 +301,11 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
         {(attemptDetail?.validation_rounds ?? 0) > 0 && (
           <span><b>Validation rounds</b> {attemptDetail?.validation_rounds}</span>
         )}
+        {/* Competitor-gap feature (task-level auto-retry); the retry budget is
+            only interesting when it exceeds the default single attempt. */}
+        {(task.max_attempts ?? 1) > 1 && (
+          <span><b>Max attempts</b> {task.max_attempts}</span>
+        )}
       </div>
       <div className="prompt-box"><b>Prompt:</b> {task.prompt}</div>
 

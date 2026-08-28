@@ -66,6 +66,60 @@
   fails the task, and the token never reaches logs, git config or the
   adapter.
 
+- **Consensus patch review: N reviewers judge one diff.**
+  Competitor-gap feature (nitpicker-inspired) — `ag review <task>
+  --models a,b` fires one review task per adapter over the task's
+  `changes.patch` (truncated at 100k chars), grouped under
+  `consensus_mode = 'review'` + `review_of` (migration 0079). On group
+  collapse the CP reads each reviewer's latest `result` event: unanimous
+  APPROVE auto-approves the pending patch review; any
+  REJECT/unclear/absent verdict leaves it for a human. One collapse
+  decision per group (audit marker under the write gate), so concurrent
+  member completions cannot double-fire.
+
+- **Task-level auto-retry: `max_attempts`.** Competitor-gap feature
+  (hatchet-inspired) — `CreateTaskRequest.max_attempts` (default 1 = no
+  auto-retry, migration 0078, echoed in `TaskView`; `ag task run
+  --max-attempts`). When an attempt FAILS and fewer than `max_attempts`
+  attempts have run, `complete_attempt` re-queues the task instead of
+  leaving it failed — same semantics as manual `retry_task`, including the
+  post-commit resume digest and a `retry.auto` audit entry. Cancellation
+  is never auto-retried; the attempt row stays failed for the audit trail.
+
+- **Built-in trivial conflict resolution.** Competitor-gap feature
+  (GitWand-inspired) — `AGENTGRID_PRE_MERGE_RESOLVE` stays the operator
+  hook, but when it is unset the node now resolves only safe hunks itself:
+  identical both-sides, one side empty, whitespace-only differences.
+  Anything else leaves the tree untouched and the cherry-pick fails as
+  before (best-effort, never silent).
+
+- **Convergence metrics: validation rounds + rework chain.**
+  Competitor-gap feature (loop-engineering-inspired) — the node reports
+  `validation_rounds` per completed attempt (migration 0077, echoed in
+  `CompleteAttemptRequest`/`AttemptView`/web) and tasks carry `rework_of`
+  linking a rework task to the attempt that spawned it. The dashboard shows
+  both, so a task that bounced through several review→rework iterations is
+  visible at a glance instead of looking like fresh work.
+
+- **Skills scanner: agent-security checklist.** Competitor-gap extension
+  — the skills scanner (prompt-injection/instruction-override) now also
+  flags agent-safety patterns: secrecy instructions, silent exfiltration,
+  reading credential files, dumping env to the network, git-hook
+  persistence, data URIs, URL shorteners, zero-width Unicode and
+  privileged `curl | bash`.
+
+- **Diff pattern-scan on `changes.patch`.** Competitor-gap feature — on
+  success the CP scans the produced diff for risky patterns (secret
+  material, absolute paths, debug leftovers) and appends audit-only
+  `diff_finding` events instead of blocking the result.
+
+- **Auto-learnings from review annotations.** Competitor-gap feature
+  (claude-reflect-inspired) — a rework annotation with a *lesson* marker
+  lands in the per-repo learning backlog (`ag learn list`) with
+  `approved = 0`; an operator approves before it surfaces in agent
+  prompts, so review feedback becomes durable repo memory instead of
+  disappearing with the rework task.
+
 ## [v0.3.7] — 2026-08-26
 
 > Пост-релизный аудит v0.3.6: 20+ подтверждённых ошибок логики,
