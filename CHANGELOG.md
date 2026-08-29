@@ -9,8 +9,13 @@
   Profiles (revisions + activate), Learnings (add/approve/revoke/delete per
   repo), Conversations (list + multi-turn chat), Shared Context (per-group
   key/value notes), MCP servers (registry + delete), Repositories (add),
-  Admin (SQLite backup + storage GC dry-run/run), Workflow authoring
-  (template create from steps + fire run + interval schedules).
+  Admin (SQLite backup + storage GC dry-run/run + autonomy policy dry-run),
+  Workflow authoring (template create from steps + fire run + interval
+  schedules).
+- **Nodes panel:** one-shot enrollment-token minting (copyable) and
+  per-node credential-pool usage (env / token idx / attempts / rate-limits).
+- **Opencode profiles:** A/B rollout via `assign-percent` directly on the
+  profile card.
 - **New Task form: full `CreateTaskRequest` surface** — advanced section
   with base_commit, network_mode, security_profile, max_attempts,
   ACP session resume, task group, agent attribution, opencode model

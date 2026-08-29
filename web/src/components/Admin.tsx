@@ -1,6 +1,13 @@
 import { useState } from "react";
-import { adminBackup, ApiError, storageGc, StorageGcResult } from "../api";
+import { adminBackup, ApiError, postJson, storageGc, StorageGcResult } from "../api";
 import { ErrorBox } from "./util";
+
+interface PolicyVerdict {
+  decision: string;
+  risk_class: string;
+  reason: string;
+  matched_rules: string[];
+}
 
 export default function Admin() {
   const [path, setPath] = useState("");
@@ -8,6 +15,10 @@ export default function Admin() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState<Error | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [policyCmd, setPolicyCmd] = useState("");
+  const [policyLevel, setPolicyLevel] = useState("l2");
+  const [policyOut, setPolicyOut] = useState<PolicyVerdict | null>(null);
+  const [policyBusy, setPolicyBusy] = useState(false);
 
   const backup = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -25,6 +36,27 @@ export default function Admin() {
       setError(err as Error);
     } finally {
       setBusy(null);
+    }
+  };
+
+  const runPolicy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!policyCmd.trim()) return;
+    setPolicyBusy(true);
+    setError(null);
+    try {
+      // Dry-run the builtin autonomy policy — shows allow/ask/deny + matched
+      // rules without executing anything.
+      setPolicyOut(
+        await postJson("/v1/policy/evaluate", {
+          command: policyCmd,
+          autonomy: policyLevel,
+        }),
+      );
+    } catch (err) {
+      setError(err as Error);
+    } finally {
+      setPolicyBusy(false);
     }
   };
 
@@ -96,6 +128,42 @@ export default function Admin() {
           <li>Metadata without file: {gcResult.metadata_without_file}</li>
           <li>Free: {gcResult.free_mb} MiB</li>
         </ul>
+      )}
+
+      <h3 style={{ marginTop: 24 }}>Policy dry-run</h3>
+      <p className="muted">
+        Evaluate a command against the builtin autonomy policy (allow / ask / deny)
+        without executing it.
+      </p>
+      <form onSubmit={runPolicy} className="form" style={{ maxWidth: 560 }}>
+        <label>
+          Command
+          <input
+            value={policyCmd}
+            onChange={(e) => setPolicyCmd(e.target.value)}
+            placeholder="rm -rf /tmp/x"
+            required
+          />
+        </label>
+        <label>
+          Autonomy
+          <select value={policyLevel} onChange={(e) => setPolicyLevel(e.target.value)}>
+            {["l0", "l1", "l2", "l3", "l4"].map((l) => (
+              <option key={l}>{l}</option>
+            ))}
+          </select>
+        </label>
+        <button type="submit" disabled={policyBusy}>
+          {policyBusy ? "Evaluating…" : "Evaluate"}
+        </button>
+      </form>
+      {policyOut && (
+        <div className="muted">
+          <b>{policyOut.decision}</b> · {policyOut.risk_class} — {policyOut.reason}
+          {policyOut.matched_rules.length > 0 && (
+            <div>rules: {policyOut.matched_rules.join(", ")}</div>
+          )}
+        </div>
       )}
     </section>
   );
