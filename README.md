@@ -5,7 +5,33 @@ node daemons, each running an LLM agent adapter (Claude Code / Codex / OpenCode)
 in an isolated git worktree. SQLite WAL on local disk, single active
 control-plane instance.
 
-> Status: MVP 0.3.2 — see [CHANGELOG.md](CHANGELOG.md).
+> Status: v0.3.9 — see [CHANGELOG.md](CHANGELOG.md).
+
+## Why this instead of k8s Jobs + cron + a queue?
+
+Those tools assume the workload is code you trust. A fleet of autonomous
+coding agents is different:
+
+- **Agents are untrusted code doing file I/O on your repos** — agentgrid gives
+  each attempt its own git worktree and process group, optional Docker/Podman
+  sandbox with network/secrets policy, per-attempt fencing tokens, and a
+  command allow/deny guard. A k8s Job with `--dangerously-skip-permissions`
+  gives you none of that.
+- **Every run is a reviewable artifact, not a log line** — `changes.patch`,
+  validation logs and the full agent event stream (idempotent, resumable,
+  FTS-searchable) per attempt, plus audit-only guards (secret scans in diffs,
+  claimed-finish-vs-actual-commit checks, unrequested-hash scope-creep flags).
+- **One binary, one SQLite file, zero runtime deps** — control plane is a
+  single Rust binary with bundled SQLite (rustls TLS, no external DB, no
+  Docker required at runtime). Install = copy a binary + `./install-*.sh`.
+  No k8s API server, no Redis, no Postgres operator.
+- **Human gates where they matter** — patch-review approvals (web/TUI/mobile),
+  multi-adapter consensus review, read-only verifier sessions, and a built-in
+  executor–verifier loop so an agent never grades its own work.
+
+If you already run k8s and just need a cron-shaped container, use k8s. If you
+run fleets of coding agents against real repositories, that's the gap this
+fills.
 
 ## Feature maturity
 

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **Meta-plan docs trimmed from the repo.** Completed or superseded planning
+  files removed to cut documentation noise for new readers (git history
+  retains them): `agentgrid-hardening-plan.md` (641/642 items done; the one
+  deferred item moved to issue #52), `docs/plans/0.2-completion.md` (plan
+  fully delivered), `docs/plans/0.4-production-ready.md` (was already
+  deprecated — k8s/Postgres path rejected against the SQLite-only
+  constraints), `docs/plans/windows-deploy-*.md` (Windows is not a supported
+  target; unreferenced). The active 0.3 plan and the gitignored competitor
+  roadmaps stay.
+
 ### Security
 
 - **RUSTSEC-2025-0134 closed: rustls-pemfile dropped from the workspace.**
@@ -37,6 +49,19 @@
   (workers × max_tasks) grid asserting concurrent attributed creations let
   exactly `min(workers, max_tasks)` through and spend exactly that many —
   the check-then-act race class from the v0.3.6 audit.
+
+### Maintenance
+
+- **Transitive RUSTSEC advisories patched via Cargo.lock:** event-listener
+  5.4.1 → 5.4.2 (unsound `StackSlot` `!Send` crossing, RUSTSEC-2026-0221;
+  via sqlx-core) and lru 0.18.1 → 0.18.3 (use-after-free in
+  `LruCache::pop()` panic path, RUSTSEC-2026-0253; via ratatui/TUI). Both
+  fix-release-only bumps, no code change. Issues #38/#39 closed.
+- **Repo description + topics set** (`rust`, `ai-agents`, `orchestrator`,
+  `llm`, `coding-agents`); previously empty.
+- **README: "Why this instead of k8s Jobs + cron" section on the first
+  screen** — the trust/review/zero-deps/human-gate story before any install
+  steps; status line un-staled (0.3.2 → 0.3.9).
 
 ## [v0.3.9] — 2026-08-29
 
