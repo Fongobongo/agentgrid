@@ -1,7 +1,14 @@
 import { useEffect, useState, Fragment } from 'react';
-import { drainNode, getOpencodeAudit, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, listOpencodeProfiles, postJson, revokeNode } from '../api';
+import { drainNode, getJson, getOpencodeAudit, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, listOpencodeProfiles, postJson, revokeNode } from '../api';
 import { ConfirmModal } from './Modal';
 import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
+
+interface AccountUsage {
+  env: string;
+  token_index: number;
+  attempts: number;
+  rate_limited: number;
+}
 
 export default function Nodes() {
   const [nodes, setNodes] = useState<NodeView[] | null>(null);
@@ -18,6 +25,11 @@ export default function Nodes() {
   const [auditRows, setAuditRows] = useState<{ nodeId: string; rows: OpencodeAuditEntry[] } | null>(null);
   const [profiles, setProfiles] = useState<OpencodeProfile[] | null>(null);
   const [assignBusy, setAssignBusy] = useState<string | null>(null);
+  // Enrollment token for joining a new node (POST /v1/nodes/enrollment-token).
+  const [enrollToken, setEnrollToken] = useState<{ token: string; expires_at: string } | null>(null);
+  // Per-node credential-pool usage (Stage: accounts/usage).
+  const [usageNode, setUsageNode] = useState<string | null>(null);
+  const [usageRows, setUsageRows] = useState<AccountUsage[] | null>(null);
 
   const load = () => {
     listNodes()
@@ -94,6 +106,33 @@ export default function Nodes() {
     }
   };
 
+  const mintEnrollToken = async () => {
+    try {
+      const t = await postJson<{ token: string; expires_at: string }>(
+        '/v1/nodes/enrollment-token',
+        {},
+      );
+      setEnrollToken(t);
+    } catch (e) {
+      setError(e);
+    }
+  };
+
+  const toggleUsage = async (nodeId: string) => {
+    if (usageNode === nodeId) {
+      setUsageNode(null);
+      setUsageRows(null);
+      return;
+    }
+    setUsageNode(nodeId);
+    setUsageRows(null);
+    try {
+      setUsageRows(await getJson<AccountUsage[]>(`/v1/nodes/${nodeId}/accounts/usage`));
+    } catch {
+      setUsageRows([]);
+    }
+  };
+
   if (!nodes) {
     if (error) return <ErrorBox err={error} />;
     return <Loading />;
@@ -102,6 +141,17 @@ export default function Nodes() {
   return (
     <section>
       <h2>Nodes</h2>
+      <p>
+        <button onClick={mintEnrollToken}>Enrollment token</button>{' '}
+        <span className="muted">(one-shot token a new node daemon uses at first boot)</span>
+      </p>
+      {enrollToken && (
+        <div className="muted" style={{ fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all' }}>
+          {enrollToken.token} — expires {fmtTime(enrollToken.expires_at)}{' '}
+          <button onClick={() => { navigator.clipboard.writeText(enrollToken.token).catch(() => {}); }}>copy</button>{' '}
+          <button onClick={() => setEnrollToken(null)}>dismiss</button>
+        </div>
+      )}
       {error ? <ErrorBox err={error} /> : null}
       <table className="grid">
         <thead>
@@ -181,7 +231,12 @@ export default function Nodes() {
                 <td>
                   {n.status !== 'revoked' && (
                     <>
-                      {/* Hardening P2 item 37: maintenance drain toggle. */}
+                      <button
+                        onClick={() => toggleUsage(n.id)}
+                        title="Pool usage per account"
+                      >
+                        {usageNode === n.id ? 'hide usage' : 'usage'}
+                      </button>{' '}
                       <button
                         disabled={busy === n.id}
                         onClick={() => toggleDrain(n)}
@@ -200,6 +255,33 @@ export default function Nodes() {
                   )}
                 </td>
               </tr>
+              {usageNode === n.id && (
+                <tr>
+                  <td colSpan={12}>
+                    {usageRows === null ? (
+                      <div className="muted">loading…</div>
+                    ) : usageRows.length === 0 ? (
+                      <div className="muted">no account-usage rows</div>
+                    ) : (
+                      <table className="grid">
+                        <thead>
+                          <tr><th>Env</th><th>Token idx</th><th>Attempts</th><th>Rate-limited</th></tr>
+                        </thead>
+                        <tbody>
+                          {usageRows.map((u) => (
+                            <tr key={u.env}>
+                              <td>{u.env}</td>
+                              <td>{u.token_index}</td>
+                              <td>{u.attempts}</td>
+                              <td>{u.rate_limited}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </td>
+                </tr>
+              )}
               {auditNode === n.id && (
                 <tr>
                   <td colSpan={12}>
