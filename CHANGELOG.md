@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v0.3.9] — 2026-08-29
 
 ### Fixed
 
@@ -20,8 +20,6 @@
   clients) 86.5 MiB at 50 WS nodes — inside the 96 MiB budget. Reports:
   `docs/load-baseline-3.1.md`, `docs/rss-budget-baseline.md`; plan
   0.3 items 3.1 and 3.2 closed.
-
-### Added
 
 - **Scope-creep guard: audit unrequested hash/checksum busywork.**
   Competitor-gap feature (stop-that-shit-inspired) — on a successful
