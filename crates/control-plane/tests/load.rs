@@ -223,99 +223,110 @@ async fn poll_loop(
 /// each `Assignment` push fulfill via HTTP data plane (ack+complete). Push,
 /// so assignment latency should sit near the WALL delay of write+push, NOT
 /// a poll cadence — proving the plan 0.3 `< 200 ms p99` target on push.
+/// On socket loss the loop RECONNECTS with a fresh Hello + free_slots
+/// heartbeat: the CP releases the registry slot on TCP close, and the
+/// next pump pass re-assigns any in-flight attempts of this node; without
+/// reconnect a dropped push stalled the run at `completed < tasks_n`
+/// (observed 946/1000 on the remote load host at 100 nodes).
 async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usize) {
     let ws_url = format!(
         "ws://{}/v1/node/ws",
         sp.base.strip_prefix("http://").unwrap_or(&sp.base)
     );
-    // tokio_tungstenite needs an IntoClientRequest; bare "ws://..." is fine.
-    let mut req =
-        match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
-            &ws_url,
-        ) {
-            Ok(r) => r,
+    while sp.completed.load(std::sync::atomic::Ordering::Relaxed) < completed_threshold {
+        // (Re)connect + Hello + free-slots heartbeat. A failed upgrade or a
+        // dropped mid-run socket falls through to the backoff + retry below.
+        let mut req =
+            match tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+                &ws_url,
+            ) {
+                Ok(r) => r,
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+        req.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", node.credential).parse().unwrap(),
+        );
+        let mut ws = match tokio_tungstenite::connect_async(req).await {
+            Ok((s, _)) => s,
             Err(_) => {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                return;
+                continue;
             }
         };
-    req.headers_mut().insert(
-        "authorization",
-        format!("Bearer {}", node.credential).parse().unwrap(),
-    );
-    let mut ws = match tokio_tungstenite::connect_async(req).await {
-        Ok((s, _)) => s,
-        Err(_) => {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            return;
-        }
-    };
-    let hello = NodeWsMsg::Hello {
-        node_id: node.node_id.clone(),
-        name: "load".into(),
-        adapters: vec!["mock".into()],
-        repositories: vec!["*".into()],
-        max_concurrency: 2,
-        protocol_version: None,
-        agent_version: String::new(),
-    };
-    if let Ok(s) = serde_json::to_string(&hello) {
-        let _ = ws.send(Message::Text(s.as_str().into())).await;
-    }
-    // Tell pusher we have slots free (once). Subsequent ack's below will
-    // indirectly wake the pump because `handle_client_msg` notifies on Ack,
-    // which currently re-fills slots; no need to spam Heartbeat every iter.
-    {
-        let hb = NodeWsMsg::Heartbeat { free_slots: 2 };
-        if let Ok(s) = serde_json::to_string(&hb) {
+        let hello = NodeWsMsg::Hello {
+            node_id: node.node_id.clone(),
+            name: "load".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 2,
+            protocol_version: None,
+            agent_version: String::new(),
+        };
+        if let Ok(s) = serde_json::to_string(&hello) {
             let _ = ws.send(Message::Text(s.as_str().into())).await;
         }
-    }
-    // Drive the channel until the queue drains. Reconnect is intentionally
-    // skipped — a lost push mid-test drops load below threshold, fix surfaces
-    // as `completed < tasks_n` assertion downstream.
-    while sp.completed.load(std::sync::atomic::Ordering::Relaxed) < completed_threshold {
-        let msg = match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await {
-            Ok(Some(Ok(m))) => m,
-            _ => continue,
-        };
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        let parsed: NodeWsMsg = match serde_json::from_str(&text) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if let NodeWsMsg::Assignment { assignments } = parsed {
-            for a in assignments {
-                // Ack the assignment back over the WS channel so the CP
-                // records it as accepted (ack semantics identical to HTTP
-                // /ack via the store; same fencing token round-trips).
-                let ack = NodeWsMsg::Ack {
-                    attempt_ids: vec![a.attempt_id.clone()],
-                    fencing_tokens: vec![a.fencing_token.clone()],
-                    ok: true,
-                    error: None,
-                };
-                if let Ok(s) = serde_json::to_string(&ack) {
-                    let _ = ws.send(Message::Text(s.as_str().into())).await;
-                }
-                fulfill_one(
-                    &sp.http,
-                    &sp.base,
-                    &node.credential,
-                    &a,
-                    &sp.created,
-                    &sp.latencies,
-                    &sp.completed,
-                )
-                .await;
+        // Tell pusher we have slots free (once per connect). Subsequent
+        // ack's below indirectly wake the pump because `handle_client_msg`
+        // notifies on Ack, which re-fills slots.
+        {
+            let hb = NodeWsMsg::Heartbeat { free_slots: 2 };
+            if let Ok(s) = serde_json::to_string(&hb) {
+                let _ = ws.send(Message::Text(s.as_str().into())).await;
             }
         }
+        // Drive this connection until the queue drains or the socket dies.
+        while sp.completed.load(std::sync::atomic::Ordering::Relaxed) < completed_threshold {
+            let msg =
+                match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await {
+                    Ok(Some(Ok(m))) => m,
+                    Ok(Some(Err(_))) => break, // socket error -> reconnect
+                    Ok(None) => break,         // stream ended -> reconnect
+                    Err(_) => continue,        // idle timeout -> keep waiting
+                };
+            let text = match msg {
+                Message::Text(t) => t,
+                Message::Close(_) => break,
+                _ => continue,
+            };
+            let parsed: NodeWsMsg = match serde_json::from_str(&text) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if let NodeWsMsg::Assignment { assignments } = parsed {
+                for a in assignments {
+                    // Ack the assignment back over the WS channel so the CP
+                    // records it as accepted (ack semantics identical to
+                    // HTTP /ack via the store; same fencing token round-trips).
+                    let ack = NodeWsMsg::Ack {
+                        attempt_ids: vec![a.attempt_id.clone()],
+                        fencing_tokens: vec![a.fencing_token.clone()],
+                        ok: true,
+                        error: None,
+                    };
+                    if let Ok(s) = serde_json::to_string(&ack) {
+                        let _ = ws.send(Message::Text(s.as_str().into())).await;
+                    }
+                    fulfill_one(
+                        &sp.http,
+                        &sp.base,
+                        &node.credential,
+                        &a,
+                        &sp.created,
+                        &sp.latencies,
+                        &sp.completed,
+                    )
+                    .await;
+                }
+            }
+        }
+        let _ = ws.close(None).await;
+        // Small backoff before reconnect so a CP-side refusal cannot hot-loop.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    let _ = ws.close(None).await;
 }
 
 /// Deadline-wait + percents + assertion, then print LOAD-RESULT.

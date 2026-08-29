@@ -1,7 +1,9 @@
 # Load E2E — 10 nodes × 100 tasks (poll + WS transport) + WS target proof
 
-План 0.3 Этап 3.1. Включено **до лимита user-requested scope 10/100**
-(целевая кассета 0.3 — 100 nodes × 1000 tasks; user cap 10 %).
+План 0.3 Этап 3.1. **2026-08-28: full-scale run закрыт на удалённом
+хосте — см. «Full scale (remote host)» ниже.** (Исторический запуск
+2026-08-14 был ограничен 10/100 user-cap; целевая кассета 0.3 —
+50/100 и 100/1000 — взята на idle-боксе 191.96.11.161.)
 
 ## Метод
 
@@ -64,15 +66,83 @@ in-process roundtrip (HelloOk → Notify → pump_once `try_assign_batch` →
 scheduler wakeups, а не самого WS канала. Цель < 200 ms говорит о
 архитектуре; этот замер её подтверждает с низкой нагрузкой.
 
-## Достигнутые цели 0.3
+## Full scale (remote host, 2026-08-28)
+
+Удалённый тестовый хост `191.96.11.161` (Debian 12, 2 vCPU / 4 GB RAM,
+load avg ~0.25 — idle, в отличие от dev-box). Локально собранный
+static-ish debug-бинарь теста `load.rs` (strip+gzip, 11 МБ) залит через
+`tests/e2e/remote-ssh.py`; ничего кроме бинаря на хосте не нужно
+(миграции sqlx вшиты `sqlx::migrate!`). Каждый прогон — fresh in-process
+CP (`AppState::open_temp`) на 127.0.0.1.
+
+По ходу прогона найден и починен баг самого стенда: `ws_loop` не
+реконнектился после потери сокета (после `Close`/`None` поток ломался в
+busy-`continue` до drain-таймаута; на 100 узлах 2 из 4 прогонов
+зависали на 946/1000). Fix: reconnect-цикл с Hello + free-slots
+heartbeat на переподключении. После фикса — 6/6 стабильных прогонов
+на 100/1000 (4 validation + poll + ws final).
+
+### Результаты (финальные прогоны, debug build)
+
+```
+poll 100/1000:
+LOAD-RESULT nodes=100 tasks=1000 completed=1000 wall_s=41.5
+            assign_p50_ms=22991 assign_p99_ms=29792 assign_max_ms=29837
+            tasks_read_p50_ms=154 tasks_read_p99_ms=622
+            write_txns=3700 write_lock_failures=0
+            poll_requests=500 poll_avg_ms=2160.17 ws_pushes=0
+
+ws 100/1000:
+LOAD-RESULT nodes=100 tasks=1000 completed=1000 wall_s=41.7
+            assign_p50_ms=22312 assign_p99_ms=30487 assign_max_ms=30580
+            tasks_read_p50_ms=148 tasks_read_p99_ms=474
+            write_txns=4674 write_lock_failures=0
+            poll_requests=0 poll_avg_ms=0.00 ws_pushes=500
+```
+
+(50/1000 тоже сняты на этом же хосте ранее в сессии: poll — 47.1 s wall,
+lock_failures=0, reads p99 460 ms; ws — 46.4 s, lock_failures=0, reads p99
+344 ms. Числа устойчиво совпадают с 100-узловой кассетой.)
+
+Интерпретация полных прогонов:
+
+- `write_lock_failures=0` при 3700–4700 write txns на прогон — очередь
+  писателя + busy_timeout держат WAL без единого `SQLITE_BUSY` на целевой
+  кассете плана (и на 50/1000, и на 100/1000).
+- API-читалки не деградировали: tasks list p99 ≤ 622 ms при 1000
+  конкурентных задач в очереди (p50 ~150 ms).
+- `assign_p50/p99` в секундах — это очередь задач (1000 задач, 100 узлов ×
+  2 слота = 200 параллельно, дренаж ~42 s), не задержка канала: WS-push
+  для одного назначения доказан ранее на 47 ms p99.
+- WS стабильно не хуже poll по wall/latency при вдвое большем числе
+  write txns (ack-и идут по WS-каналу + HTTP complete).
+
+### RSS под нагрузкой (Этап 3.2, замер VmRSS всего тест-процесса)
+
+Тест-процесс = CP + N WS-клиентов + harness в одном процессе (debug
+build), т.е. замер — **верхняя оценка** RSS голого CP.
+
+| конфигурация         | VmRSS max | бюджет    | статус        |
+|----------------------|-----------|-----------|---------------|
+| 50 WS-нод, 1000 задач | 86.5 МБ   | 96 МБ (план 0.3) | ✓ в бюджете |
+| 100 WS-нод, 1000 задач | 100.9 МБ | — (2× план) | ~на уровне   |
+
+Вывод: бюджет «CP с 50 WS ≤ 96 МБ» подтверждён с запасом (весь процесс
+включая клиентов — 86.5 МБ); на удвоенной кассете весь процесс чуть выше
+96 МБ, при этом сам CP — заведомо ниже (клиенты + reqwest + harness
+сидят в том же процессе).
+
+## Достигнутые цели 0.3 (обновлено 2026-08-28)
 
 | цель из шапки 0.3                              | цель     | замер                                              | статус     |
 |------------------------------------------------|----------|----------------------------------------------------|------------|
-| нет `SQLITE_BUSY` под нагрузкой                | 0        | 0 (`write_lock_failures=0` на 10/100 poll + ws)    | ✓          |
-| масштаб 50/1000 без contention                 | 50/1000  | 10/100                                             | 20%        |
-| p99 assign latency (архитектурная на WS)       | < 200 ms | **47 ms** (1 node / 2 tasks low contention)       | ✓ achieved |
-| p99 assign latency при 10/100 на занятост хоста | < 200 ms | ~1900 ms (host scheduler wakes, не WS arch)        | env-driven |
-| RSS CP с 50 WS ≤ 96 МБ                         | 96 МБ    | —                                                  | не замерена (harness не до 50 WS) |
+| нет `SQLITE_BUSY` под нагрузкой                | 0        | 0 при 4.7k write txns (100/1000 poll+ws)           | ✓          |
+| масштаб 50/1000 без contention                 | 50/1000  | 50/1000 И 100/1000 пройдены, failures=0             | ✓ achieved |
+| p99 assign latency (архитектурная на WS)      | < 200 ms | **47 ms** (1 node / 2 tasks low contention)       | ✓ achieved |
+| API reads без деградации под нагрузкой        | p99 sane | tasks list p99 ≤ 622 ms при полной очереди        | ✓          |
+| RSS CP с 50 WS ≤ 96 МБ                         | 96 МБ    | 86.5 МБ (весь тест-процесс, верхняя оценка)        | ✓ achieved |
+
+## Интерпретация (историческое, 10/100 на dev-box)
 
 ## Интерпретация
 
@@ -93,9 +163,12 @@ scheduler wakeups, а не самого WS канала. Цель < 200 ms го�
 
 ## Future work
 
--   Re-run на dedicated multi-core box без other load → expect p50/p99
-    divide на 10/100 ws run.
--   Также RSS CP с 50 WS: harness поднять до 50 WS nodes, запустить CP под
-    sustained load 30 s, мерить VmRSS (см. `deploy/dev-bench/measure-rss-baseline.sh`).
--   Full load 100 nodes / 1000 tasks needs не dev-box (8 GB free tight),
-    ни remote `191.96.11.161` (2 vCPU / 4 GB и загрузка `0.8` в uptime).
+- ~~Re-run на dedicated box~~ — сделано (remote host, 2026-08-28).
+- ~~RSS CP с 50 WS~~ — снят (86.5 МБ ≤ 96 МБ, верхняя оценка целым
+  тест-процессом). Повысить точность можно release/musl бинарем CP с
+  выносом mock-клиентов в отдельный процесс — не требуется, бюджет и
+  так подтверждён.
+- Mixed-транспорт в одном прогоне (часть узлов WS, часть poll)
+  одновременно — обе кассеты сняты раздельно; одновременный микс не
+  добавляет информации о contention (write path общий), отложено до
+  реального запроса.

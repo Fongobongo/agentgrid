@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Load-harness WS nodes now reconnect on socket loss.** A dropped
+  mid-run WebSocket left `ws_loop` spinning on an ended stream until the
+  drain deadline (2 of 4 runs at 100 nodes / 1000 tasks stalled at
+  946/1000 on the remote load host); the loop now re-hellos with a fresh
+  free-slots heartbeat, letting the CP reassign the in-flight attempts.
+
+### Added
+
+- **Plan 0.3 stage 3.1/3.2 full-scale load results (remote host).** The
+  deferred 50/1000 and 100/1000 cassettes ran on the idle test host
+  `191.96.11.161` (2 vCPU / 4 GB): poll and WS transports, 1000/1000
+  completed, `write_lock_failures=0` at 3.7–4.7k write txns per run, task
+  list reads p99 ≤ 622 ms, RSS (whole in-process harness incl. mock
+  clients) 86.5 MiB at 50 WS nodes — inside the 96 MiB budget. Reports:
+  `docs/load-baseline-3.1.md`, `docs/rss-budget-baseline.md`; plan
+  0.3 items 3.1 and 3.2 closed.
+
 ### Added
 
 - **Scope-creep guard: audit unrequested hash/checksum busywork.**
