@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Scope-creep guard: audit unrequested hash/checksum busywork.**
+  Competitor-gap feature (stop-that-shit-inspired) — on a successful
+  completion the control plane scans the attempt's command-bearing events
+  (tool/stdout/stderr/error) for hash/checksum commands the prompt never
+  asked for (`md5sum`/`sha256sum`/`openssl dgst`/…) and appends audit-only
+  `scope_creep` events (`unrequested_hash`, or `mass_hash` for
+  `find|xargs`-style whole-tree runs). Prompt containing any hash word
+  silences the scan (conservative). Findings never change the outcome,
+  land in the event log and are searchable via `GET /v1/search/events`.
+
 ## [v0.3.8] — 2026-08-28
 
 ### Added

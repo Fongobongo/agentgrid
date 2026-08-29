@@ -69,3 +69,4 @@ cp-test.db*
 # Python SDK test artifacts
 __pycache__/
 *.pyc
+/fongobongo_stars_v2.json
