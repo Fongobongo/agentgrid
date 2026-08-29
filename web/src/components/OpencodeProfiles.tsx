@@ -221,6 +221,26 @@ export default function OpencodeProfiles() {
     }
   };
 
+  // A/B rollout: split nodes between this profile and another by percent.
+  const assignPercent = async (name: string, other: string, percent: number) => {
+    if (!other || name === other) {
+      setMsg('pick two different profiles');
+      return;
+    }
+    try {
+      const r = await postJson(`/v1/opencode-profiles/${encodeURIComponent(name)}/assign-percent`, {
+        other,
+        percent,
+      });
+      setMsg(
+        `A/B set: ${JSON.stringify(r)}`,
+      );
+      load();
+    } catch (e) {
+      setMsg(`assign-percent failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   if (!profiles) {
     if (error) return <ErrorBox err={error} />;
     return <Loading />;
@@ -281,6 +301,36 @@ export default function OpencodeProfiles() {
                   <ConfigDiff prev={p.prev.config} cur={p.config} />
                 </details>
               )}
+              <details>
+                <summary>A/B rollout</summary>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const f = e.currentTarget;
+                    assignPercent(
+                      p.name,
+                      (f.elements.namedItem('other') as HTMLSelectElement).value,
+                      Number((f.elements.namedItem('percent') as HTMLInputElement).value || 50),
+                    );
+                  }}
+                >
+                  <select name="other" defaultValue="">
+                    <option value="" disabled>other profile…</option>
+                    {profiles.filter((x) => x.id !== p.id).map((x) => (
+                      <option key={x.id} value={x.name}>{x.name}</option>
+                    ))}
+                  </select>
+                  <input
+                    name="percent"
+                    type="number"
+                    min={0}
+                    max={100}
+                    defaultValue={50}
+                    title="% of nodes on this profile"
+                  />
+                  <button type="submit">set split</button>
+                </form>
+              </details>
             </div>
           );
         })}
