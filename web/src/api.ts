@@ -5,9 +5,15 @@
 // whether the browser is authed so the UI can show the login screen.
 
 let authed = false;
-export function isAuthed(): boolean { return authed; }
-export function markAuthed() { authed = true; }
-export function markUnauthed() { authed = false; }
+export function isAuthed(): boolean {
+  return authed;
+}
+export function markAuthed() {
+  authed = true;
+}
+export function markUnauthed() {
+  authed = false;
+}
 
 export interface TaskView {
   id: string;
@@ -72,7 +78,7 @@ export interface ApprovalView {
   attempt_id: string;
   session_id?: string | null;
   permission: string;
-  status: 'pending' | 'allowed' | 'denied' | 'expired' | 'cancelled';
+  status: "pending" | "allowed" | "denied" | "expired" | "cancelled";
   reason?: string | null;
   scope: string;
   created_at: string;
@@ -112,7 +118,10 @@ export interface TaskEvent {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
     super(message);
   }
 }
@@ -120,19 +129,23 @@ export class ApiError extends Error {
 // Audit X-D5: exported so components that need raw status handling (e.g.
 // 204 No Content deletes) still route through the central 401 handling
 // instead of hand-rolled fetch() calls.
-export async function req(method: string, path: string, body?: unknown): Promise<Response> {
+export async function req(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Response> {
   const headers: Record<string, string> = {};
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (body !== undefined) headers["Content-Type"] = "application/json";
   const r = await fetch(path, {
     method,
     headers,
-    credentials: 'include',
+    credentials: "include",
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  if (r.status === 401 && !path.startsWith('/v1/auth/')) {
+  if (r.status === 401 && !path.startsWith("/v1/auth/")) {
     // Cookie expired/invalid: drop the in-memory auth flag and reload to login.
     markUnauthed();
-    if (typeof window !== 'undefined') window.location.reload();
+    if (typeof window !== "undefined") window.location.reload();
   }
   return r;
 }
@@ -144,44 +157,67 @@ export async function req(method: string, path: string, body?: unknown): Promise
  * `await reqOk(...)` inside their existing try/catch.
  */
 export async function reqOk(r: Response): Promise<Response> {
-  if (!r.ok) throw new ApiError(r.status, `${r.url.replace(location.origin, '')} -> ${r.status}`);
+  if (!r.ok)
+    throw new ApiError(
+      r.status,
+      `${r.url.replace(location.origin, "")} -> ${r.status}`,
+    );
   return r;
 }
 
 export async function getJson<T>(path: string): Promise<T> {
-  const r = await req('GET', path);
+  const r = await req("GET", path);
   if (!r.ok) throw new ApiError(r.status, `GET ${path} -> ${r.status}`);
   return r.json();
 }
 
 export async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const r = await req('POST', path, body);
+  const r = await req("POST", path, body);
   if (!r.ok) throw new ApiError(r.status, `POST ${path} -> ${r.status}`);
   return r.json();
 }
 
 export function login(username: string, password: string) {
-  return postJson<{ token: string }>('/v1/auth/login', { username, password }).then((r) => { markAuthed(); return r; });
+  return postJson<{ token: string }>("/v1/auth/login", {
+    username,
+    password,
+  }).then((r) => {
+    markAuthed();
+    return r;
+  });
 }
 
 export function setup(username: string, password: string, setupToken: string) {
-  return postJson<{ token: string }>('/v1/auth/setup', { username, password, setup_token: setupToken }).then((r) => { markAuthed(); return r; });
+  return postJson<{ token: string }>("/v1/auth/setup", {
+    username,
+    password,
+    setup_token: setupToken,
+  }).then((r) => {
+    markAuthed();
+    return r;
+  });
 }
 
 export function logout() {
   // Clear the HttpOnly cookie server-side; the browser cannot read/delete it directly.
-  return fetch('/v1/auth/logout', { method: 'POST', credentials: 'include' }).finally(() => markUnauthed());
+  return fetch("/v1/auth/logout", {
+    method: "POST",
+    credentials: "include",
+  }).finally(() => markUnauthed());
 }
 
 export function createTask(body: unknown) {
-  return postJson<TaskView>('/v1/tasks', body);
+  return postJson<TaskView>("/v1/tasks", body);
 }
 
 export function getTask(id: string) {
   return getJson<TaskView>(`/v1/tasks/${id}`);
 }
 
-interface ListResponse<T> { items: T[]; next_cursor?: string | null }
+interface ListResponse<T> {
+  items: T[];
+  next_cursor?: string | null;
+}
 
 /**
  * GET a list endpoint, auto-paging through the keyset cursor until the
@@ -192,22 +228,24 @@ interface ListResponse<T> { items: T[]; next_cursor?: string | null }
  * `after_created_at` / `after_id` query parts. A bare-array response (old
  * servers) stops paging after one request.
  */
-async function listGet<T>(path: string, limit?: number): Promise<T[]> {
+export async function listGet<T>(path: string, limit?: number): Promise<T[]> {
   const out: T[] = [];
   let cursor: string | null = null;
   let first = true;
   while (first || cursor) {
     const params = new URLSearchParams();
-    const base = path.includes('?') ? path.slice(0, path.indexOf('?')) : path;
-    for (const [k, v] of new URLSearchParams(path.includes('?') ? path.slice(path.indexOf('?') + 1) : '')) {
+    const base = path.includes("?") ? path.slice(0, path.indexOf("?")) : path;
+    for (const [k, v] of new URLSearchParams(
+      path.includes("?") ? path.slice(path.indexOf("?") + 1) : "",
+    )) {
       params.set(k, v);
     }
-    if (limit !== undefined && first) params.set('limit', String(limit));
+    if (limit !== undefined && first) params.set("limit", String(limit));
     if (cursor) {
-      const idx = cursor.indexOf(',');
+      const idx = cursor.indexOf(",");
       if (idx <= 0) break; // malformed cursor — stop rather than loop
-      params.set('after_created_at', cursor.slice(0, idx));
-      params.set('after_id', cursor.slice(idx + 1));
+      params.set("after_created_at", cursor.slice(0, idx));
+      params.set("after_id", cursor.slice(idx + 1));
     }
     const raw = await getJson<unknown>(`${base}?${params.toString()}`);
     first = false;
@@ -224,7 +262,7 @@ async function listGet<T>(path: string, limit?: number): Promise<T[]> {
 }
 
 export function listTasks(limit?: number): Promise<TaskView[]> {
-  return listGet<TaskView>('/v1/tasks', limit);
+  return listGet<TaskView>("/v1/tasks", limit);
 }
 
 /** Plan 1.3: FTS5 full-text search over tasks. */
@@ -241,15 +279,17 @@ export interface EventSearchHit {
 }
 
 export function searchEvents(q: string): Promise<EventSearchHit[]> {
-  return listGet<EventSearchHit>(`/v1/search/events?q=${encodeURIComponent(q)}`);
+  return listGet<EventSearchHit>(
+    `/v1/search/events?q=${encodeURIComponent(q)}`,
+  );
 }
 
 export function listNodes(): Promise<NodeView[]> {
-  return listGet<NodeView>('/v1/nodes');
+  return listGet<NodeView>("/v1/nodes");
 }
 
 export function listRepos(): Promise<RepositoryView[]> {
-  return listGet<RepositoryView>('/v1/repositories');
+  return listGet<RepositoryView>("/v1/repositories");
 }
 
 export function getEligibility(id: string) {
@@ -258,17 +298,30 @@ export function getEligibility(id: string) {
 
 export function getTaskEvents(taskId: string, after?: number) {
   // Hardening P0 item 9: resume on the global ingest cursor (0 = from start).
-  const q = after && after > 0 ? `?after_ingest=${after}` : '';
+  const q = after && after > 0 ? `?after_ingest=${after}` : "";
   return getJson<TaskEvent[]>(`/v1/tasks/${taskId}/events${q}`);
 }
 
 export function revokeNode(id: string) {
-  return req('DELETE', `/v1/nodes/${id}`);
+  return req("DELETE", `/v1/nodes/${id}`);
+}
+
+// Plan 1.3 (#13): task tags — list / add / remove.
+export function listTaskTags(id: string) {
+  return getJson<string[]>(`/v1/tasks/${id}/tags`);
+}
+
+export function addTaskTag(id: string, tag: string) {
+  return req("POST", `/v1/tasks/${id}/tags/${encodeURIComponent(tag)}`);
+}
+
+export function removeTaskTag(id: string, tag: string) {
+  return req("DELETE", `/v1/tasks/${id}/tags/${encodeURIComponent(tag)}`);
 }
 
 // Hardening P2 item 37: drain (stop NEW assignments) / undrain a node.
 export function drainNode(id: string, drain: boolean) {
-  return req('POST', `/v1/nodes/${id}/drain?drain=${drain}`);
+  return req("POST", `/v1/nodes/${id}/drain?drain=${drain}`);
 }
 
 export interface WorkflowRun {
@@ -341,7 +394,7 @@ export interface WorkflowProjection {
 }
 
 export function listWorkflowRuns(): Promise<WorkflowRun[]> {
-  return listGet<WorkflowRun>('/v1/workflow-runs');
+  return listGet<WorkflowRun>("/v1/workflow-runs");
 }
 
 export function getWorkflowProjection(id: string) {
@@ -349,19 +402,19 @@ export function getWorkflowProjection(id: string) {
 }
 
 export function cancelWorkflowRun(id: string) {
-  return req('POST', `/v1/workflow-runs/${id}/cancel`, {});
+  return req("POST", `/v1/workflow-runs/${id}/cancel`, {});
 }
 
 export function approveWorkflowPlan(id: string) {
-  return req('POST', `/v1/workflow-runs/${id}/approve-plan`, {});
+  return req("POST", `/v1/workflow-runs/${id}/approve-plan`, {});
 }
 
 export function cancelTask(id: string) {
-  return req('POST', `/v1/tasks/${id}/cancel`, {});
+  return req("POST", `/v1/tasks/${id}/cancel`, {});
 }
 
 export function retryTask(id: string) {
-  return req('POST', `/v1/tasks/${id}/retry`, {});
+  return req("POST", `/v1/tasks/${id}/retry`, {});
 }
 
 // Competitor plan 1.1: pending patch-review approval for a task, or null.
@@ -410,8 +463,14 @@ export function listAnnotations(attemptId: string): Promise<PatchAnnotation[]> {
   return getJson<PatchAnnotation[]>(`/v1/attempts/${attemptId}/annotations`);
 }
 
-export function addAnnotation(attemptId: string, body: CreateAnnotationRequest): Promise<PatchAnnotation> {
-  return postJson<PatchAnnotation>(`/v1/attempts/${attemptId}/annotations`, body);
+export function addAnnotation(
+  attemptId: string,
+  body: CreateAnnotationRequest,
+): Promise<PatchAnnotation> {
+  return postJson<PatchAnnotation>(
+    `/v1/attempts/${attemptId}/annotations`,
+    body,
+  );
 }
 
 export function reworkAttempt(attemptId: string): Promise<ReworkResponse> {
@@ -419,20 +478,37 @@ export function reworkAttempt(attemptId: string): Promise<ReworkResponse> {
 }
 
 export function listApprovals(status?: string): Promise<ApprovalView[]> {
-  return listGet<ApprovalView>(status ? `/v1/approvals?status=${encodeURIComponent(status)}` : '/v1/approvals');
+  return listGet<ApprovalView>(
+    status
+      ? `/v1/approvals?status=${encodeURIComponent(status)}`
+      : "/v1/approvals",
+  );
 }
 
-export function answerApproval(id: string, decision: 'allow' | 'deny', reason?: string) {
-  return req('POST', `/v1/approvals/${id}/${decision}`, reason ? { reason } : {});
+export function answerApproval(
+  id: string,
+  decision: "allow" | "deny",
+  reason?: string,
+) {
+  return req(
+    "POST",
+    `/v1/approvals/${id}/${decision}`,
+    reason ? { reason } : {},
+  );
 }
 
 export function listSkills(source?: string): Promise<SkillTrustView[]> {
-  return listGet<SkillTrustView>(source ? `/v1/skills?source=${encodeURIComponent(source)}` : '/v1/skills');
+  return listGet<SkillTrustView>(
+    source ? `/v1/skills?source=${encodeURIComponent(source)}` : "/v1/skills",
+  );
 }
 
 export function setSkillTrust(name: string, source: string, trusted: boolean) {
-  const dec = trusted ? 'trust' : 'untrust';
-  return req('POST', `/v1/skills/${encodeURIComponent(name)}/${dec}?source=${encodeURIComponent(source)}`);
+  const dec = trusted ? "trust" : "untrust";
+  return req(
+    "POST",
+    `/v1/skills/${encodeURIComponent(name)}/${dec}?source=${encodeURIComponent(source)}`,
+  );
 }
 
 // Hardening P2 item 36: artifact download returns { text, sha256 } — the
@@ -442,12 +518,15 @@ export interface ArtifactDownload {
   sha256: string | null;
 }
 
-export async function getArtifact(taskId: string, name: string): Promise<ArtifactDownload | null> {
-  const r = await req('GET', `/v1/tasks/${taskId}/artifacts/${name}`);
+export async function getArtifact(
+  taskId: string,
+  name: string,
+): Promise<ArtifactDownload | null> {
+  const r = await req("GET", `/v1/tasks/${taskId}/artifacts/${name}`);
   if (r.status === 404) return null;
   if (!r.ok) throw new ApiError(r.status, `GET artifact -> ${r.status}`);
   const text = await r.text();
-  return { text, sha256: r.headers.get('x-artifact-sha256') };
+  return { text, sha256: r.headers.get("x-artifact-sha256") };
 }
 
 /// Stream a task's events over SSE with automatic reconnect + resume by
@@ -479,26 +558,27 @@ function sseConnect(
   const run = async () => {
     if (closed) return;
     try {
-      const p = typeof path === 'function' ? path() : path;
-      const r = await fetch(p, { credentials: 'include' });
+      const p = typeof path === "function" ? path() : path;
+      const r = await fetch(p, { credentials: "include" });
       if (r.status === 401) {
         // Cookie expired: same handling as req() — back to login, no retry loop.
         markUnauthed();
-        if (typeof window !== 'undefined') window.location.reload();
+        if (typeof window !== "undefined") window.location.reload();
         return;
       }
-      if (!r.ok || !r.body) throw new ApiError(r.status, `stream -> ${r.status}`);
+      if (!r.ok || !r.body)
+        throw new ApiError(r.status, `stream -> ${r.status}`);
       backoff = 500;
       const reader = r.body.getReader();
       activeReader = reader;
       const decoder = new TextDecoder();
-      let buf = '';
+      let buf = "";
       while (!closed) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         let idx: number;
-        while ((idx = buf.indexOf('\n')) >= 0) {
+        while ((idx = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, idx).trim();
           buf = buf.slice(idx + 1);
           onLine(line);
@@ -541,7 +621,7 @@ export function streamTask(
   return sseConnect(
     () => `/v1/tasks/${taskId}/events/stream?after_ingest=${lastIngest}`,
     (line) => {
-      if (!line.startsWith('data:')) return;
+      if (!line.startsWith("data:")) return;
       const data = line.slice(5).trim();
       if (!data) return;
       try {
@@ -569,8 +649,8 @@ export interface AuditEvent {
 
 export function listAudit(action?: string, limit = 100): Promise<AuditEvent[]> {
   const q = new URLSearchParams();
-  if (action) q.set('action', action);
-  q.set('limit', String(limit));
+  if (action) q.set("action", action);
+  q.set("limit", String(limit));
   return listGet<AuditEvent>(`/v1/audit?${q.toString()}`);
 }
 
@@ -578,12 +658,11 @@ export function listAudit(action?: string, limit = 100): Promise<AuditEvent[]> {
 // and `change` whenever the task/node/workflow-run status fingerprint moves;
 // lists refetch only on those events, so an idle UI makes zero requests.
 export function streamChanges(onChange: () => void): StreamHandle {
-  return sseConnect('/v1/stream', (line) => {
+  return sseConnect("/v1/stream", (line) => {
     // hello/change frames both mean "lists may have moved".
-    if (line.startsWith('event:') && /hello|change/.test(line)) onChange();
+    if (line.startsWith("event:") && /hello|change/.test(line)) onChange();
   });
 }
-
 
 // Feature "opencode profiles": control-plane-managed opencode config.
 export interface OpencodeProfile {
@@ -610,9 +689,288 @@ export interface OpencodeAuditEntry {
 }
 
 export function listOpencodeProfiles(): Promise<OpencodeProfile[]> {
-  return listGet<OpencodeProfile>('/v1/opencode-profiles');
+  return listGet<OpencodeProfile>("/v1/opencode-profiles");
 }
 
-export function getOpencodeAudit(nodeId: string): Promise<OpencodeAuditEntry[]> {
+export function getOpencodeAudit(
+  nodeId: string,
+): Promise<OpencodeAuditEntry[]> {
   return listGet<OpencodeAuditEntry>(`/v1/nodes/${nodeId}/opencode-audit`);
+}
+
+// ---- Users (plan 5.2) ----
+
+export interface UserEntry {
+  username: string;
+  role: string;
+}
+
+export function listUsers(): Promise<UserEntry[]> {
+  return getJson("/v1/users");
+}
+
+export function createUser(username: string, password: string, role: string) {
+  return postJson("/v1/users", { username, password, role });
+}
+
+// ---- Learnings (plan 1.12 / Stage 7) ----
+
+export interface RepoLearning {
+  id: string;
+  repository: string;
+  statement: string;
+  confidence: number;
+  source_attempt_id: string | null;
+  approved: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export function listLearnings(
+  repo: string,
+  approved?: boolean,
+): Promise<RepoLearning[]> {
+  const q = approved === undefined ? "" : `?approved=${approved}`;
+  return getJson(`/v1/repos/${encodeURIComponent(repo)}/learnings${q}`);
+}
+
+export function addLearning(
+  repo: string,
+  statement: string,
+  sourceAttemptId?: string,
+) {
+  return postJson(`/v1/repos/${encodeURIComponent(repo)}/learnings`, {
+    repository: repo,
+    statement,
+    confidence: 0.5,
+    source_attempt_id: sourceAttemptId ?? null,
+  });
+}
+
+export function setLearningApproved(id: string, approved: boolean) {
+  return postJson(`/v1/learnings/${id}/approve`, { approved });
+}
+
+export function deleteLearning(id: string) {
+  return req("DELETE", `/v1/learnings/${id}`);
+}
+
+// ---- Agents (plan 2.1 #18) ----
+
+export interface Agent {
+  id: string;
+  name: string;
+  role: string;
+  prompt: string;
+  skills: string[];
+  budget_usd: number;
+  max_tasks: number | null;
+  heartbeat_interval_secs: number | null;
+  last_heartbeat_at: string | null;
+  created_at: string;
+  tasks_spent: number;
+}
+
+export interface AgentAction {
+  id: string;
+  agent_id: string;
+  action: string;
+  detail: string;
+  created_at: string;
+}
+
+export function listAgents(): Promise<Agent[]> {
+  return getJson("/v1/agents");
+}
+
+export function createAgent(body: {
+  name: string;
+  role?: string;
+  prompt?: string;
+  skills?: string[];
+  budget_usd?: number;
+  max_tasks?: number | null;
+}) {
+  return postJson("/v1/agents", body);
+}
+
+export function listAgentActions(agentId: string): Promise<AgentAction[]> {
+  return listGet(`/v1/agents/${agentId}/actions`);
+}
+
+// ---- Conversations (multi-turn chat over tasks) ----
+
+export interface Conversation {
+  id: string;
+  adapter: string;
+  repository: string;
+  created_at: string;
+}
+
+export interface ConversationMessage {
+  seq: number;
+  role: string;
+  content: string;
+  task_id: string | null;
+  created_at: string;
+}
+
+export function listConversations(): Promise<Conversation[]> {
+  return listGet("/v1/conversations");
+}
+
+export function createConversation(adapter: string, repository?: string) {
+  return postJson("/v1/conversations", {
+    adapter,
+    repository: repository ?? "",
+  });
+}
+
+export function getConversation(id: string) {
+  return getJson<Conversation>(`/v1/conversations/${id}`);
+}
+
+export function listConversationMessages(
+  id: string,
+): Promise<ConversationMessage[]> {
+  return listGet(`/v1/conversations/${id}/messages`);
+}
+
+export function appendConversationMessage(id: string, content: string) {
+  return postJson(`/v1/conversations/${id}/messages`, { content });
+}
+
+// ---- Shared context (plan 1.12 #7: task-group /v1/task-groups/:id/context) ----
+
+export interface SharedContextEntry {
+  key: string;
+  value: string;
+  updated_at: string;
+}
+
+export function listSharedContext(
+  groupId: string,
+): Promise<SharedContextEntry[]> {
+  return getJson(`/v1/task-groups/${groupId}/context`);
+}
+
+export function setSharedContext(groupId: string, key: string, value: string) {
+  // PUT, not POST — matches the route declaration on the control plane.
+  return req('PUT', `/v1/task-groups/${groupId}/context/${encodeURIComponent(key)}`, {
+    value,
+  });
+}
+
+export function deleteSharedContext(groupId: string, key: string) {
+  return req(
+    "DELETE",
+    `/v1/task-groups/${groupId}/context/${encodeURIComponent(key)}`,
+  );
+}
+
+// ---- MCP servers (Stage 13 registry) ----
+
+export interface McpServer {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env_requirements: string[];
+  enabled: boolean;
+}
+
+export function listMcpServers(): Promise<McpServer[]> {
+  return getJson("/v1/mcp-servers");
+}
+
+export function createMcpServer(body: {
+  id: string;
+  name: string;
+  command: string;
+  args?: string[];
+  env_requirements?: string[];
+  enabled?: boolean;
+}) {
+  return postJson("/v1/mcp-servers", body);
+}
+
+export function deleteMcpServer(id: string) {
+  return req("DELETE", `/v1/mcp-servers/${id}`);
+}
+
+// ---- Agent profiles (Stage 13: revisions over system_prompt/autonomy) ----
+
+export interface AgentProfileRevision {
+  id: string;
+  revision: number;
+  system_prompt: string;
+  autonomy: string;
+  memory_max: number | null;
+  cpu_quota: number | null;
+  tasks_max: number | null;
+  created_at: string;
+  created_by: string | null;
+  active: boolean;
+  secret_requirements: { env: string; required: boolean }[];
+  adapter_version: string | null;
+  mcp_server_ids: string[];
+}
+
+export function listAgentProfiles(): Promise<string[]> {
+  return getJson("/v1/profiles");
+}
+
+export function listProfileRevisions(
+  id: string,
+): Promise<AgentProfileRevision[]> {
+  return getJson(`/v1/profiles/${id}`);
+}
+
+export function createProfileRevision(
+  id: string,
+  body: {
+    system_prompt?: string;
+    autonomy?: string;
+    memory_max?: number | null;
+    cpu_quota?: number | null;
+    tasks_max?: number | null;
+    secret_requirements?: { env: string; required: boolean }[];
+    adapter_version?: string | null;
+    mcp_server_ids?: string[];
+  },
+) {
+  return postJson(`/v1/profiles/${id}`, body);
+}
+
+export function activateProfileRevision(id: string, revision: number) {
+  return postJson(`/v1/profiles/${id}/activate`, { revision });
+}
+
+// ---- Admin ----
+
+export function adminBackup(path: string) {
+  return postJson("/v1/admin/backup", { path });
+}
+
+export interface StorageGcResult {
+  dry_run: boolean;
+  orphan_files: number;
+  orphan_bytes: number;
+  metadata_without_file: number;
+  free_mb: number;
+}
+
+export function storageGc(dryRun: boolean) {
+  return postJson<StorageGcResult>("/v1/admin/storage-gc", { dry_run: dryRun });
+}
+
+// ---- Repositories (registry) ----
+
+export function createRepository(body: {
+  name: string;
+  git_url: string;
+  default_branch: string;
+  validation_command?: string;
+}): Promise<RepositoryView> {
+  return postJson("/v1/repositories", body);
 }

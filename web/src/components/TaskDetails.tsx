@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   addAnnotation,
+  addTaskTag,
   answerApproval,
   ApiError,
   ApprovalView,
@@ -14,7 +15,9 @@ import {
   getTaskEvents,
   getTaskReviewApproval,
   listAnnotations,
+  listTaskTags,
   PatchAnnotation,
+  removeTaskTag,
   retryTask,
   reworkAttempt,
   showAttempt,
@@ -22,19 +25,22 @@ import {
   TaskEligibility,
   TaskEvent,
   TaskView,
-} from '../api';
-import { parsePatchLines } from '../patch';
-import { ErrorBox, Loading, StatusBadge, fmtTime } from './util';
-import { TextAreaModal } from './Modal';
+} from "../api";
+import { parsePatchLines } from "../patch";
+import { ErrorBox, Loading, StatusBadge, fmtTime } from "./util";
+import { TextAreaModal } from "./Modal";
 
 function eventText(e: TaskEvent): string {
   const p = e.payload ?? {};
   return (
-    p.text ?? p.content ?? p.message ?? (typeof p.status === 'string' ? p.status : JSON.stringify(p))
+    p.text ??
+    p.content ??
+    p.message ??
+    (typeof p.status === "string" ? p.status : JSON.stringify(p))
   );
 }
 
-const TERMINAL = ['succeeded', 'failed', 'cancelled'];
+const TERMINAL = ["succeeded", "failed", "cancelled"];
 
 export default function TaskDetails({ taskId }: { taskId: string }) {
   const [task, setTask] = useState<TaskView | null>(null);
@@ -42,25 +48,42 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const [patch, setPatch] = useState<ArtifactDownload | null | undefined>(undefined);
-  const [validationLog, setValidationLog] = useState<ArtifactDownload | null | undefined>(undefined);
+  const [patch, setPatch] = useState<ArtifactDownload | null | undefined>(
+    undefined,
+  );
+  const [validationLog, setValidationLog] = useState<
+    ArtifactDownload | null | undefined
+  >(undefined);
   const [busy, setBusy] = useState<string | null>(null);
   // Competitor plan 1.1 (diff review): pending patch-review approval, if any.
-  const [reviewApproval, setReviewApproval] = useState<ApprovalView | null>(null);
+  const [reviewApproval, setReviewApproval] = useState<ApprovalView | null>(
+    null,
+  );
   // Competitor-gap feature: inline annotations on the latest attempt's diff
   // + the modal state for composing one on a clicked line.
   const [annotations, setAnnotations] = useState<PatchAnnotation[]>([]);
-  const [annotating, setAnnotating] = useState<{ file: string; line: number } | null>(null);
+  const [annotating, setAnnotating] = useState<{
+    file: string;
+    line: number;
+  } | null>(null);
   // Competitor-gap feature (convergence metrics): attempt detail for the
   // validation-rounds counter.
   const [attemptDetail, setAttemptDetail] = useState<AttemptView | null>(null);
+  // Plan 1.3 (#13): task tags (add/remove inline).
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState("");
 
   const logRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
 
   useEffect(() => {
     getTask(taskId).then(setTask).catch(setError);
-    getEligibility(taskId).then(setElig).catch(() => {});
+    getEligibility(taskId)
+      .then(setElig)
+      .catch(() => {});
+    listTaskTags(taskId)
+      .then(setTags)
+      .catch(() => {});
   }, [taskId]);
 
   // Initial history, then live stream with automatic reconnect/resume. The
@@ -79,10 +102,16 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
           after,
           onEvent: (e) => {
             setEvents((prev) => {
-              if (e.ingest_id && prev.some((p) => p.ingest_id === e.ingest_id)) {
+              if (
+                e.ingest_id &&
+                prev.some((p) => p.ingest_id === e.ingest_id)
+              ) {
                 return prev;
               }
-              const next = prev.length > 5000 ? prev.slice(prev.length - 4000) : prev.slice();
+              const next =
+                prev.length > 5000
+                  ? prev.slice(prev.length - 4000)
+                  : prev.slice();
               next.push(e);
               return next;
             });
@@ -93,11 +122,20 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
             // the diff/review sections never appeared without a reload. Any
             // terminal-status event refetches the task; the guard below
             // keeps an already-terminal view stable.
-            const st = e.payload && typeof e.payload === 'object' ? (e.payload as { status?: unknown }).status : undefined;
-            if (e.type === 'status' && typeof st === 'string' && TERMINAL.includes(st)) {
+            const st =
+              e.payload && typeof e.payload === "object"
+                ? (e.payload as { status?: unknown }).status
+                : undefined;
+            if (
+              e.type === "status" &&
+              typeof st === "string" &&
+              TERMINAL.includes(st)
+            ) {
               getTask(taskId)
                 .then((t) =>
-                  setTask((cur) => (cur && TERMINAL.includes(cur.status) ? cur : t)),
+                  setTask((cur) =>
+                    cur && TERMINAL.includes(cur.status) ? cur : t,
+                  ),
                 )
                 .catch(() => {});
             }
@@ -115,18 +153,26 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   // queued task whose nodes come online kept showing "no eligible node"
   // until remount. Refetch while queued on every event batch.
   useEffect(() => {
-    if (task?.status !== 'queued') return;
-    getEligibility(taskId).then(setElig).catch(() => {});
+    if (task?.status !== "queued") return;
+    getEligibility(taskId)
+      .then(setElig)
+      .catch(() => {});
   }, [taskId, task?.status, events.length]);
 
   // Fetch artifacts once the task is terminal.
   useEffect(() => {
     if (task && TERMINAL.includes(task.status)) {
-      getArtifact(taskId, 'changes.patch').then(setPatch).catch(() => setPatch(null));
-      getArtifact(taskId, 'validation.log').then(setValidationLog).catch(() => setValidationLog(null));
+      getArtifact(taskId, "changes.patch")
+        .then(setPatch)
+        .catch(() => setPatch(null));
+      getArtifact(taskId, "validation.log")
+        .then(setValidationLog)
+        .catch(() => setValidationLog(null));
       // Competitor plan 1.1: look for a pending patch-review approval so the
       // UI can show approve/reject/rework buttons on the diff.
-      getTaskReviewApproval(taskId).then(setReviewApproval).catch(() => setReviewApproval(null));
+      getTaskReviewApproval(taskId)
+        .then(setReviewApproval)
+        .catch(() => setReviewApproval(null));
     }
   }, [task, taskId]);
 
@@ -143,8 +189,12 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   }, [task?.assigned_attempt_id, events]);
   useEffect(() => {
     if (task && TERMINAL.includes(task.status) && latestAttemptId) {
-      listAnnotations(latestAttemptId).then(setAnnotations).catch(() => setAnnotations([]));
-      showAttempt(latestAttemptId).then(setAttemptDetail).catch(() => setAttemptDetail(null));
+      listAnnotations(latestAttemptId)
+        .then(setAnnotations)
+        .catch(() => setAnnotations([]));
+      showAttempt(latestAttemptId)
+        .then(setAttemptDetail)
+        .catch(() => setAttemptDetail(null));
     } else {
       setAnnotations([]);
       setAttemptDetail(null);
@@ -153,7 +203,7 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
 
   const submitAnnotation = async (text: string) => {
     if (!annotating || !latestAttemptId) return;
-    setBusy('annotate');
+    setBusy("annotate");
     try {
       const body: CreateAnnotationRequest = {
         file: annotating.file,
@@ -184,12 +234,17 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
     atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   };
 
-  const act = async (kind: 'cancel' | 'retry') => {
+  const act = async (kind: "cancel" | "retry") => {
     setBusy(kind);
     try {
-      const r = kind === 'cancel' ? await cancelTask(taskId) : await retryTask(taskId);
-      if (!r.ok) setError(new ApiError(r.status, `${kind} failed (${r.status})`));
-      else getTask(taskId).then(setTask).catch(() => {});
+      const r =
+        kind === "cancel" ? await cancelTask(taskId) : await retryTask(taskId);
+      if (!r.ok)
+        setError(new ApiError(r.status, `${kind} failed (${r.status})`));
+      else
+        getTask(taskId)
+          .then(setTask)
+          .catch(() => {});
     } catch (e) {
       setError(e as Error);
     } finally {
@@ -202,25 +257,29 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   // - reject -> deny, human has seen the patch and rejected it
   // - rework -> deny + send the annotated attempt for rework (the backend
   //   folds all inline annotations into a fresh task's prompt)
-  const reviewDecide = async (decision: 'accept' | 'reject' | 'rework') => {
+  const reviewDecide = async (decision: "accept" | "reject" | "rework") => {
     if (!reviewApproval) return;
     setBusy(decision);
     try {
-      const deny = decision !== 'accept';
+      const deny = decision !== "accept";
       const r = await answerApproval(
         reviewApproval.id,
-        deny ? 'deny' : 'allow',
-        decision === 'rework' ? 'operator requested rework' : undefined,
+        deny ? "deny" : "allow",
+        decision === "rework" ? "operator requested rework" : undefined,
       );
-      if (!r.ok) throw new ApiError(r.status, `review ${decision} failed (${r.status})`);
-      if (decision === 'rework') {
-        if (!latestAttemptId) throw new ApiError(404, 'rework failed: no attempt to annotate');
+      if (!r.ok)
+        throw new ApiError(r.status, `review ${decision} failed (${r.status})`);
+      if (decision === "rework") {
+        if (!latestAttemptId)
+          throw new ApiError(404, "rework failed: no attempt to annotate");
         const rr = await reworkAttempt(latestAttemptId);
         window.location.hash = `#/task/${rr.task_id}`;
         return;
       }
       setReviewApproval(null);
-      getTask(taskId).then(setTask).catch(() => {});
+      getTask(taskId)
+        .then(setTask)
+        .catch(() => {});
     } catch (e) {
       setError(e as Error);
     } finally {
@@ -232,10 +291,10 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   if (!task) return <Loading />;
 
   const logEvents = events.filter((e) =>
-    ['stdout', 'stderr', 'result', 'error', 'tool'].includes(e.type),
+    ["stdout", "stderr", "result", "error", "tool"].includes(e.type),
   );
   const statusEvents = events
-    .filter((e) => e.type === 'status')
+    .filter((e) => e.type === "status")
     // Hardening P0 item 9: order status transitions by the global ingest
     // cursor so a retry's timeline reads correctly across attempts.
     .sort((a, b) => (a.ingest_id || a.sequence) - (b.ingest_id || b.sequence));
@@ -245,14 +304,16 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   const attemptStatus: Record<string, string> = {};
   for (const e of events) {
     if (!attemptOrder.includes(e.attempt_id)) attemptOrder.push(e.attempt_id);
-    if (e.type === 'status') {
+    if (e.type === "status") {
       const s = e.payload?.status;
-      if (typeof s === 'string') attemptStatus[e.attempt_id] = s;
+      if (typeof s === "string") attemptStatus[e.attempt_id] = s;
     }
   }
 
-  const canCancel = ['queued', 'assigned', 'running', 'validating'].includes(task.status);
-  const canRetry = ['failed', 'cancelled'].includes(task.status);
+  const canCancel = ["queued", "assigned", "running", "validating"].includes(
+    task.status,
+  );
+  const canRetry = ["failed", "cancelled"].includes(task.status);
 
   return (
     <div className="task-details">
@@ -271,12 +332,16 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
         </h2>
         <div className="actions">
           {canCancel && (
-            <button className="danger" disabled={busy === 'cancel'} onClick={() => act('cancel')}>
+            <button
+              className="danger"
+              disabled={busy === "cancel"}
+              onClick={() => act("cancel")}
+            >
               Cancel
             </button>
           )}
           {canRetry && (
-            <button disabled={busy === 'retry'} onClick={() => act('retry')}>
+            <button disabled={busy === "retry"} onClick={() => act("retry")}>
               Retry
             </button>
           )}
@@ -284,46 +349,104 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
       </div>
 
       <div className="meta">
-        <span><b>ID</b> {task.id}</span>
-        <span><b>Adapter</b> {task.adapter}</span>
-        <span><b>Validation</b> {task.validation_command ?? '—'}</span>
-        <span><b>Created</b> {fmtTime(task.created_at)}</span>
-        <span><b>Finished</b> {fmtTime(task.finished_at)}</span>
+        <span>
+          <b>ID</b> {task.id}
+        </span>
+        <span>
+          <b>Adapter</b> {task.adapter}
+        </span>
+        <span>
+          <b>Validation</b> {task.validation_command ?? "—"}
+        </span>
+        <span>
+          <b>Created</b> {fmtTime(task.created_at)}
+        </span>
+        <span>
+          <b>Finished</b> {fmtTime(task.finished_at)}
+        </span>
         {/* Hardening P2 item 36: the security profile the agent ran under. */}
         {task.security_profile && (
-          <span><b>Security profile</b> {task.security_profile}</span>
+          <span>
+            <b>Security profile</b> {task.security_profile}
+          </span>
         )}
         {/* Competitor-gap feature (convergence metrics): rework depth + how
             many feedback-loop rounds the attempt needed to converge. */}
         {task.rework_of && (
-          <span><b>Rework of</b> {task.rework_of}</span>
+          <span>
+            <b>Rework of</b> {task.rework_of}
+          </span>
         )}
         {(attemptDetail?.validation_rounds ?? 0) > 0 && (
-          <span><b>Validation rounds</b> {attemptDetail?.validation_rounds}</span>
+          <span>
+            <b>Validation rounds</b> {attemptDetail?.validation_rounds}
+          </span>
         )}
         {/* Competitor-gap feature (task-level auto-retry); the retry budget is
             only interesting when it exceeds the default single attempt. */}
         {(task.max_attempts ?? 1) > 1 && (
-          <span><b>Max attempts</b> {task.max_attempts}</span>
+          <span>
+            <b>Max attempts</b> {task.max_attempts}
+          </span>
         )}
+        <span className="tags">
+          <b>Tags</b>{" "}
+          {tags.map((t) => (
+            <button
+              key={t}
+              className="chip"
+              title="Remove tag"
+              onClick={() => {
+                removeTaskTag(taskId, t)
+                  .then(() => setTags((x) => x.filter((y) => y !== t)))
+                  .catch(() => {});
+              }}
+            >
+              {t} ×
+            </button>
+          ))}
+          <input
+            className="tag-input"
+            value={tagInput}
+            onChange={(e) => setTagInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && tagInput.trim()) {
+                const t = tagInput.trim();
+                addTaskTag(taskId, t)
+                  .then(() => setTags((x) => (x.includes(t) ? x : [...x, t])))
+                  .catch(() => {});
+                setTagInput("");
+              }
+            }}
+            placeholder="+ tag"
+          />
+        </span>
       </div>
-      <div className="prompt-box"><b>Prompt:</b> {task.prompt}</div>
+      <div className="prompt-box">
+        <b>Prompt:</b> {task.prompt}
+      </div>
 
-      {task.status === 'queued' && elig && elig.no_eligible_nodes.length > 0 && (
-        <div className="error">
-          <b>No eligible node:</b> {elig.no_eligible_nodes.join('; ')}
-        </div>
-      )}
+      {task.status === "queued" &&
+        elig &&
+        elig.no_eligible_nodes.length > 0 && (
+          <div className="error">
+            <b>No eligible node:</b> {elig.no_eligible_nodes.join("; ")}
+          </div>
+        )}
 
       <div className="cols">
         <section className="col">
           <h3>Live output</h3>
           <div className="log-bar">
-            <button onClick={() => setPaused((p) => !p)}>{paused ? 'Resume' : 'Pause'}</button>
+            <button onClick={() => setPaused((p) => !p)}>
+              {paused ? "Resume" : "Pause"}
+            </button>
             <span className="muted">{logEvents.length} lines</span>
           </div>
           <div className="log" ref={logRef} onScroll={onScroll}>
-            {logEvents.length === 0 && <div className="muted">No output yet.</div>}
+            {logEvents.length === 0 && (
+              <div className="muted">No output yet.</div>
+            )}
             {logEvents.map((e, i) => (
               <div key={i} className={`logline ${e.type}`}>
                 {eventText(e)}
@@ -335,10 +458,13 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
         <section className="col">
           <h3>Status timeline</h3>
           <ul className="timeline">
-            {statusEvents.length === 0 && <li className="muted">No transitions yet.</li>}
+            {statusEvents.length === 0 && (
+              <li className="muted">No transitions yet.</li>
+            )}
             {statusEvents.map((e, i) => (
               <li key={i}>
-                <StatusBadge status={e.payload?.status ?? e.type} /> {fmtTime(e.created_at)}
+                <StatusBadge status={e.payload?.status ?? e.type} />{" "}
+                {fmtTime(e.created_at)}
               </li>
             ))}
             <li>
@@ -347,12 +473,16 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
           </ul>
 
           <h3>Attempts</h3>
-          {attemptOrder.length === 0 && <p className="muted">No attempts yet.</p>}
+          {attemptOrder.length === 0 && (
+            <p className="muted">No attempts yet.</p>
+          )}
           <ul className="attempts">
             {attemptOrder.map((aid, i) => (
               <li key={aid}>
-                #{i + 1} <code>{aid.slice(0, 8)}</code>{' '}
-                {attemptStatus[aid] && <StatusBadge status={attemptStatus[aid]} />}
+                #{i + 1} <code>{aid.slice(0, 8)}</code>{" "}
+                {attemptStatus[aid] && (
+                  <StatusBadge status={attemptStatus[aid]} />
+                )}
               </li>
             ))}
           </ul>
@@ -364,25 +494,39 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
               {patch && (
                 <>
                   {/* Hardening P2 item 36: integrity hash + attachment download. */}
-                  {patch.sha256 && <p className="muted mono">sha256: {patch.sha256.slice(0, 16)}…</p>}
-                  <a className="link" href={`/v1/tasks/${taskId}/artifacts/changes.patch`} download>
+                  {patch.sha256 && (
+                    <p className="muted mono">
+                      sha256: {patch.sha256.slice(0, 16)}…
+                    </p>
+                  )}
+                  <a
+                    className="link"
+                    href={`/v1/tasks/${taskId}/artifacts/changes.patch`}
+                    download
+                  >
                     Download
                   </a>
                   {/* Competitor plan 1.1: review-actions on the diff. */}
                   {reviewApproval && (
                     <div className="review-bar">
                       <b>Review required</b>
-                      <button disabled={busy === 'accept'} onClick={() => reviewDecide('accept')}>
+                      <button
+                        disabled={busy === "accept"}
+                        onClick={() => reviewDecide("accept")}
+                      >
                         Accept
                       </button>
                       <button
                         className="danger"
-                        disabled={busy === 'reject'}
-                        onClick={() => reviewDecide('reject')}
+                        disabled={busy === "reject"}
+                        onClick={() => reviewDecide("reject")}
                       >
                         Reject
                       </button>
-                      <button disabled={busy === 'rework'} onClick={() => reviewDecide('rework')}>
+                      <button
+                        disabled={busy === "rework"}
+                        onClick={() => reviewDecide("rework")}
+                      >
                         Request rework
                       </button>
                     </div>
@@ -396,14 +540,19 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
                           <span className="muted mono">
                             {a.file}
                             {a.line_start !== null && `:L${a.line_start}`}
-                            {a.line_start !== null && a.line_end !== null && a.line_end !== a.line_start && `-${a.line_end}`}
-                          </span>{' '}
+                            {a.line_start !== null &&
+                              a.line_end !== null &&
+                              a.line_end !== a.line_start &&
+                              `-${a.line_end}`}
+                          </span>{" "}
                           {a.comment}
                         </div>
                       ))}
                     </div>
                   )}
-                  <pre className="patch">{renderPatch(patch.text, setAnnotating)}</pre>
+                  <pre className="patch">
+                    {renderPatch(patch.text, setAnnotating)}
+                  </pre>
                 </>
               )}
             </>
@@ -412,13 +561,21 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
           {validationLog !== undefined && (
             <>
               <h3>Validation log</h3>
-              {validationLog === null && <p className="muted">No validation log.</p>}
+              {validationLog === null && (
+                <p className="muted">No validation log.</p>
+              )}
               {validationLog && (
                 <>
                   {validationLog.sha256 && (
-                    <p className="muted mono">sha256: {validationLog.sha256.slice(0, 16)}…</p>
+                    <p className="muted mono">
+                      sha256: {validationLog.sha256.slice(0, 16)}…
+                    </p>
                   )}
-                  <a className="link" href={`/v1/tasks/${taskId}/artifacts/validation.log`} download>
+                  <a
+                    className="link"
+                    href={`/v1/tasks/${taskId}/artifacts/validation.log`}
+                    download
+                  >
                     Download
                   </a>
                   <pre className="vlog">{validationLog.text}</pre>
@@ -438,22 +595,32 @@ function renderPatch(
 ) {
   const lines = parsePatchLines(patch);
   return lines.map((l, i) => {
-    let cls = 'pl';
-    if (l.kind === 'file' || l.kind === 'hunk') cls = 'ph';
-    else if (l.kind === 'add') cls = 'pa';
-    else if (l.kind === 'del') cls = 'pd';
-    else if (l.kind === 'meta') cls = 'ph';
-    const canComment = (l.kind === 'add' || l.kind === 'ctx') && l.newLine !== null && l.file !== '';
+    let cls = "pl";
+    if (l.kind === "file" || l.kind === "hunk") cls = "ph";
+    else if (l.kind === "add") cls = "pa";
+    else if (l.kind === "del") cls = "pd";
+    else if (l.kind === "meta") cls = "ph";
+    const canComment =
+      (l.kind === "add" || l.kind === "ctx") &&
+      l.newLine !== null &&
+      l.file !== "";
     return (
       <div
         key={i}
-        className={cls + (canComment ? ' annotatable' : '')}
-        title={canComment ? 'Click to comment on this line' : undefined}
-        onClick={canComment ? () => onAnnotate({ file: l.file, line: l.newLine as number }) : undefined}
+        className={cls + (canComment ? " annotatable" : "")}
+        title={canComment ? "Click to comment on this line" : undefined}
+        onClick={
+          canComment
+            ? () => onAnnotate({ file: l.file, line: l.newLine as number })
+            : undefined
+        }
       >
-        <span className="ln">{l.newLine ?? ''}</span>
+        <span className="ln">{l.newLine ?? ""}</span>
         <span className="lt">
-          {l.kind === 'hunk' || l.kind === 'file' || l.kind === 'meta' ? l.text : (l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' ') + (l.text || ' ')}
+          {l.kind === "hunk" || l.kind === "file" || l.kind === "meta"
+            ? l.text
+            : (l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ") +
+              (l.text || " ")}
         </span>
       </div>
     );

@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Web UI parity push — the operator surface no longer CLI-only.** New
+  panels: Users (list + create), Agents (register + action trail), Agent
+  Profiles (revisions + activate), Learnings (add/approve/revoke/delete per
+  repo), Conversations (list + multi-turn chat), Shared Context (per-group
+  key/value notes), MCP servers (registry + delete), Repositories (add),
+  Admin (SQLite backup + storage GC dry-run/run), Workflow authoring
+  (template create from steps + fire run + interval schedules).
+- **New Task form: full `CreateTaskRequest` surface** — advanced section
+  with base_commit, network_mode, security_profile, max_attempts,
+  ACP session resume, task group, agent attribution, opencode model
+  overrides, GitHub write-back (repo/issue/base-ref) and multi-adapter
+  consensus runs (N tasks, one group id — same semantics as
+  `ag run --consensus N --models …`).
+- **Task details: editable tags** (add/remove chips inline).
+- **API: `GET /v1/conversations`** — list conversations newest-first (the
+  route previously only supported create/show-per-id; store gains
+  `list_conversations`).
+
 ### Removed
 
 - **Meta-plan docs trimmed from the repo.** Completed or superseded planning

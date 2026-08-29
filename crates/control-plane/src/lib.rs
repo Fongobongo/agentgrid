@@ -633,7 +633,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/conversations",
-            post(routes::conversations::create_conversation),
+            post(routes::conversations::create_conversation)
+                .get(routes::conversations::list_conversations),
         )
         .route(
             "/v1/conversations/{id}",

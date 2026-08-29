@@ -14,6 +14,21 @@ use axum::{
 
 use crate::AppState;
 
+/// `GET /v1/conversations` — list all conversations, newest-first.
+pub async fn list_conversations(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Conversation>>, StatusCode> {
+    state
+        .store
+        .list_conversations()
+        .await
+        .map(Json)
+        .map_err(|e| {
+            tracing::error!("list_conversations failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
 pub async fn create_conversation(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateConversationRequest>,

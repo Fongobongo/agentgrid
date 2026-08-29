@@ -50,6 +50,24 @@ impl Store {
         }))
     }
 
+    /// List all conversations, newest-first.
+    pub async fn list_conversations(&self) -> Result<Vec<agentgrid_common::Conversation>> {
+        let rows = sqlx::query(
+            "SELECT id, adapter, repository, created_at FROM conversations ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| agentgrid_common::Conversation {
+                id: r.try_get("id").unwrap_or_default(),
+                adapter: r.try_get("adapter").unwrap_or_default(),
+                repository: r.try_get("repository").unwrap_or_default(),
+                created_at: r.try_get("created_at").unwrap_or_default(),
+            })
+            .collect())
+    }
+
     /// Append a message; returns its sequence number. `task_id` is the task that
     /// produced (assistant) or carried (user) the message.
     pub async fn append_conversation_message(
