@@ -258,8 +258,11 @@ jobs:
           # commit/PR notes.
           set -e
           notes=release-assets/RELEASE_NOTES.md
+          # Match the header as a PREFIX: real headers carry a suffix after
+          # the bracket ("## [v0.3.9] — 2026-08-29"), so an exact `$0 == ...`
+          # comparison silently matched nothing and released an empty body.
           awk -v tag="${GITHUB_REF_NAME}" '
-            $0 == "## [" tag "]" { in_sec=1; next }
+            index($0, "## [" tag "]") == 1 { in_sec=1; next }
             /^## \[/ { in_sec=0 }
             in_sec { print }
           ' CHANGELOG.md > "$notes"

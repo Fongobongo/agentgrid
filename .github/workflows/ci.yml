@@ -122,6 +122,14 @@ jobs:
         env:
           AG_RUST_TEST_DOCKER: "1"
           AGENTGRID_SANDBOX_IMAGE: ag-node:test
+      # Review follow-up (v0.3.9): boot the built images and verify liveness
+      # end to end — musl control-plane (FROM scratch) must serve /health/ready
+      # + a task-API round trip on a real volume; glibc images must reach
+      # docker Health=healthy. Catches the v0.3.7 bug class (HEALTHCHECK that
+      # could never succeed in its own image) at CI time, not in production.
+      - name: image smoke (musl scratch cp + glibc HEALTHCHECK)
+        run: bash tests/e2e/run-image-smoke.sh
+        timeout-minutes: 15
 
   skill-bundle:
     name: skill bundle materializes identically local vs remote

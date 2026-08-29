@@ -1,5 +1,43 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- **RUSTSEC-2025-0134 closed: rustls-pemfile dropped from the workspace.**
+  The TLS loader now uses `rustls-pki-types`' `PemObject` (pki-types ≥ 1.11,
+  already in the rustls 0.23 graph) for cert/key PEM parsing; the archived
+  crate is gone from the dependency tree and the advisory ignore removed
+  from `deny.toml`. For a rustls-only project this was the most
+  supply-chain-sensitive RUSTSEC warning on the board.
+
+### Fixed
+
+- **GitHub Release body was empty for tagged releases.** The release
+  workflow extracted the `## [vX.Y.Z]` section with an exact `$0 ==` awk
+  comparison, but real headers carry a suffix ("## [v0.3.9] — 2026-08-29"),
+  so every tagged release published an empty body ("No changelog entries").
+  Now a prefix match, verified against the v0.3.9 section.
+
+### Added
+
+- **Image smoke test in CI (`tests/e2e/run-image-smoke.sh`).** Boots the
+  built images and verifies liveness end to end: the musl control-plane
+  (`FROM scratch`, no shell — deliberately no HEALTHCHECK) must serve
+  `/health/ready` and a setup+login+task-list round trip on a real volume;
+  the glibc control-plane and node-daemon must reach docker `Health=
+  healthy` via their HEALTHCHECKs. Catches the v0.3.7 bug class (a
+  HEALTHCHECK that could never succeed in its own image) at CI time.
+- **Scope-creep guard integration test (false-positive cases).** Drives
+  the scan through `TaskLifecycleService::complete_attempt` like the HTTP
+  layer: one `scope_creep` audit event for an unrequested `md5sum` tool
+  call; silence when the prompt mentions hashing; silence for hash-free
+  attempts.
+- **Property-style test for the agent-budget write-gate race.** Deterministic
+  (workers × max_tasks) grid asserting concurrent attributed creations let
+  exactly `min(workers, max_tasks)` through and spend exactly that many —
+  the check-then-act race class from the v0.3.6 audit.
+
 ## [v0.3.9] — 2026-08-29
 
 ### Fixed
@@ -153,9 +191,9 @@
 
 ## [v0.3.7] — 2026-08-26
 
-> Пост-релизный аудит v0.3.6: 20+ подтверждённых ошибок логики,
-> долговечности и перформанса в control-plane, node-daemon, web UI
-> и deploy. Полные описания — по разделам ниже.
+> Post-release audit of v0.3.6: 20+ confirmed logic, durability and
+> performance bugs across control-plane, node-daemon, web UI and
+> deploy. Full descriptions in the sections below.
 
 ### Fixed
 
@@ -334,11 +372,11 @@
 
 ## [v0.3.6] — 2026-08-23
 
-> Аудит качества после стабилизации v0.3.5: 16 подтверждённых ошибок логики
-> и durability в control-plane/node-daemon, ~350 строк мёртвого кода,
-> схлопнутые дубли (sha256, fencing-заголовок, keyset-пагинация, SSE-лупы,
-> supervision-ядро), конкурентный gateway, кап фреймов в ACP и ночной
-> cargo-fuzz в CI. Полные описания — по ID находок ниже.
+> Quality audit after the v0.3.5 stabilization: 16 confirmed logic and
+> durability bugs in control-plane/node-daemon, ~350 lines of dead code,
+> collapsed duplicates (sha256, fencing header, keyset pagination, SSE
+> loops, supervision core), a concurrent gateway, an ACP frame cap and a
+> nightly cargo-fuzz job in CI. Full descriptions by finding id below.
 
 ### Fixed
 

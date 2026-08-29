@@ -44,7 +44,6 @@ reqwest.workspace = true
 # TLS termination (rustls, no system OpenSSL) — opt-in via AGENTGRID_TLS_CERT/_KEY.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 tokio-rustls = "0.26"
-rustls-pemfile = "2"
 
 # OpenTelemetry (optional feature)
 opentelemetry = { version = "0.32", optional = true }

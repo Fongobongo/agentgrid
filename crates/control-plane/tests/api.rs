@@ -11153,3 +11153,192 @@ async fn review_consensus_reject_keeps_human_gate() {
         "a REJECT must keep the patch review pending for a human"
     );
 }
+
+/// Scope-creep guard (v0.3.9): an attempt that ran hash/checksum commands
+/// the prompt never asked for must land an audit-only `scope_creep` event —
+/// and a prompt that merely mentions hashing, or an attempt without such
+/// commands, must stay silent (false-positive check). The scan lives in
+/// TaskLifecycleService::complete_attempt (store-level complete does not
+/// run it), so completions go through the service like the HTTP layer does.
+#[tokio::test]
+async fn scope_creep_guard_event_and_false_positives() {
+    let state = AppState::open_temp().await.unwrap();
+    state
+        .store
+        .create_repository(&agentgrid_common::CreateRepositoryRequest {
+            name: "demo".into(),
+            git_url: "https://example.com/demo.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+        })
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let _token = test_token(&app).await;
+    let (node_id, _cred) = enroll(&app, "n-creep", vec!["mock".into()], vec!["demo".into()]).await;
+    let svc = agentgrid_control_plane::services::TaskLifecycleService::new(
+        state.store.clone(),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+        None,
+    );
+
+    // Case 1: unrequested md5sum in a tool event -> exactly one scope_creep.
+    let task = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "tidy up the module".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let a = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&a.attempt_id).await.unwrap();
+    state
+        .store
+        .ingest_events(
+            &a.attempt_id,
+            &agentgrid_common::IngestEventsRequest {
+                events: vec![
+                    agentgrid_common::IncomingEvent {
+                        sequence: 1,
+                        r#type: agentgrid_common::EventType::Tool,
+                        payload: serde_json::json!({
+                            "name": "Bash",
+                            "input": { "command": "md5sum src/main.rs" }
+                        }),
+                    },
+                    agentgrid_common::IncomingEvent {
+                        sequence: 2,
+                        r#type: agentgrid_common::EventType::Result,
+                        payload: serde_json::json!({ "text": "done" }),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    svc.complete_attempt(&a.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    let events = state
+        .store
+        .get_events(&task.id, None, 0, Some(100))
+        .await
+        .unwrap();
+    let creep: Vec<_> = events
+        .iter()
+        .filter(|e| e.payload.to_string().contains("\"kind\":\"scope_creep\""))
+        .collect();
+    assert_eq!(creep.len(), 1, "expected exactly one scope_creep event");
+    assert!(
+        creep[0].payload.to_string().contains("unrequested_hash"),
+        "payload should carry the unrequested_hash kind, got {}",
+        creep[0].payload
+    );
+
+    // Case 2 (false-positive): prompt asks for a checksum -> silent.
+    let task2 = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "verify the sha256 checksum of the artifact".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let b = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&b.attempt_id).await.unwrap();
+    state
+        .store
+        .ingest_events(
+            &b.attempt_id,
+            &agentgrid_common::IngestEventsRequest {
+                events: vec![
+                    agentgrid_common::IncomingEvent {
+                        sequence: 1,
+                        r#type: agentgrid_common::EventType::Tool,
+                        payload: serde_json::json!({
+                            "name": "Bash",
+                            "input": { "command": "sha256sum dist/app.tar.gz" }
+                        }),
+                    },
+                    agentgrid_common::IncomingEvent {
+                        sequence: 2,
+                        r#type: agentgrid_common::EventType::Result,
+                        payload: serde_json::json!({ "text": "done" }),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    svc.complete_attempt(&b.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    let events2 = state
+        .store
+        .get_events(&task2.id, None, 0, Some(100))
+        .await
+        .unwrap();
+    assert!(
+        !events2
+            .iter()
+            .any(|e| e.payload.to_string().contains("scope_creep")),
+        "prompt mentioning hashing must silence the guard"
+    );
+
+    // Case 3 (false-positive): hash-free attempt with normal commands -> silent.
+    let task3 = state
+        .store
+        .create_task(&agentgrid_common::CreateTaskRequest {
+            prompt: "run the tests".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let c = state.store.try_assign(&node_id).await.unwrap().unwrap();
+    state.store.ack_attempt(&c.attempt_id).await.unwrap();
+    state
+        .store
+        .ingest_events(
+            &c.attempt_id,
+            &agentgrid_common::IngestEventsRequest {
+                events: vec![
+                    agentgrid_common::IncomingEvent {
+                        sequence: 1,
+                        r#type: agentgrid_common::EventType::Tool,
+                        payload: serde_json::json!({
+                            "name": "Bash",
+                            "input": { "command": "cargo test --workspace" }
+                        }),
+                    },
+                    agentgrid_common::IncomingEvent {
+                        sequence: 2,
+                        r#type: agentgrid_common::EventType::Result,
+                        payload: serde_json::json!({ "text": "done" }),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    svc.complete_attempt(&c.attempt_id, &complete_req())
+        .await
+        .unwrap();
+    let events3 = state
+        .store
+        .get_events(&task3.id, None, 0, Some(100))
+        .await
+        .unwrap();
+    assert!(
+        !events3
+            .iter()
+            .any(|e| e.payload.to_string().contains("scope_creep")),
+        "normal commands must not raise scope_creep"
+    );
+}

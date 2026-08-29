@@ -8,13 +8,12 @@ all-features = true
 [advisories]
 # Fail the build on an unfixable vulnerability or a yanked crate. `cargo audit`
 # is the canonical notifier; this is the policy enforcer for the same DB.
-# Unmaintained crates are only warned (some — e.g. rustls-pemfile — have no
-# safe upgrade yet and are explicitly tracked here).
+# Unmaintained crates are only warned.
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-# rustls-pemfile 2.2.0 is archived (RUSTSEC-2025-0134) with no safe upgrade; the
-# PEM parsing it wraps is now in rustls-pki-types. Tracked under hardening #29 —
-# migrate to `rustls_pki_types::pem::PemObject` when touching the TLS loader.
+# rustls-pemfile 2.2.0 was archived (RUSTSEC-2025-0134); removed from the
+# workspace in v0.3.9+ — the TLS loader now uses rustls-pki-types' PemObject
+# (rustls 0.23 / pki-types ≥ 1.11). Ignore dropped from the list.
 #
 # RUSTSEC-2024-0437 (protobuf 2.28 recursion crash) ships via the `prometheus`
 # crate, which uses it for metric encoding only — no untrusted protobuf input
@@ -25,7 +24,7 @@ yanked = "deny"
 # version exists upstream (unfixed since 2023). Pulled transitively by
 # sqlx-mysql; this workspace only uses sqlx's SQLite driver, so the RSA code
 # paths are never executed at runtime. Mirrored in supply-chain.yml.
-ignore = ["RUSTSEC-2025-0134", "RUSTSEC-2024-0437", "RUSTSEC-2023-0071"]
+ignore = ["RUSTSEC-2024-0437", "RUSTSEC-2023-0071"]
 
 [licenses]
 # Allow common OSS licenses; unknown / restriction surface here.

@@ -40,14 +40,17 @@ pub fn load_tls_acceptor(
     cert_path: &str,
     key_path: &str,
 ) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
-    let cert_pem =
-        std::fs::read(cert_path).with_context(|| format!("read TLS cert {cert_path}"))?;
-    let key_pem = std::fs::read(key_path).with_context(|| format!("read TLS key {key_path}"))?;
-    let mut cert_reader = std::io::Cursor::new(&cert_pem[..]);
+    // rustls-pemfile is archived (RUSTSEC-2025-0134); the same PEM parsing
+    // ships in rustls-pki-types ≥ 1.11 as PemObject.
+    use rustls::pki_types::pem::PemObject;
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_reader).collect::<Result<_, _>>()?;
-    let mut key_reader = std::io::Cursor::new(&key_pem[..]);
-    let key = rustls_pemfile::private_key(&mut key_reader)?
+        rustls::pki_types::CertificateDer::pem_file_iter(cert_path)
+            .with_context(|| format!("parse TLS cert chain {cert_path}"))?
+            .collect::<Result<_, _>>()?;
+    let key = rustls::pki_types::PrivateKeyDer::pem_file_iter(key_path)
+        .with_context(|| format!("parse TLS key {key_path}"))?
+        .next()
+        .transpose()?
         .context("no private key found in TLS key PEM")?;
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -87,5 +90,30 @@ mod tests {
     #[test]
     fn load_tls_acceptor_missing_file_errors() {
         assert!(load_tls_acceptor("/no/such/cert.pem", "/no/such/key.pem").is_err());
+    }
+
+    #[test]
+    fn load_tls_acceptor_rejects_non_pem_garbage() {
+        // Exercises the pki-types PemObject parser path (RUSTSEC-2025-0134
+        // replacement): a file that is not PEM-shaped must error, not panic
+        // or unwrap. Real DER certs are not hand-rolled here (no test-only
+        // crypto dep by design) — the happy path is covered by the e2e TLS
+        // smoke tests against real generated certs.
+        let dir = std::env::temp_dir();
+        let cert = dir.join("ag-tls-test-garbage-cert.pem");
+        let key = dir.join("ag-tls-test-garbage-key.pem");
+        std::fs::write(&cert, b"this is not a PEM file").unwrap();
+        std::fs::write(&key, b"neither is this").unwrap();
+        assert!(load_tls_acceptor(cert.to_str().unwrap(), key.to_str().unwrap()).is_err());
+        // Same file existing but only a cert PEM (no key section) must also
+        // error on the key side.
+        std::fs::write(
+            &key,
+            b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        assert!(load_tls_acceptor(cert.to_str().unwrap(), key.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_file(&cert);
+        let _ = std::fs::remove_file(&key);
     }
 }

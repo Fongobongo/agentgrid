@@ -3615,6 +3615,7 @@ mod agent_tests {
     use super::*;
     use agentgrid_common::{AgentCreate, CreateTaskRequest};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -3734,6 +3735,65 @@ mod agent_tests {
         assert_eq!(created, 3, "exactly max_tasks creations may win");
         let fresh = s.get_agent(&agent.id).await.unwrap().unwrap();
         assert_eq!(fresh.tasks_spent, 3);
+    }
+
+    /// Review follow-up (v0.3.9): property-style version of the concurrent
+    /// budget race above — for a grid of (workers, max_tasks) pairs,
+    /// concurrent attributed creations must let exactly min(workers,
+    /// max_tasks) through and spend exactly that many. This is the
+    /// check-then-act race class the v0.3.6 audit found (budget check and
+    /// insert must share one write txn). proptest's macro is sync-only, so
+    /// the property runs as a deterministic factorial grid.
+    #[tokio::test]
+    async fn proptest_agent_budget_race_never_overspends() {
+        for workers in [2usize, 3, 5, 8] {
+            for max_tasks in [1i64, 2, 3, 5] {
+                let s = Arc::new(temp_store().await);
+                let agent = s
+                    .create_agent(&AgentCreate {
+                        name: "racer".into(),
+                        role: "worker".into(),
+                        prompt: "p".into(),
+                        skills: vec![],
+                        budget_usd: 0.0,
+                        max_tasks: Some(max_tasks),
+                        heartbeat_interval_secs: None,
+                    })
+                    .await
+                    .unwrap();
+                let req = CreateTaskRequest {
+                    prompt: "x".into(),
+                    repository: "*".into(),
+                    adapter: "mock".into(),
+                    ..Default::default()
+                };
+                let mut handles = Vec::new();
+                for _ in 0..workers {
+                    let s2 = Arc::clone(&s);
+                    let agent_id = agent.id.clone();
+                    let rq = req.clone();
+                    handles.push(tokio::spawn(async move {
+                        s2.create_agent_task(&agent_id, &rq).await.is_ok()
+                    }));
+                }
+                let mut created = 0;
+                for h in handles {
+                    if h.await.unwrap() {
+                        created += 1;
+                    }
+                }
+                let expected = workers.min(max_tasks.max(0) as usize);
+                assert_eq!(
+                    created, expected,
+                    "workers={workers} max_tasks={max_tasks}: exactly min() may win"
+                );
+                let fresh = s.get_agent(&agent.id).await.unwrap().unwrap();
+                assert_eq!(
+                    fresh.tasks_spent, expected as i64,
+                    "workers={workers} max_tasks={max_tasks}: spend must match winners"
+                );
+            }
+        }
     }
 
     #[tokio::test]
