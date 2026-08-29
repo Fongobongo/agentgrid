@@ -11,6 +11,7 @@ mod diff_scan;
 mod middleware;
 mod notify;
 mod routes;
+mod scope_scan;
 mod services;
 pub mod store;
 mod tls;

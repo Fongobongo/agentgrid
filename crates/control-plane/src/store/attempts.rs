@@ -6,7 +6,8 @@ use super::{
 };
 use agentgrid_common::{
     next_attempt_status, next_task_status, AgentSession, ApprovalEvent, AttemptStatus,
-    AttemptTransition, CompleteAttemptRequest, InvalidTransition, TaskStatus, TaskTransition,
+    AttemptTransition, CompleteAttemptRequest, EventType, InvalidTransition, TaskStatus,
+    TaskTransition,
 };
 use anyhow::Result;
 use sqlx::Row;
@@ -1361,5 +1362,40 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Competitor-gap feature (scope-creep guard): the task's prompt plus all
+    /// command-bearing events of a finished attempt (tool/stdout/stderr/error),
+    /// in sequence order. Used to detect unrequested hash/checksum busywork.
+    /// `None` when the task does not exist; events are empty for a quiet
+    /// attempt.
+    pub async fn scope_input(
+        &self,
+        attempt_id: &str,
+        task_id: &str,
+    ) -> Result<Option<(String, Vec<(EventType, String)>)>> {
+        let prompt: Option<String> = sqlx::query_scalar("SELECT prompt FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(prompt) = prompt else {
+            return Ok(None);
+        };
+        let rows = sqlx::query(
+            "SELECT type, payload FROM task_events \
+             WHERE attempt_id = ? AND type IN ('tool','stdout','stderr','error') \
+             ORDER BY sequence",
+        )
+        .bind(attempt_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut events = Vec::with_capacity(rows.len());
+        for r in rows {
+            let t: String = r.try_get("type")?;
+            let p: String = r.try_get("payload")?;
+            let ty = from_snake::<EventType>(&t).unwrap_or(EventType::Stdout);
+            events.push((ty, p));
+        }
+        Ok(Some((prompt, events)))
     }
 }

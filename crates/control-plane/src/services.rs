@@ -82,6 +82,24 @@ impl TaskLifecycleService {
                 }
             }
         }
+        // Competitor-gap feature (scope-creep guard): scan the attempt's
+        // command events for hash/checksum busywork the prompt never asked for
+        // (stop-that-shit inspired). Audit-only, best-effort — same shape as
+        // the diff scan above; findings never change the outcome.
+        if req.exit_code == 0 && req.error_code.is_none() {
+            if let Ok(Some((prompt, events))) = self.store.scope_input(attempt_id, &task_id).await {
+                for f in crate::scope_scan::scan_events(&prompt, &events) {
+                    let text = format!("[{}] {}", f.kind, f.detail);
+                    if let Err(e) = self
+                        .store
+                        .append_audit_event(attempt_id, "scope_creep", &text)
+                        .await
+                    {
+                        tracing::warn!(attempt_id, error = %e, "scope-creep event failed");
+                    }
+                }
+            }
+        }
         // Plan 1.2 (competitor #22a): notify the operator on terminal states
         // (mobile-friendly push). Best-effort; failures are logged inside
         // `notify_task` and never abort the completion path.
