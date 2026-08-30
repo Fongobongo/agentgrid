@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         --target x86_64-unknown-linux-musl \
         --bins \
         -p agentgrid-control-plane -p agentgrid-cli \
-    && mkdir -p /out \
+    && mkdir -p /out /out/root/var/lib/agentgrid \
     && cp target/x86_64-unknown-linux-musl/release/agentgrid-control-plane \
            target/x86_64-unknown-linux-musl/release/ag /out/
 
@@ -38,6 +38,9 @@ LABEL org.opencontainers.image.title="agentgrid-control-plane-musl" \
 # Statically linked binary (no external dependencies)
 COPY --from=builder /out/agentgrid-control-plane /usr/local/bin/
 COPY --from=builder /out/ag /usr/local/bin/
+# FROM scratch has no mkdir; materialize the data dir the binary expects
+# (SQLite db + artifacts) so the container boots without extra mounts.
+COPY --from=builder /out/root/ /
 
 ENV AGENTGRID_LISTEN=0.0.0.0:7800 \
     AGENTGRID_DB=/var/lib/agentgrid/control-plane.db \
