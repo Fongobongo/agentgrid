@@ -217,6 +217,29 @@ jobs:
             )
           done
           ls -la release-assets
+      - name: "sanity: musl binary boots + serves embedded UI"
+        # Hardening P2 item 30 follow-up: proves the *published artifact*
+        # starts and serves /health/ready and the embedded web UI before
+        # anything is signed or released. Catches "built but broken" (the
+        # v0.4.0 musl image regression class) at the last gate.
+        run: |
+          set -eux
+          mkdir -p /tmp/ag-sanity && cd /tmp/ag-sanity
+          tar xzf "$GITHUB_WORKSPACE/release-assets/agentgrid-x86_64-unknown-linux-musl.tar.gz" agentgrid-control-plane
+          ./agentgrid-control-plane --version
+          AGENTGRID_LISTEN=127.0.0.1:7900 \
+          AGENTGRID_DB=/tmp/ag-sanity/cp.db \
+          AGENTGRID_ARTIFACT_ROOT=/tmp/ag-sanity/artifacts \
+            ./agentgrid-control-plane > cp.log 2>&1 &
+          CP_PID=$!
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7900/health/ready && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:7900/health/ready
+          CT=$(curl -sf -o /dev/null -w '%{content_type}' http://127.0.0.1:7900/ || true)
+          kill $CP_PID || true
+          [ "$CT" = "text/html; charset=utf-8" ] || { echo "embedded UI not served (content-type=$CT)"; cat cp.log; exit 1; }
       - name: attest build provenance
         # Hardening P2 item 29: GitHub provenance attestation for every release
         # artifact — a verifiable record of who built what, from which commit.
