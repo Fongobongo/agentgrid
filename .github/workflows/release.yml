@@ -243,8 +243,19 @@ jobs:
           # cosign 4.x sign-blob writes a Sigstore bundle by default and
           # errors with an empty bundle path when only --output-signature is
           # given; pass an explicit bundle target alongside the signature.
+          # The Sigstore timestamp service blips transiently (seen as
+          # "connection reset by peer" on v0.4.0) — retry up to 3 times per
+          # file before failing the release.
           for f in release-assets/agentgrid-*.tar.gz; do
-            cosign sign-blob --yes "$f" --bundle "$f.bundle" --output-signature "$f.sig"
+            ok=""
+            for attempt in 1 2 3; do
+              if cosign sign-blob --yes "$f" --bundle "$f.bundle" --output-signature "$f.sig"; then
+                ok=1 && break
+              fi
+              echo "cosign sign-blob attempt $attempt failed for $f; retrying in 10s"
+              sleep 10
+            done
+            [ -n "$ok" ] || { echo "cosign failed 3x for $f"; exit 1; }
           done
       - name: create GitHub Release
         env:
