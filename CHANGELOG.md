@@ -1539,7 +1539,7 @@
   from subsequent COPY --from layers
 
 See also:
-- docs/plans/0.3-websocket-and-scale.md — full plan with stage-by-stage breakdown
+- docs/plans/0.3-websocket-and-scale.md — plan file; removed from the tree after completion (all items shipped by v0.4.0; git history retains it)
 - docs/load-baseline-0.3.md — detailed performance analysis and reproduction steps
 - docs/node-ws-protocol.md — WebSocket protocol specification
 
