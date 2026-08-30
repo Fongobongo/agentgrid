@@ -9,6 +9,75 @@ use anyhow::Result;
 use sqlx::Row;
 use uuid::Uuid;
 
+/// Task-level fields an `Assignment` is built from. Both construction sites
+/// (fresh assignment in `try_assign_batch`, redelivery in
+/// `unacked_assignments`) collect exactly these values — attempt identity
+/// (attempt_id / fencing_token / number) is supplied separately by the
+/// caller, and the constant defaults live in `finish_assignment` once.
+struct AssignmentFields {
+    repository: String,
+    prompt: String,
+    adapter: String,
+    timeout_secs: i64,
+    git_url: String,
+    default_branch: String,
+    validation_command: Option<String>,
+    base_commit: Option<String>,
+    parent_acp_session_id: Option<String>,
+    network_mode: Option<String>,
+    group_id: Option<String>,
+    read_only: bool,
+    eval_cases: Vec<String>,
+    consensus_group_id: Option<String>,
+    consensus_member: Option<String>,
+    opencode_override: Option<String>,
+    github_push: bool,
+    github_repo: Option<String>,
+    github_issue: Option<i64>,
+    github_base_ref: Option<String>,
+}
+
+fn finish_assignment(
+    attempt_id: String,
+    fencing_token: String,
+    task_id: String,
+    number: i64,
+    f: AssignmentFields,
+) -> Assignment {
+    Assignment {
+        attempt_id,
+        fencing_token,
+        task_id,
+        repository: f.repository,
+        prompt: f.prompt,
+        adapter: f.adapter,
+        number: number as u32,
+        timeout_secs: f.timeout_secs as u64,
+        git_url: f.git_url,
+        default_branch: f.default_branch,
+        validation_command: f.validation_command,
+        validation_timeout_secs: None,
+        base_commit: f.base_commit,
+        parent_acp_session_id: f.parent_acp_session_id,
+        network_mode: f.network_mode,
+        provenance: None,
+        upstream_commits: Vec::new(),
+        upstream_task_ids: Vec::new(),
+        group_id: f.group_id,
+        read_only: f.read_only,
+        eval_cases: f.eval_cases,
+        consensus_group_id: f.consensus_group_id,
+        consensus_member: f.consensus_member,
+        opencode_override: f
+            .opencode_override
+            .and_then(|s| serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()),
+        github_push: f.github_push,
+        github_repo: f.github_repo,
+        github_issue: f.github_issue,
+        github_base_ref: f.github_base_ref,
+    }
+}
+
 impl Store {
     pub async fn try_assign(&self, node_id: &str) -> Result<Option<Assignment>> {
         Ok(self.try_assign_batch(node_id, 1).await?.into_iter().next())
@@ -64,46 +133,41 @@ impl Store {
             };
             let repo_validation: Option<String> = c.try_get("repo_validation")?;
             let task_validation: Option<String> = c.try_get("task_validation")?;
-            out.push(Assignment {
-                attempt_id: c.try_get("attempt_id")?,
-                fencing_token: c.try_get("fencing_token")?,
+            out.push(finish_assignment(
+                c.try_get("attempt_id")?,
+                c.try_get("fencing_token")?,
                 task_id,
-                prompt: c.try_get("prompt")?,
-                adapter: c.try_get("adapter")?,
-                repository: c.try_get("repository")?,
-                number: number as u32,
-                timeout_secs: c.try_get::<i64, _>("timeout_secs")? as u64,
-                git_url: c
-                    .try_get::<Option<String>, _>("git_url")?
-                    .unwrap_or_default(),
-                default_branch: c
-                    .try_get::<Option<String>, _>("default_branch")?
-                    .unwrap_or_default(),
-                validation_command: task_validation.or(repo_validation),
-                validation_timeout_secs: None,
-                base_commit: c.try_get("base_commit").ok().flatten(),
-                parent_acp_session_id: c.try_get("parent_acp_session_id").ok().flatten(),
-                network_mode: c.try_get("network_mode").ok().flatten(),
-                provenance: None,
-                upstream_commits: Vec::new(),
-                upstream_task_ids: Vec::new(),
-                group_id: c.try_get("group_id").ok().flatten(),
-                read_only,
-                eval_cases,
-                consensus_group_id: c.try_get("consensus_group_id").ok().flatten(),
-                consensus_member: c.try_get("consensus_member").ok().flatten(),
-                opencode_override: c
-                    .try_get::<Option<String>, _>("opencode_override")
-                    .ok()
-                    .flatten()
-                    .and_then(|s| {
-                        serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()
-                    }),
-                github_push: c.try_get::<bool, _>("github_push").unwrap_or_default(),
-                github_repo: c.try_get("github_repo").ok().flatten(),
-                github_issue: c.try_get("github_issue").ok().flatten(),
-                github_base_ref: c.try_get("github_base_ref").ok().flatten(),
-            });
+                number,
+                AssignmentFields {
+                    prompt: c.try_get("prompt")?,
+                    adapter: c.try_get("adapter")?,
+                    repository: c.try_get("repository")?,
+                    timeout_secs: c.try_get("timeout_secs")?,
+                    git_url: c
+                        .try_get::<Option<String>, _>("git_url")?
+                        .unwrap_or_default(),
+                    default_branch: c
+                        .try_get::<Option<String>, _>("default_branch")?
+                        .unwrap_or_default(),
+                    validation_command: task_validation.or(repo_validation),
+                    base_commit: c.try_get("base_commit").ok().flatten(),
+                    parent_acp_session_id: c.try_get("parent_acp_session_id").ok().flatten(),
+                    network_mode: c.try_get("network_mode").ok().flatten(),
+                    group_id: c.try_get("group_id").ok().flatten(),
+                    read_only,
+                    eval_cases,
+                    consensus_group_id: c.try_get("consensus_group_id").ok().flatten(),
+                    consensus_member: c.try_get("consensus_member").ok().flatten(),
+                    opencode_override: c
+                        .try_get::<Option<String>, _>("opencode_override")
+                        .ok()
+                        .flatten(),
+                    github_push: c.try_get::<bool, _>("github_push").unwrap_or_default(),
+                    github_repo: c.try_get("github_repo").ok().flatten(),
+                    github_issue: c.try_get("github_issue").ok().flatten(),
+                    github_base_ref: c.try_get("github_base_ref").ok().flatten(),
+                },
+            ));
         }
         Ok(out)
     }
@@ -449,42 +513,37 @@ impl Store {
         .execute(&mut *tx)
         .await?;
             batch.push(Pending {
-                assignment: Assignment {
+                assignment: finish_assignment(
                     attempt_id,
                     fencing_token,
                     task_id,
-                    repository,
-                    prompt,
-                    adapter,
-                    number: number as u32,
-                    timeout_secs: timeout_secs as u64,
-                    git_url,
-                    default_branch,
-                    validation_command: task_validation.or(validation_command),
-                    validation_timeout_secs: None,
-                    base_commit,
-                    parent_acp_session_id,
-                    network_mode: network_mode.clone(),
-                    provenance: None,
-                    upstream_commits: Vec::new(),
-                    upstream_task_ids: Vec::new(),
-                    group_id,
-                    read_only,
-                    eval_cases,
-                    consensus_group_id,
-                    consensus_member,
-                    opencode_override: c
-                        .try_get::<Option<String>, _>("opencode_override")
-                        .ok()
-                        .flatten()
-                        .and_then(|s| {
-                            serde_json::from_str::<agentgrid_common::OpencodeOverride>(&s).ok()
-                        }),
-                    github_push: c.try_get::<bool, _>("github_push").unwrap_or_default(),
-                    github_repo: c.try_get("github_repo").ok().flatten(),
-                    github_issue: c.try_get("github_issue").ok().flatten(),
-                    github_base_ref: c.try_get("github_base_ref").ok().flatten(),
-                },
+                    number,
+                    AssignmentFields {
+                        repository,
+                        prompt,
+                        adapter,
+                        timeout_secs,
+                        git_url,
+                        default_branch,
+                        validation_command: task_validation.or(validation_command),
+                        base_commit,
+                        parent_acp_session_id,
+                        network_mode: network_mode.clone(),
+                        group_id,
+                        read_only,
+                        eval_cases,
+                        consensus_group_id,
+                        consensus_member,
+                        opencode_override: c
+                            .try_get::<Option<String>, _>("opencode_override")
+                            .ok()
+                            .flatten(),
+                        github_push: c.try_get::<bool, _>("github_push").unwrap_or_default(),
+                        github_repo: c.try_get("github_repo").ok().flatten(),
+                        github_issue: c.try_get("github_issue").ok().flatten(),
+                        github_base_ref: c.try_get("github_base_ref").ok().flatten(),
+                    },
+                ),
                 created_at,
             });
         }

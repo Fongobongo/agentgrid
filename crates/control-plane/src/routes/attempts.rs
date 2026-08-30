@@ -17,6 +17,19 @@ use crate::auth::{check_attempt_owner, check_fencing_token, fencing_token_header
 use crate::middleware;
 use crate::AppState;
 
+/// Node mutation gate: attempt ownership + fencing-token checks in one call.
+/// Every mutating node endpoint goes through this so a new handler cannot
+/// forget the fencing half of the check.
+async fn authorize_attempt_mutation(
+    state: &AppState,
+    auth: &AuthedNode,
+    attempt_id: &str,
+    headers: &HeaderMap,
+) -> Result<(), StatusCode> {
+    check_attempt_owner(state, auth, attempt_id).await?;
+    check_fencing_token(state, attempt_id, fencing_token_header(headers).as_deref()).await
+}
+
 pub async fn attempt_cancel_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
@@ -45,16 +58,7 @@ pub async fn ingest_events(
     headers: HeaderMap,
     Json(req): Json<IngestEventsRequest>,
 ) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
+    if let Err(code) = authorize_attempt_mutation(&state, &auth, &attempt_id, &headers).await {
         return code.into_response();
     }
     for e in &req.events {
@@ -133,16 +137,7 @@ pub async fn complete_attempt(
     headers: HeaderMap,
     Json(req): Json<CompleteAttemptRequest>,
 ) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
+    if let Err(code) = authorize_attempt_mutation(&state, &auth, &attempt_id, &headers).await {
         return code.into_response();
     }
     // Plan 534: completing an attempt also advances the owning workflow run
@@ -192,16 +187,7 @@ pub async fn ack_attempt_handler(
     Path(attempt_id): Path<String>,
     headers: HeaderMap,
 ) -> StatusCode {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code;
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
+    if let Err(code) = authorize_attempt_mutation(&state, &auth, &attempt_id, &headers).await {
         return code;
     }
     match state.store.ack_attempt(&attempt_id).await {
@@ -223,16 +209,7 @@ pub async fn begin_validate_handler(
     Path(attempt_id): Path<String>,
     headers: HeaderMap,
 ) -> StatusCode {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code;
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
+    if let Err(code) = authorize_attempt_mutation(&state, &auth, &attempt_id, &headers).await {
         return code;
     }
     match state.store.begin_validate(&attempt_id).await {
@@ -254,16 +231,7 @@ pub async fn create_agent_session_handler(
     headers: HeaderMap,
     Json(req): Json<CreateAgentSessionRequest>,
 ) -> Response {
-    if let Err(code) = check_attempt_owner(&state, &auth, &attempt_id).await {
-        return code.into_response();
-    }
-    if let Err(code) = check_fencing_token(
-        &state,
-        &attempt_id,
-        fencing_token_header(&headers).as_deref(),
-    )
-    .await
-    {
+    if let Err(code) = authorize_attempt_mutation(&state, &auth, &attempt_id, &headers).await {
         return code.into_response();
     }
     match state

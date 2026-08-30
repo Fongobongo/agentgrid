@@ -948,9 +948,7 @@ async fn cmd_storage(
                 .send()
                 .await
                 .context("storage gc request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("storage gc failed: HTTP {}", resp.status());
-            }
+            err_if_fail(resp.status(), "storage gc")?;
             let out: serde_json::Value = resp.json().await.context("parse storage gc response")?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -988,9 +986,7 @@ async fn cmd_storage(
                 .send()
                 .await
                 .context("storage disk request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("storage disk failed: HTTP {}", resp.status());
-            }
+            err_if_fail(resp.status(), "storage disk")?;
             let out: serde_json::Value =
                 resp.json().await.context("parse storage disk response")?;
             let free_mb = out.get("free_mb").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1019,9 +1015,7 @@ async fn cmd_search(client: &reqwest::Client, base: &str, a: SearchArgs, json: b
         .send()
         .await
         .context("search request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("search failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "search")?;
     let hits: Vec<TaskView> = resp.json().await.context("parse search response")?;
     if json {
         println!("{}", serde_json::to_string_pretty(&hits)?);
@@ -1050,9 +1044,7 @@ async fn cmd_search_events(
         .send()
         .await
         .context("event search request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("event search failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "event search")?;
     let hits: Vec<agentgrid_common::EventSearchHit> =
         resp.json().await.context("parse event search response")?;
     if json {
@@ -1087,9 +1079,7 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         .send()
         .await
         .context("attempt lookup failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("attempt not found ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "attempt")?;
     let att: agentgrid_common::AttemptView = resp.json().await.context("parse attempt response")?;
     let req = CreateTaskRequest {
         prompt: att.prompt,
@@ -1121,9 +1111,7 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         .send()
         .await
         .context("resume create failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("resume create failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "resume create")?;
     let t: TaskView = resp.json().await.context("parse created task")?;
     println!("resumed attempt {} as task {}", a.attempt_id, t.id);
     Ok(())
@@ -1141,9 +1129,7 @@ async fn cmd_tag(client: &reqwest::Client, base: &str, a: TagArgs, json: bool) -
                 .send()
                 .await
                 .context("tag add request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("tag add failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "tag add")?;
             println!("tag '{tag}' added to {task_id}");
         }
         TagSub::Remove { task_id, tag } => {
@@ -1155,9 +1141,7 @@ async fn cmd_tag(client: &reqwest::Client, base: &str, a: TagArgs, json: bool) -
                 .send()
                 .await
                 .context("tag remove request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("tag remove failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "tag remove")?;
             println!("tag '{tag}' removed from {task_id}");
         }
         TagSub::List { task_id } => {
@@ -1166,9 +1150,7 @@ async fn cmd_tag(client: &reqwest::Client, base: &str, a: TagArgs, json: bool) -
                 .send()
                 .await
                 .context("tag list request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("tag list failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "tag list")?;
             let tags: Vec<String> = resp.json().await.context("parse tags")?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&tags)?);
@@ -1296,9 +1278,7 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 .send()
                 .await
                 .context("issue task create failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("issue task create failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "issue task create")?;
             let t: TaskView = resp.json().await.context("parse created task")?;
             println!("issue #{number} '{title}' → task {}", t.id);
             Ok(())
@@ -1362,9 +1342,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 .send()
                 .await
                 .context("create consensus task")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("consensus task submit failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "consensus task submit")?;
             let task: TaskView = resp.json().await.context("parse")?;
             task_ids.push(task.id);
         }
@@ -1429,9 +1407,7 @@ async fn cmd_ctx(client: &reqwest::Client, base: &str, a: CtxArgs) -> Result<()>
                 .send()
                 .await
                 .context("set context request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("set context failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "set context")?;
             Ok(())
         }
         CtxSub::Get { group, key } => {
@@ -1443,9 +1419,7 @@ async fn cmd_ctx(client: &reqwest::Client, base: &str, a: CtxArgs) -> Result<()>
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
                 anyhow::bail!("context key {key} not set for group {group}");
             }
-            if !resp.status().is_success() {
-                anyhow::bail!("get context failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "get context")?;
             let value: String = resp.json().await.context("parse context response")?;
             println!("{value}");
             Ok(())
@@ -1456,9 +1430,7 @@ async fn cmd_ctx(client: &reqwest::Client, base: &str, a: CtxArgs) -> Result<()>
                 .send()
                 .await
                 .context("list context request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("list context failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "list context")?;
             let entries: Vec<agentgrid_common::SharedContextEntry> =
                 resp.json().await.context("parse context response")?;
             if entries.is_empty() {
@@ -1475,9 +1447,7 @@ async fn cmd_ctx(client: &reqwest::Client, base: &str, a: CtxArgs) -> Result<()>
                 .send()
                 .await
                 .context("delete context request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("delete context failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "delete context")?;
             Ok(())
         }
     }
@@ -1768,9 +1738,7 @@ async fn cmd_agent(client: &reqwest::Client, base: &str, a: AgentArgs) -> Result
                 .send()
                 .await
                 .context("create agent request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("create agent failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "create agent")?;
             let agent: agentgrid_common::Agent =
                 resp.json().await.context("parse agent response")?;
             println!("agent {} created (id {})", agent.name, agent.id);
@@ -1782,9 +1750,7 @@ async fn cmd_agent(client: &reqwest::Client, base: &str, a: AgentArgs) -> Result
                 .send()
                 .await
                 .context("list agents request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("list agents failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "list agents")?;
             let agents: Vec<agentgrid_common::Agent> =
                 resp.json().await.context("parse agents response")?;
             if agents.is_empty() {
@@ -1812,9 +1778,7 @@ async fn cmd_agent(client: &reqwest::Client, base: &str, a: AgentArgs) -> Result
                 .send()
                 .await
                 .context("agent actions request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("agent actions failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "agent actions")?;
             let actions: Vec<agentgrid_common::AgentAction> =
                 resp.json().await.context("parse actions response")?;
             if actions.is_empty() {
@@ -1834,9 +1798,7 @@ async fn cmd_show(client: &reqwest::Client, base: &str, a: ShowArgs, json: bool)
         .send()
         .await
         .context("show request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("task not found ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "task")?;
     let task: TaskView = resp.json().await.context("parse task response")?;
     if json {
         println!("{}", serde_json::to_string_pretty(&task)?);
@@ -2061,6 +2023,16 @@ fn api_error(status: reqwest::StatusCode, what: &str) -> anyhow::Error {
     }
 }
 
+/// Uniform non-2xx gate: every CLI command funnels through `api_error` so
+/// 401/403 always get the login hint and 404 reads "not found".
+fn err_if_fail(status: reqwest::StatusCode, what: &str) -> Result<()> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(api_error(status, what))
+    }
+}
+
 /// Plan 6.1: `ag status` — one-screen overview of server, nodes, tasks and
 /// workflow runs. Each section is independent: a failing/unauthorized section
 /// renders "(unavailable)" instead of aborting the whole overview.
@@ -2239,9 +2211,7 @@ async fn cmd_review(client: &reqwest::Client, base: &str, a: ReviewArgs) -> Resu
             .send()
             .await
             .context("create review task")?;
-        if !resp.status().is_success() {
-            anyhow::bail!("review task submit failed ({})", resp.status());
-        }
+        err_if_fail(resp.status(), "review task submit")?;
         let task: TaskView = resp.json().await.context("parse")?;
         task_ids.push(task.id);
     }
@@ -2260,9 +2230,7 @@ async fn cmd_brain(client: &reqwest::Client, base: &str, a: BrainArgs) -> Result
         a.limit.min(1000)
     );
     let resp = client.get(&url).send().await.context("list tasks")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("list tasks failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "list tasks")?;
     let body: serde_json::Value = resp.json().await.context("parse tasks")?;
     let items = body
         .get("items")
@@ -2350,9 +2318,7 @@ async fn cmd_node_doctor(client: &reqwest::Client, base: &str, node_id: &str) ->
         .send()
         .await
         .context("node fetch request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("node lookup failed: HTTP {}", resp.status());
-    }
+    err_if_fail(resp.status(), "node lookup")?;
     let n: serde_json::Value = resp.json().await.context("parse node")?;
     let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("-");
     let name = n.get("name").and_then(|v| v.as_str()).unwrap_or("-");
@@ -2893,12 +2859,9 @@ async fn cmd_cancel(client: &reqwest::Client, base: &str, a: CancelArgs) -> Resu
         .send()
         .await
         .context("cancel request failed")?;
-    if resp.status().is_success() {
-        println!("cancel requested for {}", a.task_id);
-        Ok(())
-    } else {
-        anyhow::bail!("cancel failed ({})", resp.status())
-    }
+    err_if_fail(resp.status(), "cancel")?;
+    println!("cancel requested for {}", a.task_id);
+    Ok(())
 }
 
 async fn cmd_retry(client: &reqwest::Client, base: &str, a: RetryArgs) -> Result<()> {
@@ -2907,12 +2870,9 @@ async fn cmd_retry(client: &reqwest::Client, base: &str, a: RetryArgs) -> Result
         .send()
         .await
         .context("retry request failed")?;
-    if resp.status().is_success() {
-        println!("task {} requeued", a.task_id);
-        Ok(())
-    } else {
-        anyhow::bail!("retry failed ({})", resp.status())
-    }
+    err_if_fail(resp.status(), "retry")?;
+    println!("task {} requeued", a.task_id);
+    Ok(())
 }
 
 async fn cmd_approvals(client: &reqwest::Client, base: &str, a: ApprovalArgs) -> Result<()> {
@@ -2927,9 +2887,7 @@ async fn cmd_approvals(client: &reqwest::Client, base: &str, a: ApprovalArgs) ->
                 .send()
                 .await
                 .context("approvals list request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("approvals list failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "approvals list")?;
             let v: serde_json::Value = resp.json().await.context("bad approvals json")?;
             let approvals: Vec<ApprovalView> =
                 serde_json::from_value(serde_json::Value::Array(list_items(&v)))
@@ -2970,12 +2928,9 @@ async fn answer_approval(
         .send()
         .await
         .context("approval answer request failed")?;
-    if resp.status().is_success() {
-        println!("approval {id} -> {decision}");
-        Ok(())
-    } else {
-        anyhow::bail!("approval {decision} failed ({})", resp.status())
-    }
+    err_if_fail(resp.status(), "approval answer")?;
+    println!("approval {id} -> {decision}");
+    Ok(())
 }
 
 /// Stage 9.2: skill trust management. A skill absent from the ledger is
@@ -2992,9 +2947,7 @@ async fn cmd_skills(client: &reqwest::Client, base: &str, a: SkillsArgs) -> Resu
                 .send()
                 .await
                 .context("skills list request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("skills list failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "skills list")?;
             let rows: Vec<SkillTrustView> = resp.json().await.context("bad skills json")?;
             if rows.is_empty() {
                 println!("no recorded skill trust decisions");
@@ -3084,9 +3037,7 @@ async fn cmd_mcp(client: &reqwest::Client, base: &str, a: McpArgs) -> Result<()>
                 .send()
                 .await
                 .context("list mcp-servers request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("list mcp-servers failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "list mcp-servers")?;
             let servers: Vec<McpServer> = resp.json().await.context("bad mcp json")?;
             if servers.is_empty() {
                 println!("no MCP servers registered");
@@ -3128,9 +3079,7 @@ async fn cmd_mcp(client: &reqwest::Client, base: &str, a: McpArgs) -> Result<()>
                 .send()
                 .await
                 .context("create mcp-server request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("create mcp-server failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "create mcp-server")?;
             let s: McpServer = resp.json().await.context("bad mcp json")?;
             println!("mcp server {} registered: {}", s.id, s.name);
             Ok(())
@@ -3144,9 +3093,7 @@ async fn cmd_mcp(client: &reqwest::Client, base: &str, a: McpArgs) -> Result<()>
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
                 anyhow::bail!("mcp server {} not found", id);
             }
-            if !resp.status().is_success() {
-                anyhow::bail!("delete mcp-server failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "delete mcp-server")?;
             println!("mcp server {} deleted", id);
             Ok(())
         }
@@ -3156,9 +3103,7 @@ async fn cmd_mcp(client: &reqwest::Client, base: &str, a: McpArgs) -> Result<()>
                 .send()
                 .await
                 .context("list mcp-servers request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("list mcp-servers failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "list mcp-servers")?;
             let servers: Vec<McpServer> = resp.json().await.context("bad mcp json")?;
             let s = servers
                 .iter()
@@ -3202,12 +3147,9 @@ async fn set_skill_trust(
         .send()
         .await
         .context("skill trust request failed")?;
-    if resp.status().is_success() {
-        println!("skill {name} ({source}) -> {decision}");
-        Ok(())
-    } else {
-        anyhow::bail!("skill {decision} failed ({})", resp.status())
-    }
+    err_if_fail(resp.status(), "skill trust")?;
+    println!("skill {name} ({source}) -> {decision}");
+    Ok(())
 }
 
 /// Stage 13: agent profile management. Revisions are immutable; activating an
@@ -3220,9 +3162,7 @@ async fn cmd_profiles(client: &reqwest::Client, base: &str, a: ProfilesArgs) -> 
                 .send()
                 .await
                 .context("profiles list request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("profiles list failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "profiles list")?;
             let ids: Vec<String> = resp.json().await.context("bad profiles json")?;
             if ids.is_empty() {
                 println!("no active profiles");
@@ -3238,9 +3178,7 @@ async fn cmd_profiles(client: &reqwest::Client, base: &str, a: ProfilesArgs) -> 
                 .send()
                 .await
                 .context("profile show request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("profile show failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "profile show")?;
             let revs: Vec<AgentProfile> = resp.json().await.context("bad profile json")?;
             if revs.is_empty() {
                 println!("profile {id}: no revisions");
@@ -3287,9 +3225,7 @@ async fn cmd_profiles(client: &reqwest::Client, base: &str, a: ProfilesArgs) -> 
                 .send()
                 .await
                 .context("profile create request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("profile create failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "profile create")?;
             let v: serde_json::Value = resp.json().await.context("bad profile json")?;
             println!(
                 "created {id}/r{} (not active; `ag profiles activate {id} <rev>`)",
@@ -3304,12 +3240,9 @@ async fn cmd_profiles(client: &reqwest::Client, base: &str, a: ProfilesArgs) -> 
                 .send()
                 .await
                 .context("profile activate request failed")?;
-            if resp.status().is_success() {
-                println!("activated {id}/r{revision}");
-                Ok(())
-            } else {
-                anyhow::bail!("profile activate failed ({})", resp.status())
-            }
+            err_if_fail(resp.status(), "profile activate")?;
+            println!("activated {id}/r{revision}");
+            Ok(())
         }
     }
 }
@@ -3329,12 +3262,9 @@ async fn cmd_repo(client: &reqwest::Client, base: &str, a: RepoArgs) -> Result<(
                 .send()
                 .await
                 .context("repository registration failed")?;
-            if resp.status().is_success() {
-                println!("repository {} registered", add.name);
-                Ok(())
-            } else {
-                anyhow::bail!("repo add failed ({})", resp.status())
-            }
+            err_if_fail(resp.status(), "repo add")?;
+            println!("repository {} registered", add.name);
+            Ok(())
         }
     }
 }
@@ -3484,9 +3414,7 @@ async fn cmd_login(client: &reqwest::Client, base: &str, a: LoginArgs) -> Result
         .send()
         .await
         .context("login request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("login failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "login")?;
     let lr: LoginResponse = resp.json().await.context("parse login response")?;
     save_token(&lr.token)?;
     println!("logged in; token stored at {}", credential_path().display());
@@ -3530,9 +3458,7 @@ async fn cmd_workflow_create(
         .send()
         .await
         .context("create workflow request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("create workflow failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "create workflow")?;
     let tpl: WorkflowTemplate = resp.json().await.context("parse workflow response")?;
     println!("workflow {} created ({} steps)", tpl.id, tpl.steps.len());
     println!("{}", tpl.id);
@@ -3655,9 +3581,7 @@ async fn cmd_workflow_schedules(
                 .send()
                 .await
                 .context("list schedules request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("list schedules failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "list schedules")?;
             let v: serde_json::Value = resp.json().await.context("bad schedule json")?;
             let schedules: Vec<WorkflowSchedule> =
                 serde_json::from_value(serde_json::Value::Array(list_items(&v)))
@@ -3697,9 +3621,7 @@ async fn cmd_workflow_schedules(
                 .send()
                 .await
                 .context("create schedule request failed")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("create schedule failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "create schedule")?;
             let s: WorkflowSchedule = resp.json().await.context("bad schedule json")?;
             println!(
                 "schedule {} created: interval={}s autonomy={} {}",
@@ -3719,9 +3641,7 @@ async fn cmd_workflow_schedules(
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
                 anyhow::bail!("schedule {} not found", sid);
             }
-            if !resp.status().is_success() {
-                anyhow::bail!("delete schedule failed ({})", resp.status());
-            }
+            err_if_fail(resp.status(), "delete schedule")?;
             println!("schedule {} deleted", sid);
             Ok(())
         }
@@ -3746,9 +3666,7 @@ async fn cmd_workflow_run(client: &reqwest::Client, base: &str, a: WorkflowRunAr
         .send()
         .await
         .context("create workflow run request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("create workflow run failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "create workflow run")?;
     let run: agentgrid_common::WorkflowRun =
         resp.json().await.context("parse workflow run response")?;
     println!("workflow run {} started (status: {:?})", run.id, run.status);
@@ -3779,9 +3697,7 @@ async fn cmd_run_workflow(
         .send()
         .await
         .context("create workflow request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("create workflow failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "create workflow")?;
     let created: WorkflowTemplate = resp.json().await.context("parse workflow response")?;
     let run_req = CreateWorkflowRunRequest {
         context: None,
@@ -3794,9 +3710,7 @@ async fn cmd_run_workflow(
         .send()
         .await
         .context("create workflow run request failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("create workflow run failed ({})", resp.status());
-    }
+    err_if_fail(resp.status(), "create workflow run")?;
     let run: agentgrid_common::WorkflowRun =
         resp.json().await.context("parse workflow run response")?;
     println!(
@@ -4122,9 +4036,7 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 .send()
                 .await
                 .context("list opencode profiles")?;
-            if !resp.status().is_success() {
-                anyhow::bail!("list failed: {}", resp.status());
-            }
+            err_if_fail(resp.status(), "list")?;
             let items: ListResponse<OpencodeProfile> = resp.json().await?;
             for p in &items.items {
                 println!(
@@ -4145,9 +4057,7 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 .get(format!("{base}/v1/opencode-profiles/{name}"))
                 .send()
                 .await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("not found");
-            }
+            err_if_fail(resp.status(), "opencode profile show")?;
             let p: OpencodeProfile = resp.json().await?;
             println!("{}", serde_json::to_string_pretty(&p)?);
             Ok(())
@@ -4218,9 +4128,7 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 .body("{}")
                 .send()
                 .await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("rollback failed: {}", resp.status());
-            }
+            err_if_fail(resp.status(), "rollback")?;
             let p: OpencodeProfile = resp.json().await?;
             println!(
                 "rolled back {} {steps} step{} -> hash {}",
@@ -4246,9 +4154,7 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                     .get(format!("{base}/v1/opencode-profiles/{name}"))
                     .send()
                     .await?;
-                if !resp.status().is_success() {
-                    anyhow::bail!("profile {name} not found");
-                }
+                err_if_fail(resp.status(), "profile {name}")?;
                 let p: OpencodeProfile = resp.json().await?;
                 Some(p.id)
             };
@@ -4258,9 +4164,7 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 .json(&body)
                 .send()
                 .await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("assign failed: {}", resp.status());
-            }
+            err_if_fail(resp.status(), "assign")?;
             if clear {
                 println!("cleared profile for node {node_id}");
             } else {
@@ -4277,9 +4181,7 @@ async fn cmd_opencode(client: &reqwest::Client, _base: &str, a: OpencodeArgs) ->
                 .get(format!("{base}/v1/nodes/{node_id}/opencode-audit"))
                 .send()
                 .await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("audit failed: {}", resp.status());
-            }
+            err_if_fail(resp.status(), "audit")?;
             let audits: ListResponse<agentgrid_common::OpencodeConfigAuditEntry> =
                 resp.json().await?;
             for a in &audits.items {
