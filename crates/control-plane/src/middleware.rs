@@ -100,15 +100,62 @@ pub fn api_error_with_id(
 #[derive(Clone, Debug)]
 pub struct RequestId(pub String);
 
-/// Serve the built web UI (Stage 4.3). Unknown non-API paths fall back to
-/// SPA static file serving using tower-http's ServeDir.
-/// Serves files from the web root with proper security headers.
-/// Falls back to index.html for non-/v1/ routes (SPA routing).
-pub async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
-    let web_root = match &state.web_root {
-        Some(r) => r.clone(),
-        None => return StatusCode::NOT_FOUND.into_response(),
+/// Built web UI embedded into the binary at compile time (release builds).
+/// In debug builds rust-embed reads the files from disk at runtime, so
+/// `npm run build` in web/ does not need a cargo rebuild.
+/// Priority stays: AGENTGRID_WEB_ROOT > exe-relative web/dist > embedded.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../web/dist"]
+struct EmbeddedWeb;
+
+/// Security headers shared by the filesystem and embedded static paths.
+fn static_headers(
+    content_type: &'static str,
+) -> [(axum::http::header::HeaderName, &'static str); 5] {
+    [
+        (axum::http::header::CONTENT_TYPE, content_type),
+        (axum::http::header::CACHE_CONTROL, if content_type.starts_with("text/html") { "no-cache" } else { "public, max-age=31536000, immutable" }),
+        (axum::http::header::HeaderName::from_static("content-security-policy"),
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';                          img-src 'self' data:; connect-src 'self'; font-src 'self';                          object-src 'none'; base-uri 'self'; frame-ancestors 'none';                          form-action 'self'"),
+        (axum::http::header::HeaderName::from_static("x-content-type-options"), "nosniff"),
+        (axum::http::header::HeaderName::from_static("x-frame-options"), "DENY"),
+    ]
+}
+
+/// Serve the SPA from the assets embedded into the binary.
+fn embedded_response(path: &str) -> Option<Response> {
+    let rel = path.trim_start_matches('/');
+    // index.html for the root and for unknown non-asset paths (SPA routes).
+    let file = EmbeddedWeb::get(rel).or_else(|| EmbeddedWeb::get("index.html"))?;
+    let mime = file.metadata.mimetype();
+    // mime_guess returns e.g. "text/css" — owned Strings are fine but headers
+    // need 'static; leak a few distinct mime strings (bounded set in dist).
+    let ct: &'static str = match mime
+        .split(';')
+        .next()
+        .unwrap_or("application/octet-stream")
+        .trim()
+    {
+        "text/html" => "text/html; charset=utf-8",
+        "text/javascript" | "application/javascript" => "text/javascript; charset=utf-8",
+        "text/css" => "text/css; charset=utf-8",
+        "application/json" => "application/json",
+        "image/svg+xml" => "image/svg+xml",
+        "image/png" => "image/png",
+        "image/x-icon" => "image/x-icon",
+        "font/woff2" => "font/woff2",
+        "font/woff" => "font/woff",
+        _ => "application/octet-stream",
     };
+    Some((static_headers(ct), file.data.into_owned()).into_response())
+}
+
+/// Serve the built web UI (Stage 4.3). Unknown non-API paths fall back to
+/// SPA static file serving. Priority: AGENTGRID_WEB_ROOT / exe-relative
+/// `web/dist` (filesystem, same hardening checks as before), then the
+/// assets embedded into the binary. Falls back to index.html for non-/v1/
+/// routes (SPA routing).
+pub async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
     let path = req.uri().path();
     // Don't serve SPA fallback for /v1/ API routes - return 404
     if path.starts_with("/v1/") {
@@ -116,7 +163,8 @@ pub async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>
     }
     // Hardening P0: validate path components to prevent traversal.
     // Only Normal segments allowed; ParentDir (..), RootDir (/), and
-    // any prefix components are rejected.
+    // any prefix components are rejected. Applies to both the filesystem
+    // and the embedded asset namespace.
     let rel = path.trim_start_matches('/');
     // Inline is_safe_static_path check
     let is_safe = {
@@ -137,6 +185,16 @@ pub async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>
     if !is_safe {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let web_root = match &state.web_root {
+        Some(r) => r.clone(),
+        // No filesystem web root — serve the UI embedded into the binary.
+        // The embedded namespace cannot escape itself; the component check
+        // above is sufficient.
+        None => match embedded_response(path) {
+            Some(r) => return r,
+            None => return StatusCode::NOT_FOUND.into_response(),
+        },
+    };
     // Hardening P0: reject symlinks that escape the web root. Walk each
     // prefix component for a symlink and canonical-check the file (or its
     // parent when the leaf does not exist) — a symlink dir would otherwise
@@ -179,17 +237,7 @@ pub async fn spa_fallback(State(state): State<Arc<AppState>>, req: Request<Body>
     if rel.is_empty() {
         let idx = web_root.join("index.html");
         if let Ok(bytes) = tokio::fs::read(&idx).await {
-            return (
-                [
-                    (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                    (axum::http::header::CACHE_CONTROL, "no-cache"),
-                    (axum::http::header::HeaderName::from_static("content-security-policy"),
-                        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';                          img-src 'self' data:; connect-src 'self'; font-src 'self';                          object-src 'none'; base-uri 'self'; frame-ancestors 'none';                          form-action 'self'"),
-                    (axum::http::header::HeaderName::from_static("x-content-type-options"), "nosniff"),
-                    (axum::http::header::HeaderName::from_static("x-frame-options"), "DENY"),
-                ],
-                bytes,
-            ).into_response();
+            return (static_headers("text/html; charset=utf-8"), bytes).into_response();
         }
         return StatusCode::NOT_FOUND.into_response();
     }

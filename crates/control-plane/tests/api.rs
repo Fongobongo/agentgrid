@@ -11342,3 +11342,33 @@ async fn scope_creep_guard_event_and_false_positives() {
         "normal commands must not raise scope_creep"
     );
 }
+
+#[tokio::test]
+async fn spa_fallback_serves_embedded_ui() {
+    // No web root configured → the UI comes from the assets embedded into
+    // the binary (release builds) / placeholder dist (bare cargo builds).
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let resp = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "text/html; charset=utf-8");
+    assert!(!to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .is_empty());
+    // /v1/ paths must never hit the SPA fallback.
+    let app = build_router(AppState::open_temp().await.unwrap());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

@@ -55,7 +55,9 @@ jobs:
         # target) so we exercise the real test code, not a cross-compile.
         run: cargo test --workspace
 
-      - name: build web UI
+      - name: build web UI (embedded into the binary)
+        # rust-embed packs web/dist into agentgrid-control-plane at compile
+        # time, so the release binary serves the UI without any side files.
         working-directory: web
         run: |
           npm ci
@@ -122,7 +124,6 @@ jobs:
             target/${{ matrix.target }}/release/adapter-claude
             target/${{ matrix.target }}/release/adapter-opencode
             target/${{ matrix.target }}/release/SHA256SUMS
-            web/dist
           if-no-files-found: warn
 
   node-image:
@@ -215,9 +216,6 @@ jobs:
                 agentgrid-acp-agent adapter-mock adapter-claude adapter-opencode SHA256SUMS
             )
           done
-          # gh release create uploads files only - package the web UI
-          # instead of copying the directory.
-          tar czf release-assets/web-dist.tar.gz             -C artifacts/agentgrid-x86_64-unknown-linux-musl/web/dist .
           ls -la release-assets
       - name: attest build provenance
         # Hardening P2 item 29: GitHub provenance attestation for every release

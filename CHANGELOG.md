@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Web UI embedded into the control-plane binary (rust-embed).**
+  `agentgrid-control-plane` now serves the full React UI with no side
+  files: release binaries, containers and bare checkouts all show the UI
+  out of the box. Priority is unchanged — `AGENTGRID_WEB_ROOT` overrides,
+  then an exe-relative `web/dist`, then the embedded assets. SPA fallback,
+  security headers (`CSP`/`nosniff`/`DENY`), `no-cache` for index.html and
+  immutable caching for hashed assets are shared between the filesystem
+  and embedded paths; a build.rs placeholder keeps bare `cargo build`/
+  `cargo test` working without the npm step.
 - **Web UI parity push — the operator surface no longer CLI-only.** New
   panels: Users (list + create), Agents (register + action trail), Agent
   Profiles (revisions + activate), Learnings (add/approve/revoke/delete per

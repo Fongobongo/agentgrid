@@ -9,6 +9,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
+# Build the web UI FIRST: rust-embed packs web/dist into the
+# control-plane binary at compile time, so no side files ship in the image.
+RUN --mount=type=cache,target=/src/web/node_modules \
+    cd web && npm ci && npm run build
 # Build the control plane and CLI binaries (release profile tuned in Cargo.toml).
 # Hardening P2 item 31: BuildKit cache mount keeps the registry + incremental
 # artifacts across rebuilds so a dependency change does not re-download/re-build
@@ -18,9 +22,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bins -p agentgrid-control-plane -p agentgrid-cli \
     && mkdir -p /out \
     && cp target/release/agentgrid-control-plane target/release/ag /out/
-# Build the web UI static bundle.
-RUN --mount=type=cache,target=/src/web/node_modules \
-    cd web && npm ci && npm run build
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 # Hardening P2 item 31: OCI provenance labels + a healthcheck.
@@ -31,18 +32,17 @@ LABEL org.opencontainers.image.title="agentgrid-control-plane" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates wget \
     && rm -rf /var/lib/apt/lists/*
-# Control plane data: SQLite DB, artifacts, web root.
+# Control plane data: SQLite DB and artifacts. The web UI is embedded in
+# the binary (rust-embed); set AGENTGRID_WEB_ROOT to serve an override.
 RUN useradd -r -m -d /var/lib/agentgrid agentgrid \
-    && mkdir -p /var/lib/agentgrid /var/lib/agentgrid/web \
+    && mkdir -p /var/lib/agentgrid \
     && chown -R agentgrid:agentgrid /var/lib/agentgrid
 WORKDIR /var/lib/agentgrid
 COPY --from=builder /out/agentgrid-control-plane /usr/local/bin/
 COPY --from=builder /out/ag /usr/local/bin/
-COPY --from=builder /src/web/dist /var/lib/agentgrid/web
 ENV AGENTGRID_LISTEN=0.0.0.0:7800 \
     AGENTGRID_DB=/var/lib/agentgrid/control-plane.db \
-    AGENTGRID_ARTIFACT_ROOT=/var/lib/agentgrid/artifacts \
-    AGENTGRID_WEB_ROOT=/var/lib/agentgrid/web
+    AGENTGRID_ARTIFACT_ROOT=/var/lib/agentgrid/artifacts
 USER agentgrid
 EXPOSE 7800
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

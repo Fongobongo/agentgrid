@@ -12,6 +12,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add x86_64-unknown-linux-musl
 
+# Build the web UI FIRST: rust-embed packs web/dist into the binary at
+# compile time, so no side files ship in the final image.
+RUN --mount=type=cache,target=/src/web/node_modules \
+    cd web && npm ci && npm run build
+
 # Build control-plane and CLI for musl target
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
@@ -24,10 +29,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/x86_64-unknown-linux-musl/release/agentgrid-control-plane \
            target/x86_64-unknown-linux-musl/release/ag /out/
 
-# Build web UI static bundle for musl build stage
-RUN --mount=type=cache,target=/src/web/node_modules \
-    cd web && npm ci && npm run build
-
 FROM scratch AS final-release
 LABEL org.opencontainers.image.title="agentgrid-control-plane-musl" \
       org.opencontainers.image.source="https://github.com/earendil-works/agentgrid" \
@@ -37,12 +38,10 @@ LABEL org.opencontainers.image.title="agentgrid-control-plane-musl" \
 # Statically linked binary (no external dependencies)
 COPY --from=builder /out/agentgrid-control-plane /usr/local/bin/
 COPY --from=builder /out/ag /usr/local/bin/
-COPY --from=builder /src/web/dist /var/lib/agentgrid/web
 
 ENV AGENTGRID_LISTEN=0.0.0.0:7800 \
     AGENTGRID_DB=/var/lib/agentgrid/control-plane.db \
-    AGENTGRID_ARTIFACT_ROOT=/var/lib/agentgrid/artifacts \
-    AGENTGRID_WEB_ROOT=/var/lib/agentgrid/web
+    AGENTGRID_ARTIFACT_ROOT=/var/lib/agentgrid/artifacts
 
 # No HEALTHCHECK: the final stage is `FROM scratch` (no shell, no wget), so a
 # HEALTHCHECK CMD can never succeed and the container reports permanently
