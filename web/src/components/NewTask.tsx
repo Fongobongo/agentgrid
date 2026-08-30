@@ -356,6 +356,10 @@ export default function NewTask({
             </label>
           </fieldset>
         </details>
+        <details className="req-preview">
+          <summary>Request preview</summary>
+          <pre>{JSON.stringify(buildBody(), null, 2)}</pre>
+        </details>
         <button type="submit" disabled={busy}>
           {busy ? "Creating…" : "Create task"}
         </button>

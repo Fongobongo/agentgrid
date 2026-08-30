@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { answerApproval, ApprovalView, listApprovals, reqOk } from '../api';
-import { PromptModal } from './Modal';
+import { ConfirmModal, PromptModal } from './Modal';
 import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
 
 // Stage 9.2 operator approval UI: list pending approvals, allow/deny with a
@@ -13,6 +13,8 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
   const [items, setItems] = useState<ApprovalView[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkConfirm, setBulkConfirm] = useState(false);
   const [pending, setPending] = useState<{ a: ApprovalView; decision: 'allow' | 'deny' } | null>(null);
 
   const load = () => {
@@ -41,6 +43,24 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
     }
   };
 
+  const approveAll = async () => {
+    setBulkConfirm(false);
+    if (!items) return;
+    setBulkBusy(true);
+    try {
+      // Sequential so a failing answer cannot mask the rest; sync per item.
+      for (const a of items) {
+        await reqOk(await answerApproval(a.id, 'allow'));
+      }
+      load();
+    } catch (e) {
+      setError(e);
+      load();
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   if (!items) {
     if (error) return <ErrorBox err={error} />;
     return <Loading />;
@@ -49,6 +69,14 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
   return (
     <section>
       <h2>Approvals{filter !== 'all' && ` — ${filter}`}</h2>
+      {filter === 'pending' && items.length > 1 && (
+        <p>
+          <button disabled={bulkBusy} onClick={() => setBulkConfirm(true)}>
+            {bulkBusy ? 'Approving…' : `Allow all ${items.length}`}
+          </button>{' '}
+          <span className="muted">approves every pending item, one by one</span>
+        </p>
+      )}
       {error ? <ErrorBox err={error} /> : null}
       {items.length === 0 ? (
         <div className="muted">No {filter} approvals.</div>
@@ -114,6 +142,15 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
           required={pending.decision === 'deny'}
           onSubmit={submit}
           onCancel={() => setPending(null)}
+        />
+      )}
+      {bulkConfirm && (
+        <ConfirmModal
+          title="Approve all pending"
+          body={`Approve ${items?.length ?? 0} pending permission requests? This cannot be undone.`}
+          confirmLabel="Approve all"
+          onConfirm={approveAll}
+          onCancel={() => setBulkConfirm(false)}
         />
       )}
     </section>

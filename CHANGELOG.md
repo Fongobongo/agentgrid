@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Release workflow: boot-the-binary sanity gate in publish** — the
+  packaged x86_64-musl tarball is started on the runner and must answer
+  `/health/ready` and serve the embedded UI before signing/publishing.
+- **Approvals UI: bulk-approve all pending** with a confirmation modal.
+- **New Task: live request preview** (the exact JSON POSTed, incl. via
+  consensus fan-out and GitHub write-back).
+
+### Maintenance
+
+- `docs/plans/0.3-websocket-and-scale.md` removed (shipped by v0.4.0).
+- `.dockerignore` added (target/, node_modules, .git, dbs, plan docs) —
+  smaller build contexts.
+- Release workflow: cosign sign-blob now retries up to 3× on transient
+  Sigstore timestamp-service failures.
+
 ## [v0.4.0] — 2026-08-29
 
 ### Added
@@ -47,8 +64,7 @@
   fully delivered), `docs/plans/0.4-production-ready.md` (was already
   deprecated — k8s/Postgres path rejected against the SQLite-only
   constraints), `docs/plans/windows-deploy-*.md` (Windows is not a supported
-  target; unreferenced). The active 0.3 plan and the gitignored competitor
-  roadmaps stay.
+  target; unreferenced). The gitignored competitor roadmaps stay.
 
 ### Security
 
