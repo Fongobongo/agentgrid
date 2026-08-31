@@ -81,6 +81,10 @@ pub async fn poll_loop_inner(
     max_duration: Option<Duration>,
 ) -> Result<()> {
     let deadline = max_duration.map(|d| tokio::time::Instant::now() + d);
+    // Consecutive poll failures back off exponentially (3s, 6s, 12s, 24s cap)
+    // so a down/unreachable CP is not hammered by every node every 3s.
+    let mut fail_streak: u32 = 0;
+    let backoff = |streak: u32| Duration::from_secs(3 * (1 << streak.min(3)));
 
     loop {
         if let Some(d) = deadline {
@@ -110,10 +114,13 @@ pub async fn poll_loop_inner(
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!("bad poll response: {e}");
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        let wait = backoff(fail_streak);
+                        fail_streak = fail_streak.saturating_add(1);
+                        tokio::time::sleep(wait).await;
                         continue;
                     }
                 };
+                fail_streak = 0;
                 // Plan 0.3 1.2: consume the whole batch; legacy CPs only fill
                 // `assignment` (N/N-1 compat).
                 let mut batch = pr.assignments;
@@ -130,12 +137,16 @@ pub async fn poll_loop_inner(
                 dispatch_batch(&cfg, &client, &sem, batch).await?;
             }
             Ok(r) => {
-                tracing::warn!("poll returned status {}", r.status());
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                let wait = backoff(fail_streak);
+                fail_streak = fail_streak.saturating_add(1);
+                tracing::warn!("poll returned status {}; retrying in {wait:?}", r.status());
+                tokio::time::sleep(wait).await;
             }
             Err(e) => {
-                tracing::warn!("poll failed: {e}; retrying in 3s");
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                let wait = backoff(fail_streak);
+                fail_streak = fail_streak.saturating_add(1);
+                tracing::warn!("poll failed: {e}; retrying in {wait:?}");
+                tokio::time::sleep(wait).await;
             }
         }
     }
