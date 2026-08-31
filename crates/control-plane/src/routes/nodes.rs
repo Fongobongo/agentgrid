@@ -270,6 +270,12 @@ pub async fn drain_node_handler(
                     None,
                 )
                 .await;
+            if !drained {
+                // Undrain must wake parked schedulers/push loops at once:
+                // without this, tasks queued while the node was drained sit
+                // until the next incidental notify (or a poll timeout).
+                state.assignment_notify.notify_waiters();
+            }
             StatusCode::OK
         }
         Ok(false) => StatusCode::NOT_FOUND,

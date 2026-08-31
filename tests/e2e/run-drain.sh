@@ -103,9 +103,8 @@ done
 [ "$(status_of "$T1")" = "running" ] || { echo "task never reached running"; cat "$TMP/cp.log"; exit 1; }
 
 echo ">> draining node $NODE_ID mid-flight"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/nodes/$NODE_ID/drain" \
-  -H "authorization: Bearer $jwt" -H 'content-type: application/json' \
-  -d '{"drain":true}')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/nodes/$NODE_ID/drain?drain=true" \
+  -H "authorization: Bearer $jwt")
 [ "$code" = "200" ] || { echo "drain returned $code"; exit 1; }
 
 echo ">> submitting second task while drained (must stay queued)"
@@ -126,9 +125,8 @@ done
 echo "   in-flight task succeeded under drain"
 
 echo ">> undrain; queued task must now run"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/nodes/$NODE_ID/drain" \
-  -H "authorization: Bearer $jwt" -H 'content-type: application/json' \
-  -d '{"drain":false}')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/nodes/$NODE_ID/drain?drain=false" \
+  -H "authorization: Bearer $jwt")
 [ "$code" = "200" ] || { echo "undrain returned $code"; exit 1; }
 S2=""
 for _ in $(seq 1 30); do

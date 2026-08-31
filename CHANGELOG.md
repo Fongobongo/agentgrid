@@ -24,6 +24,13 @@
   resets on success) instead of hammering a down control plane every
   2–3 seconds.
 
+### Fixed
+
+- **Drain E2E was silently broken**: it POSTed the drain flag as a JSON
+  body while the API reads `?drain=` query params — the "undrain" step
+  actually drained. The script now passes the query param, and undrain
+  additionally `notify_waiters()` so parked schedulers wake immediately.
+
 ### Docs
 
 - ADR 0001 node-channel row marked superseded by ADR 0009 (WebSocket is
