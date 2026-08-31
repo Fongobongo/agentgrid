@@ -91,6 +91,10 @@ jobs:
         # process-based and quick.
       - name: slow-network failure injection
         run: bash tests/e2e/run-slow-net.sh
+      - name: graceful drain (in-flight finishes, new stays queued)
+        run: bash tests/e2e/run-drain.sh
+      - name: RSS budgets (CP ≤64, node idle ≤25, streaming ≤60 MiB)
+        run: bash tests/e2e/run-rss-budget.sh
       # Plan 1.11 (#8): SDK round-trip — CP + mock node + Python SDK
       # (run/wait/artifacts/cancel). Same process-based, no-Docker class.
       - name: SDK round-trip

@@ -42,3 +42,4 @@ while :; do
 done
 end=$(date +%s)
 echo "20000 events: $((end-start))s => $((20000 / (end-start) )) events/s end-to-end"
+curl -fsS "$BASE/metrics" | grep -E "write_txn|write_lock|event_ingest|rate_limit"
