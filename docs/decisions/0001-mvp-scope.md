@@ -18,7 +18,7 @@ decisions unblock the start of implementation (Stage 0.1 of the plan).
 | 4 | Interfaces in 0.1 | Both CLI and web UI. Stage 1 builds the CLI; web UI in Stage 4. |
 | 5 | Git clone transport | HTTPS / token (recommended). SSH optional later. |
 | 6 | Agent auto-commit | Yes — diff + commit saved on attempt completion (Stage 2.5). |
-| 7 | Node channel | Long polling (MVP). WebSocket deferred to 0.2 backlog. |
+| 7 | Node channel | Long polling (MVP). WebSocket deferred to 0.2 backlog. *Superseded: WS is the primary channel with poll fallback since ADR 0009.* |
 | 8 | Control plane delivery | Both standalone binary and Docker Compose (Compose is the primary scenario). |
 | 9 | Single active control plane | Hard constraint. SQLite only on local disk; no NFS/network shares (Stage 2.1). |
 | 10 | TLS | `rustls`, no system OpenSSL. Reverse proxy (Caddy/nginx) documented; optional native TLS (Stage 5.1). |
