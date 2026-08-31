@@ -35,10 +35,10 @@ impl Store {
     /// Measured throughput (tests/e2e/measure-flush.sh, 20 000 events,
     /// release binaries): ~300 events/s end-to-end. The CP side is cheap
     /// (dropping the 0063 FTS triggers changes nothing); the ceiling is the
-    /// node daemon's outbox fsync-per-event (outbox.rs push → sync_data).
-    /// Real adapters emit ~10 events/s, so this is fine; if chatty agents
-    /// ever saturate it, group-fsync the outbox (batch fsync on the 200ms
-    /// flush tick) rather than touching this ingest loop.
+    /// node daemon's outbox fsync-per-event. Since fixed: the outbox batches
+    /// fsyncs (`AGENTGRID_OUTBOX_FSYNC_MS`, default 100 ms ⇒ ~870 events/s).
+    /// This ingest loop was never the bottleneck; profile again with
+    /// measure-flush.sh before touching it.
     async fn ingest_events_inner(
         &self,
         attempt_id: &str,

@@ -23,6 +23,11 @@
 - **Node poll loop backs off exponentially** on failures (3s → 24s cap,
   resets on success) instead of hammering a down control plane every
   2–3 seconds.
+- **Event outbox group-fsync** (`AGENTGRID_OUTBOX_FSYNC_MS`, default
+  100 ms; 0 restores fsync-per-event): chatty-adapter throughput
+  363 → ~870 events/s (20 000-event mock task). Machine-crash loss
+  window is now ≤ the interval; process-crash durability is unchanged
+  and acked events always re-anchor an fsync.
 
 ### Fixed
 

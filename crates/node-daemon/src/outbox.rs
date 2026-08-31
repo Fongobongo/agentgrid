@@ -71,6 +71,10 @@ pub struct EventOutbox {
     /// Hardening P0 item 10: outbox root, used for the global spool quota scan.
     root: PathBuf,
     file: Mutex<()>,
+    /// Group-fsync bookkeeping: `push` fsyncs at most once per
+    /// `fsync_interval` (see `open`); 0 restores fsync-per-event.
+    last_fsync: Mutex<std::time::Instant>,
+    fsync_interval: std::time::Duration,
     spool_limit_bytes: u64,
     /// Hardening P0 item 10: global cap across ALL per-attempt spools plus the
     /// completion file (env `AGENTGRID_OUTBOX_QUOTA_BYTES` / `_MB`; 0 = off).
@@ -125,10 +129,22 @@ impl EventOutbox {
                     .map(|mb| mb * 1024 * 1024)
                     .unwrap_or(1024 * 1024 * 1024)
             });
+        // Group-fsync: per-event fsync measured ~3 ms on cloud disks and
+        // capped a chatty adapter at ~300 events/s (tests/e2e/measure-flush.sh).
+        // Batching the fsync to at most one per `fsync_interval` keeps the
+        // same crash guarantees for process crashes (page cache survives) and
+        // widens ONLY the machine-crash loss window to < interval.
+        // AGENTGRID_OUTBOX_FSYNC_MS=0 restores the old fsync-per-event.
+        let fsync_interval_ms = std::env::var("AGENTGRID_OUTBOX_FSYNC_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(100);
         Ok(Self {
             path: dir.join(format!("{safe}.jsonl")),
             root: dir.to_path_buf(),
             file: Mutex::new(()),
+            last_fsync: Mutex::new(std::time::Instant::now()),
+            fsync_interval: std::time::Duration::from_millis(fsync_interval_ms),
             spool_limit_bytes,
             quota_bytes,
         })
@@ -201,7 +217,13 @@ impl EventOutbox {
             .map_err(PushError::Other)?;
         f.write_all(s.as_bytes())
             .map_err(|e| PushError::Other(e.into()))?;
-        f.sync_data().map_err(|e| PushError::Other(e.into()))?;
+        let mut last = self.last_fsync.lock().unwrap();
+        if self.fsync_interval.is_zero() || last.elapsed() >= self.fsync_interval {
+            f.sync_data().map_err(|e| PushError::Other(e.into()))?;
+            *last = std::time::Instant::now();
+        }
+        // ponytail: unsynced tail ≤ `fsync_interval`; ack()'s rewrite fsyncs,
+        // so delivered events always re-anchor durability.
         Ok(())
     }
 
@@ -1074,6 +1096,8 @@ mod tests {
             path: ob.path.clone(),
             root: ob.root.clone(),
             file: Mutex::new(()),
+            last_fsync: Mutex::new(std::time::Instant::now()),
+            fsync_interval: std::time::Duration::ZERO,
             spool_limit_bytes: 1,
             quota_bytes: 0,
         };
@@ -1109,6 +1133,8 @@ mod tests {
             path: ob.path.clone(),
             root: ob.root.clone(),
             file: Mutex::new(()),
+            last_fsync: Mutex::new(std::time::Instant::now()),
+            fsync_interval: std::time::Duration::ZERO,
             spool_limit_bytes: 200,
             quota_bytes: 0,
         };
@@ -1265,6 +1291,8 @@ mod tests {
             path: ob.path.clone(),
             root: ob.root.clone(),
             file: Mutex::new(()),
+            last_fsync: Mutex::new(std::time::Instant::now()),
+            fsync_interval: std::time::Duration::ZERO,
             spool_limit_bytes: 0, // unlimited per-attempt: quota is the only gate
             quota_bytes: 1,
         };
