@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.4.2] — 2026-08-31
+
 ### Added
 
 - **Web UI test suite**: vitest + 7 tests over the unified-diff parser
