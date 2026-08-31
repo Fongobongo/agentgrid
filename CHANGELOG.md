@@ -2,8 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Web UI test suite**: vitest + 7 tests over the unified-diff parser
+  (`parsePatchLines`, multi-file hunks / renames / no-newline markers),
+  wired into the CI web job.
+- **RSS budget E2E gate** (`tests/e2e/run-rss-budget.sh`): asserts the
+  AGENTS.md budgets (node idle ≤25 MiB, node streaming ≤60 MiB, CP
+  ≤64 MiB) against live processes; replaces the manual rm-rss-test.sh.
+- **Store race test**: 8 concurrent nodes racing one pending task must
+  yield exactly one assignment (double-assign regression guard).
+- **Flush throughput probe** (`tests/e2e/measure-flush.sh`): one-off
+  chatty-adapter benchmark; debug build measured ~363 events/s
+  end-to-end (20 000 events).
+- **scripts/cleanup.sh**: codifies the dev-box disk hygiene (target
+  intermediates, aged /var/tmp leftovers, optional --full/--docker/--npm).
+
+### Changed
+
+- **Node poll loop backs off exponentially** on failures (3s → 24s cap,
+  resets on success) instead of hammering a down control plane every
+  2–3 seconds.
+
 ### Docs
 
+- ADR 0001 node-channel row marked superseded by ADR 0009 (WebSocket is
+  the primary channel with long-poll fallback).
 - README gains a **single-binary quickstart** (download release tarball →
   run → setup in the embedded UI) and the maturity table now reflects the
   UI being embedded in the binary.
