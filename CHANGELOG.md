@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.4.1] — 2026-08-30
+
 ### Added
 
 - **Release workflow: boot-the-binary sanity gate in publish** — the
@@ -11,6 +13,16 @@
 - **New Task: live request preview** (the exact JSON POSTed, incl. via
   consensus fan-out and GitHub write-back).
 
+### Fixed
+
+- **Musl scratch image no longer boots to a missing data dir.** Dropping
+  the `web/dist` copy (now embedded) also removed the only step that
+  created `/var/lib/agentgrid`; the container crashed opening the SQLite
+  db. The dir is materialized from the builder stage.
+- **Release tarballs carry the exec bit again.** download-artifact v4
+  strips modes — the v0.4.0 assets shipped 644 binaries. (On v0.4.0 run
+  `chmod +x` after untarring.)
+
 ### Maintenance
 
 - `docs/plans/0.3-websocket-and-scale.md` removed (shipped by v0.4.0).
@@ -18,6 +30,9 @@
   smaller build contexts.
 - Release workflow: cosign sign-blob now retries up to 3× on transient
   Sigstore timestamp-service failures.
+- Release workflow: `chmod +x` before packaging — download-artifact v4
+  strips the exec bit, so the v0.4.0 tarballs shipped non-executable
+  binaries (fixed above).
 
 ## [v0.4.0] — 2026-08-29
 

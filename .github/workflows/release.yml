@@ -211,9 +211,14 @@ jobs:
             [ -d "$src" ] || src="$d"
             (
               cd "$src"
+              # download-artifact strips the exec bit (v4 known issue); restore
+              # it or the published tarballs ship non-executable binaries
+              # (first seen live on the v0.4.0 assets).
+              chmod +x agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
+                agentgrid-acp-agent adapter-mock adapter-claude adapter-opencode
               tar czf "$GITHUB_WORKSPACE/release-assets/agentgrid-$t.tar.gz" \
                 agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
-                agentgrid-acp-agent adapter-mock adapter-claude adapter-opencode SHA256SUMS
+                agentgrid-acp-agent adapter-claude adapter-opencode SHA256SUMS
             )
           done
           ls -la release-assets
