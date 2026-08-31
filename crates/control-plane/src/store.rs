@@ -2292,6 +2292,68 @@ mod workflow_tests {
         assert_eq!(write_txn_stats().1, 0, "no write-lock failures");
     }
 
+    /// Double-assign must be impossible even when many nodes race the same
+    /// pending task concurrently: exactly one `try_assign` may win, and the
+    /// loser polls must observe no assignable work.
+    #[tokio::test]
+    async fn concurrent_nodes_never_double_assign_one_task() {
+        use std::sync::Arc;
+        let s = Arc::new(temp_store().await);
+        let mut node_ids = Vec::new();
+        for i in 0..8 {
+            let (token, _) = s.create_enrollment_token().await.unwrap();
+            let node = EnrollRequest {
+                token,
+                name: format!("race-node-{i}"),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 4,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            };
+            node_ids.push(s.enroll_node(&node).await.unwrap().expect("enroll").node_id);
+        }
+        s.create_task(&CreateTaskRequest {
+            prompt: "one task".into(),
+            repository: String::new(),
+            adapter: "mock".into(),
+            requested_node_id: None,
+            timeout_secs: Some(60),
+            validation_command: None,
+            base_commit: None,
+            parent_acp_session_id: None,
+            security_profile: None,
+            network_mode: None,
+            group_id: None,
+            agent_id: None,
+            consensus_group_id: None,
+            consensus_member: None,
+            opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
+            max_attempts: 1,
+            consensus_mode: None,
+            review_of: None,
+        })
+        .await
+        .unwrap();
+        let mut handles = Vec::new();
+        for node_id in node_ids {
+            let s2 = Arc::clone(&s);
+            handles.push(tokio::spawn(async move { s2.try_assign(&node_id).await }));
+        }
+        let mut winners = Vec::new();
+        for h in handles {
+            if let Some(a) = h.await.unwrap().unwrap() {
+                winners.push(a.attempt_id);
+            }
+        }
+        assert_eq!(winners.len(), 1, "exactly one node may win the task");
+    }
+
     #[tokio::test]
     async fn cancel_workflow_run_cancels_steps_and_tasks() {
         let s = temp_store().await;
