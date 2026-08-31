@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Docs
+
+- README gains a **single-binary quickstart** (download release tarball →
+  run → setup in the embedded UI) and the maturity table now reflects the
+  UI being embedded in the binary.
+
+### Maintenance
+
+- Dead RUSTSEC-2023-0071 suppression removed from deny.toml and
+  supply-chain.yml (sqlx 0.9 no longer pulls `rsa` transitively).
+
 ## [v0.4.1] — 2026-08-30
 
 ### Added

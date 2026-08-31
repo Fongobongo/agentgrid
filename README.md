@@ -38,7 +38,7 @@ fills.
 | Area | Status | Notes |
 |------|--------|-------|
 | tasks / nodes / attempts / events / Git worktrees / adapters / artifacts | **stable** | core lifecycle, cross-node isolation, fencing tokens, retention |
-| auth (JWT, setup-token bootstrap), CLI (`ag`), web UI shell | **beta** | usable, APIs still settling pre-1.0 |
+| auth (JWT, setup-token bootstrap), CLI (`ag`), web UI | **beta** | usable, APIs still settling pre-1.0; UI embedded in the control-plane binary |
 | WebSocket node transport (default), long-poll fallback | **stable** | `AGENTGRID_TRANSPORT=ws\|poll\|auto`; see runbook |
 | opencode profiles (revisions, TTL, A/B, pinned skills, drift auto-heal) | **beta** | CP-hosted config + WS push apply; UI + CLI surface stable |
 | `ag index` knowledge-graph packet + digest injector | **beta** | offline ctags-like extraction; opt-in via `AGENTGRID_REPO_INDEX` |
@@ -54,7 +54,8 @@ Untrusted agents must run under the Docker/Podman sandbox with `permission_inter
 
 - **control-plane** (Axum + SQLite): task/attempt state machine, scheduler,
   node assignment over WebSocket or long-poll, idempotent event ingest,
-  artifacts, auth (JWT).
+  artifacts, auth (JWT). The web UI is **embedded in the binary** (rust-embed),
+  so the release artifact is self-contained — no side files.
 - **node-daemon**: WebSocket control channel (default; falls back to long-poll),
   adapter subprocess per attempt in its own worktree + process group, streams
   stdout/stderr as events, reports completion.
@@ -64,6 +65,19 @@ Untrusted agents must run under the Docker/Podman sandbox with `permission_inter
   index a repo into a knowledge-graph packet for system-prompt injection
   (`ag index`).
 - **web**: TypeScript UI (Vite + React) served by the control plane.
+
+## Quickstart: single binary
+
+The control plane ships as a static musl binary with the web UI embedded:
+
+    curl -LO https://github.com/Fongobongo/agentgrid/releases/latest/download/agentgrid-x86_64-unknown-linux-musl.tar.gz
+    tar xzf agentgrid-*.tar.gz
+    ./agentgrid-control-plane            # listens on 127.0.0.1:7800, logs a one-time setup token
+
+Open http://127.0.0.1:7800, switch to **setup**, paste the setup token from
+the server log, and create the first admin. Then `ag login` from the bundled
+CLI (`./ag login admin <password>`) and submit a task. The binary keeps all state in `./control-plane.db` plus an
+`./artifacts/` dir next to it (relocate via `AGENTGRID_DB`).
 
 ## Quickstart (Docker)
 
