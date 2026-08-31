@@ -2,20 +2,28 @@
 # Produces x86_64-unknown-linux-musl binaries that run anywhere without libc deps.
 # Stage 5.3 release artifacts. Uses rust:1-bookworm image with musl toolchain installed.
 
+# Web bundle needs Node >=20.19 for vite 8; build it in a modern-Node
+# stage (bookworm's apt nodejs is 18). Digest-pinned like the rust base.
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS webbuild
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
 WORKDIR /src
 COPY . .
 
 # Install musl tools and linker, add musl target to Rust
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends musl-tools wget nodejs npm \
+    && apt-get install -y --no-install-recommends musl-tools wget \
     && rm -rf /var/lib/apt/lists/*
 RUN rustup target add x86_64-unknown-linux-musl
 
-# Build the web UI FIRST: rust-embed packs web/dist into the binary at
-# compile time, so no side files ship in the final image.
-RUN --mount=type=cache,target=/src/web/node_modules \
-    cd web && npm ci && npm run build
+# rust-embed packs web/dist into the binary at compile time; the bundle
+# was built in the webbuild stage above (no apt nodejs on this stage).
+COPY --from=webbuild /src/web/dist web/dist
 
 # Build control-plane and CLI for musl target
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

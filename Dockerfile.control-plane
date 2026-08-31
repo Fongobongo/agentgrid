@@ -2,17 +2,22 @@
 # Stage 5.3 packaging. Bundled SQLite + rustls; no system OpenSSL/SQLite.
 # Hardening P2 item 31: base images pinned by digest (immutable); Dependabot
 # bumps the digest when a new rust/debian bookworm image is published.
+# Vite 8 needs Node >=20.19; the rust:1-bookworm apt nodejs is 18. Build
+# the web bundle in its own modern-Node stage instead of polluting the Rust
+# stage (digest-pinned like the rust base, Hardening P2 item 31).
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS webbuild
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
-# Node is needed only to build the web UI static bundle.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm \
-    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-# Build the web UI FIRST: rust-embed packs web/dist into the
-# control-plane binary at compile time, so no side files ship in the image.
-RUN --mount=type=cache,target=/src/web/node_modules \
-    cd web && npm ci && npm run build
+# rust-embed packs web/dist into the control-plane binary at compile time;
+# the bundle comes from the webbuild stage above (no side files shipped).
+COPY --from=webbuild /src/web/dist web/dist
 # Build the control plane and CLI binaries (release profile tuned in Cargo.toml).
 # Hardening P2 item 31: BuildKit cache mount keeps the registry + incremental
 # artifacts across rebuilds so a dependency change does not re-download/re-build
