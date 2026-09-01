@@ -99,17 +99,11 @@ jobs:
       # (run/wait/artifacts/cancel). Same process-based, no-Docker class.
       - name: SDK round-trip
         run: bash tests/e2e/run-sdk.sh
-      # Task auto-retry (ADR 0010): a failing max_attempts=2 task must
-      # requeue after attempt 1 and end Failed after attempt 2.
-      - name: task auto-retry
-        run: bash tests/e2e/run-auto-retry.sh
-      # Backup/restore rehearsal: VACUUM INTO snapshot of a live CP with a
-      # succeeded task must boot a second CP to the same state.
       - name: backup/restore rehearsal
         run: bash tests/e2e/run-restore.sh
-      # Consensus-run review: fan-out N reviewers, verdict aggregation.
-      - name: review consensus
-        run: bash tests/e2e/run-review-consensus.sh
+      # NOTE (bucket placement): run-auto-retry.sh and
+      # run-review-consensus.sh live in the `e2e` compose job — they bring
+      # up docker-compose, not bare processes.
 
   e2e:
     name: e2e (compose + 2 nodes + mock)
@@ -128,6 +122,10 @@ jobs:
       - name: workflow E2E (multi-role DAG across two nodes)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: bash tests/e2e/run-workflow.sh
+      - name: auto-retry + consensus (compose stack already up)
+        run: |
+          bash tests/e2e/run-auto-retry.sh
+          bash tests/e2e/run-review-consensus.sh
       # Plan 2.4 follow-up: prove the read-only verifier worktree mount
       # actually blocks a write (kernel-semantics test), not just that the
       # docker args contain `:ro`. Runs once `run.sh` has built `ag-node:test`

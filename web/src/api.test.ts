@@ -29,16 +29,16 @@ describe('getJson / postJson', () => {
 
   it('getJson throws ApiError on 404 (no body parse)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 404 })));
-    const e = await getJson('/v1/tasks/nope').catch((e) => e);
+    const e: unknown = await getJson('/v1/tasks/nope').catch((e) => e);
     expect(e).toBeInstanceOf(ApiError);
-    expect(e.status).toBe(404);
+    expect((e as ApiError).status).toBe(404);
   });
 
   it('postJson sends JSON with content-type and parses the reply', async () => {
     const f = vi.fn(async () => new Response('{"ok":true}', { status: 201 }));
     vi.stubGlobal('fetch', f);
     await expect(postJson<{ ok: boolean }>('/v1/tasks', { prompt: 'x' })).resolves.toEqual({ ok: true });
-    const init = f.mock.calls[0][1] as RequestInit;
+    const init = (f.mock.calls[0] as unknown[])[1] as RequestInit;
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
     expect(init.body).toBe(JSON.stringify({ prompt: 'x' }));
