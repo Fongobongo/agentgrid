@@ -99,6 +99,17 @@ jobs:
       # (run/wait/artifacts/cancel). Same process-based, no-Docker class.
       - name: SDK round-trip
         run: bash tests/e2e/run-sdk.sh
+      # Task auto-retry (ADR 0010): a failing max_attempts=2 task must
+      # requeue after attempt 1 and end Failed after attempt 2.
+      - name: task auto-retry
+        run: bash tests/e2e/run-auto-retry.sh
+      # Backup/restore rehearsal: VACUUM INTO snapshot of a live CP with a
+      # succeeded task must boot a second CP to the same state.
+      - name: backup/restore rehearsal
+        run: bash tests/e2e/run-restore.sh
+      # Consensus-run review: fan-out N reviewers, verdict aggregation.
+      - name: review consensus
+        run: bash tests/e2e/run-review-consensus.sh
 
   e2e:
     name: e2e (compose + 2 nodes + mock)
