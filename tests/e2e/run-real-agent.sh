@@ -51,6 +51,10 @@ case "$ADAPTER" in
     ;;
   *) echo "unknown AG_REAL_ADAPTER=$ADAPTER (claude|opencode)"; exit 1 ;;
 esac
+# Optional extra env for the adapter child (e.g. provider keys that opencode
+# resolves via its own env like NVIDIA_API_KEY, or AGENTGRID_OPENCODE_MODEL).
+# Space-separated K=V pairs, appended verbatim.
+ADAPTER_ENV="${ADAPTER_ENV} ${AG_REAL_EXTRA_ENV:-}"
 
 command -v "$AGENT_BIN" >/dev/null 2>&1 || skip "$AGENT_BIN CLI not on PATH"
 [ -x "$BIN/agentgrid-control-plane" ] || { echo "build debug binaries first"; exit 1; }
