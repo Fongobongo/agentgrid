@@ -16,7 +16,7 @@ TIMEOUT="${E2E_TIMEOUT:-120}"
 docker image inspect ag-cp:test >/dev/null 2>&1 || docker build -t ag-cp:test -f Dockerfile.control-plane .
 docker image inspect ag-node:test >/dev/null 2>&1 || docker build -t ag-node:test -f Dockerfile.node-daemon .
 
-cleanup() { bash deploy/compose/down.sh; }
+cleanup() { bash deploy/compose/down.sh --purge; }
 trap cleanup EXIT
 
 echo ">> bringing up stack (control plane + nodes)"
@@ -47,17 +47,19 @@ TID=$(curl -fsS -X POST "$BASE/v1/tasks" \
   -H "authorization: Bearer $JWT" -H 'content-type: application/json' \
   -d '{"prompt":"fail:1","adapter":"mock","repository":"*","timeout_secs":60,"max_attempts":2}' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-saw_requeue=0
+# NOTE: polled task status can skip the intermediate `queued` window between
+# attempts (the scheduler may re-assign in <1s), so "saw queued once" fs
+# races. Deterministic instead: wait for the terminal state, then assert the
+# task ran TWO attempts — a second attempt is impossible without a requeue.
 for _ in $(seq 1 "$TIMEOUT"); do
   S=$(fetch_status "$TID")
-  [ "$S" = "queued" ] && saw_requeue=1
   case "$S" in failed|cancelled|succeeded) break;; esac
   sleep 1
 done
-[ "$saw_requeue" = "1" ] || { echo "E2E FAILED: auto-retry task never re-queued (status=$S)"; exit 1; }
 [ "$S" = "failed" ] || { echo "E2E FAILED: auto-retry task should end failed (status=$S)"; exit 1; }
 ATTEMPTS=$(curl -fsS "$BASE/v1/tasks/$TID/events" -H "authorization: Bearer $JWT" \
   | python3 -c 'import sys,json;print(len({e.get("attempt_id") for e in json.load(sys.stdin)}))')
+[ "$ATTEMPTS" = "2" ] || { echo "E2E FAILED: expected 2 attempts (requeue once), got $ATTEMPTS"; exit 1; }
 echo ">> auto-retry OK: re-queued after first failure, failed after second (attempts=$ATTEMPTS)"
 
 # Default task (max_attempts=1) must fail on its first attempt — no retry.

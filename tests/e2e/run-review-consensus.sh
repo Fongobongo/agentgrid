@@ -17,7 +17,7 @@ TIMEOUT="${E2E_TIMEOUT:-120}"
 docker image inspect ag-cp:test >/dev/null 2>&1 || docker build -t ag-cp:test -f Dockerfile.control-plane .
 docker image inspect ag-node:test >/dev/null 2>&1 || docker build -t ag-node:test -f Dockerfile.node-daemon .
 
-cleanup() { bash deploy/compose/down.sh; }
+cleanup() { bash deploy/compose/down.sh --purge; }
 trap cleanup EXIT
 
 echo ">> bringing up stack (control plane + nodes)"
