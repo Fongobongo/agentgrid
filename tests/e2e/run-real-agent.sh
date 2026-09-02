@@ -107,7 +107,11 @@ mint_token() {
 # Docker-in-Docker here), so re-allow unsafe explicitly.
 start_node() {
   local name="$1" tok="$2"
+  # Per-node XDG_DATA_HOME: opencode keeps a local sqlite db under
+  # XDG_DATA_HOME and two daemons on one runner would collide on it.
+  local xdg="$TMP/$name-xdg"; mkdir -p "$xdg"
   env PATH="$BIN:$PATH" \
+    XDG_DATA_HOME="$xdg" \
     AGENTGRID_SERVER="$BASE" \
     AGENTGRID_DATA_DIR="$TMP/$name" \
     AGENTGRID_NODE_NAME="$name" \

@@ -309,13 +309,13 @@ jobs:
           cat > "$HOME/.config/opencode-e2e/opencode.json" <<'EOF'
           {
             "$schema": "https://opencode.ai/config.json",
-            "model": "ar/glm-5.3",
+            "model": "ar/deepseek-v4-flash",
             "provider": {
               "ar": {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "agentrouter",
                 "options": { "baseURL": "https://agentrouter.org/v1", "apiKey": "{env:AR_KEY}" },
-                "models": { "glm-5.3": { "name": "glm-5.3" } }
+                "models": { "deepseek-v4-flash": { "name": "deepseek-v4-flash" } }
               }
             }
           }
