@@ -974,3 +974,25 @@ export function createRepository(body: {
 }): Promise<RepositoryView> {
   return postJson("/v1/repositories", body);
 }
+
+// ---- Egress proxies (CP-managed pool, ADR 0012) ----
+
+export interface ProxyView {
+  id: number;
+  url: string;
+  node_id: string | null;
+  created_at: string;
+}
+
+export async function listProxies(): Promise<ProxyView[]> {
+  const v = await getJson<{ items: ProxyView[] }>("/v1/proxies");
+  return v.items;
+}
+
+export function addProxy(url: string, nodeId: string | null) {
+  return postJson("/v1/proxies", { url, node_id: nodeId });
+}
+
+export function removeProxy(id: number) {
+  return req("DELETE", `/v1/proxies/${id}`);
+}

@@ -13,6 +13,7 @@ import Background from "./components/Background";
 import OpencodeProfiles from "./components/OpencodeProfiles";
 import Users from "./components/Users";
 import Learnings from "./components/Learnings";
+import Proxies from "./components/Proxies";
 import Agents from "./components/Agents";
 import Conversations from "./components/Conversations";
 import SharedContext from "./components/SharedContext";
@@ -40,6 +41,7 @@ function parseHash(): { name: string; id?: string } {
   if (parts[0] === "profiles") return { name: "profiles" };
   if (parts[0] === "admin") return { name: "admin" };
   if (parts[0] === "repos") return { name: "repos" };
+  if (parts[0] === "proxies") return { name: "proxies" };
   if (parts[0] === "authoring") return { name: "authoring" };
   if (parts[0] === "new") return { name: "new" };
   if (parts[0] === "workflows") return { name: "workflows" };
@@ -137,6 +139,9 @@ export default function App() {
           <button className={cls("repos")} onClick={nav("#/repos")}>
             Repos
           </button>
+          <button className={cls("proxies")} onClick={nav("#/proxies")}>
+            Proxies
+          </button>
           <button className={cls("admin")} onClick={nav("#/admin")}>
             Admin
           </button>
@@ -176,6 +181,7 @@ export default function App() {
         {route.name === "mcp" && <McpServers />}
         {route.name === "users" && <Users />}
         {route.name === "repos" && <Repositories />}
+        {route.name === "proxies" && <Proxies />}
         {route.name === "admin" && <Admin />}
         {route.name === "workflow" && route.id && (
           <WorkflowDetails key={route.id} runId={route.id} />
