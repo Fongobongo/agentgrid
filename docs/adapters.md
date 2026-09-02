@@ -105,6 +105,39 @@ Anything on stderr is forwarded to the daemon log. Use it for diagnostics
   unknown lines fall through as `log`. Binary overridable via
   `AGENTGRID_CLAUDE_BIN`.
 - `adapter-opencode` — same pattern for the opencode CLI.
+- `adapter-codex` — wraps the Codex CLI (`codex exec --json`), translating its
+  `item.completed` / `turn.completed` events into contract events. Safe
+  default is `--sandbox workspace-write`; `AGENTGRID_UNSAFE_UNATTENDED=1`
+  switches to `--dangerously-bypass-approvals-and-sandbox`, mirroring the
+  claude adapter's safety ladder. Binary overridable via
+  `AGENTGRID_CODEX_BIN`; model via `CODEX_MODEL`.
+
+### Codex configuration ("configurator")
+
+codex reads `$CODEX_HOME/config.toml` per attempt. CP-managed adapter env
+covers credentials & home selection; the TOML profile itself is a node-local
+file:
+
+    # one-time on each node (or shipped by provisioning):
+    mkdir -p /opt/agentgrid/codex-home
+    cat >/opt/agentgrid/codex-home/config.toml <<'EOF'
+    model = "glm-5.3"
+    model_provider = "ar"
+    [model_providers.ar]
+    name = "agentrouter"
+    base_url = "https://agentrouter.org/v1"
+    env_key = "AR_KEY"
+    wire_api = "responses"
+    EOF
+
+    # CP-managed push to every codex node:
+    ag adapter-env set codex CODEX_HOME /opt/agentgrid/codex-home
+    ag adapter-env set codex AR_KEY sk-...
+
+codex 0.150+ requires the Responses API on custom providers; gateways that
+only expose chat-completions (agentrouter today) will 404 — use the real
+OpenAI endpoint, a proxy that speaks Responses, or a self-hosted provider
+that supports it.
 
 ## Writing a new adapter: checklist
 

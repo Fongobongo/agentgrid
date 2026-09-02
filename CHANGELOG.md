@@ -18,6 +18,16 @@
   wins on key collision. Migration `0081_adapter_env.sql`.
 - **Heartbeat proxy failover**: heartbeats rotate through the proxy pool
   on connect/timeout, same as the poll loop.
+- **Adapter: codex** — new `adapter-codex` binary wraps `codex exec --json`,
+  translating `item.completed` / `turn.completed` events into the agentgrid
+  contract. Safety ladder mirrors the claude adapter: default `--sandbox
+  workspace-write`, `AGENTGRID_UNSAFE_UNATTENDED=1` switches to
+  `--dangerously-bypass-approvals-and-sandbox`. `AGENTGRID_CODEX_BIN`,
+  `CODEX_MODEL` and CP-managed adapter env cover binary/model/key
+  configuration; the provably-not-on agentrouter quirk (no `/v1/responses`)
+  is documented in `docs/adapters.md`.
+- **Workflows + skills/MCP → beta**: ADR 0013 freezes the DAG/schedule/run
+  contract and the skill registry DTOs; README maturity table updated.
 - **Host-disk scheduling gate**: scheduler also rejects assignment when the
   node reports less than `AGENTGRID_MIN_FREE_DISK_MB` (default 2048 MiB) free
   on its workspace root; 0 = unknown -> admit. Nodes expose

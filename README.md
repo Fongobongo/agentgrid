@@ -42,9 +42,9 @@ fills.
 | WebSocket node transport (default), long-poll fallback | **stable** | `AGENTGRID_TRANSPORT=ws\|poll\|auto`; see runbook |
 | opencode profiles (revisions, TTL, A/B, pinned skills, drift auto-heal) | **beta** | CP-hosted config + WS push apply; UI + CLI surface stable |
 | `ag index` knowledge-graph packet + digest injector | **beta** | offline ctags-like extraction; opt-in via `AGENTGRID_REPO_INDEX` |
-| workflows (DAG / schedule / run projection) | **experimental** | gate behind an opt-in before relying on it |
+| workflows (DAG / schedule / run projection) | **beta** | contract frozen by ADR 0013; additive-only evolution |
 | ACP gateway / Telegram gateway | **experimental** | separate binaries, not in the minimal release by default |
-| skills / MCP registry | **experimental** | operator registry, semantics may change |
+| skills / MCP registry | **beta** | contract frozen by ADR 0013; server is source of truth |
 | schedules / plan expansion / zeroshot / context provider | **experimental** | subject to change |
 | Docker/Podman sandbox backend | **beta** | the worktree is **not** a security sandbox — run untrusted agents in the Docker sandbox with a restrictive network/secrets policy |
 
@@ -59,7 +59,7 @@ Untrusted agents must run under the Docker/Podman sandbox with `permission_inter
 - **node-daemon**: WebSocket control channel (default; falls back to long-poll),
   adapter subprocess per attempt in its own worktree + process group, streams
   stdout/stderr as events, reports completion.
-- **adapters**: `mock` (no LLM), `claude`, `opencode` — translate the agent's
+- **adapters**: `mock` (no LLM), `claude`, `codex`, `opencode` — translate the agent's
   JSON events into the agentgrid contract.
 - **cli** (`ag`): submit/inspect tasks, list nodes, mint tokens, run server,
   index a repo into a knowledge-graph packet for system-prompt injection
