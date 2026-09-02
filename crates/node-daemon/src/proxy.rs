@@ -28,6 +28,9 @@ struct Inner {
 impl ProxyPool {
     /// `env_urls` = parsed `AGENTGRID_PROXY_URLS`. Empty = CP-managed mode.
     pub fn new(env_urls: Vec<String>) -> Self {
+        // Drop empties — `split_csv` maps an unset var to one empty string,
+        // which would otherwise masquerade as a configured proxy.
+        let env_urls: Vec<String> = env_urls.into_iter().filter(|u| !u.is_empty()).collect();
         Self {
             inner: Mutex::new(Inner {
                 env_urls,

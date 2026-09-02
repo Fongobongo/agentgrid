@@ -92,7 +92,20 @@ pub fn node_permission_interception(cfg: &Config) -> String {
 /// Spawn the background heartbeat task. Returns a handle that can be awaited
 /// (it runs forever unless the process exits).
 pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
+    spawn_heartbeat_with(cfg, client, sem, None)
+}
+
+/// `mk_client` (when given) enables proxy failover identical to the poll
+/// loop: a connect/timeout marks the current proxy dead and the next beat
+/// is sent over a rebuilt client against the next pool entry.
+pub fn spawn_heartbeat_with(
+    cfg: Config,
+    client: Client,
+    sem: Arc<Semaphore>,
+    mk_client: Option<std::sync::Arc<dyn Fn() -> Client + Send + Sync>>,
+) {
     tokio::spawn(async move {
+        let mut client = client;
         loop {
             // Probe adapters and build capabilities list.
             let mut capabilities = Vec::new();
@@ -257,6 +270,13 @@ pub fn spawn_heartbeat(cfg: Config, client: Client, sem: Arc<Semaphore>) {
                 .await
             {
                 tracing::warn!("heartbeat failed: {e}");
+                if (e.is_connect() || e.is_timeout()) && mk_client.is_some() {
+                    if let Some(p) = cfg.proxies.current() {
+                        tracing::warn!("egress proxy {p} failed on heartbeat; rotating");
+                        cfg.proxies.mark_dead(&p);
+                        client = mk_client.as_ref().unwrap()();
+                    }
+                }
             }
 
             // Liveness marker (deploy healthcheck): the container HEALTHCHECK

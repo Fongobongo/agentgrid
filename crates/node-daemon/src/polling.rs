@@ -85,7 +85,12 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
 
     // Heartbeat loop: publish status/load/capabilities periodically (runs on
     // every transport; the WS channel additionally carries slot heartbeats).
-    heartbeat::spawn_heartbeat(cfg.clone(), client.clone(), sem.clone());
+    heartbeat::spawn_heartbeat_with(
+        cfg.clone(),
+        client.clone(),
+        sem.clone(),
+        Some(Arc::new(mk_client.clone())),
+    );
 
     match cfg.transport {
         Transport::Poll => poll_loop_inner(cfg, client, sem, cred.node_id, None, mk_client).await,
@@ -147,7 +152,14 @@ pub async fn poll_loop_inner(
                 };
                 fail_streak = 0;
                 // CP-managed proxy list (env AGENTGRID_PROXY_URLS wins if set).
+                // First delivery turns an empty pool into a non-empty one:
+                // rebuild the client so polls actually route through it.
+                let was_empty = cfg.proxies.all().is_empty();
                 cfg.proxies.update_from_cp(pr.proxy_urls.clone());
+                if was_empty && !cfg.proxies.all().is_empty() {
+                    tracing::info!("egress proxy list received; rerouting client");
+                    client = mk_client();
+                }
                 // Plan 0.3 1.2: consume the whole batch; legacy CPs only fill
                 // `assignment` (N/N-1 compat).
                 let mut batch = pr.assignments;
