@@ -18,6 +18,11 @@
   wins on key collision. Migration `0081_adapter_env.sql`.
 - **Heartbeat proxy failover**: heartbeats rotate through the proxy pool
   on connect/timeout, same as the poll loop.
+- **Adapter: aider** — `adapter-aider` runs `aider -m` in unattended mode;
+  plain-text sessions surface as `log`/`progress` events (token summary);
+  `--yes-always` gated on `AGENTGRID_UNSAFE_UNATTENDED` (without it, aider
+  runs read-only `--chat-mode chat`). Binary resolution falls back to
+  `python3 -m aider` when the bare binary is not on PATH.
 - **Adapter: codex** — new `adapter-codex` binary wraps `codex exec --json`,
   translating `item.completed` / `turn.completed` events into the agentgrid
   contract. Safety ladder mirrors the claude adapter: default `--sandbox

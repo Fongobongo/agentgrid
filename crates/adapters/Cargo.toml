@@ -33,3 +33,7 @@ libc = "0.2"
 [[bin]]
 name = "adapter-codex"
 path = "src/bin/adapter-codex.rs"
+
+[[bin]]
+name = "adapter-aider"
+path = "src/bin/adapter-aider.rs"

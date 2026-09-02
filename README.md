@@ -59,7 +59,7 @@ Untrusted agents must run under the Docker/Podman sandbox with `permission_inter
 - **node-daemon**: WebSocket control channel (default; falls back to long-poll),
   adapter subprocess per attempt in its own worktree + process group, streams
   stdout/stderr as events, reports completion.
-- **adapters**: `mock` (no LLM), `claude`, `codex`, `opencode` — translate the agent's
+- **adapters**: `mock` (no LLM), `claude`, `codex`, `opencode`, `aider` — translate the agent's
   JSON events into the agentgrid contract.
 - **cli** (`ag`): submit/inspect tasks, list nodes, mint tokens, run server,
   index a repo into a knowledge-graph packet for system-prompt injection

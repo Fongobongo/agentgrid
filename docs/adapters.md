@@ -105,6 +105,16 @@ Anything on stderr is forwarded to the daemon log. Use it for diagnostics
   unknown lines fall through as `log`. Binary overridable via
   `AGENTGRID_CLAUDE_BIN`.
 - `adapter-opencode` — same pattern for the opencode CLI.
+- `adapter-aider` — wraps [Aider](https://aider.chat) in unattended
+  prompt mode (`aider -m "<prompt>"`). Output is plain text → the adapter
+  surfaces the session as a transcript (`log` events); the edit trail stays
+  in `changes.patch`. `AIDER_MODEL`/litellm envs (`OPENAI_API_KEY`,
+  `OPENAI_BASE_URL`, `DEEPSEEK_API_KEY`, ...) reach the attempt either from
+  node-local `AGENTGRID_ADAPTER_ENV` or CP-managed adapter-env
+  (`ag adapter-env set aider OPENAI_API_KEY ...`).
+  Known provider quirk: agentrouter only whitelists claude-cli / opencode
+  user agents — aider's litellm client is blocked upstream (their policy,
+  not the adapter's).
 - `adapter-codex` — wraps the Codex CLI (`codex exec --json`), translating its
   `item.completed` / `turn.completed` events into contract events. Safe
   default is `--sandbox workspace-write`; `AGENTGRID_UNSAFE_UNATTENDED=1`
