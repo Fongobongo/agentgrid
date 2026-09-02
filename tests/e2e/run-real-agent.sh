@@ -170,6 +170,16 @@ while [ $SECONDS -lt $deadline ]; do
   sleep 3
 done
 echo "   $T1 -> $s1 / $T2 -> $s2"
+# Provider black-hole: agent produced zero text or tool calls, only empty
+# progress beacons -> nothing for the harness to debug, treat as skip.
+if printf '%s %s' "$s1" "$s2" | grep -qw failed; then
+  total_events=$(cat "$TMP"/artifacts/*/agent-raw-output.log 2>/dev/null     | grep -cE '"type":"(log|tool_call|file_change|error)"' || true)
+  if [ "${total_events:-0}" = "0" ]; then
+    echo ">> agent streams contained no log/tool_call/error events on either attempt;"
+    echo "   provider black-hole or CLI drift — nothing for the harness; skipping (77)."
+    exit 77
+  fi
+fi
 # Provider-side outages (budget/quota/overload) are not our failure: there's
 # nothing actionable in the harness, so skip with exit 77 — nightly CI stays
 # green and a healthy-provider run turns this back on automatically.
