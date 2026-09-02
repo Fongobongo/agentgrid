@@ -1,0 +1,35 @@
+name: Two-host E2E
+
+# Real-network smoke: control plane on the CI runner, one node daemon on a
+# second physical host (AG_REMOTE_*). Covers what no local test can: real
+# sockets, DNS/TCP over open wire, clock skew, cross-host WS/poll.
+on:
+  schedule:
+    - cron: "0 3 * * *" # nightly UTC, after main CI
+  workflow_dispatch:
+
+permissions: read
+
+jobs:
+  two-host:
+    if: vars.AG_REMOTE_HOST != """"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build node daemon
+        run: cargo build -p agentgrid-control-plane -p agentgrid-node-daemon
+      - name: Install ssh key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AG_REMOTE_SSH_KEY }}" > ~/.ssh/ag_remote
+          chmod 600 ~/.ssh/ag_remote
+          ssh-keyscan -p "${{ vars.AG_REMOTE_PORT }}" "${{ vars.AG_REMOTE_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+      - name: Run two-host e2e
+        env:
+          AG_REMOTE_HOST: ${{ vars.AG_REMOTE_HOST }}
+          AG_REMOTE_PORT: ${{ vars.AG_REMOTE_PORT }}
+          AG_REMOTE_USER: ${{ vars.AG_REMOTE_USER }}
+          AG_REMOTE_KEY: ~/.ssh/ag_remote
+        run: tests/e2e/run-two-host.sh
