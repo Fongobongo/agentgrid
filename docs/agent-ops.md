@@ -91,6 +91,32 @@ as root.
 | Adapter runs without `AGENTGRID_UNSAFE_UNATTENDED` despite setting it | on git tasks with `AGENTGRID_SANDBOX=none` the daemon strips the unsafe flag; opt back in with `AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX=1` |
 | Fresh workflow run stays `pending` for minutes | the background ticker only resumes runs already `running`; a new run needs an explicit first `POST /v1/workflow-runs/{id}/tick` (run-workflow.sh does this in a loop) |
 
+## Egress proxy pool (CP-managed, since 0.4.3)
+
+Route node traffic through a pool of proxies with automatic failover:
+
+```bash
+# on the control plane
+ag proxy add http://user:pass@p1.corp:8080          # global pool
+ag proxy add socks5://p2.corp:1080 --node node-b    # node-scoped
+ag proxy ls                                         # id, url, node
+ag proxy rm 3
+```
+
+Every node poll returns the effective list (global first, then node-scoped)
+and the daemon routes its CP traffic, GitHub write-back API calls and
+attempt environments (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, also inside
+sandboxed containers) through the first alive URL. A connect/timeout marks
+the proxy dead for 5 minutes and rotates to the next one; with the whole
+pool dead the node falls back to direct egress (fail-open by design — a
+dead proxy pool must not stop the fleet).
+
+Override per node: `AGENTGRID_PROXY_URLS=url1,url2` in the daemon env
+completely replaces the CP-pushed list (use when that node's network
+differs from the fleet default). Caveat: the WS transport itself is not
+proxied (no CONNECT support) — proxied nodes should run
+`AGENTGRID_TRANSPORT=poll` or `auto` (auto falls back to poll).
+
 ## Two-host smoke test
 
 A minimal end-to-end check that both nodes actually work:
