@@ -165,8 +165,22 @@ while [ $SECONDS -lt $deadline ]; do
   sleep 3
 done
 echo "   $T1 -> $s1 / $T2 -> $s2"
-[ "$s1" = "succeeded" ] || { echo "E2E FAILED: $T1 -> $s1"; tail -20 "$TMP"/node-*.log "$TMP/cp.log"; exit 1; }
-[ "$s2" = "succeeded" ] || { echo "E2E FAILED: $T2 -> $s2"; tail -20 "$TMP"/node-*.log "$TMP/cp.log"; exit 1; }
+[ "$s1" = "succeeded" ] || {
+  echo "E2E FAILED: $T1 -> $s1"
+  tail -20 "$TMP"/node-*.log "$TMP/cp.log"
+  for f in "$TMP"/artifacts/*/agent-raw-output.log "$TMP"/artifacts/*/agent.jsonl; do
+    [ -f "$f" ] && { echo "== $f"; tail -c 1500 "$f"; }
+  done
+  exit 1
+}
+[ "$s2" = "succeeded" ] || {
+  echo "E2E FAILED: $T2 -> $s2"
+  tail -20 "$TMP"/node-*.log "$TMP/cp.log"
+  for f in "$TMP"/artifacts/*/agent-raw-output.log "$TMP"/artifacts/*/agent.jsonl; do
+    [ -f "$f" ] && { echo "== $f"; tail -c 1500 "$f"; }
+  done
+  exit 1
+}
 
 # Placement: with concurrency=1 the two attempts must spread across nodes.
 a=$(grep -c "starting attempt" "$TMP/node-a.log" || true)
