@@ -21,6 +21,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 AG_REMOTE_PORT="${AG_REMOTE_PORT:-22}"
 AG_REMOTE_USER="${AG_REMOTE_USER:-root}"
 AG_REMOTE_KEY="${AG_REMOTE_KEY:-$HOME/.ssh/id_ed25519_agentgrid_remote}"
+# Trust-on-first-use; CI runners have an empty known_hosts and must not block.
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o GlobalKnownHostsFile=/dev/null)
 
 PORT=7820
 TMP="$(mktemp -d -t ag-e2e-twohost-XXXXXX)"
@@ -30,7 +32,7 @@ cleanup() {
   set +e
   [ -n "${CPPID:-}" ] && kill "$CPPID" 2>/dev/null
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null; done
-  ssh -i "$AG_REMOTE_KEY" -p "$AG_REMOTE_PORT" "$AG_REMOTE_USER@$AG_REMOTE_HOST" \
+  ssh "${SSH_OPTS[@]}" -i "$AG_REMOTE_KEY" -p "$AG_REMOTE_PORT" "$AG_REMOTE_USER@$AG_REMOTE_HOST" \
       "pkill -f agentgrid-node-daemon; rm -rf $RWORK" 2>/dev/null
   rm -rf "$TMP"
 }
@@ -66,7 +68,7 @@ TOK=$(curl -fsS -X POST -H "authorization: Bearer $JWT" \
 RPORT=""
 for attempt in 1 2 3 4 5; do
   RPORT=$((10000 + RANDOM % 50000))
-  if ssh -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+  if ssh "${SSH_OPTS[@]}" -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
       -o ServerAliveCountMax=2 \
       -i "$AG_REMOTE_KEY" -p "$AG_REMOTE_PORT" \
       -R "$RPORT:127.0.0.1:$PORT" "$AG_REMOTE_USER@$AG_REMOTE_HOST"; then
@@ -79,16 +81,16 @@ done
 echo "   cp reachable for the node through ssh -R :$RPORT"
 
 echo ">> staging node daemon on $AG_REMOTE_HOST"
-scp -q -i "$AG_REMOTE_KEY" -P "$AG_REMOTE_PORT" \
+scp -q "${SSH_OPTS[@]}" -i "$AG_REMOTE_KEY" -P "$AG_REMOTE_PORT" \
   "$BIN/agentgrid-node-daemon" "$ROOT/target/debug/adapter-mock" \
   "$AG_REMOTE_USER@$AG_REMOTE_HOST:$RWORK/" \
-  || { mkdir -p "" 2>/dev/null; ssh -i "$AG_REMOTE_KEY" -p "$AG_REMOTE_PORT" \
+  || { mkdir -p "" 2>/dev/null; ssh "${SSH_OPTS[@]}" -i "$AG_REMOTE_KEY" -p "$AG_REMOTE_PORT" \
       "$AG_REMOTE_USER@$AG_REMOTE_HOST" "mkdir -p $RWORK" \
-      && scp -q -i "$AG_REMOTE_KEY" -P "$AG_REMOTE_PORT" \
+      && scp -q "${SSH_OPTS[@]}" -i "$AG_REMOTE_KEY" -P "$AG_REMOTE_PORT" \
         "$BIN/agentgrid-node-daemon" "$ROOT/target/debug/adapter-mock" \
         "$AG_REMOTE_USER@$AG_REMOTE_HOST:$RWORK/"; }
 
-ssh -n -f -i "$AG_REMOTE_KEY" -p "$AG_REMOTE_PORT" "$AG_REMOTE_USER@$AG_REMOTE_HOST" "
+ssh "${SSH_OPTS[@]}" -n -f -i "$AG_REMOTE_KEY" -p "$AG_REMOTE_PORT" "$AG_REMOTE_USER@$AG_REMOTE_HOST" "
   cd $RWORK && chmod +x agentgrid-node-daemon adapter-mock &&
   PATH=\"$RWORK:\$PATH\" \
   AGENTGRID_SERVER='http://127.0.0.1:$RPORT' \

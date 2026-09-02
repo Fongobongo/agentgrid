@@ -162,7 +162,8 @@ jobs:
           AG_REMOTE_PASS: ${{ secrets.AG_REMOTE_PASS }}
           # Key auth preferred (run-two-host.sh uses AG_REMOTE_KEY when set);
           # the password path is the legacy fallback in tests/e2e/remote-ssh.py.
-          AG_REMOTE_KEY: ${{ secrets.AG_REMOTE_KEY }}
+          AG_REMOTE_PORT: ${{ secrets.AG_REMOTE_PORT }}
+          AG_REMOTE_SSH_KEY: ${{ secrets.AG_REMOTE_SSH_KEY }}
         run: |
           # The step shell is bash -e: a bare `bash script` that exits 77 kills
           # the step before the rc check below can turn it into a skip. Guard
@@ -257,7 +258,8 @@ jobs:
           AG_REMOTE_PASS: ${{ secrets.AG_REMOTE_PASS }}
           # Key auth preferred (run-two-host.sh uses AG_REMOTE_KEY when set);
           # the password path is the legacy fallback in tests/e2e/remote-ssh.py.
-          AG_REMOTE_KEY: ${{ secrets.AG_REMOTE_KEY }}
+          AG_REMOTE_PORT: ${{ secrets.AG_REMOTE_PORT }}
+          AG_REMOTE_SSH_KEY: ${{ secrets.AG_REMOTE_SSH_KEY }}
         run: |
           if [ -z "$AG_REMOTE_HOST" ] || [ -z "$AG_REMOTE_USER" ] || [ -z "$AG_REMOTE_PASS" ]; then
             echo "no AG_REMOTE_* configured — skipping two-host job"
@@ -268,8 +270,16 @@ jobs:
           AG_REMOTE_HOST=$AG_REMOTE_HOST
           AG_REMOTE_USER=$AG_REMOTE_USER
           AG_REMOTE_PASS=$AG_REMOTE_PASS
-          AG_REMOTE_KEY=$AG_REMOTE_KEY
+          AG_REMOTE_PORT=${AG_REMOTE_PORT:-22}
           EOF
+          # Key auth for the remote box arrives as the raw private key in the
+          # AG_REMOTE_SSH_KEY secret; install it at the default path the
+          # script (and remote-ssh.py) look up.
+          if [ -n "$AG_REMOTE_SSH_KEY" ]; then
+            mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+            printf '%s\n' "$AG_REMOTE_SSH_KEY" > "$HOME/.ssh/id_ed25519_agentgrid_remote"
+            chmod 600 "$HOME/.ssh/id_ed25519_agentgrid_remote"
+          fi
           bash tests/e2e/run-two-host.sh
 
   real-agent:
@@ -293,6 +303,10 @@ jobs:
       - name: run one real task on two nodes
         env:
           AG_REAL_KEY: ${{ secrets.AG_REAL_KEY }}
+          # Optional adapter override + extra node env (e.g. an Anthropic-
+          # compatible gateway endpoint + model); defaults = plain claude key.
+          AG_REAL_ADAPTER: ${{ secrets.AG_REAL_ADAPTER }}
+          AG_REAL_EXTRA_ENV: ${{ secrets.AG_REAL_EXTRA_ENV }}
         run: |
           rc=0
           bash tests/e2e/run-real-agent.sh || rc=$?
