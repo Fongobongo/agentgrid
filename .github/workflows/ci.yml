@@ -315,6 +315,7 @@ jobs:
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "agentrouter",
                 "options": { "baseURL": "https://agentrouter.org/v1", "apiKey": "{env:AR_KEY}" },
+                "permission": { "edit": "allow", "write": "allow", "bash": "allow", "webfetch": "allow" },
                 "models": { "deepseek-v4-flash": { "name": "deepseek-v4-flash" } }
               }
             }
