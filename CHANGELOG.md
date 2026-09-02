@@ -18,6 +18,12 @@
   wins on key collision. Migration `0081_adapter_env.sql`.
 - **Heartbeat proxy failover**: heartbeats rotate through the proxy pool
   on connect/timeout, same as the poll loop.
+- **Host-disk scheduling gate**: scheduler also rejects assignment when the
+  node reports less than `AGENTGRID_MIN_FREE_DISK_MB` (default 2048 MiB) free
+  on its workspace root; 0 = unknown -> admit. Nodes expose
+  `mem_available_mb` alongside `free_disk_mb` in `/v1/nodes`, the web nodes
+  table and `ag nodes show`; `node eligibility` now narrates low-mem /
+  low-disk as visible skip reasons instead of a silently idle queue.
 - **Proxy health prober** (`AGENTGRID_PROXY_PROBE_SECS=60`, `0` disables):
   node TCP-probes pool entries; revived proxies get traffic again early,
   dead ones stay quarantined without waiting out the full TTL. E2E covers

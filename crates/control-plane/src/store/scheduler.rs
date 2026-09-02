@@ -302,6 +302,21 @@ impl Store {
                 return Ok(Vec::new());
             }
         }
+        // Host disk gate: same contract as the memory gate — a node that
+        // reports almost no free space on its workspace root gets no new
+        // work (git clone + worktree would fail midway). 0 = unknown -> admit.
+        {
+            let disk_mb: i64 = node.try_get("free_disk_mb").unwrap_or(0);
+            let min_disk_mb: i64 = std::env::var("AGENTGRID_MIN_FREE_DISK_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2048);
+            if disk_mb > 0 && disk_mb < min_disk_mb {
+                let _ = tx.rollback().await;
+                tracing::info!(node_id, disk_mb, min_disk_mb, "rejected_due_to_low_disk");
+                return Ok(Vec::new());
+            }
+        }
         // Batch cap: the node's free concurrency slots (plan 0.3 1.2).
         let free_slots = nv.max_concurrency.saturating_sub(nv.active_attempts) as usize;
         let cap = limit.min(free_slots);

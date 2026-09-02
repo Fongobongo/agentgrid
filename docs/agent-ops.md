@@ -91,6 +91,25 @@ as root.
 | Adapter runs without `AGENTGRID_UNSAFE_UNATTENDED` despite setting it | on git tasks with `AGENTGRID_SANDBOX=none` the daemon strips the unsafe flag; opt back in with `AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX=1` |
 | Fresh workflow run stays `pending` for minutes | the background ticker only resumes runs already `running`; a new run needs an explicit first `POST /v1/workflow-runs/{id}/tick` (run-workflow.sh does this in a loop) |
 
+## Adapter env from the control plane
+
+`ag adapter-env set <adapter|*> KEY VALUE` pushes builder/provider env to all
+nodes (or `--node <id>` to one). Nodes receive the set on each poll and
+inject it into attempt process env; node-local `AGENTGRID_ADAPTER_ENV` wins
+on key collisions.
+
+Point claude at a custom gateway endpoint:
+
+    ag adapter-env set claude ANTHROPIC_BASE_URL https://agentrouter.org
+    ag adapter-env set claude ANTHROPIC_AUTH_TOKEN sk-...
+    ag adapter-env set claude ANTHROPIC_MODEL claude-opus-5
+
+opencode custom-provider keys ride the same channel; the provider JSON
+itself belongs in a CP opencode profile (`ag opencode put`), which nodes
+sync automatically:
+
+    ag adapter-env set opencode AR_KEY sk-...
+
 ## Egress proxy pool (CP-managed, since 0.4.3)
 
 Route node traffic through a pool of proxies with automatic failover:

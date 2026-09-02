@@ -51,6 +51,7 @@ export interface NodeView {
   agent_version: string;
   load_avg: number;
   free_disk_mb: number;
+  mem_available_mb?: number;
   // Hardening P0 item 5: unsafe mode + permission interception.
   unsafe_active?: boolean;
   permission_interception?: string;

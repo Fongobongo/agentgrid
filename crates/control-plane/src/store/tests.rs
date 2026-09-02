@@ -3185,7 +3185,7 @@ mod mem_gate_tests {
             max_concurrency: 4,
             agent_version: "t".into(),
             load_avg: 0.0,
-            free_disk_mb: 1000,
+            free_disk_mb: 100_000,
             mem_available_mb: mem_mb,
             active_attempts: 0,
             protocol_version: None,
@@ -3236,6 +3236,33 @@ mod mem_gate_tests {
         );
         // Ample memory -> assignment goes through.
         s.heartbeat(&node_id, &hb(4096)).await.unwrap();
+        assert!(s.try_assign(&node_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn low_host_disk_blocks_assignment() {
+        let (s, node_id) = fresh().await;
+        s.create_task(&CreateTaskRequest {
+            repository: "r".into(),
+            prompt: "p".into(),
+            adapter: "mock".into(),
+            requested_node_id: Some(node_id.clone()),
+            timeout_secs: None,
+            validation_command: None,
+            base_commit: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // 100 MiB free on the workspace root -> no assignment.
+        let mut req = hb(4096);
+        req.free_disk_mb = 100;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        assert!(s.try_assign(&node_id).await.unwrap().is_none());
+        // Plenty of disk -> assign.
+        let mut req = hb(4096);
+        req.free_disk_mb = 100_000;
+        s.heartbeat(&node_id, &req).await.unwrap();
         assert!(s.try_assign(&node_id).await.unwrap().is_some());
     }
 

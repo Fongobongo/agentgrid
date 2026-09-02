@@ -192,6 +192,13 @@ async fn cmd_node_doctor(client: &reqwest::Client, base: &str, node_id: &str) ->
     let free_disk = n.get("free_disk_mb").and_then(|v| v.as_u64()).unwrap_or(0);
     let load = n.get("load_avg").and_then(|v| v.as_f64()).unwrap_or(0.0);
     println!("  free disk   : {free_disk} MB");
+    let free_mem = n
+        .get("mem_available_mb")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if free_mem > 0 {
+        println!("  free memory : {free_mem} MB");
+    }
     println!("  load_avg    : {load}");
     let adapters = n
         .get("adapters")

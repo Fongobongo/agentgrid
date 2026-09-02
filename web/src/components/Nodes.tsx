@@ -163,6 +163,7 @@ export default function Nodes() {
             <th>Load</th>
             <th>Active</th>
             <th>Free disk</th>
+            <th>Free mem</th>
             <th>Interception</th>
             <th>Spool</th>
             <th>Heartbeat</th>
@@ -189,6 +190,11 @@ export default function Nodes() {
                 <td>{n.load_avg.toFixed(2)}</td>
                 <td>{n.active_attempts}/{n.max_concurrency}</td>
                 <td>{n.free_disk_mb >= 1024 ? `${(n.free_disk_mb / 1024).toFixed(1)} GB` : `${n.free_disk_mb} MB`}</td>
+                <td>{(() => {
+                  const m = n.mem_available_mb ?? 0;
+                  if (m <= 0) return '—';
+                  return m >= 1024 ? `${(m / 1024).toFixed(1)} GB` : `${m} MB`;
+                })()}</td>
                 <td>{n.permission_interception ?? 'wrapper'}</td>
                 {/* Hardening P2 item 35: outbox + artifact spool pressure. */}
                 <td>

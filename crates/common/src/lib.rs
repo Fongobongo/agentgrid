@@ -497,6 +497,10 @@ pub struct NodeView {
     pub agent_version: String,
     pub load_avg: f64,
     pub free_disk_mb: u64,
+    /// Latest host MemAvailable (MiB) reported by the node heartbeat.
+    /// 0 = not reported (legacy node / cold start).
+    #[serde(default)]
+    pub mem_available_mb: u64,
     /// Hardening P0 item 5: node is running an adapter with the unsafe
     /// unattended bypass active (no sandbox). Surfaced so operators can see
     /// which nodes run fully-unrestricted agents.

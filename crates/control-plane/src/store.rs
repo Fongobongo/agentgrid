@@ -478,7 +478,7 @@ impl Store {
         const MAX_NODES: i64 = 1000;
         let limit = limit.unwrap_or(100).min(MAX_NODES as u64) as i64;
         let mut sql = String::from(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at \
              FROM nodes WHERE 1=1",
         );
         if after.is_some() {
@@ -498,7 +498,7 @@ impl Store {
     /// `None` when the id is unknown.
     pub async fn get_node(&self, node_id: &str) -> Result<Option<NodeView>> {
         let row = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
@@ -772,6 +772,29 @@ fn node_ineligibility(
     {
         reasons.push(format!("missing repository {repository}"));
     }
+    // Resource gates (mirror of the scheduler's hard gates; these make the
+    // skip visible instead of a silently idle queue): 0 = not reported ->
+    // we do not emit a reason for legacy nodes.
+    let min_mem: u64 = std::env::var("AGENTGRID_MIN_FREE_MEM_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024);
+    if node.mem_available_mb > 0 && node.mem_available_mb < min_mem {
+        reasons.push(format!(
+            "low host memory ({} MiB free < {} MiB)",
+            node.mem_available_mb, min_mem
+        ));
+    }
+    let min_disk: u64 = std::env::var("AGENTGRID_MIN_FREE_DISK_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2048);
+    if node.free_disk_mb > 0 && node.free_disk_mb < min_disk {
+        reasons.push(format!(
+            "low disk on workspace root ({} MiB free < {} MiB)",
+            node.free_disk_mb, min_disk
+        ));
+    }
     if node.active_attempts >= node.max_concurrency {
         reasons.push(format!(
             "at capacity ({} >= {})",
@@ -819,6 +842,7 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
         agent_version: r.try_get("agent_version").unwrap_or_default(),
         load_avg: r.try_get::<f64, _>("load_avg").unwrap_or(0.0),
         free_disk_mb: r.try_get::<i64, _>("free_disk_mb").unwrap_or(0) as u64,
+        mem_available_mb: r.try_get::<i64, _>("mem_available_mb").unwrap_or(0) as u64,
         unsafe_active: r.try_get::<i64, _>("unsafe_active").unwrap_or(0) != 0,
         permission_interception: r.try_get("permission_interception").unwrap_or_default(),
         outbox_bytes: r.try_get::<i64, _>("outbox_bytes").unwrap_or(0) as u64,
