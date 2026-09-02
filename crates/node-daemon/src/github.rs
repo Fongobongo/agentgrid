@@ -12,11 +12,15 @@ use serde_json::{json, Value};
 
 /// Minimal GitHub REST client with the same timeout posture as the daemon's
 /// CP client (`connect_timeout(10s)` + `timeout(120s)`).
-fn gh_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+fn gh_client(proxy: Option<&str>) -> Result<reqwest::Client> {
+    let mut b = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(120))
-        .build()?)
+        .timeout(Duration::from_secs(120));
+    // Egress proxy pool: route GitHub API traffic through the node pool.
+    if let Some(p) = proxy {
+        b = b.proxy(reqwest::Proxy::all(p)?);
+    }
+    Ok(b.build()?)
 }
 
 /// Push `branch` from the bare mirror clone (`repo_dir`) to GitHub. The token
@@ -75,8 +79,9 @@ pub async fn create_pull_request(
     task_id: &str,
     attempt_id: &str,
     token: &str,
+    proxy: Option<&str>,
 ) -> Result<String> {
-    let client = gh_client()?;
+    let client = gh_client(proxy)?;
     let resp = client
         .post(format!("https://api.github.com/repos/{github_repo}/pulls"))
         .bearer_auth(token)
@@ -101,8 +106,9 @@ pub async fn comment_issue(
     issue: i64,
     body: &str,
     token: &str,
+    proxy: Option<&str>,
 ) -> Result<String> {
-    let client = gh_client()?;
+    let client = gh_client(proxy)?;
     let resp = client
         .post(format!(
             "https://api.github.com/repos/{github_repo}/issues/{issue}/comments"

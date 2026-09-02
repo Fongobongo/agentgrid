@@ -66,6 +66,8 @@ enum AgCommand {
     Mcp(registry::McpArgs),
     /// Manage agent profiles (system prompt + autonomy + limits; immutable revisions).
     Profiles(registry::ProfilesArgs),
+    /// Manage the CP-managed egress proxy pool pushed to nodes.
+    Proxy(registry::ProxyArgs),
     /// Start the control plane (standalone binary).
     Server(ServerStartArgs),
     /// Define and run Agentgrid workflows (DAGs of agent steps).
@@ -506,6 +508,7 @@ async fn main() -> Result<()> {
         AgCommand::Skills(a) => registry::cmd_skills(&client, &base, a).await,
         AgCommand::Mcp(a) => registry::cmd_mcp(&client, &base, a).await,
         AgCommand::Profiles(a) => registry::cmd_profiles(&client, &base, a).await,
+        AgCommand::Proxy(a) => registry::cmd_proxy(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
         AgCommand::Workflow(a) => workflow::cmd_workflow(&client, &base, a, cli.json).await,
         AgCommand::Tui(a) => cmd_tui(&client, &base, a).await,

@@ -1054,3 +1054,66 @@ pub(crate) async fn cmd_opencode(
         }
     }
 }
+
+// ── CP-managed egress proxy pool ───────────────────────────────────────
+
+/// `ag proxy ls/add/rm` — manage the proxy list the CP pushes to nodes.
+#[derive(Args)]
+pub(crate) struct ProxyArgs {
+    #[command(subcommand)]
+    action: ProxyAction,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ProxyAction {
+    /// List registered proxies (global pool first).
+    Ls,
+    /// Add a proxy URL (`http://user:pass@host:port`, `socks5://…`).
+    Add {
+        url: String,
+        /// Restrict this proxy to one node id (global pool otherwise).
+        #[arg(long)]
+        node: Option<String>,
+    },
+    /// Remove a proxy by id (see `ag proxy ls`).
+    Rm { id: i64 },
+}
+
+pub(crate) async fn cmd_proxy(client: &reqwest::Client, base: &str, a: ProxyArgs) -> Result<()> {
+    match a.action {
+        ProxyAction::Ls => {
+            let resp = client.get(format!("{base}/v1/proxies")).send().await?;
+            err_if_fail(resp.status(), "list proxies")?;
+            let v: serde_json::Value = resp.json().await?;
+            for p in list_items(&v) {
+                println!(
+                    "#{:>3} {:<40} node={}",
+                    p["id"].as_i64().unwrap_or(0),
+                    p["url"].as_str().unwrap_or(""),
+                    p["node_id"].as_str().unwrap_or("*"),
+                );
+            }
+            Ok(())
+        }
+        ProxyAction::Add { url, node } => {
+            let resp = client
+                .post(format!("{base}/v1/proxies"))
+                .json(&serde_json::json!({ "url": url, "node_id": node }))
+                .send()
+                .await?;
+            err_if_fail(resp.status(), "add proxy")?;
+            let v: serde_json::Value = resp.json().await?;
+            println!("proxy #{} registered", v["id"]);
+            Ok(())
+        }
+        ProxyAction::Rm { id } => {
+            let resp = client
+                .delete(format!("{base}/v1/proxies/{id}"))
+                .send()
+                .await?;
+            err_if_fail(resp.status(), "remove proxy")?;
+            println!("proxy #{id} removed");
+            Ok(())
+        }
+    }
+}

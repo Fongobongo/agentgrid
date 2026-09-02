@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- **CP-managed egress proxy pool with failover.** `ag proxy ls/add/rm`
+  (`/v1/proxies`) registers proxy URLs (global pool or `--node`-scoped);
+  nodes receive their effective list in every poll response and route all
+  egress through it — CP traffic (poll/WS fallback), GitHub API write-back
+  (PR/issue comments), and attempt env (`HTTP(S)_PROXY`/`ALL_PROXY`
+  injected into adapter + sandboxed-container processes). On a
+  connect/timeout failure the node marks the proxy dead (5-minute
+  quarantine) and rotates to the next URL; with the whole pool dead it
+  falls back to direct egress. Node-level override:
+  `AGENTGRID_PROXY_URLS=url1,url2` ignores the CP list. WS connect itself
+  is not proxied (tokio-tungstenite has no CONNECT support) — poll
+  fallback covers proxied environments.
+
 ## [v0.4.2] — 2026-08-31
 
 ### Added

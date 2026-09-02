@@ -3077,3 +3077,38 @@ mod verifier_ro_tests {
         assert!(verifier.read_only, "verifier assignment must be read-only");
     }
 }
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    async fn store() -> super::super::Store {
+        let p = std::env::temp_dir().join(format!("ag-proxy-{}.db", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&p);
+        super::super::Store::open(p.to_str().unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn global_pool_plus_node_scoped_fallback() {
+        let s = store().await;
+        s.add_proxy("http://g1:8080", None).await.unwrap();
+        s.add_proxy("http://g2:8080", None).await.unwrap();
+        s.add_proxy("http://n1:8080", Some("node-a")).await.unwrap();
+
+        // global-first ordering, node-scoped appended for that node only
+        let for_a = s.proxy_urls_for("node-a").await.unwrap();
+        assert_eq!(
+            for_a,
+            ["http://g1:8080", "http://g2:8080", "http://n1:8080"]
+        );
+        let for_b = s.proxy_urls_for("node-b").await.unwrap();
+        assert_eq!(for_b, ["http://g1:8080", "http://g2:8080"]);
+
+        // remove + uniqueness
+        let id = s.list_proxies().await.unwrap()[2].id;
+        assert_eq!(s.remove_proxy(id).await.unwrap(), 1);
+        assert!(s.add_proxy("http://g1:8080", None).await.is_err());
+    }
+}

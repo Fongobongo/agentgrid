@@ -135,6 +135,10 @@ pub struct Config {
     /// forwarded to the adapter; None = write-back disabled (tasks with
     /// `github_push` emit a log event explaining the missing token).
     pub github_token: Option<String>,
+    /// Egress proxy pool with failover (env override `AGENTGRID_PROXY_URLS`
+    /// or CP-pushed list). Shared across poll/ws/attempts so one pool state
+    /// drives every egress surface.
+    pub proxies: std::sync::Arc<crate::proxy::ProxyPool>,
 }
 
 /// One credential env-var and the tokens that back it for failover rotation.
@@ -300,6 +304,10 @@ pub fn config_from_env() -> Config {
         github_token: std::env::var("AGENTGRID_GITHUB_TOKEN")
             .ok()
             .filter(|t| !t.trim().is_empty()),
+        proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(split_csv(
+            "AGENTGRID_PROXY_URLS",
+            "",
+        ))),
     }
 }
 

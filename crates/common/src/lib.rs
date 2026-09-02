@@ -956,6 +956,10 @@ pub struct PollResponse {
     /// compat); new nodes consume every entry.
     #[serde(default)]
     pub assignments: Vec<Assignment>,
+    /// Egress proxy URLs the node should use (CP-managed list). Empty = keep
+    /// current; the node's own env `AGENTGRID_PROXY_URLS` always wins when set.
+    #[serde(default)]
+    pub proxy_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1651,6 +1655,7 @@ mod tests {
                 github_base_ref: None,
             }),
             assignments: vec![],
+            proxy_urls: vec![],
         };
         assert_eq!(round_trip(&pr), pr);
         // Batch field round-trips and tolerates absence (N/N-1 compat).

@@ -30,6 +30,7 @@ mod maintenance;
 mod nodes;
 pub(crate) mod opencode_profiles;
 mod profiles;
+mod proxies;
 mod repositories;
 mod scheduler;
 mod shared_context;

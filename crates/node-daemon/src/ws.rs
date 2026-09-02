@@ -176,12 +176,14 @@ async fn handle_msg(
 
 /// WS transport: reconnect with exponential backoff (1s → 60s) forever, so a
 /// CP restart or network drop heals itself without manual intervention.
-pub async fn ws_loop(
+pub async fn ws_loop<F: Fn() -> Client>(
     cfg: Config,
     cred: SavedCredential,
     client: Client,
     sem: Arc<Semaphore>,
+    mk_client: F,
 ) -> Result<()> {
+    let _ = mk_client; // poll-fallback failover hook lives on the Poll path
     let mut backoff = Duration::from_secs(1);
     loop {
         match connect_once(&cfg, &cred).await {
@@ -202,11 +204,12 @@ pub async fn ws_loop(
 /// Auto transport: prefer WS; after `MAX_CONSECUTIVE_WS_FAILURES` failed
 /// connects, run long polling for the current backoff window, then retry WS.
 /// A mid-session drop (CP restart, network loss) reconnects promptly.
-pub async fn auto_loop(
+pub async fn auto_loop<F: Fn() -> Client + Clone>(
     cfg: Config,
     cred: SavedCredential,
     client: Client,
     sem: Arc<Semaphore>,
+    mk_client: F,
 ) -> Result<()> {
     let mut backoff = Duration::from_secs(1);
     let mut consecutive_failures = 0usize;
@@ -232,6 +235,7 @@ pub async fn auto_loop(
                         sem.clone(),
                         cred.node_id.clone(),
                         Some(backoff),
+                        mk_client.clone(),
                     )
                     .await?;
                     backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -354,6 +358,7 @@ mod tests {
             guard_allow: vec![],
             accounts: vec![],
             github_token: None,
+            proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
         }
     }
 
@@ -416,7 +421,7 @@ mod tests {
         };
         let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
         let http = authed_client(&cred);
-        let node_task = tokio::spawn(ws_loop(cfg, cred, http, sem));
+        let node_task = tokio::spawn(ws_loop(cfg, cred, http, sem, Client::new));
 
         // 1) node registers automatically.
         let st = state.clone();
@@ -520,7 +525,7 @@ mod tests {
         };
         let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
         let http = authed_client(&cred);
-        let node_task = tokio::spawn(ws_loop(cfg, cred, http, sem));
+        let node_task = tokio::spawn(ws_loop(cfg, cred, http, sem, Client::new));
 
         let st = state.clone();
         wait_until("ws registration", Duration::from_secs(10), || async {

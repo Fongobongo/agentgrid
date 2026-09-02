@@ -28,6 +28,24 @@ pub fn daemon_http_client() -> Result<Client> {
         .build()?)
 }
 
+/// Authed client routed through the proxy pool's current egress proxy, if
+/// any pool entry is alive. When the current proxy later fails, callers
+/// rebuild via this helper after `pool.mark_dead(url)` (failover).
+pub fn authed_client(
+    headers: HeaderMap,
+    pool: &crate::proxy::ProxyPool,
+) -> Result<(Client, Option<String>)> {
+    let mut b = Client::builder()
+        .default_headers(headers)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120));
+    let via = pool.current();
+    if let Some(p) = &via {
+        b = b.proxy(reqwest::Proxy::all(p)?);
+    }
+    Ok((b.build()?, via))
+}
+
 /// Transport entry point (plan 0.3 2.3): one-time startup (recovery,
 /// heartbeat) runs once regardless of transport, then the node runs the
 /// selected channel: long polling, WebSocket, or auto (WS with poll fallback).
@@ -37,11 +55,17 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {}", cred.credential))?,
     );
-    let client = Client::builder()
-        .default_headers(headers)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(120))
-        .build()?;
+    let (client, _) = authed_client(headers.clone(), &cfg.proxies)?;
+    // Proxy failover hook: rebuild the authed client against the pool's
+    // current (next-alive) proxy after a transport failure rotated the pool.
+    let mk_client = {
+        let pool = cfg.proxies.clone();
+        move || {
+            authed_client(headers.clone(), &pool)
+                .map(|(c, _)| c)
+                .unwrap_or_else(|_| Client::new())
+        }
+    };
     let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
 
     // Startup recovery: redeliver durable completions, reap orphaned artifact
@@ -55,7 +79,7 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
     // heartbeat / poll loops start immediately.
     {
         let rcfg = cfg.clone();
-        let rclient = client.clone();
+        let rclient = mk_client();
         tokio::spawn(async move { recovery::startup_recovery(&rcfg, &rclient).await });
     }
 
@@ -64,9 +88,9 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
     heartbeat::spawn_heartbeat(cfg.clone(), client.clone(), sem.clone());
 
     match cfg.transport {
-        Transport::Poll => poll_loop_inner(cfg, client, sem, cred.node_id, None).await,
-        Transport::Ws => crate::ws::ws_loop(cfg, cred, client, sem).await,
-        Transport::Auto => crate::ws::auto_loop(cfg, cred, client, sem).await,
+        Transport::Poll => poll_loop_inner(cfg, client, sem, cred.node_id, None, mk_client).await,
+        Transport::Ws => crate::ws::ws_loop(cfg, cred, client, sem, mk_client).await,
+        Transport::Auto => crate::ws::auto_loop(cfg, cred, client, sem, mk_client).await,
     }
 }
 
@@ -75,10 +99,11 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
 /// poll fallback before retrying the WebSocket channel.
 pub async fn poll_loop_inner(
     cfg: Config,
-    client: Client,
+    mut client: Client,
     sem: Arc<Semaphore>,
     node_id: String,
     max_duration: Option<Duration>,
+    mk_client: impl Fn() -> Client,
 ) -> Result<()> {
     let deadline = max_duration.map(|d| tokio::time::Instant::now() + d);
     // Consecutive poll failures back off exponentially (3s, 6s, 12s, 24s cap)
@@ -121,6 +146,8 @@ pub async fn poll_loop_inner(
                     }
                 };
                 fail_streak = 0;
+                // CP-managed proxy list (env AGENTGRID_PROXY_URLS wins if set).
+                cfg.proxies.update_from_cp(pr.proxy_urls.clone());
                 // Plan 0.3 1.2: consume the whole batch; legacy CPs only fill
                 // `assignment` (N/N-1 compat).
                 let mut batch = pr.assignments;
@@ -146,6 +173,17 @@ pub async fn poll_loop_inner(
                 let wait = backoff(fail_streak);
                 fail_streak = fail_streak.saturating_add(1);
                 tracing::warn!("poll failed: {e}; retrying in {wait:?}");
+                // Proxy failover: a connect/timeout error may be the egress
+                // proxy dying (the CP being down produces the same symptom;
+                // marking a healthy-direct pool empty is a no-op). Rotate to
+                // the next alive proxy and rebuild the client.
+                if e.is_connect() || e.is_timeout() {
+                    if let Some(p) = cfg.proxies.current() {
+                        tracing::warn!("egress proxy {p} failed; rotating to next");
+                        cfg.proxies.mark_dead(&p);
+                        client = mk_client();
+                    }
+                }
                 tokio::time::sleep(wait).await;
             }
         }

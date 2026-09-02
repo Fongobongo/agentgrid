@@ -862,6 +862,42 @@ paths:
           in: path
           required: true
           schema: { type: string }
+  /v1/proxies:
+    get:
+      summary: List CP-managed egress proxies
+      description: |
+        Global pool (node_id null) first, then node-scoped rows. Nodes
+        receive their effective list (global + own) in every poll response
+        and rotate on failure (dead proxy is retried after 5 minutes).
+      responses:
+        '200': { description: OK }
+    post:
+      summary: Register an egress proxy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, description: 'Scheme http/https/socks5' }
+                node_id: { type: string, description: 'Omit for the global pool' }
+      responses:
+        '201': { description: Created }
+        '400': { description: Invalid proxy URL }
+        '409': { description: Already registered }
+  /v1/proxies/{id}:
+    delete:
+      summary: Remove an egress proxy
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: Removed }
+        '404': { description: Not found }
   /v1/skills/{name}/trust:
     post:
       summary: Trust a skill

@@ -809,6 +809,22 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // ProcessBackend env_clears the child, so daemon-env secrets must be
         // allowlisted here.
         let mut spawn_env = cfg.adapter_env.clone();
+        // Egress proxy (pool with failover): route adapter/LLM traffic of the
+        // attempt through it. Covers bare attempts and sandboxed ones (the
+        // docker prefix forwards env). Operators can still override per-node
+        // via AGENTGRID_PROXY_URLS; without any pool nothing is injected.
+        if let Some(proxy) = cfg.proxies.current() {
+            for k in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
+                spawn_env.push((k.to_string(), proxy.clone()));
+            }
+        }
         if let Some(p) = &cp_profile {
             for req in &p.secret_requirements {
                 if let Some(v) = std::env::var_os(&req.env) {
@@ -1274,6 +1290,7 @@ async fn github_writeback(
         &assignment.task_id,
         &assignment.attempt_id,
         token,
+        cfg.proxies.current().as_deref(),
     )
     .await
     {
@@ -1289,7 +1306,15 @@ async fn github_writeback(
             "Resolved by agentgrid — see the linked PR (`agent/{}`).",
             assignment.task_id
         );
-        match crate::github::comment_issue(repo, issue, &comment, token).await {
+        match crate::github::comment_issue(
+            repo,
+            issue,
+            &comment,
+            token,
+            cfg.proxies.current().as_deref(),
+        )
+        .await
+        {
             Ok(url) => {
                 log("github_issue_commented", format!("issue comment: {url}")).await;
             }
