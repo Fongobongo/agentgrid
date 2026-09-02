@@ -236,6 +236,15 @@ what they download (not that a rebuild matches). For bit-identical rebuilds a
 future pass would pin `rust-toolchain.toml`, add `remap-path-prefix`, and
 reproduce the web bundle in a pinned container image.
 
+## Windows
+
+Windows hosts (and WSL1) are not supported. The supported path from a Windows
+workstation is a Linux node — WSL2 is a practical option: run
+`agentgrid-node-daemon` inside a WSL2 distro (systemd-enabled or `nohup`), and
+keep each attempt's worktree inside the WSL ext4 filesystem (`~/...`), not on
+`/mnt/c/...` (NTFS mount kills git performance and breaks file modes). Linux
+kernel >= 5.10 applies (stock WSL2 yes).
+
 ## Dev / ops notes
 
 - Only one control-plane instance per SQLite DB: a second launch is refused via
