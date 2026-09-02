@@ -19,6 +19,7 @@ use sqlx::sqlite::{
 };
 use sqlx::Row;
 
+mod adapter_env;
 mod agents;
 mod approvals;
 mod artifacts;

@@ -1345,6 +1345,7 @@ mod tests {
             accounts: vec![],
             github_token: None,
             proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
+            managed_adapter_env: Default::default(),
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-{}-{}",
@@ -1453,6 +1454,7 @@ mod tests {
             sandbox: sandbox::SandboxKind::None,
             github_token: None,
             proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
+            managed_adapter_env: Default::default(),
             // Two-token pool backing a credential env var the fake agent ignores —
             // rotation only swaps the value, which is enough to exercise the path.
             accounts: vec![crate::config::AccountConfig {
@@ -1633,6 +1635,7 @@ mod tests {
             accounts: vec![],
             github_token: None,
             proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
+            managed_adapter_env: Default::default(),
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-hang-{}-{}",
@@ -1752,6 +1755,7 @@ mod tests {
             accounts: vec![],
             github_token: None,
             proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
+            managed_adapter_env: Default::default(),
         };
         let ws = std::env::temp_dir().join(format!(
             "ag-acp-cancel-{}-{}",
@@ -1940,6 +1944,7 @@ mod tests {
                 accounts: vec![],
                 github_token: None,
                 proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
+                managed_adapter_env: Default::default(),
             };
 
             let ws = tmp.join("ws");

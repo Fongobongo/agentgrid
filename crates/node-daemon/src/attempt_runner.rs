@@ -825,6 +825,17 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 spawn_env.push((k.to_string(), proxy.clone()));
             }
         }
+        // CP-managed adapter env (adapter env endpoints/keys, e.g. point
+        // claude at a custom base URL). Local AGENTGRID_ADAPTER_ENV wins:
+        // only inject keys the operator hasn't set locally.
+        for e in cfg.managed_adapter_env.lock().unwrap().iter() {
+            let matches = e.adapter == "*"
+                || assignment.adapter == e.adapter
+                || assignment.adapter.starts_with(&format!("{}:", e.adapter));
+            if matches && !spawn_env.iter().any(|(k, _)| k == &e.key) {
+                spawn_env.push((e.key.clone(), e.value.clone()));
+            }
+        }
         if let Some(p) = &cp_profile {
             for req in &p.secret_requirements {
                 if let Some(v) = std::env::var_os(&req.env) {

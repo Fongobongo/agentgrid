@@ -359,6 +359,7 @@ mod tests {
             accounts: vec![],
             github_token: None,
             proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
+            managed_adapter_env: Default::default(),
         }
     }
 

@@ -139,6 +139,11 @@ pub struct Config {
     /// or CP-pushed list). Shared across poll/ws/attempts so one pool state
     /// drives every egress surface.
     pub proxies: std::sync::Arc<crate::proxy::ProxyPool>,
+    /// CP-pushed adapter environment (custom endpoints/keys, e.g.
+    /// ANTHROPIC_BASE_URL). Updated on every poll; local AGENTGRID_ADAPTER_ENV
+    /// values win on key collision.
+    pub managed_adapter_env:
+        std::sync::Arc<std::sync::Mutex<Vec<agentgrid_common::AdapterEnvEntry>>>,
 }
 
 /// One credential env-var and the tokens that back it for failover rotation.
@@ -308,6 +313,7 @@ pub fn config_from_env() -> Config {
             "AGENTGRID_PROXY_URLS",
             "",
         ))),
+        managed_adapter_env: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
     }
 }
 

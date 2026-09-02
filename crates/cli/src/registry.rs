@@ -1117,3 +1117,82 @@ pub(crate) async fn cmd_proxy(client: &reqwest::Client, base: &str, a: ProxyArgs
         }
     }
 }
+
+// ── CP-managed adapter env (custom endpoints/keys) ─────────────────────
+
+/// `ag adapter-env ls/set/rm` — CP-pushed env for adapter processes, e.g.
+/// claude via a custom endpoint: `ag adapter-env set claude
+/// ANTHROPIC_BASE_URL https://agentrouter.org`.
+#[derive(Args)]
+pub(crate) struct AdapterEnvArgs {
+    #[command(subcommand)]
+    action: AdapterEnvAction,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AdapterEnvAction {
+    /// List managed entries.
+    Ls,
+    /// Add or update an entry (adapter or `*`; `--node` scopes it).
+    Set {
+        adapter: String,
+        key: String,
+        value: String,
+        #[arg(long)]
+        node: Option<String>,
+    },
+    /// Remove an entry by id (see `ls`).
+    Rm { id: i64 },
+}
+
+pub(crate) async fn cmd_adapter_env(
+    client: &reqwest::Client,
+    base: &str,
+    a: AdapterEnvArgs,
+) -> Result<()> {
+    match a.action {
+        AdapterEnvAction::Ls => {
+            let resp = client.get(format!("{base}/v1/adapter-env")).send().await?;
+            err_if_fail(resp.status(), "list adapter env")?;
+            let v: serde_json::Value = resp.json().await?;
+            for p in list_items(&v) {
+                println!(
+                    "#{:>3} {:<12} {:<28} node={}  value={}",
+                    p["id"].as_i64().unwrap_or(0),
+                    p["adapter"].as_str().unwrap_or(""),
+                    p["key"].as_str().unwrap_or(""),
+                    p["node_id"].as_str().unwrap_or("*"),
+                    p["value"].as_str().unwrap_or(""),
+                );
+            }
+            Ok(())
+        }
+        AdapterEnvAction::Set {
+            adapter,
+            key,
+            value,
+            node,
+        } => {
+            let resp = client
+                .put(format!("{base}/v1/adapter-env"))
+                .json(&serde_json::json!({
+                    "adapter": adapter, "key": key, "value": value, "node_id": node,
+                }))
+                .send()
+                .await?;
+            err_if_fail(resp.status(), "set adapter env")?;
+            let v: serde_json::Value = resp.json().await?;
+            println!("adapter-env #{} saved", v["id"]);
+            Ok(())
+        }
+        AdapterEnvAction::Rm { id } => {
+            let resp = client
+                .delete(format!("{base}/v1/adapter-env/{id}"))
+                .send()
+                .await?;
+            err_if_fail(resp.status(), "remove adapter env")?;
+            println!("adapter-env #{id} removed");
+            Ok(())
+        }
+    }
+}

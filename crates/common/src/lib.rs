@@ -960,6 +960,19 @@ pub struct PollResponse {
     /// current; the node's own env `AGENTGRID_PROXY_URLS` always wins when set.
     #[serde(default)]
     pub proxy_urls: Vec<String>,
+    /// CP-managed adapter environment (e.g. route claude at a custom proxy
+    /// endpoint: adapter=claude, key=ANTHROPIC_BASE_URL). Entries with
+    /// adapter="*" apply to every adapter. Empty = keep current.
+    #[serde(default)]
+    pub adapter_env: Vec<AdapterEnvEntry>,
+}
+
+/// One CP-managed env-var entry for attempts of a given adapter (or `*`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterEnvEntry {
+    pub adapter: String,
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1656,6 +1669,7 @@ mod tests {
             }),
             assignments: vec![],
             proxy_urls: vec![],
+            adapter_env: vec![],
         };
         assert_eq!(round_trip(&pr), pr);
         // Batch field round-trips and tolerates absence (N/N-1 compat).

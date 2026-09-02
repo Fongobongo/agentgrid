@@ -862,6 +862,43 @@ paths:
           in: path
           required: true
           schema: { type: string }
+  /v1/adapter-env:
+    get:
+      summary: List CP-managed adapter env entries
+      description: |
+        Entries pushed to nodes on poll and injected into attempt process
+        env (adapter match or `*`; node_id NULL = global). Local node env
+        wins on key collision.
+      responses:
+        '200': { description: OK }
+    put:
+      summary: Upsert an adapter env entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adapter, key, value]
+              properties:
+                adapter: { type: string, description: "Adapter id or '*'" }
+                key: { type: string, description: "Env var name (ASCII uppercase)" }
+                value: { type: string }
+                node_id: { type: string, description: 'Omit for global' }
+      responses:
+        '200': { description: Upserted }
+        '400': { description: Invalid adapter/key }
+  /v1/adapter-env/{id}:
+    delete:
+      summary: Remove an adapter env entry
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: Removed }
+        '404': { description: Not found }
   /v1/proxies:
     get:
       summary: List CP-managed egress proxies

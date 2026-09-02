@@ -68,6 +68,8 @@ enum AgCommand {
     Profiles(registry::ProfilesArgs),
     /// Manage the CP-managed egress proxy pool pushed to nodes.
     Proxy(registry::ProxyArgs),
+    /// CP-managed adapter env (custom endpoints/keys, pushed to nodes).
+    AdapterEnv(registry::AdapterEnvArgs),
     /// Start the control plane (standalone binary).
     Server(ServerStartArgs),
     /// Define and run Agentgrid workflows (DAGs of agent steps).
@@ -509,6 +511,7 @@ async fn main() -> Result<()> {
         AgCommand::Mcp(a) => registry::cmd_mcp(&client, &base, a).await,
         AgCommand::Profiles(a) => registry::cmd_profiles(&client, &base, a).await,
         AgCommand::Proxy(a) => registry::cmd_proxy(&client, &base, a).await,
+        AgCommand::AdapterEnv(a) => registry::cmd_adapter_env(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
         AgCommand::Workflow(a) => workflow::cmd_workflow(&client, &base, a, cli.json).await,
         AgCommand::Tui(a) => cmd_tui(&client, &base, a).await,

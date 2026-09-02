@@ -3112,3 +3112,38 @@ mod proxy_tests {
         assert!(s.add_proxy("http://g1:8080", None).await.is_err());
     }
 }
+
+#[cfg(test)]
+mod adapter_env_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn global_and_node_scoped_upsert() {
+        let p = std::env::temp_dir().join(format!("ag-aenv-{}.db", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(p.to_str().unwrap()).await.unwrap();
+
+        s.upsert_adapter_env("claude", "ANTHROPIC_BASE_URL", "https://r.example", None)
+            .await
+            .unwrap();
+        s.upsert_adapter_env("claude", "ANTHROPIC_AUTH_TOKEN", "k1", Some("node-a"))
+            .await
+            .unwrap();
+
+        let g = s.adapter_env_for("node-b").await.unwrap();
+        assert_eq!(g.len(), 1);
+        let a = s.adapter_env_for("node-a").await.unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].key, "ANTHROPIC_BASE_URL", "global rows first");
+
+        // upsert updates value in place (same adapter+key+node)
+        s.upsert_adapter_env("claude", "ANTHROPIC_BASE_URL", "https://r2.example", None)
+            .await
+            .unwrap();
+        let g = s.adapter_env_for("node-b").await.unwrap();
+        assert_eq!(g[0].value, "https://r2.example");
+
+        let id = s.list_adapter_env().await.unwrap()[0].id;
+        assert_eq!(s.remove_adapter_env(id).await.unwrap(), 1);
+    }
+}

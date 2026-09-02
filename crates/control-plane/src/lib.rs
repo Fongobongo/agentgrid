@@ -399,6 +399,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             axum::routing::delete(routes::learnings::delete_learning),
         )
         .route(
+            "/v1/adapter-env",
+            get(routes::adapter_env::list_adapter_env).put(routes::adapter_env::set_adapter_env),
+        )
+        .route(
+            "/v1/adapter-env/{id}",
+            axum::routing::delete(routes::adapter_env::remove_adapter_env),
+        )
+        .route(
             "/v1/proxies",
             get(routes::proxies::list_proxies).post(routes::proxies::add_proxy),
         )

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- **CP-managed adapter env** (`ag adapter-env ls/set/rm`, `/v1/adapter-env`):
+  key/value pairs (adapter-scoped or `*`, global or per-node) pushed to
+  nodes in poll responses and injected into attempt process env. Enables
+  pointing adapters at non-default endpoints from the control plane —
+  e.g. Claude Code via a third-party gateway:
+  `ag adapter-env set claude ANTHROPIC_BASE_URL https://agentrouter.org`,
+  `… set claude ANTHROPIC_AUTH_TOKEN sk-…`. Local `AGENTGRID_ADAPTER_ENV`
+  wins on key collision. Migration `0081_adapter_env.sql`.
+- **Heartbeat proxy failover**: heartbeats rotate through the proxy pool
+  on connect/timeout, same as the poll loop.
+
 ## [0.4.3] — 2026-09-02
 
 ### Added

@@ -85,7 +85,7 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
 
     // Heartbeat loop: publish status/load/capabilities periodically (runs on
     // every transport; the WS channel additionally carries slot heartbeats).
-    heartbeat::spawn_heartbeat_with(
+    heartbeat::spawn_heartbeat(
         cfg.clone(),
         client.clone(),
         sem.clone(),
@@ -162,6 +162,7 @@ pub async fn poll_loop_inner(
                 }
                 // Plan 0.3 1.2: consume the whole batch; legacy CPs only fill
                 // `assignment` (N/N-1 compat).
+                *cfg.managed_adapter_env.lock().unwrap() = pr.adapter_env.clone();
                 let mut batch = pr.assignments;
                 if batch.is_empty() {
                     if let Some(a) = pr.assignment {

@@ -201,9 +201,16 @@ pub async fn poll(
     // Plan 533: degrade + touch + assign are coordinated in SchedulerService.
     // CP-managed egress proxy list for this node (global pool + node-scoped).
     // Failure must not break polling — an empty list means no update.
+    // CP-pushed node config: egress proxies + adapter env (best-effort —
+    // failures leave the node on its previous snapshot).
     let proxy_urls = state
         .store
         .proxy_urls_for(&req.node_id)
+        .await
+        .unwrap_or_default();
+    let adapter_env = state
+        .store
+        .adapter_env_for(&req.node_id)
         .await
         .unwrap_or_default();
     let out = match state.scheduler.poll(&req, max_batch).await {
@@ -212,6 +219,7 @@ pub async fn poll(
                 assignment: None,
                 assignments: batch,
                 proxy_urls,
+                adapter_env,
             };
             resp.assignment = Some(resp.assignments[0].clone());
             (StatusCode::OK, Json(resp))
@@ -222,6 +230,7 @@ pub async fn poll(
                 assignment: None,
                 assignments: Vec::new(),
                 proxy_urls,
+                adapter_env,
             }),
         ),
         Err(e) => {
@@ -232,6 +241,7 @@ pub async fn poll(
                     assignment: None,
                     assignments: Vec::new(),
                     proxy_urls,
+                    adapter_env,
                 }),
             )
         }

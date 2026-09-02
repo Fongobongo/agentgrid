@@ -1,6 +1,7 @@
 //! HTTP route handlers, grouped by resource. Handlers stay thin:
 //! auth (middleware/extensions) → validate → store call → response.
 
+pub mod adapter_env;
 pub mod agents;
 pub mod approvals;
 pub mod artifacts;
