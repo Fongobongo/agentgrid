@@ -307,9 +307,8 @@ jobs:
           # compatible gateway endpoint + model); defaults = plain claude key.
           AG_REAL_ADAPTER: ${{ secrets.AG_REAL_ADAPTER }}
           AG_REAL_EXTRA_ENV: ${{ secrets.AG_REAL_EXTRA_ENV }}
-        # Keep the sandbox on failure so the upload step below can attach
-        # node/attempt outputs to the failed run.
-        env:
+          # Keep the sandbox so the upload step below can attach node/attempt
+          # outputs to a failed run.
           AG_E2E_KEEP: "1"
         run: |
           rc=0
