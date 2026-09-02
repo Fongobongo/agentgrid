@@ -109,8 +109,9 @@ start_node() {
   local name="$1" tok="$2"
   # Per-node XDG_DATA_HOME: opencode keeps a local sqlite db under
   # XDG_DATA_HOME and two daemons on one runner would collide on it.
-  local xdg="$TMP/$name-xdg"; mkdir -p "$xdg"
+  local xdg="$TMP/$name-xdg" home="$TMP/$name-home"; mkdir -p "$xdg" "$home"
   env PATH="$BIN:$PATH" \
+    HOME="$home" \
     XDG_DATA_HOME="$xdg" \
     AGENTGRID_SERVER="$BASE" \
     AGENTGRID_DATA_DIR="$TMP/$name" \
