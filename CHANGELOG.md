@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-02
+
 ### Added
 
 - **CP-managed egress proxy pool with failover.** `ag proxy ls/add/rm`
@@ -16,6 +18,22 @@
   `AGENTGRID_PROXY_URLS=url1,url2` ignores the CP list. WS connect itself
   is not proxied (tokio-tungstenite has no CONNECT support) — poll
   fallback covers proxied environments.
+- **Web UI proxy page** (`#/proxies`): list/add/remove pool entries.
+- **E2E proxy failover test** (`tests/e2e/run-proxy-failover.sh`): node
+  rotates proxies when the active one dies mid-run.
+- **Sandbox cold-start benchmark** (`tests/e2e/measure-sandbox-coldstart.sh`).
+
+### Docs
+
+- ADR 0012 (egress proxy pool); `docs/ROADMAP.md` — tracked status summary
+  of the exhausted competitor roadmap; agent-ops proxy ops section.
+
+### Maintenance
+
+- control-plane `store.rs` split: 3 750 lines of inline tests moved to
+  `store/tests.rs` (968-line module left).
+- CLI `main.rs` 3 808 → 1 985 lines: `nodes.rs` + `registry.rs` extracted.
+- node-daemon `git.rs` test suite extracted to `git/tests.rs`.
 
 ## [v0.4.2] — 2026-08-31
 
