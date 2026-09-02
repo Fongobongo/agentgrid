@@ -307,6 +307,10 @@ jobs:
           # compatible gateway endpoint + model); defaults = plain claude key.
           AG_REAL_ADAPTER: ${{ secrets.AG_REAL_ADAPTER }}
           AG_REAL_EXTRA_ENV: ${{ secrets.AG_REAL_EXTRA_ENV }}
+        # Keep the sandbox on failure so the upload step below can attach
+        # node/attempt outputs to the failed run.
+        env:
+          AG_E2E_KEEP: "1"
         run: |
           rc=0
           bash tests/e2e/run-real-agent.sh || rc=$?
@@ -315,3 +319,10 @@ jobs:
             exit 0
           fi
           exit "$rc"
+      - name: upload real-agent debug logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: real-agent-e2e-logs
+          path: /var/tmp/ag-e2e-real-*/
+          if-no-files-found: ignore

@@ -70,7 +70,7 @@ cleanup() {
   [ -n "$NODE_A_PID" ] && kill -9 "$NODE_A_PID" 2>/dev/null
   [ -n "$NODE_B_PID" ] && kill -9 "$NODE_B_PID" 2>/dev/null
   [ -n "$CP_PID" ] && kill "$CP_PID" 2>/dev/null
-  [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
+  if [ "${AG_E2E_KEEP:-0}" = "1" ]; then echo "kept sandbox: $TMP"; else rm -rf "$TMP"; fi
 }
 trap cleanup EXIT
 
