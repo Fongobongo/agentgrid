@@ -169,6 +169,19 @@ jobs:
           # the step before the rc check below can turn it into a skip. Guard
           # with `|| rc=$?` so errexit never fires on the script's exit code.
           rc=0
+          pip install --quiet paramiko 2>/dev/null || pip install --quiet --break-system-packages paramiko
+          if [ -n "$AG_REMOTE_SSH_KEY" ]; then
+            mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+            printf '%s\n' "$AG_REMOTE_SSH_KEY" > "$HOME/.ssh/id_ed25519_agentgrid_remote"
+            chmod 600 "$HOME/.ssh/id_ed25519_agentgrid_remote"
+          fi
+          cat > .env <<EOF
+          AG_REMOTE_HOST=$AG_REMOTE_HOST
+          AG_REMOTE_USER=$AG_REMOTE_USER
+          AG_REMOTE_PASSWORD=$AG_REMOTE_PASS
+          AG_REMOTE_PORT=${AG_REMOTE_PORT:-22}
+          AG_REMOTE_KEY=$HOME/.ssh/id_ed25519_agentgrid_remote
+          EOF
           bash tests/e2e/run-skill-bundle.sh || rc=$?
           if [ "$rc" = "77" ]; then
             echo "no AG_REMOTE_* configured — skipping skill-bundle job"
