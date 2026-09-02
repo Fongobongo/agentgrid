@@ -298,8 +298,28 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: build debug binaries
         run: cargo build --workspace
-      - name: install the real agent CLI
-        run: npm install -g @anthropic-ai/claude-code
+      - name: install the real agent CLIs
+        run: |
+          npm install -g @anthropic-ai/claude-code opencode-ai
+      - name: opencode custom-provider config (agentrouter)
+        # codex-like config layout: the script passes OPENCODE_CONFIG via
+        # AG_REAL_EXTRA_ENV; the key stays a secret referenced by name.
+        run: |
+          mkdir -p "$HOME/.config/opencode-e2e"
+          cat > "$HOME/.config/opencode-e2e/opencode.json" <<'EOF'
+          {
+            "$schema": "https://opencode.ai/config.json",
+            "model": "ar/glm-5.3",
+            "provider": {
+              "ar": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "agentrouter",
+                "options": { "baseURL": "https://agentrouter.org/v1", "apiKey": "{env:AR_KEY}" },
+                "models": { "glm-5.3": { "name": "glm-5.3" } }
+              }
+            }
+          }
+          EOF
       - name: run one real task on two nodes
         env:
           AG_REAL_KEY: ${{ secrets.AG_REAL_KEY }}
@@ -307,6 +327,9 @@ jobs:
           # compatible gateway endpoint + model); defaults = plain claude key.
           AG_REAL_ADAPTER: ${{ secrets.AG_REAL_ADAPTER }}
           AG_REAL_EXTRA_ENV: ${{ secrets.AG_REAL_EXTRA_ENV }}
+          # Forwarded to run-real-agent.sh when AG_REAL_ADAPTER=opencode so
+          # the provider key lands in the right env var name.
+          AG_REAL_KEY_NAME: ${{ secrets.AG_REAL_KEY_NAME }}
           # Keep the sandbox so the upload step below can attach node/attempt
           # outputs to a failed run.
           AG_E2E_KEEP: "1"
