@@ -92,6 +92,20 @@ pub async fn run_transport(cfg: Config, cred: crate::config::SavedCredential) ->
         Some(Arc::new(mk_client.clone())),
     );
 
+    // Proxy health prober: TCP-probes pool entries, revives reachable ones
+    // early, keeps unreachable ones quarantined. 0 disables.
+    let probe_secs: u64 = std::env::var("AGENTGRID_PROXY_PROBE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    if probe_secs > 0 {
+        let pool = std::sync::Arc::clone(&cfg.proxies);
+        tokio::spawn(crate::proxy::probe_loop(
+            pool,
+            std::time::Duration::from_secs(probe_secs),
+        ));
+    }
+
     match cfg.transport {
         Transport::Poll => poll_loop_inner(cfg, client, sem, cred.node_id, None, mk_client).await,
         Transport::Ws => crate::ws::ws_loop(cfg, cred, client, sem, mk_client).await,
@@ -115,6 +129,10 @@ pub async fn poll_loop_inner(
     // so a down/unreachable CP is not hammered by every node every 3s.
     let mut fail_streak: u32 = 0;
     let backoff = |streak: u32| Duration::from_secs(3 * (1 << streak.min(3)));
+    // Proxy the client is actually built against. Transport errors mark
+    // THIS url dead (not whatever current() happens to return at that
+    // instant — the prober may have rotated the pool meanwhile).
+    let mut built_against: Option<String> = cfg.proxies.current();
 
     loop {
         if let Some(d) = deadline {
@@ -152,13 +170,16 @@ pub async fn poll_loop_inner(
                 };
                 fail_streak = 0;
                 // CP-managed proxy list (env AGENTGRID_PROXY_URLS wins if set).
-                // First delivery turns an empty pool into a non-empty one:
-                // rebuild the client so polls actually route through it.
-                let was_empty = cfg.proxies.all().is_empty();
                 cfg.proxies.update_from_cp(pr.proxy_urls.clone());
-                if was_empty && !cfg.proxies.all().is_empty() {
-                    tracing::info!("egress proxy list received; rerouting client");
-                    client = mk_client();
+                // Rebuild the client whenever the effective proxy changes:
+                // first list delivery, failover AND recovery back to a
+                // higher-priority revived proxy (prober/TTL revive).
+                if let Some(now) = cfg.proxies.current() {
+                    if built_against.as_deref() != Some(now.as_str()) {
+                        tracing::info!("active egress proxy -> {now}");
+                        client = mk_client();
+                        built_against = Some(now);
+                    }
                 }
                 // Plan 0.3 1.2: consume the whole batch; legacy CPs only fill
                 // `assignment` (N/N-1 compat).
@@ -191,10 +212,11 @@ pub async fn poll_loop_inner(
                 // marking a healthy-direct pool empty is a no-op). Rotate to
                 // the next alive proxy and rebuild the client.
                 if e.is_connect() || e.is_timeout() {
-                    if let Some(p) = cfg.proxies.current() {
+                    if let Some(p) = built_against.clone() {
                         tracing::warn!("egress proxy {p} failed; rotating to next");
                         cfg.proxies.mark_dead(&p);
                         client = mk_client();
+                        built_against = cfg.proxies.current();
                     }
                 }
                 tokio::time::sleep(wait).await;

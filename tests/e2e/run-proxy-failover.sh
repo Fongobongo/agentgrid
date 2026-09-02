@@ -73,6 +73,7 @@ env PATH="$BIN:$PATH" \
   AGENTGRID_ADAPTERS="mock" \
   AGENTGRID_TRANSPORT="poll" \
   AGENTGRID_MAX_CONCURRENCY="1" \
+  AGENTGRID_PROXY_PROBE_SECS="2" \
   AGENTGRID_ENROLL_TOKEN="$ENROLL_TOKEN" \
   RUST_LOG="info" \
   nohup "$BIN/agentgrid-node-daemon" >"$TMP/node.log" 2>&1 &
@@ -106,5 +107,17 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [ "$st" = "online" ] || { echo "node not online after rotation (status=$st)"; exit 1; }
+
+echo ">> reviving proxy A — prober must bring the node back"
+na_before=$(wc -l < "$TMP/hitsA.log")
+revived=0
+for _ in $(seq 1 45); do
+  if pgrep -f "mini-forward-proxy.py $PROXY_A_PORT" >/dev/null ||      { python3 "$PY" $PROXY_A_PORT "$TMP/hitsA.log" & PIDS+=($!); sleep 1; true; }; then :; fi
+  na_now=$(wc -l < "$TMP/hitsA.log")
+  if [ "$na_now" -gt "$na_before" ]; then revived=1; break; fi
+  sleep 1
+done
+[ "$revived" = "1" ] || { echo "FAIL: node never returned to revived proxy A"; tail -20 "$TMP/node.log"; exit 1; }
+echo "   node returned to revived proxy A"
 
 echo "PROXY FAILOVER E2E OK"

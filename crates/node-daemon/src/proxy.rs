@@ -78,8 +78,12 @@ impl ProxyPool {
             .insert(url.to_string(), Instant::now());
     }
 
+    /// Revive a URL immediately (prober saw it reachable).
+    pub fn revive(&self, url: &str) {
+        self.inner.lock().unwrap().dead.remove(url);
+    }
+
     /// All configured URLs, dead or not (health checks / status reporting).
-    #[allow(dead_code)]
     #[allow(dead_code)]
     pub fn all(&self) -> Vec<String> {
         let g = self.inner.lock().unwrap();
@@ -110,5 +114,83 @@ mod tests {
         let env_p = ProxyPool::new(vec!["http://mine:1".into()]);
         env_p.update_from_cp(vec!["http://x:1".into()]);
         assert_eq!(env_p.current().as_deref(), Some("http://mine:1"));
+    }
+}
+
+/// Background health prober: every `interval` try a TCP connect to every
+/// pool entry. Reachable => revive (clears the dead-TTL so the node returns
+/// to it before the full quarantine expires); unreachable => mark the dead
+/// window again. Keeps the pool honest without load on the CP.
+///
+/// Best-effort and deliberately shallow: a TCP handshake proves the proxy
+/// host answers, not that the upstream destination is reachable.
+pub async fn probe_loop(pool: std::sync::Arc<ProxyPool>, interval: Duration) {
+    // Never return early on an empty pool: the CP-pushed list may arrive
+    // after startup. Just sleep until there is something to probe.
+    loop {
+        tokio::time::sleep(interval).await;
+        for url in pool.all() {
+            match probe_one(&url).await {
+                true => pool.revive(&url),
+                false => pool.mark_dead(&url),
+            }
+        }
+    }
+}
+
+async fn probe_one(url: &str) -> bool {
+    let Some(addr) = host_port(url) else {
+        return false;
+    };
+    tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr))
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
+}
+
+fn host_port(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after_scheme.rsplit('@').next()?.split('/').next()?;
+    if authority.is_empty() {
+        None
+    } else {
+        Some(authority.to_string())
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn host_port_parses_common_forms() {
+        assert_eq!(
+            host_port("http://127.0.0.1:8080").unwrap(),
+            "127.0.0.1:8080"
+        );
+        assert_eq!(
+            host_port("http://user:pw@proxy.local:3128/ignored").unwrap(),
+            "proxy.local:3128"
+        );
+        assert_eq!(
+            host_port("socks5://10.0.0.5:1080").unwrap(),
+            "10.0.0.5:1080"
+        );
+        assert!(host_port("http://").is_none());
+    }
+
+    #[tokio::test]
+    async fn dead_proxy_revives_when_reachable() {
+        // Bind a throwaway listener — that's a reachable TCP endpoint.
+        let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ln.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let pool = std::sync::Arc::new(ProxyPool::new(vec![url.clone()]));
+        pool.mark_dead(&url);
+        assert_eq!(pool.current(), None);
+        assert!(probe_one(&url).await);
+        pool.revive(&url);
+        assert_eq!(pool.current().as_deref(), Some(url.as_str()));
+        drop(ln);
     }
 }

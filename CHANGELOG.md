@@ -18,6 +18,10 @@
   wins on key collision. Migration `0081_adapter_env.sql`.
 - **Heartbeat proxy failover**: heartbeats rotate through the proxy pool
   on connect/timeout, same as the poll loop.
+- **Proxy health prober** (`AGENTGRID_PROXY_PROBE_SECS=60`, `0` disables):
+  node TCP-probes pool entries; revived proxies get traffic again early,
+  dead ones stay quarantined without waiting out the full TTL. E2E covers
+  kill → failover → revive → return.
 
 ## [0.4.3] — 2026-09-02
 
