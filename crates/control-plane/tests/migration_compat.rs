@@ -68,6 +68,7 @@ async fn migrations_serve_legacy_happy_path() {
         agent_version: "test".into(),
         load_avg: 0.1,
         free_disk_mb: 4096,
+        mem_available_mb: 4096,
         active_attempts: 0,
         protocol_version: None,
         capabilities: vec![],

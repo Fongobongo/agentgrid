@@ -225,7 +225,7 @@ impl Store {
         .await?;
 
         let node = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, drained, active_rss_mib, max_rss_mib \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, drained, active_rss_mib, max_rss_mib \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
@@ -276,6 +276,28 @@ impl Store {
                     max_rss,
                     projected,
                     "rejected_due_to_pressure"
+                );
+                return Ok(Vec::new());
+            }
+        }
+        // Host memory gate: refuse new work when the node knows it has too
+        // little RAM left (MemAvailable). 0 = not reported -> admit (legacy
+        // nodes, cold start); only a known-below-threshold value rejects.
+        // Threshold configurable via AGENTGRID_MIN_FREE_MEM_MB (default
+        // 1024 MiB ~= a claude-code session + adapter + git).
+        {
+            let mem_avail: i64 = node.try_get("mem_available_mb").unwrap_or(0);
+            let min_free_mb: i64 = std::env::var("AGENTGRID_MIN_FREE_MEM_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1024);
+            if mem_avail > 0 && mem_avail < min_free_mb {
+                let _ = tx.rollback().await;
+                tracing::info!(
+                    node_id,
+                    mem_avail,
+                    min_free_mb,
+                    "rejected_due_to_low_host_memory"
                 );
                 return Ok(Vec::new());
             }

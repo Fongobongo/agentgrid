@@ -820,6 +820,10 @@ pub struct HeartbeatRequest {
     pub free_disk_mb: u64,
     #[serde(default)]
     pub active_attempts: u32,
+    /// Latest MemAvailable of the host (MiB, from /proc/meminfo). 0 = not
+    /// reported: the scheduler memory gate only applies once a value known.
+    #[serde(default)]
+    pub mem_available_mb: u64,
     /// Node→control-plane protocol version (Stage 2.5). Absent on legacy
     /// nodes; a major mismatch marks the node `degraded`.
     #[serde(default)]
@@ -1701,6 +1705,7 @@ mod tests {
             load_avg: 0.5,
             free_disk_mb: 1024,
             active_attempts: 1,
+            mem_available_mb: 4096,
             capabilities: vec![],
             protocol_version: None,
             discovered_skills: vec![],

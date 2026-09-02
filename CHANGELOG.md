@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **Host-memory scheduling gate**: nodes report `MemAvailable` in every
+  heartbeat; the CP skips assignment when it is known and below
+  `AGENTGRID_MIN_FREE_MEM_MB` (default 1024 MiB). 0 = not reported
+  (legacy nodes) — admitted. Migration `0082_mem_available.sql`.
 
 - **CP-managed adapter env** (`ag adapter-env ls/set/rm`, `/v1/adapter-env`):
   key/value pairs (adapter-scoped or `*`, global or per-node) pushed to

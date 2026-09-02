@@ -53,6 +53,26 @@ pub fn read_vmrss_mib() -> u64 {
     0
 }
 
+/// MemAvailable in MiB from /proc/meminfo (kernel's estimate of memory
+/// startable without swapping). 0 when unreadable — CP treats 0 as
+/// "unknown", not as "no memory".
+pub fn read_mem_available_mb() -> u64 {
+    let Ok(s) = std::fs::read_to_string("/proc/meminfo") else {
+        return 0;
+    };
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kb: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            return kb / 1024;
+        }
+    }
+    0
+}
+
 /// Read free disk space in MB for `path`.
 pub fn read_free_disk_mb(path: &Path) -> u64 {
     let cpath = match CString::new(path.to_string_lossy().as_bytes().to_vec()) {
@@ -218,6 +238,7 @@ pub fn spawn_heartbeat(
                 agent_version: cfg.agent_version.clone(),
                 load_avg: read_load_avg(),
                 free_disk_mb: free_disk,
+                mem_available_mb: read_mem_available_mb(),
                 active_attempts: active,
                 capabilities,
                 protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),

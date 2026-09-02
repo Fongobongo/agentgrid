@@ -3147,3 +3147,115 @@ mod adapter_env_tests {
         assert_eq!(s.remove_adapter_env(id).await.unwrap(), 1);
     }
 }
+
+#[cfg(test)]
+mod mem_gate_tests {
+    use super::*;
+    use agentgrid_common::{CreateTaskRequest, EnrollRequest, HeartbeatRequest};
+
+    async fn fresh() -> (Store, String) {
+        let p = std::env::temp_dir().join(format!("ag-mem-{}.db", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(p.to_str().unwrap()).await.unwrap();
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 4,
+                agent_version: "t".into(),
+                protocol_version: None,
+                permission_interception: "none".into(),
+            })
+            .await
+            .unwrap()
+            .expect("enroll")
+            .node_id;
+        (s, node_id)
+    }
+
+    fn hb(mem_mb: u64) -> HeartbeatRequest {
+        HeartbeatRequest {
+            status: None,
+            name: "n".into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 4,
+            agent_version: "t".into(),
+            load_avg: 0.0,
+            free_disk_mb: 1000,
+            mem_available_mb: mem_mb,
+            active_attempts: 0,
+            protocol_version: None,
+            capabilities: vec![],
+            discovered_skills: vec![],
+            account_usage: vec![],
+            unsafe_active: false,
+            permission_interception: "none".into(),
+            outbox_bytes: 0,
+            artifact_spool_bytes: 0,
+            outbox_rows: 0,
+            outbox_oldest_pending_age_ms: 0,
+            outbox_corruption_count: 0,
+            outbox_completion_rows: 0,
+            repo_lock_wait_ms: 0,
+            repo_cache_bytes: 0,
+            workspace_bytes: 0,
+            active_rss_mib: 0,
+            max_rss_mib: 0,
+            applied_opencode_hash: None,
+            network_mode: "none".into(),
+            sandbox_backend: "none".into(),
+            enforced_limits: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn low_host_memory_blocks_assignment() {
+        let (s, node_id) = fresh().await;
+        s.create_task(&CreateTaskRequest {
+            repository: "r".into(),
+            prompt: "p".into(),
+            adapter: "mock".into(),
+            requested_node_id: Some(node_id.clone()),
+            timeout_secs: None,
+            validation_command: None,
+            base_commit: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // Known-low memory -> no assignment.
+        s.heartbeat(&node_id, &hb(200)).await.unwrap();
+        assert!(
+            s.try_assign(&node_id).await.unwrap().is_none(),
+            "must not schedule on a host with 200 MiB free"
+        );
+        // Ample memory -> assignment goes through.
+        s.heartbeat(&node_id, &hb(4096)).await.unwrap();
+        assert!(s.try_assign(&node_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn unknown_host_memory_still_admits() {
+        let (s, node_id) = fresh().await;
+        s.create_task(&CreateTaskRequest {
+            repository: "r".into(),
+            prompt: "p".into(),
+            adapter: "mock".into(),
+            requested_node_id: Some(node_id.clone()),
+            timeout_secs: None,
+            validation_command: None,
+            base_commit: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // mem_available_mb = 0 -> old node / unreadable /proc: admit.
+        s.heartbeat(&node_id, &hb(0)).await.unwrap();
+        assert!(s.try_assign(&node_id).await.unwrap().is_some());
+    }
+}
