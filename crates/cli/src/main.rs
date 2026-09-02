@@ -66,6 +66,15 @@ enum AgCommand {
     Mcp(registry::McpArgs),
     /// Manage agent profiles (system prompt + autonomy + limits; immutable revisions).
     Profiles(registry::ProfilesArgs),
+    /// Live view of nodes + recent tasks (repeats every N seconds).
+    Watch {
+        /// Refresh interval in seconds.
+        #[arg(short, long, default_value = "3")]
+        interval: u64,
+        /// How many recent tasks to show.
+        #[arg(long, default_value = "12")]
+        tasks: usize,
+    },
     /// Manage the CP-managed egress proxy pool pushed to nodes.
     Proxy(registry::ProxyArgs),
     /// CP-managed adapter env (custom endpoints/keys, pushed to nodes).
@@ -510,6 +519,7 @@ async fn main() -> Result<()> {
         AgCommand::Skills(a) => registry::cmd_skills(&client, &base, a).await,
         AgCommand::Mcp(a) => registry::cmd_mcp(&client, &base, a).await,
         AgCommand::Profiles(a) => registry::cmd_profiles(&client, &base, a).await,
+        AgCommand::Watch { interval, tasks } => cmd_watch(&client, &base, interval, tasks).await,
         AgCommand::Proxy(a) => registry::cmd_proxy(&client, &base, a).await,
         AgCommand::AdapterEnv(a) => registry::cmd_adapter_env(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
@@ -1986,5 +1996,83 @@ mod setup_tests {
         let parsed = <SetupArgs as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
         assert!(parsed.accept_defaults);
         assert!(parsed.no_smoke);
+    }
+}
+
+/// `ag watch` — one-screen live view: nodes on top, recent tasks below.
+async fn cmd_watch(
+    client: &reqwest::Client,
+    base: &str,
+    interval: u64,
+    tasks: usize,
+) -> Result<()> {
+    loop {
+        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+        let mut out =
+            format!("=== agentgrid watch {now} (every {interval}s, Ctrl+C to quit) ===\n\n");
+
+        let nodes = client
+            .get(format!("{base}/v1/nodes"))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("nodes: {e}"))?
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default();
+        let mut nhas = false;
+        for n in list_items(&nodes) {
+            nhas = true;
+            out.push_str(&format!(
+                " node {:<16} {:<9} {:>3}/{:<3} rss {:>5}/{} MiB  mem {:>5} MiB  disk {:>6} MiB  {}\n",
+                n["name"].as_str().unwrap_or("?"),
+                n["status"].as_str().unwrap_or("?"),
+                n["active_attempts"].as_u64().unwrap_or(0),
+                n["max_concurrency"].as_u64().unwrap_or(0),
+                n["active_rss_mib"].as_u64().unwrap_or(0),
+                n["max_rss_mib"].as_u64().unwrap_or(0),
+                n["mem_available_mb"].as_u64().unwrap_or(0),
+                n["free_disk_mb"].as_u64().unwrap_or(0),
+                n["id"].as_str().unwrap_or(""),
+            ));
+        }
+        if !nhas {
+            out.push_str(" (no nodes)\n");
+        }
+        out.push('\n');
+
+        let list = client
+            .get(format!("{base}/v1/tasks?limit={tasks}"))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("tasks: {e}"))?
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default();
+        let mut thas = false;
+        for t in list_items(&list) {
+            thas = true;
+            let id = t["id"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(8)
+                .collect::<String>();
+            let prompt: String = t["prompt"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect();
+            out.push_str(&format!(
+                " task {id} {:<11} {:<9} {prompt}\n",
+                t["status"].as_str().unwrap_or("?"),
+                t["adapter"].as_str().unwrap_or("?"),
+            ));
+        }
+        if !thas {
+            out.push_str(" (no tasks)\n");
+        }
+        print!("\x1b[2J\x1b[H{out}");
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
     }
 }
