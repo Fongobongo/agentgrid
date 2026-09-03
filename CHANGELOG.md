@@ -18,6 +18,11 @@
   wins on key collision. Migration `0081_adapter_env.sql`.
 - **Heartbeat proxy failover**: heartbeats rotate through the proxy pool
   on connect/timeout, same as the poll loop.
+- **Beta lift**: schedules / plan expansion / `zeroshot` cluster adapter /
+  shared task-group context now publish a beta contract (ADR 0014).
+- **Adapter: pi** — `adapter-pi` wraps `pi --mode json -p` and translates
+  documented JsonAgentSessionEvent events into the contract. Verified against
+  a live pi session on this box.
 - **Adapter: aider** — `adapter-aider` runs `aider -m` in unattended mode;
   plain-text sessions surface as `log`/`progress` events (token summary);
   `--yes-always` gated on `AGENTGRID_UNSAFE_UNATTENDED` (without it, aider

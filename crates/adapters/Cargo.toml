@@ -37,3 +37,7 @@ path = "src/bin/adapter-codex.rs"
 [[bin]]
 name = "adapter-aider"
 path = "src/bin/adapter-aider.rs"
+
+[[bin]]
+name = "adapter-pi"
+path = "src/bin/adapter-pi.rs"

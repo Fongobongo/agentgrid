@@ -105,6 +105,12 @@ Anything on stderr is forwarded to the daemon log. Use it for diagnostics
   unknown lines fall through as `log`. Binary overridable via
   `AGENTGRID_CLAUDE_BIN`.
 - `adapter-opencode` — same pattern for the opencode CLI.
+- `adapter-pi` — wraps [pi](https://pkggo.dev/pi.mjs.dev/pi) via
+  `pi --mode json -p "<prompt>"`; translates the documented
+  `JsonAgentSessionEvent` stream (tool_execution_start/end → `tool_call`,
+  assistant `message_end` → `log`, `agent_end` → `result` + token `progress`).
+  `AGENTGRID_PI_MODEL` / `AGENTGRID_PI_THINK`, `AGENTGRID_PI_BIN`. Pi has no
+  bypass flag — gate nodes through sandboxes/policies as usual.
 - `adapter-aider` — wraps [Aider](https://aider.chat) in unattended
   prompt mode (`aider -m "<prompt>"`). Output is plain text → the adapter
   surfaces the session as a transcript (`log` events); the edit trail stays

@@ -45,7 +45,7 @@ fills.
 | workflows (DAG / schedule / run projection) | **beta** | contract frozen by ADR 0013; additive-only evolution |
 | ACP gateway / Telegram gateway | **experimental** | separate binaries, not in the minimal release by default |
 | skills / MCP registry | **beta** | contract frozen by ADR 0013; server is source of truth |
-| schedules / plan expansion / zeroshot / context provider | **experimental** | subject to change |
+| schedules / plan expansion / zeroshot / context provider | **beta** | contract frozen by ADR 0014 |
 | Docker/Podman sandbox backend | **beta** | the worktree is **not** a security sandbox — run untrusted agents in the Docker sandbox with a restrictive network/secrets policy |
 
 Untrusted agents must run under the Docker/Podman sandbox with `permission_interception` and a network/secrets policy. A plain git worktree is **not** isolation against hostile code — see [`docs/decisions/threat-model.md`](docs/decisions/threat-model.md).
@@ -59,7 +59,7 @@ Untrusted agents must run under the Docker/Podman sandbox with `permission_inter
 - **node-daemon**: WebSocket control channel (default; falls back to long-poll),
   adapter subprocess per attempt in its own worktree + process group, streams
   stdout/stderr as events, reports completion.
-- **adapters**: `mock` (no LLM), `claude`, `codex`, `opencode`, `aider` — translate the agent's
+- **adapters**: `mock` (no LLM), `claude`, `codex`, `opencode`, `aider`, `pi` — translate the agent's
   JSON events into the agentgrid contract.
 - **cli** (`ag`): submit/inspect tasks, list nodes, mint tokens, run server,
   index a repo into a knowledge-graph packet for system-prompt injection

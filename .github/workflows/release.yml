@@ -94,7 +94,7 @@ jobs:
         # starts as an agent) — skipped.
         run: |
           cd "target/${{ matrix.target }}/release"
-          for b in ag agentgrid-control-plane agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-claude adapter-codex adapter-aider adapter-opencode; do
+          for b in ag agentgrid-control-plane agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-claude adapter-codex adapter-aider adapter-pi adapter-opencode; do
             if file -b "$b" | grep -q "x86-64"; then
               "./$b" --version
             else
@@ -106,7 +106,7 @@ jobs:
       - name: checksums (SHA256SUMS)
         run: |
           cd "target/${{ matrix.target }}/release"
-          sha256sum agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode \
+          sha256sum agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi adapter-pi \
             > SHA256SUMS
           cat SHA256SUMS
 
@@ -124,6 +124,7 @@ jobs:
             target/${{ matrix.target }}/release/adapter-claude
             target/${{ matrix.target }}/release/adapter-codex
             target/${{ matrix.target }}/release/adapter-aider
+            target/${{ matrix.target }}/release/adapter-pi
             target/${{ matrix.target }}/release/adapter-opencode
             target/${{ matrix.target }}/release/SHA256SUMS
           if-no-files-found: warn
@@ -217,10 +218,10 @@ jobs:
               # it or the published tarballs ship non-executable binaries
               # (first seen live on the v0.4.0 assets).
               chmod +x agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
-                agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode
+                agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi
               tar czf "$GITHUB_WORKSPACE/release-assets/agentgrid-$t.tar.gz" \
                 agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
-                agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode SHA256SUMS
+                agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi SHA256SUMS
             )
           done
           ls -la release-assets
