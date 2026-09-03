@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.4] - 2026-09-03
 
 ### Added
 - **Host-memory scheduling gate**: nodes report `MemAvailable` in every
