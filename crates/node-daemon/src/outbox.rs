@@ -74,6 +74,10 @@ pub struct EventOutbox {
     /// Group-fsync bookkeeping: `push` fsyncs at most once per
     /// `fsync_interval` (see `open`); 0 restores fsync-per-event.
     last_fsync: Mutex<std::time::Instant>,
+    /// Cached global-quota scan: (when taken, total bytes). Refreshed at most
+    /// once per `QUOTA_RESCAN_INTERVAL` and incremented locally on each
+    /// successful push, so the hot path avoids a `read_dir` per event.
+    quota_cache: Mutex<(std::time::Instant, u64)>,
     fsync_interval: std::time::Duration,
     spool_limit_bytes: u64,
     /// Hardening P0 item 10: global cap across ALL per-attempt spools plus the
@@ -81,6 +85,11 @@ pub struct EventOutbox {
     /// Best-effort ceiling — a single oversized event may overshoot.
     quota_bytes: u64,
 }
+
+/// How often the cached global-quota total is re-scanned from disk. Between
+/// rescans our own writes are counted locally, so the estimate stays
+/// conservative (never undercounts this outbox's growth).
+const QUOTA_RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Errors from [`EventOutbox::push`]. `SpoolFull` is recoverable: the caller
 /// should stop accepting events and terminate the attempt with `spool_full`.
@@ -144,6 +153,7 @@ impl EventOutbox {
             root: dir.to_path_buf(),
             file: Mutex::new(()),
             last_fsync: Mutex::new(std::time::Instant::now()),
+            quota_cache: Mutex::new((std::time::Instant::now(), 0)),
             fsync_interval: std::time::Duration::from_millis(fsync_interval_ms),
             spool_limit_bytes,
             quota_bytes,
@@ -162,10 +172,14 @@ impl EventOutbox {
         // per-attempt spool limit remains the primary guard; the quota is a
         // second ceiling for many concurrent attempts.
         if self.quota_bytes > 0 {
-            if let Ok(total) = total_bytes(&self.root) {
-                if total >= self.quota_bytes {
-                    return Err(PushError::SpoolFull);
+            let mut cache = self.quota_cache.lock().unwrap();
+            if cache.0.elapsed() >= QUOTA_RESCAN_INTERVAL {
+                if let Ok(total) = total_bytes(&self.root) {
+                    *cache = (std::time::Instant::now(), total);
                 }
+            }
+            if cache.1 >= self.quota_bytes {
+                return Err(PushError::SpoolFull);
             }
         }
         // Check the cap before appending: if already over, refuse. The limit
@@ -217,6 +231,9 @@ impl EventOutbox {
             .map_err(PushError::Other)?;
         f.write_all(s.as_bytes())
             .map_err(|e| PushError::Other(e.into()))?;
+        if self.quota_bytes > 0 {
+            self.quota_cache.lock().unwrap().1 += s.len() as u64;
+        }
         let mut last = self.last_fsync.lock().unwrap();
         if self.fsync_interval.is_zero() || last.elapsed() >= self.fsync_interval {
             f.sync_data().map_err(|e| PushError::Other(e.into()))?;
@@ -1097,6 +1114,7 @@ mod tests {
             root: ob.root.clone(),
             file: Mutex::new(()),
             last_fsync: Mutex::new(std::time::Instant::now()),
+            quota_cache: Mutex::new((std::time::Instant::now(), 0)),
             fsync_interval: std::time::Duration::ZERO,
             spool_limit_bytes: 1,
             quota_bytes: 0,
@@ -1134,6 +1152,7 @@ mod tests {
             root: ob.root.clone(),
             file: Mutex::new(()),
             last_fsync: Mutex::new(std::time::Instant::now()),
+            quota_cache: Mutex::new((std::time::Instant::now(), 0)),
             fsync_interval: std::time::Duration::ZERO,
             spool_limit_bytes: 200,
             quota_bytes: 0,
@@ -1292,6 +1311,7 @@ mod tests {
             root: ob.root.clone(),
             file: Mutex::new(()),
             last_fsync: Mutex::new(std::time::Instant::now()),
+            quota_cache: Mutex::new((std::time::Instant::now(), 0)),
             fsync_interval: std::time::Duration::ZERO,
             spool_limit_bytes: 0, // unlimited per-attempt: quota is the only gate
             quota_bytes: 1,
