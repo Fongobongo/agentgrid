@@ -1,0 +1,121 @@
+{
+  "title": "AgentGrid control plane",
+  "uid": "agentgrid-cp",
+  "description": "Dashboard for agentgrid control plane (Prometheus /metrics). Import via Grafana → Dashboards → Import.",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [
+    { "type": "datasource", "name": "DS_PROMETHEUS", "query": "prometheus", "hide": 0 },
+    { "type": "promql", "name": "node", "label": "node", "datasource": "${DS_PROMETHEUS}",
+      "query": "label_values(agentgrid_node_load_avg, node)" }
+  ] },
+  "panels": [
+    { "type": "row", "title": "Overview", "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }, "panels": [] },
+    { "type": "stat", "title": "nodes online", "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "sum(agentgrid_nodes{status=\"online\"})" } ] },
+    { "type": "stat", "title": "running tasks", "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "sum(agentgrid_tasks{status=\"running\"})" } ] },
+    { "type": "stat", "title": "queued tasks", "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "sum(agentgrid_tasks{status=\"queued\"})" } ] },
+    { "type": "stat", "title": "oldest queued (s)", "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "max(agentgrid_oldest_queued_task_seconds)" } ] },
+    { "type": "stat", "title": "last backup age (s)", "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "max(agentgrid_last_backup_age_seconds)" } ] },
+    { "type": "stat", "title": "ws-connected nodes", "gridPos": { "x": 20, "y": 1, "w": 4, "h": 4 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "sum(agentgrid_node_transport_connections{transport=\"ws\"})" } ] },
+
+    { "type": "row", "title": "Throughput", "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 }, "panels": [] },
+    { "type": "timeseries", "title": "attempts rate (5m)", "gridPos": { "x": 0, "y": 6, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "rate(agentgrid_attempts_total[5m])" } ] },
+    { "type": "timeseries", "title": "terminal tasks rate (5m) by status", "gridPos": { "x": 8, "y": 6, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "sum by (status) (rate(agentgrid_tasks_total[5m]))" } ] },
+    { "type": "timeseries", "title": "scheduler latency ms", "gridPos": { "x": 16, "y": 6, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "agentgrid_scheduler_latency_ms" } ] },
+
+    { "type": "row", "title": "Latency", "gridPos": { "x": 0, "y": 14, "w": 24, "h": 1 }, "panels": [] },
+    { "type": "timeseries", "title": "task duration (p50/p90/p99)", "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum(rate(agentgrid_task_duration_seconds_bucket[10m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.9, sum(rate(agentgrid_task_duration_seconds_bucket[10m])) by (le))", "legendFormat": "p90" },
+        { "expr": "histogram_quantile(0.99, sum(rate(agentgrid_task_duration_seconds_bucket[10m])) by (le))", "legendFormat": "p99" }
+      ] },
+    { "type": "timeseries", "title": "poll requests rate / duration", "gridPos": { "x": 12, "y": 15, "w": 12, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "rate(agentgrid_poll_requests_total[5m])", "legendFormat": "requests/s" },
+        { "expr": "rate(agentgrid_poll_duration_ms_sum[5m]) / rate(agentgrid_poll_requests_total[5m])",
+          "legendFormat": "avg ms/poll" }
+      ] },
+
+    { "type": "row", "title": "SQLite", "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 }, "panels": [] },
+    { "type": "timeseries", "title": "db / WAL size", "gridPos": { "x": 0, "y": 24, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "agentgrid_sqlite_db_bytes", "legendFormat": "db bytes" },
+        { "expr": "agentgrid_sqlite_wal_bytes", "legendFormat": "wal bytes" }
+      ] },
+    { "type": "timeseries", "title": "sqlite busy / write-lock failures (rate 5m)", "gridPos": { "x": 8, "y": 24, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "rate(agentgrid_sqlite_busy_total[5m])", "legendFormat": "busy" },
+        { "expr": "rate(agentgrid_sqlite_write_lock_failures_total[5m])", "legendFormat": "write lock failures" }
+      ] },
+    { "type": "timeseries", "title": "checkpoint ms", "gridPos": { "x": 16, "y": 24, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "agentgrid_sqlite_checkpoint_ms" } ] },
+
+    { "type": "row", "title": "Nodes", "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 }, "panels": [] },
+    { "type": "timeseries", "title": "node load avg", "gridPos": { "x": 0, "y": 33, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "agentgrid_node_load_avg", "legendFormat": "{{node}}" } ] },
+    { "type": "timeseries", "title": "mem available (MB)", "gridPos": { "x": 8, "y": 33, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "agentgrid_node_mem_available_mb", "legendFormat": "{{node}}" } ] },
+    { "type": "timeseries", "title": "free disk (MB)", "gridPos": { "x": 16, "y": 33, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "agentgrid_node_free_disk_mb", "legendFormat": "{{node}}" } ] },
+    { "type": "timeseries", "title": "outbox pressure", "gridPos": { "x": 0, "y": 41, "w": 12, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "agentgrid_node_outbox_bytes", "legendFormat": "{{node}} bytes" },
+        { "expr": "agentgrid_node_outbox_rows", "legendFormat": "{{node}} rows" }
+      ] },
+    { "type": "timeseries", "title": "oldest pending outbox age (ms)", "gridPos": { "x": 12, "y": 41, "w": 12, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [ { "expr": "agentgrid_node_outbox_oldest_pending_age_ms", "legendFormat": "{{node}}" } ] },
+
+    { "type": "row", "title": "Integrity / anomalies", "gridPos": { "x": 0, "y": 49, "w": 24, "h": 1 }, "panels": [] },
+    { "type": "timeseries", "title": "event stream anomalies (rate 5m)", "gridPos": { "x": 0, "y": 50, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "rate(agentgrid_event_rejections_total[5m])", "legendFormat": "rejections" },
+        { "expr": "rate(agentgrid_event_gaps_total[5m])", "legendFormat": "gaps" },
+        { "expr": "rate(agentgrid_lease_reverts_total[5m])", "legendFormat": "lease reverts" }
+      ] },
+    { "type": "timeseries", "title": "scheduler hardening flags (rate 5m)", "gridPos": { "x": 8, "y": 50, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "rate(agentgrid_cross_node_rejects_total[5m])", "legendFormat": "cross-node rejects" },
+        { "expr": "rate(agentgrid_stale_fencing_tokens_total[5m])", "legendFormat": "stale fencing" },
+        { "expr": "rate(agentgrid_active_attempt_drift_total[5m])", "legendFormat": "attempt drift" }
+      ] },
+    { "type": "timeseries", "title": "outbox data integrity (rate 5m)", "gridPos": { "x": 16, "y": 50, "w": 8, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "rate(agentgrid_node_outbox_corruption_total[5m])", "legendFormat": "{{node}} corrupt" },
+        { "expr": "rate(agentgrid_artifact_cleanup_failures_total[5m])", "legendFormat": "cleanup failures" }
+      ] }
+  ]
+}
