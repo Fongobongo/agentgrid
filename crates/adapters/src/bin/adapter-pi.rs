@@ -237,6 +237,7 @@ mod tests {
                          "result":{"ok":true},"isError":false})
         .to_string();
         let evs = translate(&end, &mut err, &mut u);
+        assert_eq!(types(&evs), vec!["tool_call"]);
         assert!(!err);
         let bad = json!({"type":"tool_execution_end","toolCallId":"b","toolName":"bash",
                          "result":{},"isError":true})
