@@ -42,8 +42,11 @@ impl Store {
 
     pub async fn list_adapter_env(&self) -> Result<Vec<AdapterEnvView>> {
         Ok(sqlx::query_as::<_, AdapterEnvView>(
+            // Audit X-C6: globals are stored as '' (see upsert), never NULL —
+            // the old `node_id IS NULL` tied everywhere and the global-first
+            // order was arbitrary. Matches `adapter_env_for`'s predicate.
             "SELECT id, adapter, key, value, NULLIF(node_id, '') AS node_id, created_at \
-             FROM adapter_env ORDER BY (node_id IS NULL) DESC, adapter, key",
+             FROM adapter_env ORDER BY (node_id = '') DESC, adapter, key",
         )
         .fetch_all(&self.pool)
         .await?)

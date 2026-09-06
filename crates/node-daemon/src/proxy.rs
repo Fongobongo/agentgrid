@@ -41,9 +41,11 @@ impl ProxyPool {
     }
 
     /// Replace the CP-managed list. No-op when env override is configured.
+    /// Audit X-N1b: also a no-op on an empty delivery — the CP contract is
+    /// Empty=keep current, and legacy polls carry `[]` on every cycle.
     pub fn update_from_cp(&self, urls: Vec<String>) {
         let mut g = self.inner.lock().unwrap();
-        if !g.env_urls.is_empty() {
+        if !g.env_urls.is_empty() || urls.is_empty() {
             return;
         }
         // Keep liveness state for URLs that survive the update.
