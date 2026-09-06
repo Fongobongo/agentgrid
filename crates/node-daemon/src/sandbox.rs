@@ -90,12 +90,18 @@ pub fn sandbox_prefix(
     network_mode: Option<&str>,
     read_only_worktree: bool,
     container_name: Option<&str>,
+    container_env: &[(String, String)],
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), vec![]),
         SandboxKind::Docker => {
-            let mut prefix =
-                docker_run_head(workdir, network_mode, read_only_worktree, container_name);
+            let mut prefix = docker_run_head(
+                workdir,
+                network_mode,
+                read_only_worktree,
+                container_name,
+                container_env,
+            );
             prefix.push(image_ref());
             prefix.push(program.into());
             ("docker".into(), prefix)
@@ -121,7 +127,13 @@ fn valid_allowlist_spec(net: &str) -> bool {
 /// the mapping in [`docker_run_head`].
 pub fn resolved_network_mode(mode: &str) -> String {
     match mode {
-        "restricted" => egress_proxy_network().unwrap_or_else(|| "none".to_string()),
+        // Audit X-N3: both the proxy network AND its URL must be configured
+        // for a restricted attempt to leave `none` — a bridge with no
+        // filtering URL is unfiltered internet, not an upgrade.
+        "restricted" => match (egress_proxy_network(), egress_proxy_url()) {
+            (Some(net), Some(_)) => net,
+            _ => "none".to_string(),
+        },
         "unrestricted" => "bridge".to_string(),
         "none" => "none".to_string(),
         _ => "none".to_string(),
@@ -151,13 +163,18 @@ pub fn egress_proxy_url() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// True when the effective egress is isolated: `none`, or a `restricted`
-/// attempt attached to a configured egress-proxy network (the proxy enforces
-/// the allowlist, so isolation is preserved even though the docker network is
-/// not `none`).
+/// True when the effective egress is isolated: `none`; a `restricted`
+/// attempt collapsed to `none` (no usable proxy); or `restricted` attached
+/// to a configured egress-proxy network WITH its filtering URL. A proxy
+/// network without a URL is unfiltered internet (fail-open), so it reports
+/// NOT isolated (audit X-N2: the old code reported it isolated).
 pub fn effective_egress_isolated(mode: &str) -> bool {
     match mode {
-        "restricted" => egress_proxy_network().is_some(),
+        "restricted" => match (egress_proxy_network(), egress_proxy_url()) {
+            (None, _) => true,
+            (Some(_), Some(_)) => true,
+            (Some(_), None) => false,
+        },
         other => other == "none",
     }
 }
@@ -211,6 +228,7 @@ fn docker_run_head(
     network_mode: Option<&str>,
     read_only_worktree: bool,
     container_name: Option<&str>,
+    container_env: &[(String, String)],
 ) -> Vec<String> {
     let mut v = vec![
         "run".to_string(),
@@ -255,8 +273,11 @@ fn docker_run_head(
     // allowlist.
     let net = match net.as_str() {
         "none" => "none".to_string(),
+        // Audit X-N3: attach to the proxy network only when a filtering URL
+        // is configured too — a bridge with no proxy env is unfiltered
+        // internet, a downgrade from `none`, not an upgrade.
         "restricted" => {
-            if let Some(egress) = egress_proxy_network() {
+            if let (Some(egress), Some(_)) = (egress_proxy_network(), egress_proxy_url()) {
                 tracing::debug!(
                     network = %egress,
                     "network_mode=restricted attaches to the egress-proxy network"
@@ -264,8 +285,8 @@ fn docker_run_head(
                 egress
             } else {
                 tracing::debug!(
-                    "network_mode=restricted maps to --network none (docker has no \
-                     per-range egress filter; egress proxy is the upgrade path)"
+                    "network_mode=restricted maps to --network none (no usable \
+                     egress proxy configured)"
                 );
                 "none".to_string()
             }
@@ -285,6 +306,16 @@ fn docker_run_head(
     };
     v.push("--network".to_string());
     v.push(net);
+    // Audit X-N3b: forward the attempt env INTO the container. The backend
+    // applies SpawnRequest.env only to the `docker` client process, so
+    // without these flags credentials/proxies/managed env never reached
+    // sandboxed agents. (The proxy-URL block below stays as the restricted
+    // path's explicit variant; when it fires the same pairs simply appear
+    // twice — harmless, last-wins identical values.)
+    for (k, val) in container_env {
+        v.push("--env".to_string());
+        v.push(format!("{k}={val}"));
+    }
     // Competitor-gap feature (egress firewall): inject the proxy URL so
     // restricted-mode adapters route through the sidecar (which enforces the
     // domain allowlist). Only applied when a restricted attempt attached to
@@ -374,6 +405,10 @@ pub(crate) fn image_ref() -> String {
 /// ponytail: binds the whole workdir read-write; a stricter mount policy
 /// (read-only + separate artifact dir) is the upgrade path once a real
 /// DockerBackend trait owns the worktree/artifact mounts.
+// Audit X-N3b: eight assembly knobs is the documented shape of these two
+// builders (each has a narrow, distinct role); splitting them into a config
+// struct would churn every caller for no gain.
+#[allow(clippy::too_many_arguments)]
 pub fn sandbox_command(
     kind: SandboxKind,
     program: &str,
@@ -382,12 +417,18 @@ pub fn sandbox_command(
     network_mode: Option<&str>,
     read_only_worktree: bool,
     container_name: Option<&str>,
+    container_env: &[(String, String)],
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), args.to_vec()),
         SandboxKind::Docker => {
-            let mut out =
-                docker_run_head(workdir, network_mode, read_only_worktree, container_name);
+            let mut out = docker_run_head(
+                workdir,
+                network_mode,
+                read_only_worktree,
+                container_name,
+                container_env,
+            );
             out.push(image_ref());
             out.push(program.to_string());
             out.extend(args.iter().cloned());
@@ -595,6 +636,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         assert_eq!(p, "claude");
         assert_eq!(a, vec!["--acp"]);
@@ -614,6 +656,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -646,6 +689,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         assert_eq!(p, "adapter-x");
         assert!(a.is_empty());
@@ -671,6 +715,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         clear_sandbox_env();
         let idx = a
@@ -698,6 +743,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -737,6 +783,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -752,6 +799,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         clear_sandbox_env();
         assert_eq!(a2[a2.len() - 2], "img:1@sha256:f00d");
@@ -773,6 +821,7 @@ mod tests {
             None,
             true,
             None,
+            &[],
         );
         clear_sandbox_env();
         let vol = a
@@ -792,6 +841,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         let vol2 = a2
             .iter()
@@ -888,6 +938,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
@@ -912,6 +963,7 @@ mod tests {
                 mode,
                 false,
                 None,
+                &[],
             );
             let i = a.iter().position(|x| x == "--network").unwrap() + 1;
             a[i].clone()
@@ -942,6 +994,7 @@ mod tests {
             Some("restricted"),
             false,
             None,
+            &[],
         );
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
@@ -965,6 +1018,7 @@ mod tests {
             Some("unrestricted"),
             false,
             None,
+            &[],
         );
         let at2 = |flag: &str| a2.iter().position(|x| x == flag).unwrap() + 1;
         assert_eq!(a2[at2("--network")], "bridge");
@@ -1023,6 +1077,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
         );
         clear_sandbox_env();
         assert!(

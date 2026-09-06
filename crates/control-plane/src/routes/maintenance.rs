@@ -185,7 +185,9 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
             n.free_disk_mb
         ));
     }
-    s.push_str("# HELP agentgrid_node_mem_available_mb Host MemAvailable reported via heartbeat.\n");
+    s.push_str(
+        "# HELP agentgrid_node_mem_available_mb Host MemAvailable reported via heartbeat.\n",
+    );
     s.push_str("# TYPE agentgrid_node_mem_available_mb gauge\n");
     for n in &nodes {
         if n.mem_available_mb > 0 {
