@@ -1007,8 +1007,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                     )
                     .await;
                     prompt = format!(
-                        "{orig}\n\nValidation failed (round {round}):\n```\n{log}\n```\nFix the code so the validation passes.",
-                        orig = format!("{}{}", assignment.prompt, brain)
+                        "{base}{brain}\n\nValidation failed (round {round}):\n```\n{log}\n```\nFix the code so the validation passes.",
+                        base = assignment.prompt,
+                        brain = brain.as_str()
                     );
                     round += 1;
                     continue;
