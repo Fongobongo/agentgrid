@@ -42,7 +42,9 @@ fn aider_args(prompt: &str, unsafe_unattended: bool) -> (String, Vec<String>) {
     if unsafe_unattended {
         extra.push("--yes-always".into());
     } else {
-        // Read-only chat: no file writes without explicit operator opt-in.
+        // Read-only chat: no file writes without explicit operator opt-in
+        // (matches the documented `--no-git --chat-mode=chat` safe mode).
+        extra.push("--no-git".into());
         extra.push("--chat-mode".into());
         extra.push("chat".into());
     }

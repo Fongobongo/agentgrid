@@ -719,8 +719,11 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     let mut prompt = assignment.prompt.clone();
     // Competitor-gap feature (project brain): append the repo's persistent
     // project memory (AGENTS-BRAIN.md) when present in the worktree — same
-    // block as the ACP path, so both transports get the brain.
-    prompt.push_str(&crate::skills::compose_brain_block(&workdir).await);
+    // block as the ACP path, so both transports get the brain. Kept in a
+    // separate binding (audit X-N8): the validation-feedback retry below
+    // rebuilds the prompt and used to drop the brain from round 1 on.
+    let brain = crate::skills::compose_brain_block(&workdir).await;
+    prompt.push_str(&brain);
     let mut last_code: i32;
     let mut last_kill_reason: Option<&'static str> = None;
     // Hardening P0 item 12: distinct validation verdicts (timeout/cancel) are
@@ -776,19 +779,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     }
 
     let mut round = 0usize;
-    // Stage 11.2 / line 358: route the legacy wrapper-binary spawn through
-    // the configured sandbox (matches the ACP path). `sandbox_prefix` splits
-    // the program from the prefix args because ProcessBackend appends its own
-    // `--prompt <prompt>` after the prefix.
-    // Hardening P2 item 659: pass task network_mode to sandbox.
-    let (sb_program, sb_prefix) = sandbox::sandbox_prefix(
-        cfg.sandbox,
-        &ws.path,
-        &bin,
-        assignment.network_mode.as_deref(),
-        assignment.read_only,
-        Some(&sandbox::container_name(&assignment.attempt_id)),
-    );
+    // Hardening P2 item 659: the task network_mode reaches the sandbox below.
     // Plan §27: egress audit — log the effective isolation applied to this
     // attempt (task mode + resolved docker network) so operators can verify
     // the deployed network policy from the daemon logs.
@@ -810,9 +801,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // allowlisted here.
         let mut spawn_env = cfg.adapter_env.clone();
         // Egress proxy (pool with failover): route adapter/LLM traffic of the
-        // attempt through it. Covers bare attempts and sandboxed ones (the
-        // docker prefix forwards env). Operators can still override per-node
-        // via AGENTGRID_PROXY_URLS; without any pool nothing is injected.
+        // attempt through it. Without any pool nothing is injected; operators
+        // can still override per-node via AGENTGRID_PROXY_URLS.
         if let Some(proxy) = cfg.proxies.current() {
             for k in [
                 "HTTP_PROXY",
@@ -855,9 +845,23 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 spawn_env.push(("OPENCODE_CONFIG_CONTENT".to_string(), merged));
             }
         }
+        // Audit X-N3b: Stage 11.2 routes the wrapper-binary spawn through the
+        // configured sandbox; the prefix is rebuilt per round because the
+        // container env above can change between rounds (proxy failover).
+        // `sandbox_prefix` splits the program from the prefix args because
+        // ProcessBackend appends its own `--prompt <prompt>` after the prefix.
+        let (sb_program, sb_prefix) = sandbox::sandbox_prefix(
+            cfg.sandbox,
+            &ws.path,
+            &bin,
+            assignment.network_mode.as_deref(),
+            assignment.read_only,
+            Some(&sandbox::container_name(&assignment.attempt_id)),
+            &spawn_env,
+        );
         let req = SpawnRequest {
-            bin: sb_program.clone(),
-            sandbox_prefix_args: sb_prefix.clone(),
+            bin: sb_program,
+            sandbox_prefix_args: sb_prefix,
             prompt: prompt.clone(),
             extra_args: vec![],
             raw_args: false,
@@ -1003,8 +1007,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                     )
                     .await;
                     prompt = format!(
-                        "{orig}\n\nValidation failed (round {round}):\n```\n{log}\n```\nFix the code so the validation passes.",
-                        orig = assignment.prompt
+                        "{base}{brain}\n\nValidation failed (round {round}):\n```\n{log}\n```\nFix the code so the validation passes.",
+                        base = assignment.prompt,
+                        brain = brain.as_str()
                     );
                     round += 1;
                     continue;

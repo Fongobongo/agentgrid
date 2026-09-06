@@ -183,7 +183,12 @@ pub async fn poll_loop_inner(
                 }
                 // Plan 0.3 1.2: consume the whole batch; legacy CPs only fill
                 // `assignment` (N/N-1 compat).
-                *cfg.managed_adapter_env.lock().unwrap() = pr.adapter_env.clone();
+                // Audit X-N1b: Empty = keep current (the field is `[]` on
+                // every legacy poll) — never wipe managed env on an empty
+                // delivery.
+                if !pr.adapter_env.is_empty() {
+                    *cfg.managed_adapter_env.lock().unwrap() = pr.adapter_env.clone();
+                }
                 let mut batch = pr.assignments;
                 if batch.is_empty() {
                     if let Some(a) = pr.assignment {

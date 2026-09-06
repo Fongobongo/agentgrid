@@ -153,7 +153,13 @@ fn truncate(s: &str) -> String {
     if s.len() <= MAX_DETAIL {
         s.to_string()
     } else {
-        format!("{}…", &s[..MAX_DETAIL - 1])
+        // Audit X-C5: char-boundary cut (same as diff_scan) — byte indexing
+        // panicked on multi-byte content straddling the boundary.
+        let mut end = MAX_DETAIL - 1;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     }
 }
 
