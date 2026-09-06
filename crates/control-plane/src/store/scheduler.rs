@@ -495,7 +495,6 @@ impl Store {
             let parent_acp_session_id: Option<String> =
                 c.try_get("parent_acp_session_id").ok().flatten();
             let created_at: String = c.try_get("created_at")?;
-            let security_profile: Option<String> = c.try_get("security_profile").ok().flatten();
             let network_mode: Option<String> = c.try_get("network_mode").ok().flatten();
             let group_id: Option<String> = c.try_get("group_id").ok().flatten();
 

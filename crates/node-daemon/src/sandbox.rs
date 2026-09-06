@@ -405,6 +405,10 @@ pub(crate) fn image_ref() -> String {
 /// ponytail: binds the whole workdir read-write; a stricter mount policy
 /// (read-only + separate artifact dir) is the upgrade path once a real
 /// DockerBackend trait owns the worktree/artifact mounts.
+// Audit X-N3b: eight assembly knobs is the documented shape of these two
+// builders (each has a narrow, distinct role); splitting them into a config
+// struct would churn every caller for no gain.
+#[allow(clippy::too_many_arguments)]
 pub fn sandbox_command(
     kind: SandboxKind,
     program: &str,
@@ -414,8 +418,7 @@ pub fn sandbox_command(
     read_only_worktree: bool,
     container_name: Option<&str>,
     container_env: &[(String, String)],
-) -> (String, Vec<String>) {
-    match kind {
+) -> (String, Vec<String>) {    match kind {
         SandboxKind::None => (program.to_string(), args.to_vec()),
         SandboxKind::Docker => {
             let mut out = docker_run_head(
