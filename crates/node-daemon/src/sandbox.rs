@@ -418,7 +418,8 @@ pub fn sandbox_command(
     read_only_worktree: bool,
     container_name: Option<&str>,
     container_env: &[(String, String)],
-) -> (String, Vec<String>) {    match kind {
+) -> (String, Vec<String>) {
+    match kind {
         SandboxKind::None => (program.to_string(), args.to_vec()),
         SandboxKind::Docker => {
             let mut out = docker_run_head(
