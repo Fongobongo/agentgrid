@@ -61,13 +61,23 @@ impl TaskLifecycleService {
             Some(t) => t,
             None => return Ok(true), // orphaned attempt; nothing to advance
         };
+        // Audit X-C7: completions are at-least-once and the store acks
+        // redeliveries as success — scans and the terminal push below run
+        // once per attempt, never per delivery. (A notify added *after* the
+        // first delivery goes out on the next real completion, not on a
+        // replay; failures never scan, so their pushes are unaffected.)
+        let effects_done = self
+            .store
+            .completion_side_effects_done(attempt_id)
+            .await
+            .unwrap_or(false);
         // Competitor-gap feature (diff pattern-scan): deterministic pre-pass
         // over a successful attempt's changes.patch — secrets, private keys,
         // binary blobs, oversized additions. The secret redactor masks agent
         // LOGS; the committed diff itself was never checked. Findings are
         // emitted as audit log events (searchable via /v1/search/events) and
         // never change the outcome. Best-effort: a read failure is logged.
-        if req.exit_code == 0 && req.error_code.is_none() {
+        if req.exit_code == 0 && req.error_code.is_none() && !effects_done {
             if let Ok(Some(patch)) = self.store.read_artifact(&task_id, "changes.patch").await {
                 let findings = crate::diff_scan::scan_patch(&patch);
                 for f in findings {
@@ -86,7 +96,7 @@ impl TaskLifecycleService {
         // command events for hash/checksum busywork the prompt never asked for
         // (stop-that-shit inspired). Audit-only, best-effort — same shape as
         // the diff scan above; findings never change the outcome.
-        if req.exit_code == 0 && req.error_code.is_none() {
+        if req.exit_code == 0 && req.error_code.is_none() && !effects_done {
             if let Ok(Some((prompt, events))) = self.store.scope_input(attempt_id, &task_id).await {
                 for f in crate::scope_scan::scan_events(&prompt, &events) {
                     let text = format!("[{}] {}", f.kind, f.detail);
@@ -102,8 +112,10 @@ impl TaskLifecycleService {
         }
         // Plan 1.2 (competitor #22a): notify the operator on terminal states
         // (mobile-friendly push). Best-effort; failures are logged inside
-        // `notify_task` and never abort the completion path.
-        if let Some(url) = &self.notify_webhook {
+        // `notify_task` and never abort the completion path. Skipped on
+        // redeliveries (see the effects_done guard above).
+        if !effects_done {
+            if let Some(url) = &self.notify_webhook {
             if let Ok(Some(task)) = self.store.show_task(&task_id).await {
                 use agentgrid_common::TaskStatus::*;
                 // Plan 1.1 patch-review: a success creates a pending
@@ -137,6 +149,7 @@ impl TaskLifecycleService {
                     tokio::spawn(async move { crate::notify::notify_task(&url, &note).await });
                 }
             }
+        }
         }
         // Plan 2.9 (#20): consensus collapse — when the task was part of a
         // consensus batch and every member task has reached a terminal state,

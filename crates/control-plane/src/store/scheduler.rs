@@ -325,6 +325,42 @@ impl Store {
             return Ok(Vec::new());
         }
 
+        // Audit X-S1: filter to eligible candidates BEFORE the bulk
+        // prefetch. The prefetch used to cover the first `cap` queue rows
+        // while the assignment loop scanned past ineligible ones, so any
+        // task beyond the prefix shipped with missing role/count/eval/repo
+        // data (read_only=false, wrong retry number, empty eval suite, blank
+        // repo) when earlier rows were skipped. Eligibility needs only row
+        // fields + the node view, so it runs here with no DB traffic; the
+        // prefetch below then covers exactly the tasks the loop consumes.
+        // The emptiness guard also keeps every `IN (...)` below non-empty.
+        let mut eligible: Vec<_> = Vec::new();
+        for c in &cands {
+            if eligible.len() >= cap {
+                break;
+            }
+            let repository: String = c.try_get("repository")?;
+            let adapter: String = c.try_get("adapter")?;
+            let security_profile: Option<String> = c.try_get("security_profile").ok().flatten();
+            let network_mode: Option<String> = c.try_get("network_mode").ok().flatten();
+            if !node_ineligibility(
+                &nv,
+                &repository,
+                &adapter,
+                security_profile.as_deref(),
+                network_mode.as_deref(),
+            )
+            .is_empty()
+            {
+                continue;
+            }
+            eligible.push(c);
+        }
+        if eligible.is_empty() {
+            let _ = tx.rollback().await;
+            return Ok(Vec::new());
+        }
+
         struct Pending {
             assignment: Assignment,
             created_at: String,
@@ -336,9 +372,8 @@ impl Store {
         // holding the only writer permit). They are invariant during the
         // flip loop, so resolve them in bulk BEFORE it and keep only the
         // cheap CAS UPDATE + INSERT per candidate inside the txn.
-        let cap_ids: Vec<String> = cands
+        let cap_ids: Vec<String> = eligible
             .iter()
-            .take(cap)
             .map(|c| c.try_get::<String, _>("id"))
             .collect::<std::result::Result<_, _>>()?;
         let placeholders = |n: usize| {
@@ -411,9 +446,8 @@ impl Store {
         }
 
         // Repository rows (absent for plain-dir tasks) in one query.
-        let repo_names: Vec<String> = cands
+        let repo_names: Vec<String> = eligible
             .iter()
-            .take(cap)
             .map(|c| c.try_get::<String, _>("repository"))
             .collect::<std::result::Result<_, _>>()?;
         struct RepoRow {
@@ -447,7 +481,7 @@ impl Store {
             }
         }
 
-        for c in &cands {
+        for c in &eligible {
             if batch.len() >= cap {
                 break;
             }
@@ -503,16 +537,8 @@ impl Store {
                 None => (String::new(), String::new(), None),
             };
 
-            let inelig = node_ineligibility(
-                &nv,
-                &repository,
-                &adapter,
-                security_profile.as_deref(),
-                network_mode.as_deref(),
-            );
-            if !inelig.is_empty() {
-                continue;
-            }
+            // (eligibility was already decided by the pre-loop filter above —
+            // same predicate, so every task reaching this point is eligible.)
 
             let attempt_id = Uuid::new_v4().to_string();
             // Hardening P0 item 8: a fresh fencing token per assignment. The

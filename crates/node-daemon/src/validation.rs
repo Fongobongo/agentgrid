@@ -85,6 +85,7 @@ pub async fn run_validation(
         None,  // validation has no task network_mode; sandbox env default applies
         false, // validation must be able to write (test fixtures)
         None,  // no per-attempt name: transient validation command
+        &[],   // validation needs no adapter secrets in-container
     );
     let mut cmd = tokio::process::Command::new(&program);
     cmd.args(prefix_args)

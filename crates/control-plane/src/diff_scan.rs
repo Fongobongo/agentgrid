@@ -66,14 +66,15 @@ pub fn scan_patch(patch: &str) -> Vec<DiffFinding> {
             added_lines += 1;
             let content = &line[1..];
             for (rule, prefix) in secret_rules {
-                if content.starts_with(*prefix) && content.len() >= min_len(prefix) {
+                // Audit X-C4: secrets in real diffs are embedded
+                // (`+token = "sk-ant-..."`), not line-leading — starts_with
+                // missed every such case. The length gate still filters
+                // short accidental matches.
+                if content.contains(*prefix) && content.len() >= min_len(prefix) {
                     findings.push(DiffFinding {
                         rule,
                         file: truncate(&current_file),
-                        detail: format!(
-                            "possible secret `{}…` added",
-                            truncate(&content[..content.len().min(40)])
-                        ),
+                        detail: format!("possible secret `{}` added", truncate(content)),
                     });
                     break;
                 }
@@ -103,7 +104,14 @@ fn truncate(s: &str) -> String {
     if s.len() <= MAX_DETAIL {
         s.to_string()
     } else {
-        format!("{}…", &s[..MAX_DETAIL - 1])
+        // Audit X-C5: never slice inside a multi-byte char — byte indexing
+        // panicked on non-ASCII straddling the boundary (agent-controlled
+        // patch content).
+        let mut end = MAX_DETAIL - 1;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     }
 }
 
