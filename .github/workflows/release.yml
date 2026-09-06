@@ -257,7 +257,7 @@ jobs:
       - name: generate SBOM (CycloneDX)
         # Plan 964: the release itself must ship the dependency SBOM, not just
         # a build artifact in CI. CycloneDX JSON of the Rust workspace.
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
         with:
           path: .
           format: cyclonedx-json
