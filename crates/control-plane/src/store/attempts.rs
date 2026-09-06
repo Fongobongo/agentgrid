@@ -654,6 +654,23 @@ impl Store {
         Ok(())
     }
 
+    /// Audit X-C7: whether the completion side-effects (diff/scope scans +
+    /// terminal notify) already ran for this attempt. Completions are
+    /// at-least-once and the store acks redeliveries as success, so without
+    /// this guard every retry re-emits findings and re-pushes the operator.
+    pub async fn completion_side_effects_done(&self, attempt_id: &str) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_events \
+             WHERE attempt_id = ? \
+               AND type = 'stdout' \
+               AND json_extract(payload, '$.kind') IN ('diff_finding', 'scope_creep')",
+        )
+        .bind(attempt_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     pub async fn create_agent_session(&self, attempt_id: &str, adapter: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();

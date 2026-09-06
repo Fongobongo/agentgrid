@@ -1,5 +1,55 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Bulk scheduler prefetch covered the wrong tasks when earlier queue
+  rows were ineligible (audit X-S1).** The prefetch keyed the first `cap`
+  queue rows while the loop scanned past skipped ones — any task past the
+  prefix shipped with missing role/count/eval/repo data (non-read-only
+  verifier, retry number 1, empty eval suite, blank repo). The loop now
+  pre-filters eligible candidates (pure row data, no DB) and the prefetch
+  covers exactly them; the shared empty guard also closes the `IN ()`
+  syntax error on an empty queue or all-ineligible prefix.
+- **Zero-step workflow runs 500'd their projection (audit X-C3)** —
+  `step_run_id IN ()` is a SQLite syntax error. Returns the empty map like
+  the old per-step loop.
+- **Diff secrets were matched only at line start (audit X-C4)** — real
+  diffs embed keys after `=`/`"`/space and never fired. Matching is
+  substring now (the length gate still filters short accidental hits).
+- **Agent-controlled patch bytes could panic the scanner on truncation
+  (audit X-C5)** — both `truncate` helpers now cut on char boundaries.
+- **Adapter-env listing ordered globals arbitrarily (audit X-C6)** — the
+  `ORDER BY (node_id IS NULL)` predicate never matched (`''`, not NULL).
+  Matches the `(node_id = '')` predicate the effective-entries query uses.
+- **Completion redelivery re-ran diff/scope scans and re-pushed the
+  operator (audit X-C7).** A new idempotent guard (marker scan rows in the
+  event stream) runs scans and the terminal notify once per attempt.
+- **Legacy CP polls wiped the node's proxy pool and managed env every
+  cycle (audit X-N1b).** Both fields document Empty=keep current, but the
+  node replaced them with the delivered (empty) lists; delivery now skips
+  empties.
+- **Fail-open restricted egress without a proxy URL (audit X-N2/X-N3).**
+  Attaching to the egress bridge with no filtering URL is unfiltered
+  internet — restricted now requires network AND URL, else collapses to
+  `none`; `resolved_network_mode` mirrors it and the isolation gauge
+  reports the truthful value.
+- **Sandboxed agents received no credentials, proxy or managed env at all
+  (audit X-N3b).** `SpawnRequest.env` only reached the `docker` client
+  process; the attempt env now also lands in the container via `--env`
+  (ACP path included via `sandbox_command`), while probes keep `&[]`.
+- **The GitHub push token rode in argv (audit X-N6)** — world-readable in
+  `/proc/<pid>/cmdline`. It travels through a 0600 askpass helper now;
+  repo/branch are validated up front (`owner/name`, no option-injection),
+  and same-repo PR heads fall back to the bare branch.
+- **Validation-feedback retries dropped the project brain (audit X-N8)** —
+  rebuilt from the base prompt only. The brain block carries forward.
+- **The brain block now states its provenance (audit X-N12)** — same trust
+  tier as AGENTS.md, repo-provided convention.
+- **Aider safe mode no longer matches its docs (audit X-N7)** — the
+  documented `--no-git --chat-mode=chat` restores `--no-git`.
+
 ## [0.4.4] - 2026-09-03
 
 ### Added
