@@ -537,7 +537,14 @@ impl Store {
         }
         let mut task_by_step: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for r in q.fetch_all(&self.pool).await? {
+        // Audit X-C3: a run with no steps must not build `step_run_id IN ()`
+        // (SQLite syntax error) — the old per-step loop returned [] here.
+        let rows = if steps.is_empty() {
+            Vec::new()
+        } else {
+            q.fetch_all(&self.pool).await?
+        };
+        for r in rows {
             let sid: String = r.try_get("step_run_id")?;
             let tid: String = r.try_get("task_id")?;
             task_by_step.insert(sid, tid);

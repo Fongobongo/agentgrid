@@ -98,6 +98,60 @@ async fn drive_acp_session(
             }
         },
     };
+    // Stage 13: prefer the control-plane active profile; fall back to env.
+    let cp_profile = fetch_agent_profile(client, &cfg.server, &assignment.adapter).await;
+    let profile_text = cp_profile
+        .as_ref()
+        .map(|p| p.system_prompt.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| agent_profile(&assignment.adapter));
+    // Audit X-N4: the env the agent MUST see even inside a container (ACP /
+    // wrapper parity). The backend applies env only to the `docker` client
+    // process, so without forwarding here sandboxed ACP agents lost
+    // credentials, proxy pool entries and managed env entirely.
+    let mut container_env: Vec<(String, String)> = cfg.adapter_env.clone();
+    // Egress proxy (pool with failover): route agent/LLM traffic through it.
+    if let Some(proxy) = cfg.proxies.current() {
+        for k in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            container_env.push((k.to_string(), proxy.clone()));
+        }
+    }
+    // CP-managed adapter env (e.g. a custom base URL). Local
+    // AGENTGRID_ADAPTER_ENV wins: only inject operator-unset keys.
+    for e in cfg.managed_adapter_env.lock().unwrap().iter() {
+        let matches = e.adapter == "*"
+            || assignment.adapter == e.adapter
+            || assignment.adapter.starts_with(&format!("{}:", e.adapter));
+        if matches && !container_env.iter().any(|(k, _)| k == &e.key) {
+            container_env.push((e.key.clone(), e.value.clone()));
+        }
+    }
+    // Forward the agent profile as an env hint for agents that read it.
+    if let Some(text) = &profile_text {
+        container_env.push(("AGENTGRID_SYSTEM_PROMPT".to_string(), text.clone()));
+    }
+    // Hardening P1 item 27: profile-declared secrets live in the daemon env
+    // but the child no longer inherits it — forward the ones the profile
+    // requires.
+    if let Some(p) = &cp_profile {
+        for req in &p.secret_requirements {
+            if let Some(v) = std::env::var_os(&req.env) {
+                container_env.push((req.env.clone(), v.to_string_lossy().to_string()));
+            }
+        }
+    }
+    // Plan 1.12 (#7): shared-context group id — the agent gets AG_GROUP_ID
+    // so it can `ag ctx set/get` against its group's shared notes.
+    if let Some(gid) = &assignment.group_id {
+        container_env.push(("AG_GROUP_ID".to_string(), gid.clone()));
+    }
     let (program, args) = sandbox::sandbox_command(
         cfg.sandbox,
         &program,
@@ -106,6 +160,7 @@ async fn drive_acp_session(
         assignment.network_mode.as_deref(),
         assignment.read_only,
         Some(&sandbox::container_name(&assignment.attempt_id)),
+        &container_env,
     );
     let mut cmd = tokio::process::Command::new(&program);
     cmd.args(&args);
@@ -136,28 +191,11 @@ async fn drive_acp_session(
     if let Ok(home) = std::env::var("HOME") {
         cmd.env("HOME", home);
     }
-    for (k, v) in &cfg.adapter_env {
+    // Audit X-N4: sandbox_command ignores env for the bare (None) sandbox,
+    // so mirror the assembled container env onto the outer command — bare
+    // agents see exactly what they saw before this change.
+    for (k, v) in &container_env {
         cmd.env(k, v);
-    }
-    // Forward the agent profile as an env hint for agents that read it.
-    // Stage 13: prefer the control-plane active profile; fall back to env.
-    let cp_profile = fetch_agent_profile(client, &cfg.server, &assignment.adapter).await;
-    let profile_text = cp_profile
-        .as_ref()
-        .map(|p| p.system_prompt.clone())
-        .filter(|s| !s.is_empty())
-        .or_else(|| agent_profile(&assignment.adapter));
-    if let Some(text) = &profile_text {
-        cmd.env("AGENTGRID_SYSTEM_PROMPT", text);
-    }
-    // Hardening P1 item 27: profile-declared secrets live in the daemon env but
-    // the child no longer inherits it — forward the ones the profile requires.
-    if let Some(p) = &cp_profile {
-        for req in &p.secret_requirements {
-            if let Some(v) = std::env::var_os(&req.env) {
-                cmd.env(&req.env, v);
-            }
-        }
     }
     // Stage 13 secret-ref sync: required secrets must be set in the node env
     // before the agent starts. A missing required secret is fail-closed —
@@ -171,11 +209,8 @@ async fn drive_acp_session(
             rate_limited: false,
         });
     }
-    // Plan 1.12 (#7): shared-context group id — the agent gets AG_GROUP_ID so
-    // it can `ag ctx set/get` against its group's shared notes.
-    if let Some(gid) = &assignment.group_id {
-        cmd.env("AG_GROUP_ID", gid);
-    }
+    // AG_GROUP_ID already flows via container_env (outer command for bare
+    // agents, --env for sandboxed ones) — no separate cmd.env needed.
     // Stage 13 capability check: the profile's declared adapter_version must
     // be compatible with the installed adapter (cached probe from startup).
     if let Some(code) = check_adapter_compatibility(
