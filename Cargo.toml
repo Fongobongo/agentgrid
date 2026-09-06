@@ -41,7 +41,7 @@ async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 argon2 = "0.6"
-password-hash = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.6", features = ["std"] }
 jsonwebtoken = "9"
 rand = "0.8"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }

@@ -6,20 +6,20 @@ use sqlx::Row;
 use uuid::Uuid;
 
 fn hash_password(password: &str) -> Result<String> {
-    use argon2::password_hash::{PasswordHasher, SaltString};
+    use argon2::password_hash::PasswordHasher;
     use argon2::Argon2;
-    use rand::rngs::OsRng;
-    let salt = SaltString::generate(&mut OsRng);
+    // password-hash 0.6: the salt is generated internally (getrandom).
     let hash = Argon2::default()
-        .hash_password(password.as_bytes(), &salt)?
+        .hash_password(password.as_bytes())?
         .to_string();
     Ok(hash)
 }
 
 /// Verify a password against an Argon2id hash string (Stage 4.1).
 fn verify_password(password: &str, hash: &str) -> bool {
-    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    use argon2::password_hash::PasswordVerifier;
     use argon2::Argon2;
+    use password_hash::phc::PasswordHash;
     let Ok(parsed) = PasswordHash::new(hash) else {
         return false;
     };
