@@ -77,14 +77,13 @@ pub fn push_branch(repo_dir: &Path, github_repo: &str, branch: &str, token: &str
 
 fn validate_push_target(github_repo: &str, branch: &str) -> Result<()> {
     let mut parts = github_repo.split('/');
-    let (owner, name) = (
-        parts.next().unwrap_or(""),
-        parts.next().unwrap_or(""),
-    );
-    let ok_part =
-        |s: &str| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| {
-            c.is_alphanumeric() || c == '-' || c == '_' || c == '.'
-        });
+    let (owner, name) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let ok_part = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 128
+            && s.chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
     if parts.next().is_some() || !ok_part(owner) || !ok_part(name) {
         bail!("invalid github_repo (want owner/name): {github_repo}");
     }

@@ -43,6 +43,47 @@ impl TaskLifecycleService {
         }
     }
 
+    /// Plan 1.2 (competitor #22a): notify the operator on terminal states
+    /// (mobile-friendly push). Best-effort; failures are logged inside
+    /// `notify_task` and never abort the completion path.
+    async fn notify_terminal(&self, task_id: &str, attempt_id: &str) {
+        if let Some(url) = &self.notify_webhook {
+            if let Ok(Some(task)) = self.store.show_task(task_id).await {
+                use agentgrid_common::TaskStatus::*;
+                // Plan 1.1 patch-review: a success creates a pending
+                // task_patch_review approval (operator must ack the patch).
+                // Surface that as `awaiting_review` for the webhook (competitor
+                // #22a) instead of `completed` so the operator gets a push
+                // to review, not a "done" notification.
+                let awaiting = self
+                    .store
+                    .find_pending_patch_review(task_id)
+                    .await
+                    .unwrap_or(None)
+                    .is_some();
+                let status_str = match task.status {
+                    Succeeded => Some(if awaiting {
+                        "awaiting_review"
+                    } else {
+                        "completed"
+                    }),
+                    Failed => Some("failed"),
+                    _ => None,
+                };
+                if let Some(s) = status_str {
+                    let url = url.clone();
+                    let note = crate::notify::TaskNotification {
+                        task_id: task_id.to_string(),
+                        attempt_id: attempt_id.to_string(),
+                        status: s.to_string(),
+                        url: format!("/tasks/{task_id}"),
+                    };
+                    tokio::spawn(async move { crate::notify::notify_task(&url, &note).await });
+                }
+            }
+        }
+    }
+
     /// Complete an attempt, then advance the owning workflow run (if any) and
     /// wake the scheduler for tasks it spawned. Returns `false` if the attempt
     /// does not exist; the workflow advance is best-effort (a failure here
@@ -110,46 +151,10 @@ impl TaskLifecycleService {
                 }
             }
         }
-        // Plan 1.2 (competitor #22a): notify the operator on terminal states
-        // (mobile-friendly push). Best-effort; failures are logged inside
-        // `notify_task` and never abort the completion path. Skipped on
-        // redeliveries (see the effects_done guard above).
+        // Plan 1.2 (competitor #22a): terminal-state operator push, extracted
+        // so the redelivery guard above does not re-indent the whole block.
         if !effects_done {
-            if let Some(url) = &self.notify_webhook {
-            if let Ok(Some(task)) = self.store.show_task(&task_id).await {
-                use agentgrid_common::TaskStatus::*;
-                // Plan 1.1 patch-review: a success creates a pending
-                // task_patch_review approval (operator must ack the patch).
-                // Surface that as `awaiting_review` for the webhook (competitor
-                // #22a) instead of `completed` so the operator gets a push
-                // to review, not a "done" notification.
-                let awaiting = self
-                    .store
-                    .find_pending_patch_review(&task_id)
-                    .await
-                    .unwrap_or(None)
-                    .is_some();
-                let status_str = match task.status {
-                    Succeeded => Some(if awaiting {
-                        "awaiting_review"
-                    } else {
-                        "completed"
-                    }),
-                    Failed => Some("failed"),
-                    _ => None,
-                };
-                if let Some(s) = status_str {
-                    let url = url.clone();
-                    let note = crate::notify::TaskNotification {
-                        task_id: task_id.clone(),
-                        attempt_id: attempt_id.to_string(),
-                        status: s.to_string(),
-                        url: format!("/tasks/{task_id}"),
-                    };
-                    tokio::spawn(async move { crate::notify::notify_task(&url, &note).await });
-                }
-            }
-        }
+            self.notify_terminal(&task_id, attempt_id).await;
         }
         // Plan 2.9 (#20): consensus collapse — when the task was part of a
         // consensus batch and every member task has reached a terminal state,

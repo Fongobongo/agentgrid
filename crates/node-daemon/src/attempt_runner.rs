@@ -861,7 +861,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         );
         let req = SpawnRequest {
             bin: sb_program,
-            sandbox_prefix_args: sb_prefix,            prompt: prompt.clone(),
+            sandbox_prefix_args: sb_prefix,
+            prompt: prompt.clone(),
             extra_args: vec![],
             raw_args: false,
             workdir: ws.path.clone(),
