@@ -329,7 +329,7 @@ mod tests {
         let hash = apply_config("{\"model\":\"m1\"}").await.unwrap();
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(format!("{:x}", sha2::Sha256::digest(&bytes)), hash);
+        assert_eq!(agentgrid_common::sha256_hex(&bytes), hash);
         assert_eq!(current_hash().await.as_deref(), Some(hash.as_str()));
     }
 

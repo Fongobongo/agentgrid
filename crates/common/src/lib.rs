@@ -29,7 +29,14 @@ pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(data);
-    format!("{:x}", h.finalize())
+    // digest 0.11 dropped LowerHex on the output array — hex-encode by hand
+    // (same canonicalization, pinned by the FIPS vector test below).
+    let out = h.finalize();
+    let mut s = String::with_capacity(out.len() * 2);
+    for b in out {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// Task lifecycle status (control-plane view of a user request).
@@ -1516,7 +1523,10 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     fn round_trip<T: Serialize + for<'de> Deserialize<'de>>(v: &T) -> T {
