@@ -301,7 +301,6 @@ pub async fn build_override_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::Digest;
 
     // Tests must not race on the process-wide AG_OPENCODE_HOME env var;
     // a process-local mutex serializes them.

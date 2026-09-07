@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **rand 0.8 → 0.10 and sha2 0.10 → 0.11 (workspace crates).** rand 0.10
+  moved `random`/`random_range` onto `RngExt` and thread_rng → `rng()`;
+  digest 0.11 dropped `LowerHex` on the output array, so the shared
+  `sha256_hex` hex-encodes explicitly — output pinned by a FIPS 180-4
+  vector test (audit X-D1: the hash round-trips CP↔node). Cargo.lock
+  regenerated on the CI runner (`lock-regen` workflow, one-shot).
+- **jsonwebtoken stays on 9.x.** An 11.x bump (rust_crypto backend) was
+  attempted and reverted: the backend feature set re-introduces `rsa`
+  (RUSTSEC-2023-0071, no patch — we only use HS256, but the supply-chain
+  gate fails on any unpatched critical), and cargo-deny 0.20.2 cannot
+  resolve the workspace graph with the new feature pin
+  (`unresolved-workspace-dependency` on every path dep). Revisit when
+  cargo-deny fixes workspace-dep resolution or jwt ships an HS256-only
+  backend feature.
+
 ### Fixed
 
 - **Bulk scheduler prefetch covered the wrong tasks when earlier queue
