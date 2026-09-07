@@ -133,7 +133,7 @@ impl AppState {
                      existing user session JWTs will not survive a restart"
                 );
                 use rand::Rng;
-                rand::thread_rng().gen::<[u8; 32]>().to_vec()
+                rand::rng().random::<[u8; 32]>().to_vec()
             }
         };
         // Hardening P0: when no users exist (fresh install), mint a

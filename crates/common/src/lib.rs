@@ -1507,6 +1507,18 @@ pub struct OpencodeOverride {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        // FIPS 180-4 test vector; pins the output format across sha2 major
+        // versions (audit X-D1: this hash round-trips CP↔node for drift
+        // detection, so a format change must fail here, not in the field).
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
+
     fn round_trip<T: Serialize + for<'de> Deserialize<'de>>(v: &T) -> T {
         let s = serde_json::to_string(v).unwrap();
         serde_json::from_str(&s).unwrap()

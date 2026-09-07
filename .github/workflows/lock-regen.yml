@@ -1,0 +1,33 @@
+name: lock-regen
+
+# One-shot dependency-bump helper: resolves the newly-pinned workspace
+# manifests against the registry and commits the regenerated Cargo.lock.
+# Used for major bumps (rand 0.10, sha2 0.11, jsonwebtoken 11) where
+# hand-editing the lock is infeasible without cargo.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - name: regenerate Cargo.lock from manifests
+        run: cargo update --workspace
+      - name: commit updated lock
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          if git diff --cached --quiet; then
+            echo "lock already up to date"
+          else
+            git commit -m "chore: regenerate Cargo.lock for pinned major bumps (rand 0.10, sha2 0.11, jsonwebtoken 11)"
+            git push
+          fi

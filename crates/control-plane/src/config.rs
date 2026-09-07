@@ -33,7 +33,7 @@ impl SetupToken {
         use rand::Rng;
         // 32 hex chars from a random u128; sufficient for a short-lived,
         // one-time bootstrap token printed to stdout.
-        let token = format!("{:032x}", rand::thread_rng().gen::<u128>());
+        let token = format!("{:032x}", rand::rng().random::<u128>());
         Self {
             token,
             issued_at: std::time::Instant::now(),

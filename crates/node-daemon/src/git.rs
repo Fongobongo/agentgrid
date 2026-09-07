@@ -122,7 +122,7 @@ fn check_workspace_quota(additional_bytes: u64) -> Result<()> {
 fn update_quota_metrics(repository_root: &Path, workspace_root: &Path) {
     use std::sync::atomic::Ordering;
     // 10% chance to refresh from disk
-    if rand::thread_rng().gen_range(0..=9) == 0 {
+    if rand::rng().random_range(0..=9) == 0 {
         if let Ok(size) = dir_size(repository_root) {
             REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
         }
