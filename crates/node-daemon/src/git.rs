@@ -10,7 +10,7 @@
 //! plane cannot inject a shell command. Tokens are validated as defense-in-depth
 //! (Stage 2.3).
 
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;

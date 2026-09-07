@@ -30,7 +30,7 @@ pub(crate) const SETUP_TOKEN_TTL: std::time::Duration = std::time::Duration::fro
 
 impl SetupToken {
     pub(crate) fn new() -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         // 32 hex chars from a random u128; sufficient for a short-lived,
         // one-time bootstrap token printed to stdout.
         let token = format!("{:032x}", rand::rng().random::<u128>());

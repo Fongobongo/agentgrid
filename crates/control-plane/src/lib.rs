@@ -132,7 +132,7 @@ impl AppState {
                     "AGENTGRID_JWT_SECRET unset: using a random secret for this run; \
                      existing user session JWTs will not survive a restart"
                 );
-                use rand::Rng;
+                use rand::RngExt;
                 rand::rng().random::<[u8; 32]>().to_vec()
             }
         };
