@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-08
+
 ### Changed
 
 - **rand 0.8 → 0.10 and sha2 0.10 → 0.11 (workspace crates).** rand 0.10
