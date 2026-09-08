@@ -10,3 +10,8 @@
 # must handle strings that LOOK like credentials.
 dbfe9fe9db67e482869b5e491d951014ca36cf41:crates/node-daemon/src/main.rs:generic-api-key:1618
 e0279261e4583268854cd5ab0df4adccb4ae72a6:crates/node-daemon/src/main.rs:generic-api-key:2282
+# crates/node-daemon/src/main_tests.rs (file extracted from main.rs, commit
+# 373899ae): same synthetic test secrets — fixtures of the redaction tests
+# (sk-LEAK-12345, sk-live-abc123XYZ), never real credentials.
+373899ae3fcfa7c9fb3d8689008fdc8129c38924:crates/node-daemon/src/main_tests.rs:generic-api-key:288
+373899ae3fcfa7c9fb3d8689008fdc8129c38924:crates/node-daemon/src/main_tests.rs:generic-api-key:1358
