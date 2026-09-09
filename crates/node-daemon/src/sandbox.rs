@@ -123,6 +123,9 @@ pub async fn remove_sandbox_container(attempt_id: &str) {
 /// `limits` is the per-attempt profile ceiling (Stage 12 / ADR 0003): each
 /// set field overrides the node-wide env knob for this run; unset fields fall
 /// back to the env default.
+// Audit X-N3b (same rationale as sandbox_command): the assembly knobs are the
+// documented shape; a config struct would churn every caller for no gain.
+#[allow(clippy::too_many_arguments)]
 pub fn sandbox_prefix(
     kind: SandboxKind,
     workdir: &std::path::Path,

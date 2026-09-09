@@ -1103,11 +1103,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             Some("validation_failed".into())
         }
     } else {
-        Some(
-            last_kill_reason
-                .unwrap_or_else(|| "agent_failed".into())
-                .into(),
-        )
+        Some(last_kill_reason.unwrap_or_else(|| "agent_failed".to_string()))
     };
     // Audit ND-3: the finalize verdict outranks agent/validation outcomes —
     // without a finalized worktree there is no deliverable result even when
