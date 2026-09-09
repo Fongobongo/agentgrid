@@ -144,6 +144,15 @@ jobs:
       - name: image smoke (musl scratch cp + glibc HEALTHCHECK)
         run: bash tests/e2e/run-image-smoke.sh
         timeout-minutes: 15
+      # Stage 12 / ADR 0003: the memory-limit acceptance — a sandboxed attempt
+      # that exceeds --memory is OOM-killed by the runtime and completes with
+      # error_code=resource_limit (not agent_failed). Uses the ag-node:test
+      # image (built above by run.sh) so the mock adapter exists in-container.
+      - name: memory limit → OOM → resource_limit error code
+        run: bash tests/e2e/run-oom-limit.sh
+        timeout-minutes: 10
+        env:
+          AGENTGRID_SANDBOX_IMAGE: ag-node:test
 
   skill-bundle:
     name: skill bundle materializes identically local vs remote

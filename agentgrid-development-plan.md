@@ -406,13 +406,13 @@
 
 - [x] Backend conformance suite (единые тесты для всех backends) — `crates/adapters/tests/conformance.rs` (с Stage 3.2); `SpawnRequest.limits` теперь часть контракта, все backends проходят один smoke.
 - [x] ADR `0003-execution-backends.md`: capability-honest resource limits — `ResourceLimits` в `SpawnRequest`, backend reports `enforced_limits`, `BackendOutcome::ResourceLimit` → `error_code=resource_limit`.
-- [ ] Container backend (Docker/Podman): optional executor, resource limits, без обязательности для core — контракт готов (`ResourceLimits` → `--memory/--cpus/--pids-limit`); impl follow-up.
+- [x] Container backend (Docker/Podman): optional executor, resource limits, без обязательности для core — контракт готов (`ResourceLimits` → `--memory/--cpus/--pids-limit`); impl follow-up. — **Stage 12 сделано**: per-attempt `ResourceLimits` из профиля прокинуты в обе sandbox-обёртки (`sandbox_prefix`/`sandbox_command` → `docker_run_head`); set-поля перекрывают node-wide env-кнопки, unset — фолбэк на env. Named per-attempt контейнеры больше не `--rm` (OOM-инспект не гонится с auto-removal; cleanup — `remove_sandbox_container` + startup sweep); transient пробы (validation/eval) остаются `--rm`. Post-exit `docker inspect OOMKilled` → `SupervisedRun.kill_reason = resource_limit:<reason>` → CP error_code.
 - [x] Contract для Linux cgroups v2 / systemd transient scope + macOS/Windows capability honesty — `ResourceLimits` (MemoryMax/CPUQuota/TasksMax), `enforced_limits` flag, `classify_exit` → `BackendOutcome`.
-- [ ] Test: превышение memory limit → `error_code=resource_limit` — mapping (`BackendOutcome::ResourceLimit → error_code`) и unit-проверен; реальный cgroup-backend E2E (OOM kill) — follow-up (нужен systemd/cgroup impl).
+- [x] Test: превышение memory limit → `error_code=resource_limit` — mapping (`BackendOutcome::ResourceLimit → error_code`) и unit-проверен; реальный cgroup-backend E2E (OOM kill) — follow-up (нужен systemd/cgroup impl). — **закрыт**: unit-тесты `per_attempt_limits_override_env_knobs`, `per_attempt_unset_fields_fall_back_to_env`, `cpu_quota_renders_whole_cores_without_fraction`, `named_containers_are_not_rm_ed_transient_ones_are` (sandbox.rs); процессный E2E `tests/e2e/run-oom-limit.sh` (docker sandbox `--memory 64m`, mock `oom:512` → runtime OOM kill → attempt `failed` с `error_code=resource_limit:memory`), подключён в CI `e2e` job (`AGENTGRID_SANDBOX_IMAGE=ag-node:test`).
 - [ ] h5i spike: executor/provenance — go/no-go документ — follow-up.
 - [ ] CubeSandbox spike: strong isolation profile — follow-up.
 - [ ] Secure profile: готовая связка isolated backend + strict policy — follow-up (нужен cgroup impl + 9.1 pluggable strict).
-- [ ] E2E: одинаковый workflow на native и одном isolated backend — follow-up (нужен container impl).
+- [ ] E2E: одинаковый workflow на native и одном isolated backend — follow-up (нужен container impl). — контур готов: sandbox=docker уже принимает workflow tasks с тем же manifest (worktree mount /ag), dedicated workflow-on-two-backends прогон — follow-up.
 
 **Exit 12:** один workflow запускается минимум на двух backends без изменения manifest.
 

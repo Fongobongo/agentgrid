@@ -725,7 +725,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     let brain = crate::skills::compose_brain_block(&workdir).await;
     prompt.push_str(&brain);
     let mut last_code: i32;
-    let mut last_kill_reason: Option<&'static str> = None;
+    let mut last_kill_reason: Option<String> = None;
     // Hardening P0 item 12: distinct validation verdicts (timeout/cancel) are
     // captured here so the post-loop error_code mapping preserves them instead
     // of collapsing into `validation_failed`.
@@ -850,6 +850,10 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // container env above can change between rounds (proxy failover).
         // `sandbox_prefix` splits the program from the prefix args because
         // ProcessBackend appends its own `--prompt <prompt>` after the prefix.
+        // Stage 12: the per-attempt profile limits ride in SpawnRequest.limits
+        // and the sandbox prefix both — the sandbox applies them as
+        // --memory/--cpus/--pids-limit, SpawnRequest keeps the contract honest.
+        let limits = profile_limits(cp_profile.as_ref());
         let (sb_program, sb_prefix) = sandbox::sandbox_prefix(
             cfg.sandbox,
             &ws.path,
@@ -858,6 +862,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             assignment.read_only,
             Some(&sandbox::container_name(&assignment.attempt_id)),
             &spawn_env,
+            Some(&limits),
         );
         let req = SpawnRequest {
             bin: sb_program,
@@ -870,7 +875,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
             env: spawn_env,
             env_remove: env_remove.clone(),
-            limits: profile_limits(cp_profile.as_ref()),
+            limits,
         };
         let run = match process_supervisor::supervise_adapter(
             req,
@@ -916,7 +921,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             let early_req = CompleteAttemptRequest {
                 exit_code: code,
                 commit_sha: None,
-                error_code: kill_reason.as_ref().map(|k| k.to_string()),
+                error_code: kill_reason.clone(),
                 resolved_base_sha: None,
                 remote_head_at_start: None,
                 remote_head_at_finish: None,
@@ -1098,7 +1103,11 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             Some("validation_failed".into())
         }
     } else {
-        Some(last_kill_reason.unwrap_or("agent_failed").into())
+        Some(
+            last_kill_reason
+                .unwrap_or_else(|| "agent_failed".into())
+                .into(),
+        )
     };
     // Audit ND-3: the finalize verdict outranks agent/validation outcomes —
     // without a finalized worktree there is no deliverable result even when

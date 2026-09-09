@@ -161,6 +161,9 @@ async fn drive_acp_session(
         assignment.read_only,
         Some(&sandbox::container_name(&assignment.attempt_id)),
         &container_env,
+        // Stage 12 / ADR 0003: per-attempt profile ceilings reach the ACP
+        // path too (the wrapper path rides them via SpawnRequest.limits).
+        Some(&crate::profiles::profile_limits(cp_profile.as_ref())),
     );
     let mut cmd = tokio::process::Command::new(&program);
     cmd.args(&args);
