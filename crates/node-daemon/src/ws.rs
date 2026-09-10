@@ -402,7 +402,10 @@ mod tests {
         // test's fixture leaking through a process-global PATH mutation —
         // racy under the parallel test harness). A missing binary turns the
         // attempt `infrastructure_failed` without ever reaching `running`,
-        // which is exactly the observed timeout. Install our own.
+        // which is exactly the observed timeout. Install our own, with a 2 s
+        // sleep so the `running` window is wide enough for the poller to
+        // observe it (an instant-exit mock finishes the whole task in ~24 ms,
+        // racing the 50 ms polling loop — the flake of issue #61).
         let dir = std::env::temp_dir().join(format!(
             "ag-ws-reg-{}-{}",
             std::process::id(),
@@ -414,6 +417,7 @@ mod tests {
         std::fs::write(
             &script,
             "#!/bin/sh\necho '{\"type\":\"log\",\"payload\":{\"text\":\"hi\"}}'\n\
+             sleep 2\n\
              echo '{\"type\":\"result\",\"payload\":{\"exit_code\":0,\"text\":\"done\"}}'\n",
         )
         .unwrap();
