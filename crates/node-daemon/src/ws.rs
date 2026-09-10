@@ -481,22 +481,32 @@ mod tests {
         // 3) assignments flow over the restored channel: the receipt Ack flips
         // the task to running.
         let task_id = create_task(&base, &token).await;
-        wait_until(
-            "task running via ws push",
-            Duration::from_secs(15),
-            || async {
-                let Ok(r) = reqwest::Client::new()
-                    .get(format!("{base}/v1/tasks/{task_id}"))
-                    .header("authorization", format!("Bearer {token}"))
-                    .send()
-                    .await
-                else {
-                    return false;
-                };
-                r.text().await.unwrap_or_default().contains("\"running\"")
-            },
-        )
-        .await;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut detail = String::new();
+        while Instant::now() < deadline {
+            if let Ok(r) = reqwest::Client::new()
+                .get(format!("{base}/v1/tasks/{task_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .send()
+                .await
+            {
+                let body = r.text().await.unwrap_or_default();
+                if body.contains("\"running\"") {
+                    detail.clear();
+                    break;
+                }
+                detail = body;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if !detail.is_empty() {
+            panic!(
+                "timed out waiting for: task running via ws push\n\
+                 task detail: {detail}\n\
+                 ws connections: {} (expected 1)",
+                state.ws_registry.connection_count().await
+            );
+        }
 
         node_task.abort();
         std::env::set_var("PATH", old_path);
