@@ -45,6 +45,42 @@ pub fn container_name(attempt_id: &str) -> String {
     format!("agentgrid-{attempt_id}")
 }
 
+/// Stage 12 / ADR 0003: after a sandboxed attempt exits, ask the runtime
+/// whether the container was OOM-killed (`docker inspect -f {{.State.OOMKilled}}`).
+/// Upgrades a bare exit-137 into the first-class `resource_limit` terminal
+/// outcome so the CP can treat OOM differently from an agent crash (e.g. never
+/// auto-retry). `None` when not sandboxed, the container is already gone
+/// (raced removal / non-docker runtime quirk), or the answer is inconclusive —
+/// the caller keeps the plain exit-code classification then.
+pub async fn inspect_container_oom(attempt_id: &str) -> Option<String> {
+    let sandbox = std::env::var("AGENTGRID_SANDBOX").unwrap_or_default();
+    if sandbox.is_empty() || sandbox == "none" {
+        return None;
+    }
+    let runtime =
+        std::env::var("AGENTGRID_SANDBOX_RUNTIME").unwrap_or_else(|_| "docker".to_string());
+    let name = container_name(attempt_id);
+    let out = tokio::process::Command::new(&runtime)
+        .args(["inspect", "-f", "{{.State.OOMKilled}}", &name])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if stdout == "true" {
+        let limit = std::env::var("AGENTGRID_SANDBOX_MEMORY").unwrap_or_default();
+        Some(if limit.is_empty() {
+            "memory".to_string()
+        } else {
+            format!("memory (limit {limit})")
+        })
+    } else {
+        None
+    }
+}
+
 /// Best-effort `rm -f` of the attempt's sandbox container. No-op when the
 /// daemon is not running a container sandbox (mirrors the env the startup
 /// config parsed `SandboxKind` from). Failures only warn: the startup orphan
@@ -83,6 +119,13 @@ pub async fn remove_sandbox_container(attempt_id: &str) {
 /// `(program, args)` already including `program`; this variant splits them
 /// because the legacy ExecutionBackend appends its own `--prompt` after the
 /// prefix.
+///
+/// `limits` is the per-attempt profile ceiling (Stage 12 / ADR 0003): each
+/// set field overrides the node-wide env knob for this run; unset fields fall
+/// back to the env default.
+// Audit X-N3b (same rationale as sandbox_command): the assembly knobs are the
+// documented shape; a config struct would churn every caller for no gain.
+#[allow(clippy::too_many_arguments)]
 pub fn sandbox_prefix(
     kind: SandboxKind,
     workdir: &std::path::Path,
@@ -91,6 +134,7 @@ pub fn sandbox_prefix(
     read_only_worktree: bool,
     container_name: Option<&str>,
     container_env: &[(String, String)],
+    limits: Option<&agentgrid_adapters::ResourceLimits>,
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), vec![]),
@@ -101,6 +145,7 @@ pub fn sandbox_prefix(
                 read_only_worktree,
                 container_name,
                 container_env,
+                limits,
             );
             prefix.push(image_ref());
             prefix.push(program.into());
@@ -220,29 +265,38 @@ fn parse_ipv6(s: &str) -> bool {
 /// `AGENTGRID_SANDBOX_PIDS_LIMIT`, `AGENTGRID_SANDBOX_MEMORY`,
 /// `AGENTGRID_SANDBOX_CPUS`, `AGENTGRID_SANDBOX_IMAGE_DIGEST` (pins the image
 /// by digest when `AGENTGRID_SANDBOX_IMAGE` is a tag).
-/// ponytail: limits come from env rather than SpawnRequest.limits so this
-/// wrapper need not change signature; plumbing ResourceLimits through is the
-/// upgrade path once a real DockerBackend trait owns spawn.
+///
+/// Stage 12 / ADR 0003: `limits` is the per-attempt profile ceiling. Each set
+/// field overrides the node-wide env knob for this run (per-attempt
+/// isolation, not a global hammer); unset fields keep the env fallback so a
+/// node operator can still bound every attempt without a profile.
+///
+/// `--rm` is emitted only for unnamed transient commands (validation/eval
+/// probes). Named per-attempt containers are NOT `--rm`-ed: the OOM inspection
+/// (`inspect_container_oom`) races auto-removal otherwise, and
+/// `remove_sandbox_container` (cancel/timeout/cleanup) plus the startup
+/// orphan sweep already reap them.
 fn docker_run_head(
     workdir: &std::path::Path,
     network_mode: Option<&str>,
     read_only_worktree: bool,
     container_name: Option<&str>,
     container_env: &[(String, String)],
+    limits: Option<&agentgrid_adapters::ResourceLimits>,
 ) -> Vec<String> {
-    let mut v = vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "-i".to_string(),
-        // The node always spawns an explicit `<program> <args>`; an image
-        // ENTRYPOINT (the GHCR node image ships one: the daemon itself) would
-        // swallow the program and run the entrypoint with our args instead.
-        // Clear it so the explicit command wins for ANY image.
-        "--entrypoint".to_string(),
-        "".to_string(),
-        "--cap-drop=ALL".to_string(),
-        "--security-opt=no-new-privileges".to_string(),
-    ];
+    let mut v = vec!["run".to_string()];
+    if container_name.is_none() {
+        v.push("--rm".to_string());
+    }
+    v.push("-i".to_string());
+    // The node always spawns an explicit `<program> <args>`; an image
+    // ENTRYPOINT (the GHCR node image ships one: the daemon itself) would
+    // swallow the program and run the entrypoint with our args instead.
+    // Clear it so the explicit command wins for ANY image.
+    v.push("--entrypoint".to_string());
+    v.push("".to_string());
+    v.push("--cap-drop=ALL".to_string());
+    v.push("--security-opt=no-new-privileges".to_string());
     // Audit ND-6: a deterministic per-attempt name so cancel/timeout can
     // `docker rm -f` the actual container. Killing the attached `docker run`
     // client only proxies SIGTERM; the 10s SIGKILL escalation kills the
@@ -343,23 +397,41 @@ fn docker_run_head(
         v.push("--tmpfs".to_string());
         v.push("/tmp".to_string());
     }
-    if let Ok(p) = std::env::var("AGENTGRID_SANDBOX_PIDS_LIMIT") {
-        if !p.is_empty() {
-            v.push("--pids-limit".to_string());
-            v.push(p);
-        }
+    // Stage 12 / ADR 0003: per-attempt limits from the profile override the
+    // node-wide env knobs; unset fields fall back to the env default.
+    let limits = limits.cloned().unwrap_or_default();
+    let pids = limits
+        .tasks_max
+        .map(|n| n.to_string())
+        .or_else(|| env_nonempty("AGENTGRID_SANDBOX_PIDS_LIMIT"));
+    if let Some(p) = pids {
+        v.push("--pids-limit".to_string());
+        v.push(p);
     }
-    if let Ok(m) = std::env::var("AGENTGRID_SANDBOX_MEMORY") {
-        if !m.is_empty() {
-            v.push("--memory".to_string());
-            v.push(m);
-        }
+    let mem = limits
+        .memory_max
+        .map(|b| format!("{}m", (b / (1024 * 1024)).max(1)))
+        .or_else(|| env_nonempty("AGENTGRID_SANDBOX_MEMORY"));
+    if let Some(m) = mem {
+        v.push("--memory".to_string());
+        v.push(m);
     }
-    if let Ok(c) = std::env::var("AGENTGRID_SANDBOX_CPUS") {
-        if !c.is_empty() {
-            v.push("--cpus".to_string());
-            v.push(c);
-        }
+    let cpus = limits
+        .cpu_quota_percent
+        .map(|c| {
+            // CPUQuota 200% == 2 cores; docker --cpus takes cores directly.
+            let whole = c / 100;
+            let frac = c % 100;
+            if frac == 0 {
+                whole.to_string()
+            } else {
+                format!("{whole}.{frac:02}")
+            }
+        })
+        .or_else(|| env_nonempty("AGENTGRID_SANDBOX_CPUS"));
+    if let Some(c) = cpus {
+        v.push("--cpus".to_string());
+        v.push(c);
     }
     // Plan §25: separate artifact/output mount. When the worktree is
     // read-only the agent still needs a writable place for outputs:
@@ -399,6 +471,13 @@ pub(crate) fn image_ref() -> String {
     image
 }
 
+fn env_nonempty(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
+}
+
 /// Wrap `(program, args)` for the configured sandbox, rooted at `workdir`.
 /// `None` returns the command unchanged. `Docker` prefixes with the hardened
 /// `docker run … <image> --` head from [`docker_run_head`].
@@ -418,6 +497,7 @@ pub fn sandbox_command(
     read_only_worktree: bool,
     container_name: Option<&str>,
     container_env: &[(String, String)],
+    limits: Option<&agentgrid_adapters::ResourceLimits>,
 ) -> (String, Vec<String>) {
     match kind {
         SandboxKind::None => (program.to_string(), args.to_vec()),
@@ -428,6 +508,7 @@ pub fn sandbox_command(
                 read_only_worktree,
                 container_name,
                 container_env,
+                limits,
             );
             out.push(image_ref());
             out.push(program.to_string());
@@ -637,6 +718,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         assert_eq!(p, "claude");
         assert_eq!(a, vec!["--acp"]);
@@ -657,6 +739,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -690,6 +773,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         assert_eq!(p, "adapter-x");
         assert!(a.is_empty());
@@ -716,6 +800,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         let idx = a
@@ -744,6 +829,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -784,6 +870,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         assert_eq!(p, "docker");
@@ -800,6 +887,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         assert_eq!(a2[a2.len() - 2], "img:1@sha256:f00d");
@@ -822,6 +910,7 @@ mod tests {
             true,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         let vol = a
@@ -842,6 +931,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         let vol2 = a2
             .iter()
@@ -939,6 +1029,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
@@ -964,6 +1055,7 @@ mod tests {
                 false,
                 None,
                 &[],
+                None,
             );
             let i = a.iter().position(|x| x == "--network").unwrap() + 1;
             a[i].clone()
@@ -995,6 +1087,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
@@ -1019,6 +1112,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         let at2 = |flag: &str| a2.iter().position(|x| x == flag).unwrap() + 1;
         assert_eq!(a2[at2("--network")], "bridge");
@@ -1078,6 +1172,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
         );
         clear_sandbox_env();
         assert!(
@@ -1117,5 +1212,151 @@ mod tests {
         let remove = unsafe_env_guard(SandboxKind::None);
         assert!(remove.is_empty(), "explicit override keeps the unsafe env");
         std::env::remove_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX");
+    }
+
+    // ---- Stage 12 / ADR 0003: per-attempt resource limits ----
+
+    use agentgrid_adapters::ResourceLimits;
+
+    #[test]
+    fn per_attempt_limits_override_env_knobs() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        // Node-wide env knob says 512m, but the attempt profile says 64 MiB
+        // with 0.5 cores and 32 tasks — the per-attempt ceiling must win.
+        std::env::set_var("AGENTGRID_SANDBOX_MEMORY", "512m");
+        let limits = ResourceLimits {
+            memory_max: Some(64 * 1024 * 1024),
+            cpu_quota_percent: Some(50),
+            tasks_max: Some(32),
+        };
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            None,
+            &[],
+            Some(&limits),
+        );
+        clear_sandbox_env();
+        let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
+        assert_eq!(
+            a[at("--memory")],
+            "64m",
+            "profile memory overrides env 512m"
+        );
+        assert_eq!(
+            a[at("--cpus")],
+            "0.50",
+            "CPUQuota 50% renders as 0.50 cores"
+        );
+        assert_eq!(a[at("--pids-limit")], "32");
+    }
+
+    #[test]
+    fn per_attempt_unset_fields_fall_back_to_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        std::env::set_var("AGENTGRID_SANDBOX_PIDS_LIMIT", "100");
+        std::env::set_var("AGENTGRID_SANDBOX_CPUS", "2");
+        // Only memory is set on the attempt; pids/cpus keep the env value.
+        let limits = ResourceLimits {
+            memory_max: Some(32 * 1024 * 1024),
+            cpu_quota_percent: None,
+            tasks_max: None,
+        };
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            None,
+            &[],
+            Some(&limits),
+        );
+        clear_sandbox_env();
+        let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
+        assert_eq!(a[at("--memory")], "32m");
+        assert_eq!(
+            a[at("--pids-limit")],
+            "100",
+            "unset profile field keeps env"
+        );
+        assert_eq!(a[at("--cpus")], "2", "unset profile field keeps env");
+    }
+
+    #[test]
+    fn cpu_quota_renders_whole_cores_without_fraction() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        for (quota, expect) in [(100, "1"), (200, "2"), (150, "1.50"), (75, "0.75")] {
+            let limits = ResourceLimits {
+                memory_max: None,
+                cpu_quota_percent: Some(quota),
+                tasks_max: None,
+            };
+            let (_, a) = sandbox_command(
+                SandboxKind::Docker,
+                "c",
+                &[],
+                std::path::Path::new("/w"),
+                None,
+                false,
+                None,
+                &[],
+                Some(&limits),
+            );
+            let at = a.iter().position(|x| x == "--cpus").unwrap() + 1;
+            assert_eq!(a[at], expect, "quota {quota}% must render as {expect}");
+        }
+        clear_sandbox_env();
+    }
+
+    #[test]
+    fn named_containers_are_not_rm_ed_transient_ones_are() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        // A named per-attempt container keeps its inspectable state so the
+        // OOM check (inspect_container_oom) does not race auto-removal.
+        let (_, named) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            Some("agentgrid-attempt-x"),
+            &[],
+            None,
+        );
+        let (_, transient) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert!(
+            !named.contains(&"--rm".to_string()),
+            "named per-attempt container must not be --rm (OOM inspect races it): {named:?}"
+        );
+        assert!(
+            transient.contains(&"--rm".to_string()),
+            "transient unnamed probe keeps --rm: {transient:?}"
+        );
     }
 }

@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Per-attempt resource limits on the Docker sandbox (Stage 12 / ADR
+  0003).** The profile's `ResourceLimits { memory_max, cpu_quota_percent,
+  tasks_max }` now reach the container: `sandbox_prefix`/`sandbox_command`
+  accept a `limits` argument and `docker_run_head` maps it to
+  `--memory/--cpus/--pids-limit` (CPUQuota 150% → `--cpus 1.50`). Set fields
+  override the node-wide env knobs per attempt; unset fields keep the env
+  fallback. Both spawn paths ride it — the wrapper path via
+  `SpawnRequest.limits`, the ACP path via the fetched CP profile (which
+  previously had no limits at all).
+- **OOM-killed attempts now report `resource_limit`, not `agent_failed`** —
+  the exit-137 of an OOM kill is indistinguishable from a crash at the exit
+  code level. After a sandboxed attempt exits, the node asks the runtime
+  (`docker inspect -f {{.State.OOMKilled}}`) and upgrades the outcome to the
+  first-class `resource_limit:memory` error code, so a hit ceiling is
+  distinguishable from an agent crash (e.g. never auto-retry an OOM). To keep
+  the container inspectable, named per-attempt containers are no longer
+  `--rm` (the OOM inspect raced auto-removal); transient probes (validation/
+  eval) keep `--rm`, and cancel/timeout plus the startup sweep still reap.
+- **Mock adapter `oom:<mb>` command** — allocates and touches `<mb>` MiB so
+  the memory limit trips deterministically (E2E fixture, no LLM).
+- **E2E `tests/e2e/run-oom-limit.sh`** — process-based CP+node with a
+  Docker-sandboxed attempt (`--memory 64m`): mock `oom:512` → runtime OOM
+  kill → attempt `failed` with `error_code=resource_limit:memory`. Wired
+  into the CI `e2e` job (`AGENTGRID_SANDBOX_IMAGE=ag-node:test`); skips
+  cleanly when docker is unavailable.
+
 ## [0.4.5] - 2026-09-08
 
 ### Changed

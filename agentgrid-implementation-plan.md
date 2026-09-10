@@ -625,13 +625,13 @@
 
 - [ ] Default executor запускает subprocess под отдельным Unix user  — нет; `agentgrid` systemd user для daemon, child бежит под ним
 - [ ] При наличии systemd/cgroups v2 создавать transient scope на attempt  — контракт `ResourceLimits` в `SpawnRequest`, real impl = follow-up (Stage 12)
-- [ ] Поддержать `MemoryMax`
-- [ ] Поддержать `CPUQuota`
-- [ ] Поддержать `TasksMax`
+- [ ] Поддержать `MemoryMax` — docker-sandbox path: `--memory` из per-attempt `ResourceLimits.memory_max` или env (Stage 12); systemd transient scope — follow-up
+- [ ] Поддержать `CPUQuota` — docker-sandbox path: `--cpus` (CPUQuota% / 100) из per-attempt limits/env (Stage 12); systemd — follow-up
+- [ ] Поддержать `TasksMax` — docker-sandbox path: `--pids-limit` из per-attempt limits/env (Stage 12); systemd — follow-up
 - [ ] Завершать весь cgroup при cancel/timeout
 - [x] Fallback при отсутствии systemd scope — process group + SIGTERM/SIGKILL  — process group + bounded reap
 - [ ] Публиковать поддержку cgroups как capability
-- [ ] Тестировать превышение memory limit и корректный `error_code=resource_limit`  — unit-mapping есть (Stage 12); real E2E = follow-up
+- [x] Тестировать превышение memory limit и корректный `error_code=resource_limit`  — unit-mapping есть (Stage 12); real E2E = follow-up — закрыто Stage 12: unit-тесты (sandbox.rs `per_attempt_*`, `cpu_quota_*`, `named_containers_*`) + процессный E2E `tests/e2e/run-oom-limit.sh` (OOMKilled → `resource_limit:memory`) в CI
 - [ ] Тестировать fork-heavy mock adapter и `TasksMax`
 
 ### 6.12 Protocol и version compatibility

@@ -5,6 +5,9 @@
 //!   write:<file>:<content> - write a file into the cwd (the attempt worktree)
 //!   fail:<exit-code>  - finish with a non-zero exit code
 //!   spam:<n>          - emit n log lines (streaming/buffer tests)
+//!   oom:<mb>          - allocate <mb> of RAM and touch it (Stage 12 E2E:
+//!                       trips the sandbox --memory limit → the runtime
+//!                       OOM-kills the container → resource_limit error code)
 //! Any other line is logged as a note. Emits a final `result` event.
 
 use std::env;
@@ -92,6 +95,25 @@ fn main() {
             let n: usize = n.parse().unwrap_or(0);
             for i in 0..n {
                 emit("log", json!({ "text": format!("spam line {i}") }));
+            }
+        } else if let Some(mb) = line.strip_prefix("oom:") {
+            // Stage 12 E2E: allocate and touch <mb> MiB so the container
+            // runtime's --memory limit OOM-kills the attempt. The allocation
+            // is held until process exit (the kill never lets it return).
+            let mb: usize = mb.parse().unwrap_or(0);
+            emit(
+                "log",
+                json!({ "text": format!("allocating {mb} MiB to trip the memory limit") }),
+            );
+            if mb > 0 {
+                let mut buf: Vec<u8> = vec![0u8; mb * 1024 * 1024];
+                // Touch every page so the RSS really grows (a bare alloc can
+                // stay untouched on lazily-committed memory).
+                for chunk in buf.chunks_mut(4096) {
+                    chunk[0] = 1;
+                }
+                emit("log", json!({ "text": format!("allocated {mb} MiB") }));
+                std::thread::sleep(Duration::from_secs(30));
             }
         } else {
             emit("log", json!({ "text": format!("note: {line}") }));

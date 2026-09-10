@@ -88,6 +88,7 @@ pub async fn run_validation(
         false, // validation must be able to write (test fixtures)
         None,  // no per-attempt name: transient validation command
         &[],   // validation needs no adapter secrets in-container
+        None,  // no per-attempt profile limits; node-wide env knobs apply
     );
     let mut cmd = tokio::process::Command::new(&program);
     cmd.args(prefix_args)

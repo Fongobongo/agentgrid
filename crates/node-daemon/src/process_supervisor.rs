@@ -16,11 +16,12 @@ use crate::completion::{terminate_group, wait_bounded, BoundedExit};
 use crate::event_sink::{read_stream, EventSink};
 
 /// Outcome of a supervised adapter run: the process exit code plus why it was
-/// cut short (`timeout` / `cancelled` / `None` = natural exit).
-#[derive(Debug, Clone, Copy)]
+/// cut short (`timeout` / `cancelled` / `resource_limit:<reason>` / `None` =
+/// natural exit).
+#[derive(Debug, Clone)]
 pub struct SupervisedRun {
     pub code: i32,
-    pub kill_reason: Option<&'static str>,
+    pub kill_reason: Option<String>,
 }
 
 /// Spawn the adapter through `ProcessBackend`, stream stdout/stderr as events
@@ -68,9 +69,22 @@ pub async fn supervise_adapter(
         g2,
     ));
 
-    let (code, kill_reason): (i32, Option<&'static str>) = {
+    let (code, kill_reason): (i32, Option<String>) = {
         match wait_bounded(&mut child, timeout, attempt_id, cancel_client, cancel_url).await? {
-            BoundedExit::Exited(c) => (c, None),
+            BoundedExit::Exited(c) => {
+                // Stage 12 / ADR 0003: a sandboxed attempt may have been
+                // OOM-killed by the container runtime — the exit code alone
+                // (137) is indistinguishable from an agent crash. Ask the
+                // runtime; on OOM upgrade the outcome to the first-class
+                // `resource_limit:<reason>` error code so the CP can treat
+                // "the profile ceiling was hit" differently from "the agent
+                // died" (e.g. never auto-retry an OOM).
+                let oom = crate::sandbox::inspect_container_oom(attempt_id).await;
+                if oom.is_some() {
+                    crate::sandbox::remove_sandbox_container(attempt_id).await;
+                }
+                (c, oom.map(|reason| format!("resource_limit:{reason}")))
+            }
             BoundedExit::TimedOut => {
                 terminate_group(pid);
                 // Audit ND-6: killing the `docker run` client leaves the
@@ -83,7 +97,10 @@ pub async fn supervise_adapter(
                     .await
                     .ok()
                     .and_then(|r| r.ok());
-                (status.and_then(|s| s.code()).unwrap_or(-1), Some("timeout"))
+                (
+                    status.and_then(|s| s.code()).unwrap_or(-1),
+                    Some("timeout".to_string()),
+                )
             }
             BoundedExit::Cancelled => {
                 sink.push(
@@ -103,7 +120,7 @@ pub async fn supervise_adapter(
                     .and_then(|r| r.ok());
                 (
                     status.and_then(|s| s.code()).unwrap_or(-1),
-                    Some("cancelled"),
+                    Some("cancelled".to_string()),
                 )
             }
         }

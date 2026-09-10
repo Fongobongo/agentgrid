@@ -182,6 +182,7 @@ pub async fn probe_evals(workdir: &Path, timeout: Duration) -> Result<EvalOutcom
             false, /* evals write scratch if needed */
             None,  /* no per-attempt name: transient eval probe */
             &[],   /* eval probes need no adapter secrets in-container */
+            None,  /* no per-attempt profile limits; node-wide env knobs apply */
         );
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&prefix_args)
