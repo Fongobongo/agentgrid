@@ -182,24 +182,37 @@ fi
 
 echo ">> asserting error_code=resource_limit (distinct from agent_failed)"
 DETAIL=$(curl -fsS "$BASE/v1/tasks/$TID" -H "authorization: Bearer $jwt")
-python3 <<PYEOF
+if ! python3 <<PYEOF
 import json
 d = json.loads('''$DETAIL''')
-attempts = d.get("attempts") or d.get("attempt") or []
-if isinstance(attempts, dict):
-    attempts = [attempts]
-err = None
-for a in attempts:
-    e = a.get("error_code")
-    if e:
-        err = e
-        break
+# The task detail carries error_code at the top level (tasks.error_code),
+# mirrored onto the latest attempt by the completion handler. Accept either.
+err = d.get("error_code")
 if not err:
-    print("  FAILED: no error_code on the attempt"); raise SystemExit(1)
-if not err.startswith("resource_limit"):
-    print(f"  FAILED: expected resource_limit:*, got {err!r}"); raise SystemExit(1)
+    attempts = d.get("attempts") or d.get("attempt") or []
+    if isinstance(attempts, dict):
+        attempts = [attempts]
+    for a in attempts:
+        e = a.get("error_code")
+        if e:
+            err = e
+            break
+if not err:
+    print("  FAILED: no error_code on the task")
+    print("  task detail:", json.dumps(d, indent=2)[:2000])
+    raise SystemExit(1)
+if not str(err).startswith("resource_limit"):
+    print(f"  FAILED: expected resource_limit:*, got {err!r}")
+    raise SystemExit(1)
 print(f"  error_code={err} — OOM classified as resource_limit, not agent_failed")
 PYEOF
+then
+  echo ">> node log tail:"
+  tail -n 60 "$TMP/node.log" 2>/dev/null || true
+  echo ">> leftover sandbox containers:"
+  docker ps -a --filter name=agentgrid- --format '{{.Names}} {{.Status}}' || true
+  exit 1
+fi
 
 echo ">> asserting the sandbox actually OOM-killed the container (not a mock bug)"
 if docker ps -a --filter name=agentgrid- --format '{{.Names}}' | grep -q .; then
