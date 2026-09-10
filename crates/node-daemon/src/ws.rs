@@ -395,6 +395,32 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn ws_node_survives_cp_restart() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Self-contained `adapter-mock` (JSON-line protocol): the test used to
+        // rely on cargo-test's target/debug landing in PATH (or on a sibling
+        // test's fixture leaking through a process-global PATH mutation —
+        // racy under the parallel test harness). A missing binary turns the
+        // attempt `infrastructure_failed` without ever reaching `running`,
+        // which is exactly the observed timeout. Install our own.
+        let dir = std::env::temp_dir().join(format!(
+            "ag-ws-reg-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let script = bin_dir.join("adapter-mock");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho '{\"type\":\"log\",\"payload\":{\"text\":\"hi\"}}'\n\
+             echo '{\"type\":\"result\",\"payload\":{\"exit_code\":0,\"text\":\"done\"}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{old_path}", bin_dir.display()));
+
         let state = AppState::open_temp().await.unwrap();
         // Bind with reuseaddr so the "restart" can take the same port.
         let sock = tokio::net::TcpSocket::new_v4().unwrap();
@@ -473,6 +499,8 @@ mod tests {
         .await;
 
         node_task.abort();
+        std::env::set_var("PATH", old_path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Plan 0.3 2.4 failure injection: kill the CP mid-attempt. The attempt
