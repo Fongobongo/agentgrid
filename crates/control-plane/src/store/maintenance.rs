@@ -581,6 +581,15 @@ impl Store {
         v
     }
 
+    // Windows has no statvfs; the production control plane deploys on Linux,
+    // but local dev on Windows must still compile. Assume "disk not full".
+    #[cfg(windows)]
+    fn statvfs_free_bytes(&self) -> u64 {
+        tracing::warn!("free_bytes: statvfs unsupported on this platform, assuming disk not full");
+        u64::MAX
+    }
+
+    #[cfg(not(windows))]
     fn statvfs_free_bytes(&self) -> u64 {
         let path = std::path::Path::new(&self.artifact_root);
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };

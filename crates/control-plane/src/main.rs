@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 use agentgrid_control_plane::{serve, AppState};
