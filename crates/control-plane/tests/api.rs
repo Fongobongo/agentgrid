@@ -1372,6 +1372,8 @@ async fn metrics_endpoint_exposes_counts() {
     assert!(text.contains("agentgrid_node_free_disk_mb"));
     assert!(text.contains("agentgrid_sqlite_db_bytes"));
     assert!(text.contains("agentgrid_sqlite_wal_bytes"));
+    // Stage 12: error-code outcome split (resource_limit vs agent_failed).
+    assert!(text.contains("agentgrid_task_errors_total"));
 }
 
 #[tokio::test]

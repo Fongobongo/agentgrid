@@ -4,6 +4,29 @@
 
 ### Added
 
+- **Keyset pagination for `/v1/audit`.** `list_audit` gains a
+  `(before_created_at, before_id)` cursor paging back through the
+  newest-first trail; the route emits `next_cursor` while full pages remain
+  and ignores half-cursors. The UI's Audit view pages via "Load more"
+  instead of silently truncating at the server's 500-row cap. Covered by a
+  new api test (no repeats/drops across pages, cursor lifecycle, `%2B`
+  percent-encoding of rfc3339 timestamps).
+- **`agentgrid_task_errors_total` metric.** Failed/cancelled task counts
+  by `error_code` (full-table GROUP BY, empty label = unclassified) —
+  keeps the Stage-12 `resource_limit:memory` vs `agent_failed` split
+  alertable in Prometheus.
+- **Web UI overhaul.** Grouped sidebar navigation with a mobile burger menu
+  (replacing the overflowing 20-button topbar), `aria-current` markers and a
+  pending-approvals badge refreshed over the change stream; global toasts for
+  action feedback (approve/deny/revoke/drain); light theme with a persisted
+  toggle; relative timestamps (`2m ago`) in dashboard/approvals/nodes/audit;
+  a tasks-finished-per-hour sparkline card; hotkeys (`n` → new task, `/` →
+  focus search); dynamic `document.title`; an inline SVG favicon; table
+  skeletons with a reduced-motion-aware shimmer; server-side "Load more" in
+  Audit; a render cap + IntersectionObserver scroll-up sentinel in the task
+  log view (no more jank on thousands of lines); a "Page not found" notice
+  for unknown hashes. Frontend test suite grows to 20 vitest cases
+  (`fmtAgo`/`fmtTime`).
 - **Per-attempt resource limits on the Docker sandbox (Stage 12 / ADR
   0003).** The profile's `ResourceLimits { memory_max, cpu_quota_percent,
   tasks_max }` now reach the container: `sandbox_prefix`/`sandbox_command`
@@ -29,6 +52,18 @@
   kill → attempt `failed` with `error_code=resource_limit:memory`. Wired
   into the CI `e2e` job (`AGENTGRID_SANDBOX_IMAGE=ag-node:test`); skips
   cleanly when docker is unavailable.
+
+### Fixed
+
+- **The crate now compiles on Windows (local dev).** `statvfs`
+  (artifact-root free-space probe) and the `flock` instance-lock are
+  linux-only; both are now `#[cfg]`-gated with a conservative fallback
+  (assume "disk not full" / skip the lock). Production deploys are
+  unaffected.
+- **Dead CSS variables in the web panel** — `--text`/`--bg2` never existed
+  (now `--fg`/`--panel2`); duplicated `.cards`/`.card` and `.badge` blocks
+  merged into one source of truth (the workflow-viewer overrides silently
+  re-styled every badge on the page).
 
 ## [0.4.5] - 2026-09-08
 

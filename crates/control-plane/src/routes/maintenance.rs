@@ -176,6 +176,26 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         s.push_str(&format!("agentgrid_tasks_total{{status=\"{st}\"}} {c}\n"));
     }
 
+    // Stage 12: failed/cancelled tasks by error_code. A NULL bucket means
+    // the attempt failed without a classified code (legacy rows); the
+    // resource_limit:* split keeps OOM vs agent-crash alertable.
+    let error_codes = state
+        .store
+        .task_error_code_counts()
+        .await
+        .unwrap_or_default();
+    s.push_str(
+        "# HELP agentgrid_task_errors_total Terminal tasks by error_code (empty = unclassified).\n",
+    );
+    s.push_str("# TYPE agentgrid_task_errors_total counter\n");
+    for (code, c) in &error_codes {
+        let label = code.as_deref().unwrap_or("");
+        s.push_str(&format!(
+            "agentgrid_task_errors_total{{error_code=\"{}\"}} {c}\n",
+            prom_label(label)
+        ));
+    }
+
     s.push_str("# HELP agentgrid_node_free_disk_mb Free disk reported via heartbeat.\n");
     s.push_str("# TYPE agentgrid_node_free_disk_mb gauge\n");
     for n in &nodes {

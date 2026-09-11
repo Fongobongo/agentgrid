@@ -111,6 +111,19 @@ impl Store {
         Ok(rows)
     }
 
+    /// Stage 12 observability: terminal task counts by error_code (NULL =
+    /// succeeded). Full-table GROUP BY like task_status_counts — keeps the
+    /// `resource_limit:*` vs `agent_failed` split alertable.
+    pub async fn task_error_code_counts(&self) -> Result<Vec<(Option<String>, i64)>> {
+        let rows: Vec<(Option<String>, i64)> = sqlx::query_as(
+            "SELECT error_code, COUNT(*) FROM tasks \
+             WHERE status IN ('failed','cancelled') GROUP BY error_code",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Audit X-C3: durations (seconds) of the most recent terminal tasks —
     /// histogram input for /metrics, newest first so the window tracks live
     /// traffic instead of the oldest page.
