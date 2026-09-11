@@ -1473,7 +1473,7 @@ mod workflow_tests {
         let s = temp_store().await;
         // No in-flight attempts: reconcile is a clean no-op that still audits.
         s.reconcile_on_startup().await.unwrap();
-        let audits = s.list_audit(None, 100).await.unwrap();
+        let audits = s.list_audit(None, None, 100).await.unwrap();
         assert!(audits.iter().any(|a| a.action == "startup_reconcile"));
     }
 
@@ -2656,7 +2656,7 @@ mod workflow_tests {
             .complete_attempt(&a.attempt_id, &CompleteAttemptRequest::default())
             .await
             .unwrap());
-        let audits = s.list_audit(None, 100).await.unwrap();
+        let audits = s.list_audit(None, None, 100).await.unwrap();
         let rejs: Vec<_> = audits
             .iter()
             .filter(|e| e.action == "complete.rejected_terminal")
@@ -2701,7 +2701,7 @@ mod workflow_tests {
             .unwrap();
         // The task is queued (never failed); retry must be rejected.
         assert!(!s.retry_task(&task.id).await.unwrap());
-        let audits = s.list_audit(None, 100).await.unwrap();
+        let audits = s.list_audit(None, None, 100).await.unwrap();
         let rejs: Vec<_> = audits
             .iter()
             .filter(|e| e.action == "retry.rejected_nonterminal")

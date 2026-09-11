@@ -4181,7 +4181,7 @@ async fn policy_evaluate_audits_decision() {
     assert_eq!(resp.status(), StatusCode::OK);
     let events = state
         .store
-        .list_audit(Some("policy.evaluate"), 10)
+        .list_audit(Some("policy.evaluate"), None, 10)
         .await
         .unwrap();
     assert!(!events.is_empty(), "every policy decision must be audited");
@@ -8620,6 +8620,111 @@ async fn audit_route_lists_and_filters_decisions() {
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert!(!lr.items.is_empty());
     assert!(lr.items.iter().all(|i| i["action"] == "task.create"));
+}
+
+#[tokio::test]
+async fn audit_route_paginates_with_before_cursor() {
+    // Keyset pagination over the audit trail: `next_cursor` is emitted while
+    // pages come back full; the `before_*` pair pages strictly back in time;
+    // pages never overlap or drop rows, and a short final page stops the
+    // cursor. Also: a lone half of the cursor pair is ignored (first page).
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+    // Three task creates -> three `task.create` audit rows (plus whatever
+    // the test-token bootstrap wrote).
+    for i in 0..3 {
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/tasks",
+                json!({"prompt": format!("p{i}"), "repository": "demo", "adapter": "mock"})
+                    .to_string(),
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+    }
+
+    // Page through ONLY the task.create rows, one at a time (limit=1).
+    // NB: created_at is RFC3339 with a `+00:00` suffix — the `+` MUST be
+    // percent-encoded or the query parser reads it as a space and the
+    // cursor silently matches nothing.
+    let mut seen_ids: Vec<serde_json::Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let qs = match &cursor {
+            Some(c) => {
+                let (created, id) = c.split_once(',').unwrap();
+                let created = created.replace('+', "%2B");
+                format!("/v1/audit?action=task.create&limit=1&before_created_at={created}&before_id={id}")
+            }
+            None => "/v1/audit?action=task.create&limit=1".to_string(),
+        };
+        let resp = app.clone().oneshot(get_auth(&qs, &token)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let lr: ListResponse<serde_json::Value> =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        if lr.items.is_empty() {
+            // Exhausted: a page past the end is empty and offers no cursor.
+            assert!(lr.next_cursor.is_none(), "empty page must end the trail");
+            break;
+        }
+        assert!(
+            lr.items.len() == 1 || lr.next_cursor.is_some(),
+            "a short page must not claim more history"
+        );
+        for item in &lr.items {
+            assert_eq!(item["action"], "task.create");
+            assert!(
+                !seen_ids.contains(&item["id"]),
+                "cursor pages must not repeat rows"
+            );
+            seen_ids.push(item["id"].clone());
+        }
+        cursor = lr.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    // All three created rows were reached exactly once.
+    assert_eq!(seen_ids.len(), 3, "pagination must cover every row");
+
+    // Full pages emit the cursor, the exhausted tail does not.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/audit?action=task.create&limit=3", &token))
+        .await
+        .unwrap();
+    let lr: ListResponse<serde_json::Value> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(lr.items.len(), 3);
+    assert!(lr.next_cursor.is_some(), "full page must offer a cursor");
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/audit?action=task.create&limit=500", &token))
+        .await
+        .unwrap();
+    let lr: ListResponse<serde_json::Value> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(lr.next_cursor.is_none(), "short tail page ends the trail");
+
+    // A half cursor (missing before_id) falls back to the first page rather
+    // than silently matching nothing.
+    let resp = app
+        .clone()
+        .oneshot(get_auth(
+            "/v1/audit?action=task.create&limit=1&before_created_at=2099-01-01T00:00:00Z",
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let lr: ListResponse<serde_json::Value> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(lr.items.len(), 1);
 }
 
 #[tokio::test]

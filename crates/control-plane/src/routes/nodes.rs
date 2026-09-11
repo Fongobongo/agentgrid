@@ -61,24 +61,44 @@ pub async fn get_node(
 }
 
 /// Query for `GET /v1/audit` (plan 3.4): optional action filter + row cap.
+/// Keyset cursor `before_created_at` + `before_id` (both required together)
+/// pages further back through the newest-first trail.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AuditQuery {
     #[serde(default)]
     pub action: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+    #[serde(default)]
+    pub before_created_at: Option<String>,
+    #[serde(default)]
+    pub before_id: Option<String>,
 }
 
 /// Newest-first audit trail (plan 3.4): who decided what, with an optional
 /// action filter. Storage outage surfaces as 503, never an empty list.
+/// The response carries a `next_cursor` while more history remains.
 pub async fn list_audit_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<ListResponse<crate::store::AuditEvent>>, StatusCode> {
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let action = q.action.as_deref().filter(|a| !a.is_empty());
-    match state.store.list_audit(action, limit).await {
-        Ok(items) => Ok(Json(ListResponse::new(items, None))),
+    let before = match (&q.before_created_at, &q.before_id) {
+        (Some(c), Some(i)) if !c.is_empty() && !i.is_empty() => Some((c.clone(), i.clone())),
+        _ => None,
+    };
+    match state.store.list_audit(action, before, limit).await {
+        Ok(items) => {
+            // Same convention as tasks/nodes: emit a cursor while the page
+            // came back full — the client can keep paging back in time.
+            let next_cursor = if items.len() == limit as usize {
+                items.last().map(|e| format!("{},{}", e.created_at, e.id))
+            } else {
+                None
+            };
+            Ok(Json(ListResponse::new(items, next_cursor)))
+        }
         Err(e) => {
             tracing::error!("list_audit failed: {e}");
             Err(StatusCode::SERVICE_UNAVAILABLE)

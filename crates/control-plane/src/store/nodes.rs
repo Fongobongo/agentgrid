@@ -369,22 +369,61 @@ impl Store {
     }
 
     /// Most-recent audit events (newest first), optionally filtered by action.
-    pub async fn list_audit(&self, action: Option<&str>, limit: i64) -> Result<Vec<AuditEvent>> {
-        let rows = match action {
-            Some(a) => {
+    /// Keyset cursor `(before_created_at, before_id)` pages further back in
+    /// time: rows strictly older than the pair, mirroring the tasks/nodes
+    /// pagination (which pages forward with `after_*`).
+    pub async fn list_audit(
+        &self,
+        action: Option<&str>,
+        before: Option<(String, String)>,
+        limit: i64,
+    ) -> Result<Vec<AuditEvent>> {
+        // sqlx 0.9 requires static SQL literals (no runtime-built strings);
+        // the four combinations are spelled out explicitly below. All data
+        // still travels through bound parameters.
+        let rows = match (action, before) {
+            (Some(a), Some((c, i))) => {
                 sqlx::query(
                     "SELECT id, actor_type, actor_id, action, subject, payload, created_at \
-                     FROM audit_events WHERE action = ? ORDER BY created_at DESC LIMIT ?",
+                     FROM audit_events WHERE action = ? \
+                     AND (created_at < ? OR (created_at = ? AND id < ?)) \
+                     ORDER BY created_at DESC, id DESC LIMIT ?",
+                )
+                .bind(a)
+                .bind(&c)
+                .bind(&c)
+                .bind(&i)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(a), None) => {
+                sqlx::query(
+                    "SELECT id, actor_type, actor_id, action, subject, payload, created_at \
+                     FROM audit_events WHERE action = ? ORDER BY created_at DESC, id DESC LIMIT ?",
                 )
                 .bind(a)
                 .bind(limit)
                 .fetch_all(&self.pool)
                 .await?
             }
-            None => {
+            (None, Some((c, i))) => {
                 sqlx::query(
                     "SELECT id, actor_type, actor_id, action, subject, payload, created_at \
-                     FROM audit_events ORDER BY created_at DESC LIMIT ?",
+                     FROM audit_events WHERE created_at < ? OR (created_at = ? AND id < ?) \
+                     ORDER BY created_at DESC, id DESC LIMIT ?",
+                )
+                .bind(&c)
+                .bind(&c)
+                .bind(&i)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, None) => {
+                sqlx::query(
+                    "SELECT id, actor_type, actor_id, action, subject, payload, created_at \
+                     FROM audit_events ORDER BY created_at DESC, id DESC LIMIT ?",
                 )
                 .bind(limit)
                 .fetch_all(&self.pool)
