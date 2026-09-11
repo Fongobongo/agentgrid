@@ -1,7 +1,8 @@
 import { useEffect, useState, Fragment } from 'react';
 import { drainNode, getJson, getOpencodeAudit, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, listOpencodeProfiles, postJson, revokeNode } from '../api';
 import { ConfirmModal } from './Modal';
-import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
+import { ErrorBox, Loading, StatusBadge, TimeAgo, fmtTime, useLiveRefresh } from './util';
+import { toast } from './Toast';
 
 interface AccountUsage {
   env: string;
@@ -83,8 +84,10 @@ export default function Nodes() {
     setBusy(n.id);
     try {
       const r = await revokeNode(n.id);
-      if (r.ok) load();
-      else setError(new Error(`Revoke failed (${r.status})`));
+      if (r.ok) {
+        toast.ok(`Node ${n.name} revoked`);
+        load();
+      } else setError(new Error(`Revoke failed (${r.status})`));
     } catch (e) {
       setError(e);
     } finally {
@@ -97,8 +100,10 @@ export default function Nodes() {
     setBusy(n.id);
     try {
       const r = await drainNode(n.id, !n.drained);
-      if (r.ok) load();
-      else setError(new Error(`Drain failed (${r.status})`));
+      if (r.ok) {
+        toast.ok(`Node ${n.name} ${n.drained ? 'undrained' : 'drained'}`);
+        load();
+      } else setError(new Error(`Drain failed (${r.status})`));
     } catch (e) {
       setError(e);
     } finally {
@@ -205,7 +210,7 @@ export default function Nodes() {
                     return `${b} B`;
                   })()}
                 </td>
-                <td>{fmtTime(n.last_heartbeat_at)}</td>
+                <td><TimeAgo s={n.last_heartbeat_at} /></td>
                 <td>
                   {n.status !== 'revoked' && (
                     <div>

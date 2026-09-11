@@ -486,6 +486,21 @@ export function listApprovals(status?: string): Promise<ApprovalView[]> {
   );
 }
 
+// Sidebar badge: count of pending approvals. Pending queues are small in
+// practice, but cap the fetch at 50 pages-worth to avoid an unbounded walk
+// on a runaway queue; the badge shows "50+" in that case.
+export async function countPendingApprovals(): Promise<number | null> {
+  try {
+    const list = await listGet<ApprovalView>(
+      `/v1/approvals?status=pending`,
+      200,
+    );
+    return list.length;
+  } catch {
+    return null; // don't badge on transient errors
+  }
+}
+
 export function answerApproval(
   id: string,
   decision: "allow" | "deny",
@@ -653,6 +668,41 @@ export function listAudit(action?: string, limit = 100): Promise<AuditEvent[]> {
   if (action) q.set("action", action);
   q.set("limit", String(limit));
   return listGet<AuditEvent>(`/v1/audit?${q.toString()}`);
+}
+
+// Server-side audit pagination: one page at a time, paging BACK in time with
+// the `before_*` keyset cursor the /v1/audit handler emits. (listGet's
+// forward `after_*` auto-pager does not apply to newest-first trails.)
+export interface AuditPage {
+  items: AuditEvent[];
+  next_cursor: string | null;
+}
+
+export async function listAuditPage(
+  action: string | undefined,
+  beforeCursor: string | null,
+  limit = 100,
+): Promise<AuditPage> {
+  const q = new URLSearchParams();
+  if (action) q.set('action', action);
+  q.set('limit', String(limit));
+  if (beforeCursor) {
+    const idx = beforeCursor.indexOf(',');
+    if (idx > 0) {
+      q.set('before_created_at', beforeCursor.slice(0, idx));
+      q.set('before_id', beforeCursor.slice(idx + 1));
+    }
+  }
+  const raw = await getJson<unknown>(`/v1/audit?${q.toString()}`);
+  if (Array.isArray(raw)) {
+    // Old server without the cursor envelope: single page, no continuation.
+    return { items: raw as AuditEvent[], next_cursor: null };
+  }
+  const resp = raw as ListResponse<AuditEvent>;
+  return {
+    items: Array.isArray(resp?.items) ? resp.items : [],
+    next_cursor: resp?.next_cursor ?? null,
+  };
 }
 
 // Plan 3.2: change-notification stream. The server emits `hello` on connect

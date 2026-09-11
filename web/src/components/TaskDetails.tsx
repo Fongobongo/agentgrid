@@ -72,6 +72,23 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   // Plan 1.3 (#13): task tags (add/remove inline).
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
+  // Render cap for the live output: paging walks back in LOG_PAGE chunks.
+  const LOG_PAGE = 500;
+  const [logLimit, setLogLimit] = useState(1000);
+  // Sentinel that auto-extends the cap when scrolled into view, so paging
+  // back through a long log is a flick-up instead of a button click.
+  const moreRef = useRef<HTMLDivElement | null>(null);
+  const logMore = useRef(() => {});
+  logMore.current = () => setLogLimit((l) => l + LOG_PAGE);
+  useEffect(() => {
+    const el = moreRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) logMore.current();
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
 
   const logRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -290,9 +307,14 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   if (error) return <ErrorBox err={error} />;
   if (!task) return <Loading />;
 
+  // Render cap for the live log: long tasks pile up thousands of lines and
+  // the full DOM render jank-freezes scroll. `logLimit` shows the tail;
+  // the sentinel above walks it back in chunks as the user scrolls up.
   const logEvents = events.filter((e) =>
     ["stdout", "stderr", "result", "error", "tool"].includes(e.type),
   );
+  const hidden = Math.max(0, logEvents.length - logLimit);
+  const shownLog = hidden > 0 ? logEvents.slice(-logLimit) : logEvents;
   const statusEvents = events
     .filter((e) => e.type === "status")
     // Hardening P0 item 9: order status transitions by the global ingest
@@ -444,10 +466,17 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
             <span className="muted">{logEvents.length} lines</span>
           </div>
           <div className="log" ref={logRef} onScroll={onScroll}>
+            {hidden > 0 && (
+              <div className="log-sentinel" ref={moreRef}>
+                <span className="muted">
+                  ↑ {hidden} earlier lines — keep scrolling to load more
+                </span>
+              </div>
+            )}
             {logEvents.length === 0 && (
               <div className="muted">No output yet.</div>
             )}
-            {logEvents.map((e, i) => (
+            {shownLog.map((e, i) => (
               <div key={i} className={`logline ${e.type}`}>
                 {eventText(e)}
               </div>

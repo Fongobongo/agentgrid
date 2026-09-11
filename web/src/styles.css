@@ -10,6 +10,25 @@
   --bad: #f85149;
   --warn: #d29922;
   --cancel: #a371f7;
+  --log-bg: #0a0c10;
+}
+
+/* Light theme: opt-in via <html data-theme="light"> (toggle in the topbar,
+   persisted in localStorage). Only the palette flips; component rules
+   keep referencing the same custom properties. */
+[data-theme="light"] {
+  --bg: #f4f6fa;
+  --panel: #ffffff;
+  --panel2: #e9edf4;
+  --border: #d3dae5;
+  --fg: #1a2230;
+  --muted: #5c6779;
+  --accent: #1a5fd0;
+  --ok: #1a7f37;
+  --bad: #cf222e;
+  --warn: #9a6700;
+  --cancel: #8250df;
+  --log-bg: #f9fafc;
 }
 
 * {
@@ -31,39 +50,117 @@ body {
 
 .app {
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
+/* Topbar is now a slim strip: brand + mobile menu toggle. Navigation
+   moved into the grouped sidebar below (see .sidebar/.sidenav). */
 .topbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   padding: 10px 18px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 30;
 }
 .brand {
   font-weight: 700;
   letter-spacing: 0.5px;
   color: var(--accent);
 }
-.topbar nav {
-  display: flex;
-  gap: 6px;
+.topbar-new {
+  margin-left: 8px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 6px 14px;
+  min-height: 32px;
+  font-size: 13px;
+  font-weight: 600;
 }
-.topbar .logout {
+.topbar-new:hover {
+  filter: brightness(1.08);
+}
+.theme-toggle {
   margin-left: auto;
+  background: var(--panel2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  width: 34px;
+  height: 34px;
+  min-height: 0;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
 }
+.menu-toggle {
+  display: none;
+  background: var(--panel2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.app-body {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ----- sidebar ----- */
+.sidebar {
+  width: 210px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  position: sticky;
+  top: 49px;
+  height: calc(100vh - 49px);
+  overflow-y: auto;
+  padding: 12px 10px;
+}
+.sidenav {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.navgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.navgroup-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px 10px 6px;
+}
+.sidenav .logout {
+  margin-top: 6px;
+}
+
 .navbtn {
+  display: block;
+  width: 100%;
   background: transparent;
   color: var(--fg);
   border: 1px solid transparent;
-  padding: 6px 12px;
+  padding: 6px 10px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 14px;
+  text-align: left;
 }
 .navbtn:hover {
   background: var(--panel2);
@@ -73,8 +170,74 @@ body {
   border-color: var(--border);
   color: var(--accent);
 }
+.navbtn.accent {
+  color: var(--accent);
+  font-weight: 600;
+}
+.navbtn-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.navbadge {
+  display: inline-block;
+  min-width: 20px;
+  text-align: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.navbadge.hot {
+  background: rgba(248, 81, 73, 0.18);
+  border-color: rgba(248, 81, 73, 0.5);
+  color: var(--bad);
+}
 .navbtn.logout {
   color: var(--muted);
+}
+
+/* Scrim behind the mobile slide-out menu. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 40;
+}
+
+@media (max-width: 860px) {
+  .menu-toggle {
+    display: inline-block;
+  }
+  .app-body {
+    display: block;
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    height: 100%;
+    width: 230px;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.18s ease;
+    box-shadow: 4px 0 18px rgba(0, 0, 0, 0.35);
+  }
+  .app-body > .sidebar {
+    /* mobile default: hidden */
+  }
+  .app-body.menu-open .sidebar,
+  .sidebar.open {
+    transform: translateX(0);
+  }
+  .topbar {
+    z-index: 60;
+  }
 }
 
 .content {
@@ -228,18 +391,19 @@ a.link {
 }
 
 /* ----- dashboard ----- */
+/* Single source of truth for stat/HUD cards (previously duplicated:
+   the flex version below was dead CSS once the grid version loaded). */
 .cards {
-  display: flex;
+  display: grid;
   gap: 14px;
-  flex-wrap: wrap;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   margin-bottom: 20px;
 }
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 16px 22px;
-  min-width: 130px;
+  padding: 14px 16px;
 }
 .card-value {
   font-size: 28px;
@@ -250,6 +414,18 @@ a.link {
   margin-top: 4px;
 }
 
+/* Sparkline inside the "Finished (24h)" dashboard card. viewBox is
+   0 0 100 100 with non-scaling-stroke so the line stays 3px at any size. */
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 34px;
+  margin-top: 8px;
+}
+.sparkline polyline {
+  stroke: var(--accent);
+}
+
 .search-input {
   width: 100%;
   max-width: 420px;
@@ -258,7 +434,7 @@ a.link {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
-  color: var(--text);
+  color: var(--fg);
   font-size: 14px;
 }
 
@@ -309,7 +485,11 @@ a.link {
   white-space: nowrap;
 }
 
-/* ----- badges ----- */
+/* ----- badges -----
+   Single badge block (previously duplicated: the workflow-run viewer
+   re-declared .badge with border-radius 4px and .err/.run variants,
+   overriding the pill style above). Kept the pill shape and merged
+   the extra workflow status variants in. */
 .badge {
   display: inline-block;
   padding: 2px 8px;
@@ -324,7 +504,8 @@ a.link {
   color: var(--ok);
   border-color: rgba(63, 185, 80, 0.4);
 }
-.badge.bad {
+.badge.bad,
+.badge.err {
   background: rgba(248, 81, 73, 0.15);
   color: var(--bad);
   border-color: rgba(248, 81, 73, 0.4);
@@ -343,6 +524,11 @@ a.link {
   background: rgba(163, 113, 247, 0.15);
   color: var(--cancel);
   border-color: rgba(163, 113, 247, 0.4);
+}
+.badge.run {
+  background: var(--panel2);
+  color: var(--accent);
+  border-color: var(--border);
 }
 
 /* ----- new task form ----- */
@@ -404,7 +590,7 @@ a.link {
   padding: 0 6px;
 }
 .chip {
-  background: var(--bg2);
+  background: var(--panel2);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 2px 10px;
@@ -525,7 +711,7 @@ a:focus-visible {
   margin-bottom: 6px;
 }
 .log {
-  background: #0a0c10;
+  background: var(--log-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   height: 420px;
@@ -554,6 +740,20 @@ a:focus-visible {
 .logline.tool {
   color: var(--warn);
 }
+.log-sentinel {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 36px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  margin: 4px 0 8px;
+  font-size: 12px;
+  background: var(--panel);
+}
+.log-sentinel:hover {
+  border-color: var(--accent);
+}
 
 .timeline,
 .attempts {
@@ -575,7 +775,7 @@ a:focus-visible {
 
 .patch,
 .vlog {
-  background: #0a0c10;
+  background: var(--log-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 10px;
@@ -699,29 +899,6 @@ a:focus-visible {
   align-items: center;
   flex-wrap: wrap;
 }
-.badge {
-  padding: 2px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  font-size: 0.85rem;
-}
-.badge.ok {
-  background: rgba(63, 185, 80, 0.15);
-  color: var(--ok);
-}
-.badge.err {
-  background: rgba(248, 81, 73, 0.15);
-  color: var(--bad);
-}
-.badge.warn {
-  background: rgba(210, 153, 34, 0.15);
-  color: var(--warn);
-}
-.badge.run {
-  background: var(--panel2);
-  color: var(--accent);
-}
-
 .wf-plan {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -1020,17 +1197,6 @@ button.secondary {
   border-radius: 6px;
   min-width: 160px;
 }
-.cards {
-  display: grid;
-  gap: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-}
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px 16px;
-}
 .card h3 {
   margin: 0 0 8px;
   font-size: 15px;
@@ -1054,4 +1220,122 @@ button.secondary {
 }
 .card li > * + * {
   margin-left: 6px;
+}
+
+/* ----- toasts ----- */
+.toasts {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 80;
+  max-width: 360px;
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.toast span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.toast.ok {
+  border-left-color: var(--ok);
+}
+.toast.err {
+  border-left-color: var(--bad);
+  color: #ffb4ae;
+}
+.toast-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 4px;
+  min-height: 0;
+}
+.toast-close:hover {
+  color: var(--fg);
+}
+
+/* ----- pager ----- */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+/* ----- skeletons ----- */
+.skeleton-table {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.skeleton-row {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.skeleton-row:last-child {
+  border-bottom: none;
+}
+.skeleton-cell {
+  flex: 1;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--panel2);
+  /* Shimmer: a soft light sweep; reduced-motion gets a plain pulse. */
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(128, 140, 160, 0.18) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+.skeleton-cell.narrow {
+  flex: 0 0 90px;
+}
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-cell {
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+    background-image: none;
+  }
+  @keyframes skeleton-pulse {
+    0%,
+    100% {
+      opacity: 0.55;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
 }

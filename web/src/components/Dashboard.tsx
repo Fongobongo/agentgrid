@@ -8,7 +8,7 @@ import {
   NodeView,
   TaskView,
 } from '../api';
-import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
+import { ErrorBox, Pager, StatusBadge, TableSkeleton, TimeAgo, useLiveRefresh } from './util';
 
 export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
@@ -62,7 +62,14 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
 
   if (!tasks || !nodes) {
     if (error) return <ErrorBox err={error} />;
-    return <Loading />;
+    // Same shape as the loaded page: stat cards, then the tasks table.
+    return (
+      <div>
+        <TableSkeleton rows={1} cols={5} />
+        <div style={{ height: 16 }} />
+        <TableSkeleton rows={6} cols={4} />
+      </div>
+    );
   }
 
   const nodeByStatus: Record<string, number> = {};
@@ -82,6 +89,20 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
     { label: 'Tasks queued', value: queued },
   ];
 
+  // Sparkline: tasks finished per hour over the last 24h, computed from
+  // the already-fetched list (no extra request). Buckets start 23h ago.
+  const now = Date.now();
+  const buckets = new Array(24).fill(0);
+  for (const t of tasks) {
+    if (!t.finished_at) continue;
+    const ms = now - new Date(t.finished_at).getTime();
+    if (isNaN(ms) || ms < 0 || ms >= 24 * 3600_000) continue;
+    const hourAgo = Math.floor(ms / 3600_000);
+    buckets[23 - hourAgo]++;
+  }
+  const max = Math.max(1, ...buckets);
+  const spark = buckets.map((v, i) => `${(i / 23) * 100},${100 - (v / max) * 100}`).join(' ');
+
   return (
     <div className="dashboard">
       {error && <ErrorBox err={error} />}
@@ -92,6 +113,20 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
             <div className="card-label">{c.label}</div>
           </div>
         ))}
+        <div className="card">
+          <div className="card-value">
+            {buckets.reduce((a, b) => a + b, 0)}
+          </div>
+          <div className="card-label">Finished (24h)</div>
+          <svg
+            className="sparkline"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            aria-label="Tasks finished per hour, last 24 hours"
+          >
+            <polyline points={spark} fill="none" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+          </svg>
+        </div>
       </div>
 
       <section>
@@ -174,26 +209,30 @@ export default function Dashboard({ onOpen }: { onOpen: (id: string) => void }) 
             })()
           : completed.length === 0 && <p className="muted">No completed tasks yet.</p>}
         {!searchHits && !eventHits && completed.length > 0 && (
-        <table className="grid">
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>Repository</th>
-              <th>Prompt</th>
-              <th>Finished</th>
-            </tr>
-          </thead>
-          <tbody>
-            {completed.map((t) => (
-              <tr key={t.id} onClick={() => onOpen(t.id)} className="clickable">
-                <td><StatusBadge status={t.status} /></td>
-                <td>{t.repository}</td>
-                <td className="prompt">{t.prompt}</td>
-                <td>{fmtTime(t.finished_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <Pager items={completed} initial={10} step={20}>
+          {(shown) => (
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Repository</th>
+                  <th>Prompt</th>
+                  <th>Finished</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(shown as TaskView[]).map((t) => (
+                  <tr key={t.id} onClick={() => onOpen(t.id)} className="clickable">
+                    <td><StatusBadge status={t.status} /></td>
+                    <td>{t.repository}</td>
+                    <td className="prompt">{t.prompt}</td>
+                    <td><TimeAgo s={t.finished_at} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Pager>
         )}
       </section>
     </div>

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { answerApproval, ApprovalView, listApprovals, reqOk } from '../api';
 import { ConfirmModal, PromptModal } from './Modal';
-import { ErrorBox, Loading, StatusBadge, fmtTime, useLiveRefresh } from './util';
+import { ErrorBox, Loading, StatusBadge, TimeAgo, useLiveRefresh } from './util';
+import { toast } from './Toast';
 
 // Stage 9.2 operator approval UI: list pending approvals, allow/deny with a
 // recorded reason. Refreshes on the control-plane change stream so a fresh
@@ -35,8 +36,10 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
     setBusy(a.id);
     try {
       await reqOk(await answerApproval(a.id, decision, reason.trim() || undefined));
+      toast.ok(decision === 'allow' ? `Allowed ${a.permission}` : `Denied ${a.permission}`);
       load();
     } catch (e) {
+      toast.error(e, `Failed to ${decision} approval`);
       setError(e);
     } finally {
       setBusy(null);
@@ -52,8 +55,10 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
       for (const a of items) {
         await reqOk(await answerApproval(a.id, 'allow'));
       }
+      toast.ok(`Approved ${items.length} approvals`);
       load();
     } catch (e) {
+      toast.error(e, 'Bulk approve failed partway');
       setError(e);
       load();
     } finally {
@@ -103,8 +108,8 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
                 <td data-h="Permission" className="mono">{a.permission}</td>
                 <td data-h="Task" className="mono"><a href={`#/task/${a.task_id}`}>{a.task_id.slice(0, 8)}</a></td>
                 <td data-h="Attempt" className="mono">{a.attempt_id.slice(0, 8)}</td>
-                <td data-h="Created">{fmtTime(a.created_at)}</td>
-                <td data-h="Expires">{fmtTime(a.expires_at)}</td>
+                <td data-h="Created"><TimeAgo s={a.created_at} /></td>
+                <td data-h="Expires"><TimeAgo s={a.expires_at} /></td>
                 <td data-h="Reason">{a.reason || '—'}</td>
                 <td data-h="Action">
                   {a.status === 'pending' && (
