@@ -254,6 +254,27 @@ kernel >= 5.10 applies (stock WSL2 yes).
 - A warning is logged when an adapter exits 0 but produces no events, surfacing
   silent agents that yield empty "succeeded" tasks.
 
+### Operator notifications (webhook / Telegram)
+
+Set `AGENTGRID_NOTIFY_WEBHOOK` on the control plane and terminal task states
+(completed / failed / awaiting review) push a best-effort notification:
+
+- **Telegram** — `https://api.telegram.org/bot<token>/sendMessage?chat_id=<n>`
+  sends the native Bot API shape (`chat_id` + human-readable status line, e.g.
+  `❌ task failed 3f2a1b… — /show 3f2a1b`).
+- **Generic JSON** — any other URL (e.g. `https://ntfy.sh/mytopic`) gets the
+  raw `{"task_id","attempt_id","status","url"}` document.
+
+### Telegram gateway (experimental)
+
+`agentgrid-gateway` bridges a Telegram chat to the control-plane API so an
+operator can drive the grid from a phone: `/nodes /tasks /approvals
+/allow <id> /deny <id> /show <id> /cancel <id> /logs <id> /run <repo>
+<adapter> <prompt...>`, plus plain-text messages routed to a chat session
+(`/new <adapter> [repo]`). Auth is an allowlist of chat ids
+(`agentgrid-gateway allow <id>` after `/start` shows your chat id); the
+allowlist file is re-read on every message.
+
 ### GitHub write-back (push + PR + issue comment)
 
 A task created with `github_push: true` (issue webhook with the `agent` label,

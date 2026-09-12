@@ -16,8 +16,9 @@
 //! a chat. The file is re-read on every message, so approval takes effect
 //! immediately without restarting the bot.
 //!
-//! Commands: /help /nodes /tasks /run <repo> <adapter> <prompt...>
-//!           /show <id> /cancel <id> /logs <id> /whoami
+//! Commands: /help /nodes /tasks /approvals /allow <id> /deny <id>
+//!           /run <repo> <adapter> <prompt...> /show <id> /cancel <id>
+//!           /logs <id> /new <adapter> [repo] /whoami
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -267,6 +268,50 @@ impl ControlPlane {
         Ok(out)
     }
 
+    /// Pending permission approvals, newest first. The gateway is an
+    /// operator surface for the "human gates" — allow/deny from the phone.
+    async fn approvals(&self) -> Result<String> {
+        let r = self.get("/v1/approvals?status=pending").send().await?;
+        let v: serde_json::Value = r.json().await.unwrap_or_default();
+        let arr = list_items(&v);
+        if arr.is_empty() {
+            return Ok("(no pending approvals)".into());
+        }
+        let mut out = String::new();
+        for a in arr.iter().take(10) {
+            let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let perm = a.get("permission").and_then(|v| v.as_str()).unwrap_or("?");
+            let scope = a.get("scope").and_then(|v| v.as_str()).unwrap_or("?");
+            let task = a.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
+            out.push_str(&format!(
+                "{id}\n  perm: {perm}\n  scope: {scope}\n  task: {}\n",
+                &task[..task.len().min(8)]
+            ));
+        }
+        if arr.len() > 10 {
+            out.push_str(&format!("... ({} more)\n", arr.len() - 10));
+        }
+        out.push_str("\nreply /allow <id> or /deny <id>");
+        Ok(out)
+    }
+
+    /// Answer an approval via the CP's separate allow/deny endpoints. Deny
+    /// carries a reason so the audit trail attributes the decision.
+    async fn answer_approval(&self, id: &str, decision: &str) -> Result<String> {
+        let path = if decision == "allow" {
+            format!("/v1/approvals/{id}/allow")
+        } else {
+            format!("/v1/approvals/{id}/deny")
+        };
+        let body = if decision == "allow" {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"reason": "denied via telegram gateway"})
+        };
+        let r = self.post(&path).json(&body).send().await?;
+        Ok(format!("{decision} {id}: {}", r.status()))
+    }
+
     async fn create_conversation(&self, adapter: &str, repository: &str) -> Result<String> {
         let r = self
             .post("/v1/conversations")
@@ -420,6 +465,21 @@ async fn dispatch(ctl: &ControlPlane, text: &str, chat_id: i64, conv: &ConvState
         }
         "nodes" => ctl.nodes().await.unwrap_or_else(|e| e.to_string()),
         "tasks" => ctl.tasks().await.unwrap_or_else(|e| e.to_string()),
+        "approvals" => ctl.approvals().await.unwrap_or_else(|e| e.to_string()),
+        "allow" => match parts.next() {
+            Some(id) => ctl
+                .answer_approval(id, "allow")
+                .await
+                .unwrap_or_else(|e| e.to_string()),
+            None => "usage: /allow <approval-id>".into(),
+        },
+        "deny" => match parts.next() {
+            Some(id) => ctl
+                .answer_approval(id, "deny")
+                .await
+                .unwrap_or_else(|e| e.to_string()),
+            None => "usage: /deny <approval-id>".into(),
+        },
         "show" => match parts.next() {
             Some(id) => ctl.show(id).await.unwrap_or_else(|e| e.to_string()),
             None => "usage: /show <task-id>".into(),
@@ -479,7 +539,7 @@ create one with:\n  /new <adapter> [repository]\n\
     }
 }
 
-const HELP: &str = "agentgrid gateway — /help /whoami /nodes /tasks /show <id> /cancel <id> /logs <id> /run <repo-url> <adapter> <prompt...>. /start and /whoami are open (they show your chat id + the host-side approval command).";
+const HELP: &str = "agentgrid gateway — /help /whoami /nodes /tasks /approvals /allow <id> /deny <id> /show <id> /cancel <id> /logs <id> /run <repo-url> <adapter> <prompt...> /new <adapter> [repo]. /start and /whoami are open (they show your chat id + the host-side approval command).";
 
 // ---- formatting ----
 

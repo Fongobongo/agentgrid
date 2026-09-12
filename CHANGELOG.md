@@ -15,6 +15,15 @@
   by `error_code` (full-table GROUP BY, empty label = unclassified) —
   keeps the Stage-12 `resource_limit:memory` vs `agent_failed` split
   alertable in Prometheus.
+- **Telegram gateway maturation.** New `/approvals` command (pending
+  permission queue, newest first) plus `/allow <id>` / `/deny <id>`
+  answering through the CP's approval endpoints — the "human gates" are
+  now operable from the phone, not just the web UI.
+- **Native Telegram notifications.** `AGENTGRID_NOTIFY_WEBHOOK` pointing
+  at `https://api.telegram.org/bot<token>/sendMessage?chat_id=<n>` now
+  sends the Bot API shape (`{chat_id, text}` with a human-readable
+  status line) instead of the generic JSON document. Every other URL
+  (ntfy.sh, custom) keeps the old generic POST.
 - **Web UI overhaul.** Grouped sidebar navigation with a mobile burger menu
   (replacing the overflowing 20-button topbar), `aria-current` markers and a
   pending-approvals badge refreshed over the change stream; global toasts for
