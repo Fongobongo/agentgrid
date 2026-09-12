@@ -24,6 +24,19 @@
   sends the Bot API shape (`{chat_id, text}` with a human-readable
   status line) instead of the generic JSON document. Every other URL
   (ntfy.sh, custom) keeps the old generic POST.
+- **Inline approval buttons in the Telegram gateway.** `/approvals` now
+  attaches an inline keyboard — one `✅ Allow / ❌ Deny` row per pending
+  entry — and the gateway handles `callback_query` taps (`ag:allow:<id>`
+  / `ag:deny:<id>`): answers the approval, acks the tap via
+  `answerCallbackQuery` and posts the outcome back to the chat. The
+  plain `/allow` / `/deny` commands remain as a fallback.
+- **`AGENTGRID_TELEGRAM_API` env override** for the gateway's Bot API
+  base (default `https://api.telegram.org`) — points the gateway at a
+  self-hosted Bot API server, and powers the new process-based E2E
+  (`tests/e2e/run-telegram-gateway.sh` + `mini-telegram-bot.py`, wired
+  into the CI e2e-failinject job): asserts the approvals listing carries
+  the permission and the keyboard, and a deny tap resolves the approval
+  CP-side.
 - **Web UI overhaul.** Grouped sidebar navigation with a mobile burger menu
   (replacing the overflowing 20-button topbar), `aria-current` markers and a
   pending-approvals badge refreshed over the change stream; global toasts for

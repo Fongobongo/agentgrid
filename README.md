@@ -271,9 +271,12 @@ Set `AGENTGRID_NOTIFY_WEBHOOK` on the control plane and terminal task states
 operator can drive the grid from a phone: `/nodes /tasks /approvals
 /allow <id> /deny <id> /show <id> /cancel <id> /logs <id> /run <repo>
 <adapter> <prompt...>`, plus plain-text messages routed to a chat session
-(`/new <adapter> [repo]`). Auth is an allowlist of chat ids
-(`agentgrid-gateway allow <id>` after `/start` shows your chat id); the
-allowlist file is re-read on every message.
+(`/new <adapter> [repo]`). `/approvals` attaches an inline `✅ Allow /
+❌ Deny` keyboard per pending entry — a tap answers the approval directly.
+Auth is an allowlist of chat ids (`agentgrid-gateway allow <id>` after
+`/start` shows your chat id); the allowlist file is re-read on every
+message. `AGENTGRID_TELEGRAM_API` overrides the Bot API base for
+self-hosted Bot API servers.
 
 ### GitHub write-back (push + PR + issue comment)
 

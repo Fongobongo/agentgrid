@@ -101,6 +101,10 @@ jobs:
         run: bash tests/e2e/run-sdk.sh
       - name: backup/restore rehearsal
         run: bash tests/e2e/run-restore.sh
+      # Telegram gateway vs a mock Bot API: approvals listing + inline
+      # keyboard + deny callback (process-based, no Docker, no real Telegram).
+      - name: telegram gateway (mock Bot API)
+        run: bash tests/e2e/run-telegram-gateway.sh
       # NOTE (bucket placement): run-auto-retry.sh and
       # run-review-consensus.sh live in the `e2e` compose job — they bring
       # up docker-compose, not bare processes.

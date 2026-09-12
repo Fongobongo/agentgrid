@@ -270,29 +270,17 @@ impl ControlPlane {
 
     /// Pending permission approvals, newest first. The gateway is an
     /// operator surface for the "human gates" — allow/deny from the phone.
+    /// Message text only; the inline Allow/Deny keyboard comes from
+    /// `approvals_keyboard`.
     async fn approvals(&self) -> Result<String> {
+        let v = self.approvals_list_json().await?;
+        Ok(fmt_approvals(&v))
+    }
+
+    /// Raw pending-approvals response (for the inline keyboard builder).
+    async fn approvals_list_json(&self) -> Result<serde_json::Value> {
         let r = self.get("/v1/approvals?status=pending").send().await?;
-        let v: serde_json::Value = r.json().await.unwrap_or_default();
-        let arr = list_items(&v);
-        if arr.is_empty() {
-            return Ok("(no pending approvals)".into());
-        }
-        let mut out = String::new();
-        for a in arr.iter().take(10) {
-            let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-            let perm = a.get("permission").and_then(|v| v.as_str()).unwrap_or("?");
-            let scope = a.get("scope").and_then(|v| v.as_str()).unwrap_or("?");
-            let task = a.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
-            out.push_str(&format!(
-                "{id}\n  perm: {perm}\n  scope: {scope}\n  task: {}\n",
-                &task[..task.len().min(8)]
-            ));
-        }
-        if arr.len() > 10 {
-            out.push_str(&format!("... ({} more)\n", arr.len() - 10));
-        }
-        out.push_str("\nreply /allow <id> or /deny <id>");
-        Ok(out)
+        Ok(r.json().await.unwrap_or_default())
     }
 
     /// Answer an approval via the CP's separate allow/deny endpoints. Deny
@@ -602,6 +590,54 @@ fn fmt_tasks(v: &serde_json::Value) -> String {
     s
 }
 
+/// Human text for the pending-approval list (newest first, capped at 10).
+/// Each entry also gets an inline Allow/Deny pair via `approvals_keyboard`.
+fn fmt_approvals(v: &serde_json::Value) -> String {
+    let arr = list_items(v);
+    if arr.is_empty() {
+        return "(no pending approvals)".into();
+    }
+    let mut out = String::new();
+    for a in arr.iter().take(10) {
+        let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let perm = a.get("permission").and_then(|v| v.as_str()).unwrap_or("?");
+        let scope = a.get("scope").and_then(|v| v.as_str()).unwrap_or("?");
+        let task = a.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let task8 = &task[..task.len().min(8)];
+        out.push_str(&format!(
+            "{id}\n  perm: {perm}\n  scope: {scope}\n  task: {task8}\n"
+        ));
+    }
+    if arr.len() > 10 {
+        out.push_str(&format!("... ({} more)\n", arr.len() - 10));
+    }
+    out.push_str("\ntap Allow/Deny under an entry (or /allow <id> / /deny <id>)");
+    out
+}
+
+/// Inline keyboard for the approval list: one `[Allow] [Deny]` row per
+/// pending entry (same 10-item cap as the text). `callback_data` is
+/// `ag:allow:<id>` / `ag:deny:<id>` — the `ag:` prefix keeps unrelated
+/// bots sharing a chat distinguishable, and the 64-byte callback_data
+/// limit is safe (uuid + prefix).
+fn approvals_keyboard(v: &serde_json::Value) -> serde_json::Value {
+    let arr = list_items(v);
+    let rows: Vec<serde_json::Value> = arr
+        .iter()
+        .take(10)
+        .filter_map(|a| {
+            let id = a.get("id").and_then(|x| x.as_str())?;
+            let perm = a.get("permission").and_then(|x| x.as_str()).unwrap_or("?");
+            let perm8: String = perm.chars().take(24).collect();
+            Some(serde_json::json!([
+                {"text": format!("✅ Allow {perm8}"), "callback_data": format!("ag:allow:{id}")},
+                {"text": "❌ Deny", "callback_data": format!("ag:deny:{id}")},
+            ]))
+        })
+        .collect();
+    serde_json::json!({"inline_keyboard": rows})
+}
+
 // ---- Telegram provider (raw Bot API over reqwest, no chat crate) ----
 
 struct Telegram {
@@ -616,8 +652,17 @@ impl Telegram {
             offset: std::sync::atomic::AtomicI64::new(0),
         }
     }
+    /// Bot API base. Defaults to the public api.telegram.org; the env
+    /// override points the gateway at a local Bot API server (or the e2e
+    /// mock) without code changes.
+    fn api_base() -> String {
+        std::env::var("AGENTGRID_TELEGRAM_API")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "https://api.telegram.org".to_string())
+    }
     fn url(&self, method: &str) -> String {
-        format!("https://api.telegram.org/bot{}/{}", self.token, method)
+        format!("{}/bot{}/{}", Self::api_base(), self.token, method)
     }
     /// Redact the bot token from error text before logging: reqwest errors
     /// include the request URL, which contains the token.
@@ -666,6 +711,67 @@ impl ChatProvider for Telegram {
                     let id = u.get("update_id").and_then(|v| v.as_i64()).unwrap_or(0);
                     tg.offset
                         .store(id + 1, std::sync::atomic::Ordering::Relaxed);
+                    // Inline-keyboard taps arrive as callback_query updates
+                    // (`ag:allow:<id>` / `ag:deny:<id>`), not as messages.
+                    if u.get("callback_query").is_some() {
+                        let cb = u.get("callback_query").cloned().unwrap_or_default();
+                        let cb_id = cb
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let from_chat = cb
+                            .get("message")
+                            .and_then(|m| m.get("chat"))
+                            .and_then(|c| c.get("id"))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let data = cb
+                            .get("data")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !allowed(from_chat) {
+                            tracing::info!("ignoring callback from {from_chat} (not in allowlist)");
+                            continue;
+                        }
+                        let ctl2 = ctl.clone();
+                        let client2 = Arc::clone(&client);
+                        let answer_url = tg.url("answerCallbackQuery");
+                        let send_url = tg.url("sendMessage");
+                        let ack = cb_id;
+                        tokio::spawn(async move {
+                            // Tap payloads are `ag:<decision>:<approval id>`.
+                            let (decision, aid) =
+                                match data.strip_prefix("ag:").and_then(|d| d.split_once(':')) {
+                                    Some((d, i)) => (d.to_string(), i.to_string()),
+                                    None => ("?".to_string(), String::new()),
+                                };
+                            let reply = if matches!(decision.as_str(), "allow" | "deny") {
+                                ctl2.answer_approval(&aid, &decision)
+                                    .await
+                                    .unwrap_or_else(|e| e.to_string())
+                            } else {
+                                format!("unknown callback: {data}")
+                            };
+                            // Ack the tap (clears the spinner in the chat)…
+                            let _ = client2
+                                .post(&answer_url)
+                                .json(&serde_json::json!({"callback_query_id": ack}))
+                                .send()
+                                .await;
+                            // …then surface the outcome as a fresh message.
+                            let _ = client2
+                                .post(&send_url)
+                                .json(&serde_json::json!({
+                                    "chat_id": from_chat,
+                                    "text": reply,
+                                }))
+                                .send()
+                                .await;
+                        });
+                        continue;
+                    }
                     let msg = match u.get("message").or_else(|| u.get("edited_message")) {
                         Some(m) => m,
                         None => continue,
@@ -725,14 +831,34 @@ then send /nodes\n\
                     let ctl2 = ctl.clone();
                     let conv2 = Arc::clone(&conv);
                     let client2 = Arc::clone(&client);
-                    let reply_url = format!("https://api.telegram.org/bot{}/sendMessage", tg.token);
+                    let reply_url = tg.url("sendMessage");
+                    let is_approvals_cmd = text
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .split('@')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start_matches('/')
+                        == "approvals";
                     tokio::spawn(async move {
                         let reply = dispatch(&ctl2, &text, chat_id, &conv2).await;
-                        let _ = client2
-                            .post(reply_url)
-                            .json(&serde_json::json!({"chat_id": chat_id, "text": reply}))
-                            .send()
-                            .await;
+                        let mut body = serde_json::json!({"chat_id": chat_id, "text": reply});
+                        // Attach the Allow/Deny inline keyboard to the
+                        // /approvals listing (data fetched a second time —
+                        // cheap, and keeps dispatch signature-free).
+                        if is_approvals_cmd {
+                            if let Ok(list) = ctl2.approvals_list_json().await {
+                                let kb = approvals_keyboard(&list);
+                                if kb["inline_keyboard"]
+                                    .as_array()
+                                    .is_some_and(|a| !a.is_empty())
+                                {
+                                    body["reply_markup"] = kb;
+                                }
+                            }
+                        }
+                        let _ = client2.post(reply_url).json(&body).send().await;
                     });
                 }
             }
@@ -795,5 +921,48 @@ mod tests {
         assert!(s.contains("abc"));
         assert!(s.contains("running"));
         assert!(s.contains("r1"));
+    }
+
+    #[test]
+    fn fmt_approvals_empty_and_rows() {
+        assert_eq!(
+            fmt_approvals(&serde_json::json!({"items": []})),
+            "(no pending approvals)"
+        );
+        let v = serde_json::json!({"items": [
+            {"id":"ap1","permission":"bash","scope":"repo","task_id":"t1"}
+        ]});
+        let s = fmt_approvals(&v);
+        assert!(s.contains("ap1"));
+        assert!(s.contains("perm: bash"));
+        assert!(s.contains("task: t1"));
+    }
+
+    #[test]
+    fn approvals_keyboard_emits_allow_deny_callbacks() {
+        let v = serde_json::json!({"items": [
+            {"id":"ap1","permission":"Bash(rm -rf)","task_id":"t1"}
+        ]});
+        let kb = approvals_keyboard(&v);
+        let rows = kb["inline_keyboard"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let btns = rows[0].as_array().unwrap();
+        assert_eq!(btns.len(), 2);
+        assert_eq!(btns[0]["callback_data"], "ag:allow:ap1");
+        assert_eq!(btns[1]["callback_data"], "ag:deny:ap1");
+        // Long permission names are truncated for the button label.
+        assert!(btns[0]["text"].as_str().unwrap().chars().count() <= 24 + 8);
+        // Empty queue -> empty keyboard (no phantom rows).
+        let kb0 = approvals_keyboard(&serde_json::json!({"items": []}));
+        assert!(kb0["inline_keyboard"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn approvals_keyboard_truncates_long_permission_labels() {
+        let perm = "x".repeat(80);
+        let v = serde_json::json!({"items": [{"id":"ap1","permission":perm,"task_id":"t1"}]});
+        let kb = approvals_keyboard(&v);
+        let label = kb["inline_keyboard"][0][0]["text"].as_str().unwrap();
+        assert!(label.chars().count() < 40, "label must stay button-sized");
     }
 }
