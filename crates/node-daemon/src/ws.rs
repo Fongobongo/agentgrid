@@ -620,20 +620,28 @@ mod tests {
             },
         )
         .await;
-        let events: serde_json::Value = reqwest::Client::new()
-            .get(format!("{base}/v1/tasks/{task_id}/events"))
-            .header("authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let count = events.as_array().map(|a| a.len()).unwrap_or(0);
-        assert!(
-            count >= 10,
-            "events lost across the CP outage: got {count}, want >= 10"
-        );
+        // The task flips to succeeded on the completion record; the tail of
+        // the event stream may still be redriving from the outbox (bounded
+        // retry backoff after the reconnect). Poll until the full batch
+        // lands instead of counting once — a single count raced the redrive
+        // and flaked as "events lost" on loaded CI runners.
+        wait_until(
+            "all events landed after CP restart",
+            Duration::from_secs(30),
+            || async {
+                let Ok(r) = reqwest::Client::new()
+                    .get(format!("{base}/v1/tasks/{task_id}/events"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .send()
+                    .await
+                else {
+                    return false;
+                };
+                let events: serde_json::Value = r.json().await.unwrap_or_default();
+                events.as_array().is_some_and(|a| a.len() >= 10)
+            },
+        )
+        .await;
 
         node_task.abort();
         std::env::set_var("PATH", old_path);
