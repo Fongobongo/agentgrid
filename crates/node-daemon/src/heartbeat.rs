@@ -1,5 +1,6 @@
 //! Node heartbeat: periodic status/capability reporting to the control plane.
 
+#[cfg(unix)]
 use std::ffi::CString;
 use std::path::Path;
 use std::sync::Arc;
@@ -73,19 +74,29 @@ pub fn read_mem_available_mb() -> u64 {
     0
 }
 
-/// Read free disk space in MB for `path`.
+/// Read free disk space in MB for `path`. Returns 0 on platforms without
+/// statvfs (Windows local dev) — the CP treats 0 as "unknown", matching the
+/// legacy-node behavior for the disk-pressure path.
 pub fn read_free_disk_mb(path: &Path) -> u64 {
-    let cpath = match CString::new(path.to_string_lossy().as_bytes().to_vec()) {
-        Ok(p) => p,
-        Err(_) => return 0,
-    };
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: stat is a valid, zeroed statvfs; cpath is a valid NUL-terminated path.
-    let free = unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) };
-    if free != 0 || stat.f_frsize == 0 {
-        return 0;
+    #[cfg(unix)]
+    {
+        let cpath = match CString::new(path.to_string_lossy().as_bytes().to_vec()) {
+            Ok(p) => p,
+            Err(_) => return 0,
+        };
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: stat is a valid, zeroed statvfs; cpath is a valid NUL-terminated path.
+        let free = unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) };
+        if free != 0 || stat.f_frsize == 0 {
+            return 0;
+        }
+        (stat.f_bavail as u64 * stat.f_frsize as u64) / (1024 * 1024)
     }
-    (stat.f_bavail as u64 * stat.f_frsize as u64) / (1024 * 1024)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0
+    }
 }
 
 /// Check if unsafe/unattended mode is active via environment.
@@ -109,6 +120,28 @@ pub fn node_permission_interception(cfg: &Config) -> String {
     }
 }
 
+/// Plan 6.10: jitter the heartbeat interval by ±20% so a fleet restarted
+/// together (deploy, CP restart) does not synchronize its beats into a
+/// thundering herd against the CP. Pure and seedable for tests: the value is
+/// deterministic for a given `(base, roll)` pair, `roll ∈ [0,1)`; the result
+/// always stays within ±20% of `base` and never above it (a slow host is
+/// fine — a too-fast cadence would churn the CP).
+pub fn jittered_interval(base_secs: u64, roll: f64) -> u64 {
+    // Clamp the roll to [0,1) defensively; a NaN/inf roll degrades to the
+    // base interval.
+    if !(0.0..1.0).contains(&roll) {
+        return base_secs;
+    }
+    let jitter = 0.2;
+    // -20% … +20% around the base: map roll onto [-1, 1) then scale.
+    let scaled = (roll * 2.0 - 1.0) * jitter;
+    let secs = base_secs as f64 * (1.0 + scaled);
+    // Tiny bases (1s) with a negative jitter must not round to 0 — a zero
+    // sleep would busy-loop the heartbeat.
+    let secs = secs.max(1.0);
+    secs.round() as u64
+}
+
 /// Spawn the background heartbeat task. Returns a handle that can be awaited
 /// (it runs forever unless the process exits).
 /// `mk_client` (when given) enables proxy failover identical to the poll
@@ -122,6 +155,10 @@ pub fn spawn_heartbeat(
 ) {
     tokio::spawn(async move {
         let mut client = client;
+        // Plan 6.10: cheap per-beat pseudo-random roll for the interval
+        // jitter (no RNG dependency — the CP only cares that beats do not
+        // align across a fleet, not that they are cryptographically random).
+        let mut roll_state: u64 = u64::from(std::process::id()) ^ cfg.heartbeat_secs;
         loop {
             // Probe adapters and build capabilities list.
             let mut capabilities = Vec::new();
@@ -241,7 +278,14 @@ pub fn spawn_heartbeat(
                 mem_available_mb: read_mem_available_mb(),
                 active_attempts: active,
                 capabilities,
+                // Plan 6.12: advertise the capability-schema and event-version
+                // contracts alongside the protocol version, so a rolling
+                // upgrade is observable in the CP logs.
                 protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
+                capabilities_schema_version: Some(
+                    agentgrid_common::CAPABILITIES_SCHEMA_VERSION.into(),
+                ),
+                supported_event_versions: Some(agentgrid_common::SUPPORTED_EVENT_VERSIONS.into()),
                 discovered_skills,
                 unsafe_active: node_unsafe_active(&cfg),
                 permission_interception: node_permission_interception(&cfg),
@@ -304,8 +348,73 @@ pub fn spawn_heartbeat(
             let marker = cfg.outbox_root.join("../heartbeat.stamp");
             let _ = std::fs::write(&marker, chrono::Utc::now().to_rfc3339().as_bytes());
 
-            // Interval until the next heartbeat.
-            tokio::time::sleep(Duration::from_secs(cfg.heartbeat_secs)).await;
+            // Interval until the next heartbeat (Plan 6.10: ±20% jitter so
+            // a fleet restarted together does not synchronize beats; the
+            // CP's 30s staleness window tolerates the worst case of a
+            // 10s base +20% = 12s easily).
+            roll_state ^= roll_state << 13;
+            roll_state ^= roll_state >> 7;
+            roll_state ^= roll_state << 17;
+            let roll = (roll_state % 1_000_000) as f64 / 1_000_000.0;
+            let interval = if std::env::var_os("AGENTGRID_HEARTBEAT_NO_JITTER").is_some() {
+                cfg.heartbeat_secs
+            } else {
+                jittered_interval(cfg.heartbeat_secs, roll)
+            };
+            tokio::time::sleep(Duration::from_secs(interval)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_stays_within_20_percent_band() {
+        for base in [1u64, 5, 10, 30, 60] {
+            for roll in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.999999] {
+                let j = jittered_interval(base, roll);
+                let lo = (base as f64 * 0.8).floor() as u64;
+                let hi = (base as f64 * 1.2).ceil() as u64;
+                // Rounding on tiny bases can leak one second outside the
+                // exact band; tolerate ±1s there, but never a busy-loop 0.
+                assert!(
+                    j >= lo.max(1),
+                    "base {base} roll {roll}: {j} < {}",
+                    lo.max(1)
+                );
+                assert!(j <= hi + 1, "base {base} roll {roll}: {j} > {}", hi + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_degrades_to_base_on_garbage_roll() {
+        assert_eq!(jittered_interval(10, 1.5), 10);
+        assert_eq!(jittered_interval(10, -0.2), 10);
+        assert_eq!(jittered_interval(10, f64::NAN), 10);
+        assert_eq!(jittered_interval(10, f64::INFINITY), 10);
+    }
+
+    #[test]
+    fn jitter_never_reaches_the_cp_staleness_window() {
+        // Default 10s base + full jitter must stay well under the CP's 30s
+        // node-staleness cutoff (mark_offline_nodes), or a jittered fleet
+        // would flap nodes offline.
+        for roll in [0.0, 0.5, 0.999999] {
+            assert!(jittered_interval(10, roll) < 30);
+        }
+    }
+
+    #[test]
+    fn jitter_varies_across_rolls() {
+        // A deterministic xorshift spread must not collapse to one value
+        // across a plausible roll range (that would just re-synchronize the
+        // fleet — the thing the jitter exists to prevent).
+        let vals: std::collections::HashSet<u64> = (0..20)
+            .map(|i| jittered_interval(10, i as f64 / 20.0))
+            .collect();
+        assert!(vals.len() >= 3, "jitter collapsed to {vals:?}");
+    }
 }
