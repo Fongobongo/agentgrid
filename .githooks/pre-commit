@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Pre-commit hook (Plan 0.2): fast local gate before a commit goes out.
+# Runs `cargo fmt --check` (instant) and clippy on changed crates only
+# (falls back to workspace clippy when the quick path cannot resolve).
+# Install once per clone:
+#   git config core.hooksPath .githooks
+# or copy/symlink this file into .git/hooks/pre-commit manually.
+#
+# Scope: staged Rust files only. Full `cargo test --workspace` stays in CI
+# (too slow for a commit hook); clippy here is the best latency/coverage
+# trade-off for the fmt+lint class of CI failures.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Collect staged .rs files (deleted files excluded).
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
+if [ "${#staged[@]}" -eq 0 ]; then
+  exit 0
+fi
+echo "pre-commit: ${#staged[@]} staged Rust file(s)"
+
+# 1) Format check on the whole workspace — fmt is stable and instant.
+if ! cargo fmt --all --check; then
+  echo "pre-commit: cargo fmt --check failed. Run 'cargo fmt --all' and re-stage." >&2
+  exit 1
+fi
+
+# 2) Clippy. Running per-crate would need a crate→path mapping; instead run
+#    workspace clippy with `-D warnings` exactly like CI (Swatinem cache makes
+#    this a no-op rebuild after the first run).
+echo "pre-commit: cargo clippy --all-targets -- -D warnings"
+if ! cargo clippy --all-targets -- -D warnings; then
+  echo "pre-commit: clippy failed. Fix warnings above and re-stage." >&2
+  exit 1
+fi
+
+echo "pre-commit: ok"
