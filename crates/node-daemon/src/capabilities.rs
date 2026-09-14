@@ -146,6 +146,50 @@ pub async fn probe_cluster_adapter(executor_bin: &str, runtime_bin: &str) -> Ada
     }
 }
 
+/// Plan 6.8: `git lfs version` probe. LFS is an optional git extension —
+/// absent on minimal hosts — and cloning an LFS-enabled repo without it
+/// silently yields pointer files instead of real blobs. The heartbeat
+/// publishes the result so the UI/eligibility can show "this node cannot
+/// fetch LFS objects".
+pub async fn probe_git_lfs() -> AdapterProbe {
+    let Some(_) = resolve_in_path("git-lfs") else {
+        return AdapterProbe {
+            found: false,
+            version: None,
+        };
+    };
+    let probe = tokio::process::Command::new("git-lfs")
+        .arg("version")
+        .output();
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
+        Ok(o) => o.ok(),
+        Err(_) => {
+            tracing::warn!("git-lfs version probe timed out");
+            None
+        }
+    };
+    let version = output
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| {
+            // `git-lfs/3.4.0 (GitHub; linux amd64)` -> keep the first token.
+            s.split_whitespace().next().unwrap_or("").to_string()
+        })
+        .filter(|s| !s.is_empty());
+    AdapterProbe {
+        found: version.is_some(),
+        version,
+    }
+}
+
+/// Plan 6.8: submodule support probe. Every modern git supports
+/// `--recurse-submodules` in fetch/clone; the only failure mode is an
+/// ancient (<2.13) build or a wrapper that drops the flag. Advertise
+/// true when plain `git` resolves at all — the actual recursion is a
+/// clone-time argument, not a capability.
+pub fn probe_git_submodules() -> bool {
+    resolve_in_path("git").is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

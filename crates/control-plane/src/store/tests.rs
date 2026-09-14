@@ -3185,6 +3185,8 @@ mod mem_gate_tests {
             max_concurrency: 4,
             agent_version: "t".into(),
             load_avg: 0.0,
+            cpu_count: 0,
+            free_memory_mb: 0,
             free_disk_mb: 100_000,
             mem_available_mb: mem_mb,
             active_attempts: 0,
@@ -3201,6 +3203,8 @@ mod mem_gate_tests {
             outbox_corruption_count: 0,
             outbox_completion_rows: 0,
             repo_lock_wait_ms: 0,
+            git_lfs_installed: false,
+            git_submodules_supported: true,
             repo_cache_bytes: 0,
             workspace_bytes: 0,
             active_rss_mib: 0,
@@ -3286,5 +3290,123 @@ mod mem_gate_tests {
         // mem_available_mb = 0 -> old node / unreadable /proc: admit.
         s.heartbeat(&node_id, &hb(0)).await.unwrap();
         assert!(s.try_assign(&node_id).await.unwrap().is_some());
+    }
+
+    /// Plan 6.10: `free_memory_mb` (reserved-slice-adjusted) wins over raw
+    /// `mem_available_mb` when reported. 4096 raw but 512 after the
+    /// reservation -> no assignment; the raw fallback path (0) still admits
+    /// via mem_available_mb.
+    #[tokio::test]
+    async fn reserved_free_memory_gates_assignment() {
+        let (s, node_id) = fresh().await;
+        s.create_task(&CreateTaskRequest {
+            repository: "r".into(),
+            prompt: "p".into(),
+            adapter: "mock".into(),
+            requested_node_id: Some(node_id.clone()),
+            timeout_secs: None,
+            validation_command: None,
+            base_commit: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // Reserved slice eats most of the host: 512 MiB free < 1024 default.
+        let mut req = hb(4096);
+        req.free_memory_mb = 512;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        assert!(
+            s.try_assign(&node_id).await.unwrap().is_none(),
+            "free_memory_mb below the floor must block assignment"
+        );
+        // Legacy node: free_memory_mb = 0 -> fall back to raw
+        // mem_available_mb (4096) and admit.
+        let mut req = hb(4096);
+        req.free_memory_mb = 0;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        assert!(
+            s.try_assign(&node_id).await.unwrap().is_some(),
+            "raw mem_available_mb fallback must admit"
+        );
+    }
+
+    /// Plan 6.10 load gate: load per CPU above AGENTGRID_MAX_LOAD_PER_CPU
+    /// (default 2.0) refuses new work; normal load admits.
+    #[tokio::test]
+    async fn high_load_per_cpu_blocks_assignment() {
+        let (s, node_id) = fresh().await;
+        s.create_task(&CreateTaskRequest {
+            repository: "r".into(),
+            prompt: "p".into(),
+            adapter: "mock".into(),
+            requested_node_id: Some(node_id.clone()),
+            timeout_secs: None,
+            validation_command: None,
+            base_commit: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // 8.0 load on 4 cpus = 2.0/cpu — exactly at the default ceiling,
+        // not above it; admits.
+        let mut req = hb(4096);
+        req.load_avg = 8.0;
+        req.cpu_count = 4;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        assert!(s.try_assign(&node_id).await.unwrap().is_some());
+        // 9.0 on 4 cpus = 2.25/cpu > 2.0 -> rejected.
+        let mut req = hb(4096);
+        req.load_avg = 9.0;
+        req.cpu_count = 4;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        assert!(
+            s.try_assign(&node_id).await.unwrap().is_none(),
+            "load above the per-cpu ceiling must block assignment"
+        );
+        // Legacy node: cpu_count = 0 -> assume 1 cpu; load 2.5 > 2.0 -> rejected.
+        let mut req = hb(4096);
+        req.load_avg = 2.5;
+        req.cpu_count = 0;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        assert!(
+            s.try_assign(&node_id).await.unwrap().is_none(),
+            "legacy cpu_count=0 must assume 1 cpu and still gate"
+        );
+    }
+
+    /// Plan 6.10: the eligibility mirror surfaces the same resource
+    /// pressure reasons the scheduler gates on.
+    #[tokio::test]
+    async fn eligibility_reports_resource_pressure_reasons() {
+        let (s, node_id) = fresh().await;
+        let task_id = s
+            .create_task(&CreateTaskRequest {
+                repository: "r".into(),
+                prompt: "p".into(),
+                adapter: "mock".into(),
+                requested_node_id: Some(node_id.clone()),
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .id;
+        let mut req = hb(4096);
+        req.free_memory_mb = 512; // < 1024 floor
+        req.load_avg = 9.0; // 9/4 > 2.0/cpu
+        req.cpu_count = 4;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        let elig = s.task_eligibility(&task_id).await.unwrap().unwrap();
+        let reasons: Vec<String> = elig.nodes.iter().flat_map(|n| n.reasons.clone()).collect();
+        assert!(
+            reasons.iter().any(|r| r.contains("low host memory")),
+            "expected a low host memory reason, got {reasons:?}"
+        );
+        assert!(
+            reasons.iter().any(|r| r.contains("high load")),
+            "expected a high load reason, got {reasons:?}"
+        );
     }
 }

@@ -795,6 +795,88 @@ async fn cancel_running_then_node_confirms_cancelled() {
     );
 }
 
+/// Plan 6.6: responses above 8 KiB are brotli-compressed when the client
+/// sends Accept-Encoding; smaller ones pass through untouched.
+#[tokio::test]
+async fn compression_kicks_in_above_8kib() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-1", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:hello.txt:hi").await;
+
+    // ~40 KiB of events spread over a few ingest batches (CP caps batch
+    // bytes, so push several).
+    for seq in 0..8 {
+        let events: Vec<IncomingEvent> = (0..50)
+            .map(|i| IncomingEvent {
+                sequence: seq * 50 + i + 1,
+                r#type: EventType::Stdout,
+                payload: json!({"text": "x".repeat(128)}),
+            })
+            .collect();
+        let resp = app
+            .clone()
+            .oneshot(post_node(
+                &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+                serde_json::to_string(&IngestEventsRequest { events }).unwrap(),
+                &cred,
+                &assign.fencing_token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Big listing + Accept-Encoding: br -> compressed.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/v1/tasks/{}/events", assign.task_id))
+                .header(
+                    "authorization",
+                    format!("Bearer {}", test_token(&app).await),
+                )
+                .header("accept-encoding", "br")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let enc = resp
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(enc, "br", "large event listing must be brotli-compressed");
+
+    // Small task-details response: no Content-Encoding even when offered.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/v1/tasks/{}", assign.task_id))
+                .header(
+                    "authorization",
+                    format!("Bearer {}", test_token(&app).await),
+                )
+                .header("accept-encoding", "br, gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().get("content-encoding").is_none(),
+        "small JSON must not pay the compression cost"
+    );
+}
+
 #[tokio::test]
 async fn retry_failed_task_reques() {
     let state = AppState::open_temp().await.unwrap();
@@ -896,6 +978,8 @@ async fn revoked_node_gets_401() {
         max_concurrency: 2,
         agent_version: "t".into(),
         load_avg: 0.1,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         active_attempts: 0,
@@ -911,6 +995,8 @@ async fn revoked_node_gets_401() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,
@@ -1009,6 +1095,8 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
         max_concurrency: 2,
         agent_version: "t".into(),
         load_avg: 0.1,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         active_attempts: 0,
@@ -1024,6 +1112,8 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,
@@ -1142,6 +1232,8 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
         max_concurrency: 2,
         agent_version: "t".into(),
         load_avg: 0.1,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         active_attempts: 0,
@@ -1157,6 +1249,8 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,
@@ -2255,6 +2349,8 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 agent_version: "mock".into(),
                 active_attempts: 0,
                 load_avg: 0.0,
+                cpu_count: 4,
+                free_memory_mb: 100_000,
                 free_disk_mb: 100_000,
                 mem_available_mb: 4096,
                 capabilities: vec![],
@@ -2269,6 +2365,8 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 outbox_corruption_count: 0,
                 outbox_completion_rows: 0,
                 repo_lock_wait_ms: 0,
+                git_lfs_installed: false,
+                git_submodules_supported: true,
                 sandbox_backend: "none".into(),
                 enforced_limits: false,
                 repo_cache_bytes: 0,
@@ -2322,6 +2420,8 @@ async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
         agent_version: "mock".into(),
         active_attempts: 0,
         load_avg: 0.0,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         capabilities: vec![],
@@ -2336,6 +2436,8 @@ async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,
@@ -2424,6 +2526,8 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         max_concurrency: 2,
         agent_version: "test".into(),
         load_avg: 0.0,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         active_attempts: 1,
@@ -2439,6 +2543,8 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,
@@ -4951,6 +5057,8 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         max_concurrency: 2,
         agent_version: "t".into(),
         load_avg: 0.0,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         active_attempts: 0,
@@ -4975,6 +5083,8 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,
@@ -7634,6 +7744,8 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         max_concurrency: 2,
         agent_version: "t".into(),
         load_avg: 0.0,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         active_attempts: 0,
@@ -7650,6 +7762,8 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,
@@ -7710,6 +7824,8 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
         max_concurrency: 2,
         agent_version: "t".into(),
         load_avg: 0.0,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         active_attempts: 0,
@@ -7725,6 +7841,8 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,
@@ -10799,6 +10917,8 @@ async fn opencode_heartbeat_drift_audit() {
         max_concurrency: 1,
         agent_version: String::new(),
         load_avg: 0.0,
+        cpu_count: 4,
+        free_memory_mb: 100_000,
         free_disk_mb: 100_000,
         mem_available_mb: 4096,
         active_attempts: 0,
@@ -10814,6 +10934,8 @@ async fn opencode_heartbeat_drift_audit() {
         outbox_corruption_count: 0,
         outbox_completion_rows: 0,
         repo_lock_wait_ms: 0,
+        git_lfs_installed: false,
+        git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
         repo_cache_bytes: 0,

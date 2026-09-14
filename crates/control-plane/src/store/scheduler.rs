@@ -225,7 +225,7 @@ impl Store {
         .await?;
 
         let node = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, drained, active_rss_mib, max_rss_mib \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, drained, active_rss_mib, max_rss_mib \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
@@ -281,12 +281,21 @@ impl Store {
             }
         }
         // Host memory gate: refuse new work when the node knows it has too
-        // little RAM left (MemAvailable). 0 = not reported -> admit (legacy
-        // nodes, cold start); only a known-below-threshold value rejects.
-        // Threshold configurable via AGENTGRID_MIN_FREE_MEM_MB (default
-        // 1024 MiB ~= a claude-code session + adapter + git).
+        // little RAM left. Plan 6.10: prefer `free_memory_mb` (MemAvailable
+        // minus the operator-reserved slice, AGENTGRID_RESERVED_MEM_MB on the
+        // node) so the OS and the fleet don't compete for the same bytes;
+        // fall back to raw `mem_available_mb` for legacy nodes that only
+        // report the latter. 0 = not reported -> admit (legacy nodes, cold
+        // start); only a known-below-threshold value rejects. Threshold
+        // configurable via AGENTGRID_MIN_FREE_MEM_MB (default 1024 MiB ~=
+        // a claude-code session + adapter + git).
         {
-            let mem_avail: i64 = node.try_get("mem_available_mb").unwrap_or(0);
+            let mem_reserved: i64 = node.try_get("free_memory_mb").unwrap_or(0);
+            let mem_avail: i64 = if mem_reserved > 0 {
+                mem_reserved
+            } else {
+                node.try_get("mem_available_mb").unwrap_or(0)
+            };
             let min_free_mb: i64 = std::env::var("AGENTGRID_MIN_FREE_MEM_MB")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -315,6 +324,45 @@ impl Store {
                 let _ = tx.rollback().await;
                 tracing::info!(node_id, disk_mb, min_disk_mb, "rejected_due_to_low_disk");
                 return Ok(Vec::new());
+            }
+        }
+        // Plan 6.10 load gate: refuse new work while the node reports more
+        // runnable load per CPU than the operator allows
+        // (AGENTGRID_MAX_LOAD_PER_CPU, default 2.0). A load spike here is
+        // transient pressure, not a node fault — the hysteresis (degraded
+        // flip) lives on the node; this gate just stops piling new work on
+        // an already saturated host. Negative/zero threshold disables.
+        {
+            let load: f64 = node.try_get("load_avg").unwrap_or(0.0);
+            let cpus: f64 = std::env::var("AGENTGRID_CPUS_PER_NODE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.0);
+            let max_per_cpu: f64 = std::env::var("AGENTGRID_MAX_LOAD_PER_CPU")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2.0);
+            if max_per_cpu > 0.0 && load > 0.0 {
+                // Per-node CPU count wins when the operator pinned it;
+                // otherwise the node's own cpu count (reported alongside
+                // load in the heartbeat row) decides, falling back to 1 so a
+                // single-core host does not get silently flooded.
+                let cpus = if cpus > 0.0 {
+                    cpus
+                } else {
+                    node.try_get::<i64, _>("cpu_count").unwrap_or(1).max(1) as f64
+                };
+                if load / cpus > max_per_cpu {
+                    let _ = tx.rollback().await;
+                    tracing::info!(
+                        node_id,
+                        load,
+                        cpus,
+                        max_per_cpu,
+                        "rejected_due_to_high_load"
+                    );
+                    return Ok(Vec::new());
+                }
             }
         }
         // Batch cap: the node's free concurrency slots (plan 0.3 1.2).

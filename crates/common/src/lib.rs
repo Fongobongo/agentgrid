@@ -503,7 +503,15 @@ pub struct NodeView {
     pub last_heartbeat_at: String,
     pub agent_version: String,
     pub load_avg: f64,
+    /// Plan 6.10: CPU count reported by the node heartbeat. 0 = not
+    /// reported (legacy node); the scheduler load gate falls back to 1.
+    #[serde(default)]
+    pub cpu_count: u32,
     pub free_disk_mb: u64,
+    /// Plan 6.10: MemAvailable minus the operator-reserved slice (MiB).
+    /// 0 = not reported (legacy node / cold start).
+    #[serde(default)]
+    pub free_memory_mb: u64,
     /// Latest host MemAvailable (MiB) reported by the node heartbeat.
     /// 0 = not reported (legacy node / cold start).
     #[serde(default)]
@@ -861,6 +869,17 @@ pub struct HeartbeatRequest {
     pub agent_version: String,
     #[serde(default)]
     pub load_avg: f64,
+    /// Plan 6.10: CPU count of the host (from /proc/cpuinfo or
+    /// std::thread::available_parallelism). 0 = not reported; the
+    /// scheduler load gate falls back to 1.
+    #[serde(default)]
+    pub cpu_count: u32,
+    /// Plan 6.10: MemAvailable minus the operator-reserved slice
+    /// (AGENTGRID_RESERVED_MEM_MB, default 256). The scheduler gate treats
+    /// this as "memory the node may hand to new attempts". 0 = not
+    /// reported; the gate only applies once a value is known.
+    #[serde(default)]
+    pub free_memory_mb: u64,
     #[serde(default)]
     pub free_disk_mb: u64,
     #[serde(default)]
@@ -931,6 +950,15 @@ pub struct HeartbeatRequest {
     /// measured on the node. 0 on legacy nodes.
     #[serde(default)]
     pub repo_lock_wait_ms: u64,
+    /// Plan 6.8: `git-lfs` is installed and its `version` probe answered.
+    /// Absent/legacy nodes report false — LFS repos need manual attention.
+    #[serde(default)]
+    pub git_lfs_installed: bool,
+    /// Plan 6.8: plain `git` resolves (submodule recursion is a clone-time
+    /// argument, not a separate capability; the flag exists since 2.13).
+    /// Absent on legacy nodes.
+    #[serde(default)]
+    pub git_submodules_supported: bool,
     /// Hardening P2 item 35: sandbox backend kind ("none" | "docker").
     /// Absent on legacy nodes (defaults to "none").
     #[serde(default = "default_sandbox_backend")]
@@ -1771,6 +1799,8 @@ mod tests {
             max_concurrency: 2,
             agent_version: "0.1".into(),
             load_avg: 0.5,
+            cpu_count: 4,
+            free_memory_mb: 3840,
             free_disk_mb: 1024,
             active_attempts: 1,
             mem_available_mb: 4096,
@@ -1787,6 +1817,8 @@ mod tests {
             outbox_corruption_count: 0,
             outbox_completion_rows: 0,
             repo_lock_wait_ms: 0,
+            git_lfs_installed: false,
+            git_submodules_supported: true,
             sandbox_backend: "none".into(),
             enforced_limits: false,
             repo_cache_bytes: 0,
