@@ -85,6 +85,42 @@ jobs:
           find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -executable -print0 \
             | xargs -0 -I{} sh -c 'test "$(stat -c%s "{}")" -le 62914560'
 
+      - name: binary size tracking (baseline + summary)
+        # Plan 6.2: record release binary sizes per target, compare against
+        # the previous successful run's baseline (actions/cache) and print
+        # the delta into the build summary so size regressions are visible
+        # at review time, not just at the 60 MiB guardrail.
+        uses: actions/cache@13aacd865c20de90d75de3b17ebe84f7a17d57d2  # v4.0.0
+        with:
+          path: .size-baseline
+          key: binary-sizes-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            binary-sizes-${{ matrix.target }}-
+
+      - name: binary size report
+        run: |
+          cd "target/${{ matrix.target }}/release"
+          mkdir -p ../../.size-baseline
+          BASE=../../.size-baseline/${{ matrix.target }}.tsv
+          {
+            for b in agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi; do
+              [ -f "$b" ] || continue
+              printf '%s\t%s\n' "$b" "$(stat -c%s "$b")"
+            done
+          } > sizes.tsv
+          echo "## Binary sizes — ${{ matrix.target }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$BASE" ]; then
+            join -t$'\t' -j 1 "$BASE" sizes.tsv | awk -F'\t' '
+              { d = $3 - $2; printf "%-28s %10d -> %10d  (%+d bytes)\n", $1, $2, $3, d }' \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            awk -F'\t' '{ printf "%-28s %10d\n", $1, $2 }' sizes.tsv >> "$GITHUB_STEP_SUMMARY"
+            echo "(no baseline yet — this run becomes the baseline)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cp sizes.tsv "$BASE"
+
       - name: smoke test (binaries start)
         # Hardening P2 item 30: every published binary must at least start
         # and report a version. Catches a broken build before the release is

@@ -247,7 +247,7 @@ pub fn config_from_env() -> Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(2),
         agent_version: std::env::var("AGENTGRID_AGENT_VERSION")
-            .unwrap_or_else(|_| "0.1.0-dev".into()),
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into()),
         adapters: parse_adapters(
             &std::env::var("AGENTGRID_ADAPTERS").unwrap_or_else(|_| "mock".into()),
         ),
