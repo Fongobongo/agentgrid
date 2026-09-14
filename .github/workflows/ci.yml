@@ -69,6 +69,124 @@ jobs:
       - run: npm run build
       - run: npm run lint
 
+  docker-images:
+    # Plan 0.3 item: CI builds every published Docker image so a broken
+    # Dockerfile/layer fails the PR, not the release. Publish (GHCR push)
+    # stays in release.yml — this is build-only, no registry credentials.
+    name: docker images (build only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: build web UI (embedded into the control-plane image)
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: build control-plane (glibc)
+        run: docker build -f Dockerfile.control-plane -t ag-cp:ci .
+      - name: build control-plane (musl/scratch)
+        run: docker build -f Dockerfile.control-plane-musl -t ag-cp-musl:ci .
+      - name: build node-daemon
+        run: docker build -f Dockerfile.node-daemon -t ag-node:ci .
+      - name: image liveness smoke (health/ready + version)
+        run: |
+          set -euo pipefail
+          cid=$(docker run -d --rm -p 127.0.0.1:7890:7800 \
+            -e AGENTGRID_LISTEN=0.0.0.0:7800 \
+            -e AGENTGRID_DB=/tmp/cp.db \
+            ag-cp:ci)
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7890/health/ready && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:7890/health/ready
+          curl -sf http://127.0.0.1:7890/v1/version | grep -q control_plane
+
+  tier1-matrix:
+    # Plan 0.3 / 6.13 item: Tier 1 CI beyond ubuntu-latest — the musl
+    # binaries run on Debian 12/13 (glibc-independent) and Ubuntu 24.04.
+    # Cheapest honest matrix: release-style musl build (x86_64) + a
+    # run-the-binary smoke inside each distro container, nightly + manual
+    # (a full musl cross build per PR would double the CI time).
+    name: tier1 musl smoke (${{ matrix.distro }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: ["debian:12", "debian:13", "ubuntu:24.04"]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: install cross
+        run: cargo install cross --locked
+      - name: build musl binaries
+        run: |
+          cross build --release --target x86_64-unknown-linux-musl \
+            -p agentgrid-control-plane -p agentgrid-cli \
+            -p agentgrid-node-daemon -p agentgrid-adapters \
+            -p agentgrid-gateway -p agentgrid-acp
+      - name: smoke: binaries start in ${{ matrix.distro }}
+        run: |
+          set -euo pipefail
+          distro="${{ matrix.distro }}"
+          docker pull "$distro"
+          for b in agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-claude adapter-codex adapter-aider adapter-pi adapter-opencode; do
+            docker run --rm -v "$PWD/target/x86_64-unknown-linux-musl/release:/bins:ro" "$distro" \
+              sh -c "/bins/$b --version"
+          done
+      - name: smoke: CP serves /health/ready inside ${{ matrix.distro }}
+        run: |
+          set -euo pipefail
+          distro="${{ matrix.distro }}"
+          docker run -d --name ag-tier1 -v "$PWD/target/x86_64-unknown-linux-musl/release:/bins:ro" \
+            -p 127.0.0.1:7891:7800 "$distro" \
+            sh -c "AGENTGRID_LISTEN=0.0.0.0:7800 AGENTGRID_DB=/tmp/cp.db /bins/agentgrid-control-plane"
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7891/health/ready && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:7891/health/ready
+          docker rm -f ag-tier1
+
+  arm64-musl-smoke:
+    # Plan 6.13/6.14 item: the aarch64-musl binary is published but never
+    # smoke-tested. QEMU-emulated Debian arm64 proves the release binary at
+    # least starts and reports a version. Uses setup-qemu-action pinned to
+    # the same major as the buildx action in release.yml (v3 line). Nightly
+    # + manual so a QEMU flake never blocks a PR.
+    name: aarch64 musl smoke (QEMU)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          targets: aarch64-unknown-linux-musl
+      - name: install cross
+        run: cargo install cross --locked
+      - name: build aarch64 musl binaries
+        run: |
+          cross build --release --target aarch64-unknown-linux-musl \
+            -p agentgrid-control-plane -p agentgrid-node-daemon -p agentgrid-cli
+      - name: set up QEMU
+        uses: docker/setup-qemu-action@4574d27a4764455b42196d70a065bc6853246a25  # v3.4.0
+      - name: smoke: aarch64 binaries start under QEMU
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD/target/aarch64-unknown-linux-musl/release:/bins:ro" \
+            debian:13 sh -c '/bins/agentgrid-control-plane --version && /bins/ag --version && /bins/agentgrid-node-daemon --version'
+
+
   e2e-failinject:
     name: e2e failure injection (process, no Docker)
     runs-on: ubuntu-latest
