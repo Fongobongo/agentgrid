@@ -4,6 +4,79 @@
 
 ### Added
 
+- **`GET /v1/version` (public) + heartbeat contract versions (Plan 6.12).**
+  The new endpoint reports the CP crate version plus the node-facing
+  contract versions (`node_protocol`, `capabilities_schema`,
+  `supported_event_versions`); nodes advertise
+  `capabilities_schema_version` / `supported_event_versions` in each
+  heartbeat (absent on legacy nodes, never a gate — observability for
+  rolling upgrades). `ag doctor` now prints the server version line
+  instead of a reserved-null field. Covered by
+  `version_endpoint_reports_contracts` (api) + the openapi contract
+  test.
+- **Heartbeat jitter (Plan 6.10).** The node's heartbeat interval is
+  jittered ±20% (deterministic xorshift roll, `jittered_interval` is
+  pure and unit-tested: band/staleness/garbage-roll/variance) so a fleet
+  restarted together does not synchronize beats into a thundering herd
+  against the CP. Worst case (10s base +20% = 12s) stays far under the
+  30s node-staleness window. `AGENTGRID_HEARTBEAT_NO_JITTER=1` restores
+  the fixed cadence for debugging.
+- **Windows dev-host support restored (regression from 0.3.x).** The
+  workspace compiles and the full test suite runs natively on Windows:
+  unix-only code paths (flock, killpg/waitpid, process groups, statvfs,
+  getuid, mode bits) are `#[cfg(unix)]`-gated with documented
+  degradations; `resolve_in_path` also probes the `.exe` form (the raw
+  `is_file` check missed every adapter on Windows);
+  `validate_git_url` accepts drive-letter local paths on Windows while
+  keeping the full metachar reject list; `safe_workspace_target` no
+  longer rejects absolute Windows paths (Prefix components) — only
+  `..` and symlinks remain the traversal vectors. Git tests run with a
+  hermetic empty `GIT_CONFIG_SYSTEM`/`GIT_CONFIG_GLOBAL` so a host's
+  `core.autocrlf=true` (the git-for-Windows installer default) cannot
+  corrupt byte-exact patch/merge assertions; unix-shell tests are
+  `#[cfg(unix)]`.
+- **`ag` categorized exit codes (Plan 1.10 #3).** Failures no longer
+  flatten to exit 1: 3 auth (401/403), 4 not found, 5 CP unreachable
+  (connect/timeout), 6 rejected (409/422), 7 rate-limited (429), 10
+  5xx — the classifier walks the anyhow chain for the reqwest status.
+  Documented in README ("ag exit codes"); constants unit-tested for
+  distinctness.
+- **Claude adapter failure classification (Plan 3.5 #13).** A failed
+  `claude -p` result line now also emits a classified `error` event
+  (`subtype: rate_limited | auth_failed | billing_exhausted |
+  network_error`) via the pure `classify_error` matcher, so failure
+  causes are visible in the task event trail without parsing prose.
+  Unknown text keeps the plain result event (no behaviour change).
+- **CI: docker-image build job + Tier-1 distro matrix + ARM64 QEMU
+  smoke (Plans 0.3/6.13/6.14).** `docker-images` builds all three
+  published images per PR (glibc CP, musl/scratch CP, node-daemon) and
+  smoke-boots the CP image (health + /v1/version); nightly
+  `tier1-musl-smoke` runs the musl release binaries inside Debian 12,
+  Debian 13 and Ubuntu 24.04 containers (`--version` + CP
+  `/health/ready`); nightly `arm64-musl-smoke` boots the aarch64
+  binaries under QEMU. Publish stays in release.yml.
+- **Pre-commit hook (`.githooks/pre-commit`, Plan 0.2).** Opt-in via
+  `git config core.hooksPath .githooks`: runs `cargo fmt --all --check`
+  + `cargo clippy --all-targets -- -D warnings` when staged `.rs`
+  files exist — the same gates CI enforces, before the push.
+- **Monitoring docs + Grafana dashboard (Plan 3.10).**
+  `docs/monitoring.md`: Prometheus scrape config, the full metric
+  reference table (real metric names/labels from `/metrics`), alerting
+  rules (queue starvation, outbox backlog, stale backups, SQLite
+  contention) and a ready-to-import dashboard at
+  `deploy/grafana-dashboard.json`.
+- **Compatibility matrix (`docs/compatibility-matrix.md`, Plans
+  6.13/6.14).** What CI actually covers per OS (Ubuntu 24.04 per-PR;
+  Debian 12/13 nightly musl smoke; ARM64 QEMU nightly), what works by
+  construction (xfs, Fedora/Rocky/Arch via musl), and honest Tier-3
+  guidance (WSL2 in-distro with the ext4 rule, Alpine via the musl
+  images, NixOS/no-systemd caveats).
+- **TROUBLESHOOTING.md: enrollment / clone / adapter / TLS sections
+  (Plan 3.8).** One-time token semantics + credential reuse, probed
+  (not declared) adapter capabilities and the queued-not-failed
+  scheduler behaviour for incompatible tasks, bare-mirror/lock
+  recovery, rustls CA trust and reverse-proxy considerations.
+
 - **Keyset pagination for `/v1/audit`.** `list_audit` gains a
   `(before_created_at, before_id)` cursor paging back through the
   newest-first trail; the route emits `next_cursor` while full pages remain

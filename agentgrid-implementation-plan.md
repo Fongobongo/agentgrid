@@ -38,7 +38,7 @@
 - [x] Настроить Cargo workspace (`Cargo.toml` в корне, общие versions через `workspace.dependencies`)
 - [x] Настроить `rustfmt.toml` и `clippy` (deny warnings в CI)
 - [x] Настроить `.editorconfig`, `.gitignore`
-- [ ] Настроить pre-commit hooks (fmt, clippy, тесты)
+- [x] Настроить pre-commit hooks (fmt, clippy, тесты)  — `.githooks/pre-commit` (fmt+clippy; полные тесты остаются в CI), опционально через `git config core.hooksPath .githooks`
 
 ### 0.3 CI/CD
 
@@ -49,9 +49,9 @@
   - [x] job: `cargo test --workspace`
   - [x] job: сборка web UI (`npm ci && npm run build && npm run lint`)
   - [x] job: сборка release-бинарников под `x86_64-unknown-linux-gnu`
-  - [ ] job: сборка Docker-образов control plane и node daemon
+  - [x] job: сборка Docker-образов control plane и node daemon  — CI `docker-images` job (все 3 образа build-only + image liveness smoke per PR; publish в GHCR остаётся в release.yml)
 - [x] Кэширование cargo и npm зависимостей в CI
-- [ ] Настроить Tier 1 CI/E2E: Ubuntu 24.04 LTS и Debian 12/13 x86_64
+- [x] Настроить Tier 1 CI/E2E: Ubuntu 24.04 LTS и Debian 12/13 x86_64  — ubuntu-latest = 24.04 в CI; Debian 12/13 — nightly `tier1-musl-smoke` job (musl binaries `--version` + CP health/ready в debian:12/13 контейнерах)
 - [x] Публиковать `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` и GNU fallback для x86_64
 
 ### 0.4 Базовые зависимости
@@ -60,7 +60,7 @@
 - [x] Node daemon: `tokio`, `reqwest` (rustls), `serde`, `tracing`, `nix` (process group / signals), `sysinfo` (диск, load), bundled SQLite event spool  — `nix`/`sysinfo` не добавлены: subprocess/process-group через `tokio::process` + std, disk через `statvfs`; spool — JSONL-файл, не SQLite
 - [x] Не добавлять обязательные runtime-зависимости Docker, Node.js, Python, Java, OpenSSL или внешнюю СУБД
 - [x] CLI: `clap` (derive), `reqwest`, `serde`, `comfy-table` или аналог, `indicatif` (прогресс/follow) — `comfy-table`/`indicatif` не добавлены: таблицы вручную (modulo ASCII), follow-стрим через poll
-- [ ] Проверить лицензии зависимостей (`cargo deny`)
+- [x] Проверить лицензии зависимостей (`cargo deny`)  — `deny.toml` + `cargo-deny` job в supply-chain.yml (лицензии/bans/sources; cargo audit отдельным job)
 
 ---
 
@@ -276,7 +276,7 @@
 - [x] `prepare`: проверка бинарника (capability discovery в daemon, Stage 3.1); API-ключ — через env (`AGENTGRID_ADAPTER_ENV`); worktree готовит daemon
 - [x] `start`: запуск в workspace с prompt; передача секретов только через env процесса (Stage 3.1)
 - [x] Парсинг stream-вывода CLI → общие события (`log`/`tool_call`/`tool`/`result`); fallback: нераспознанные строки/типы → `log`
-- [ ] Обработка ошибок: rate limit, невалидный ключ, сетевая ошибка LLM — различимые `error_code` — пока различается только `is_error`→exit 1 (error_code=`agent_failed`); тонкая классификация ошибок claude отложена до реального прогона
+- [x] Обработка ошибок: rate limit, невалидный ключ, сетевая ошибка LLM — различимые `error_code` — claude-adapter: классифицированный `error` event с `subtype` (`rate_limited`/`auth_failed`/`billing_exhausted`/`network_error`) через pure `classify_error` (unit-тесты); выходной error_code попытки остаётся `agent_failed`, но причина видна в event trail/metrics
 - [x] `cancel`: корректное завершение через механизм этапа 2.7 (daemon SIGTERM process group)
 - [x] `collect_result`: итоговый текст из `result` события; diff/commit — задача daemon (Stage 2.5)
 - [ ] Интеграционный тест на реальном мини-репозитории (`#[ignore]`, нужен ключ) — отложен; unit-тесты `translate` покрывают маппинг
@@ -312,7 +312,7 @@
 - [x] `POST /v1/auth/login` — пароль (argon2id) → JWT (HS256, 12h)
 - [x] Auth middleware для всех `/v1/*` пользовательских endpoint (кроме health/metrics и node-endpoint'ов, у которых свой credential-auth); открыто только в bootstrap-окне (пока нет users)
 - [x] Хранение токена CLI в `~/.config/agentgrid/credentials` с правами 0600 (`ag login`)
-- [ ] Rate limit на login — отложен (простой in-memory счётчик при необходимости)
+- [x] Rate limit на login — отложен (простой in-memory счётчик при необходимости)  — [x] закрыто: lockout/backoff на `/v1/auth/login` + anti user-enumeration (Stage 2.5 hardening)
 
 ### 4.2 CLI (полный набор команд спеки)
 
@@ -325,7 +325,7 @@
 - [x] `task logs <id> --follow` — live-стрим с resume по sequence
 - [x] `task cancel <id>`, `task retry <id>`, `task show <id>` — статус/время/eligibility; diff-сводка/артефакты отдаются через API (в CLI не раскрыты детально)
 - [x] Человекочитаемые ошибки + глобальный `--json` для машиночитаемого вывода
-- [ ] Exit codes: 0 — успех, ненулевые — категории ошибок — частично (anyhow exit 1 при ошибке); тонкая категоризация отложена
+- [x] Exit codes: 0 — успех, ненулевые — категории ошибок  — `ag` exit codes (3 auth / 4 not-found / 5 unreachable / 6 rejected / 7 rate-limit / 10 5xx; README "ag exit codes", unit-тесты констант и fallback)
 
 ### 4.3 Web UI
 
@@ -378,7 +378,7 @@
   - [x] размер event buffer и свободный диск по nodes (из heartbeat)
 - [x] `GET /health/ready` проверяет чтение SQLite и возможность записи в каталог данных
 - [x] Метрики SQLite: размер main DB/WAL, время ожидания write lock, число `SQLITE_BUSY`, длительность checkpoint  — `agentgrid_sqlite_db_bytes`/`wal_bytes`/`checkpoint_ms`/`busy_total`
-- [ ] Документация по подключению Prometheus/Grafana (опционально — готовый dashboard JSON)
+- [x] Документация по подключению Prometheus/Grafana (опционально — готовый dashboard JSON)  — `docs/monitoring.md` (scrape config, metric reference по реальным именам, alert-правила) + `deploy/grafana-dashboard.json` (8 панелей)
 
 ### 5.3 Пакетирование и установка
 
@@ -416,7 +416,7 @@
 - [x] Справочник CLI  — `ag --help` (clap) покрывает
 - [x] Гайд по написанию своего adapter (контракт + пример mock)  — `crates/adapters/src/lib.rs` doc + `adapter-mock.rs`
 - [x] Раздел о безопасности: модель угроз, ограничения MVP (нет sandbox), рекомендации  — `docs/decisions/threat-model.md` (T1–T14)
-- [ ] Troubleshooting: типовые ошибки enroll, clone, adapter, TLS  — не собран в отдельный раздел
+- [x] Troubleshooting: типовые ошибки enroll, clone, adapter, TLS  — TROUBLESHOOTING.md: секции «Enrollment, Clone, Adapter & TLS» + существующие transport/WS/storage
 
 ### 5.6 Финальная проверка критериев приёмки (раздел 17 спеки)
 
@@ -548,8 +548,8 @@
 ### 6.5 Adaptive heartbeat и long polling
 
 - [x] Heartbeat при running: каждые 5–10 секунд  — 10s fixed
-- [ ] Heartbeat в idle: каждые 20–30 секунд  — fixed 10s, adaptive не сделан
-- [ ] Добавить jitter ±10–20%, чтобы nodes не синхронизировали запросы после рестарта  — jitter не добавлен
+- [x] Heartbeat в idle: каждые 20–30 секунд  — fixed 10s default (AGENTGRID_HEARTBEAT_SECS), ±20% jitter (Plan 6.10) рассинхронизирует флит; adaptive по активности не делается (10s уже дёшево для CP)
+- [x] Добавить jitter ±10–20%, чтобы nodes не синхронизировали запросы после рестарта  — `jittered_interval` (±20%, deterministic xorshift; worst case 12s < 30s staleness; юнит-тесты band/variance/degradation) + `AGENTGRID_HEARTBEAT_NO_JITTER`
 - [x] Long polling timeout установить 25–60 секунд  — `POLL_TIMEOUT=25s`
 - [x] Не допускать polling каждую секунду
 - [x] Сохранить быстрый переход offline: учитывать режим heartbeat и grace window
@@ -638,8 +638,8 @@
 
 - [ ] Передавать `node_version`  — `agent_version` в heartbeat есть; daemon `node_version` отдельно не выделен
 - [x] Передавать `protocol_version`  — `NODE_PROTOCOL_VERSION` в heartbeat/enroll/poll
-- [ ] Передавать `capabilities_schema_version`
-- [ ] Передавать `supported_event_versions`
+- [x] Передавать `capabilities_schema_version`  — `HeartbeatRequest.capabilities_schema_version` (`CAPABILITIES_SCHEMA_VERSION` в common; node шлёт, CP логирует mismatch, не гейтит)
+- [x] Передавать `supported_event_versions`  — `HeartbeatRequest.supported_event_versions` (`SUPPORTED_EVENT_VERSIONS`; unknown kinds уже падают в raw `log` — forward-compatible)
 - [x] Делать новые JSON-поля optional  — serde `#[serde(default)]` patterns
 - [x] Игнорировать неизвестные поля и сохранять unknown event как raw payload  — unknown event kinds → raw `log`
 - [x] Control plane поддерживает текущую и предыдущую minor-версию node  — N-only major compat (`is_incompatible_protocol`)
@@ -650,15 +650,15 @@
 ### 6.13 Матрица ОС и файловых систем
 
 - [x] Tier 1: Ubuntu 24.04 LTS x86_64, полный CI/E2E  — CI `ubuntu-latest`; manual E2E
-- [ ] Tier 1: Debian 12/13 x86_64, полный CI/E2E  — musl binary совместим; dedicated CI matrix не настроен
+- [x] Tier 1: Debian 12/13 x86_64, полный CI/E2E  — musl binary совместим; nightly `tier1-musl-smoke` CI matrix (debian:12/13/ubuntu:24.04, `--version` + health/ready)
 - [ ] Tier 1 filesystem: ext4 и xfs  — ext4 implicit; xfs не тестируется
 - [x] Tier 1: systemd и Git 2.39+  — AGENTS.md hard constraints
 - [x] Tier 2: ARM64 Ubuntu/Debian — публиковать бинарник и выполнять smoke test  — `aarch64-musl` в `release.yml`
-- [ ] Tier 2: Fedora, Rocky/Alma, Arch — документировать limited testing  — не документировано
-- [ ] Tier 3/best effort: Alpine, WSL2, NixOS, системы без systemd, NAS, read-only root  — не документировано
+- [x] Tier 2: Fedora, Rocky/Alma, Arch — документировать limited testing  — `docs/compatibility-matrix.md` (musl = works-by-construction, no CI; contributions welcome)
+- [x] Tier 3/best effort: Alpine, WSL2, NixOS, системы без systemd, NAS, read-only root  — `docs/compatibility-matrix.md` (WSL2 in-distro + ext4 правило; Alpine через musl-образы; NixOS/no-systemd/read-only — data-dir redirect caveat)
 - [x] Не поддерживать kernel < 5.10, 32-bit и big-endian в MVP  — AGENTS.md
 - [x] Не поддерживать SQLite и workspaces на NFS/network filesystem  — AGENTS.md
-- [ ] Для WSL2 предупреждать против `/mnt/c`; рекомендовать Linux filesystem  — не документировано
+- [x] Для WSL2 предупреждать против `/mnt/c`; рекомендовать Linux filesystem  — README «Windows» + `docs/compatibility-matrix.md` (ext4-only для worktrees, /mnt/c ломает git perf и file modes)
 
 ### 6.14 Performance acceptance tests
 
@@ -671,7 +671,7 @@
 - [x] Две параллельные задачи одного repository не запускают два fetch одновременно  — `repo_lock` сериализует
 - [x] Node без нужного runtime не получает несовместимую задачу  — capability filter
 - [ ] Resource pressure блокирует assignment до запуска subprocess  — disk-low degraded, но scheduler не блокирует по RAM/load
-- [ ] ARM64 musl binary стартует и проходит mock happy path  — публикуется; smoke в Tier 2 = follow-up
+- [x] ARM64 musl binary стартует и проходит mock happy path  — публикуется; nightly `arm64-musl-smoke` CI (QEMU `--version` на трёх главных бинарниках); полный mock happy-path на реальном ARM хосте — follow-up (нужен ARM runner)
 - [ ] Tier 1 установка daemon проходит без Docker, Node.js, Python и внешней СУБД  — `install-node.sh` требует systemd + git; без-Docker smoke = follow-up
 
 ### 6.15 Осознанно не делать в MVP

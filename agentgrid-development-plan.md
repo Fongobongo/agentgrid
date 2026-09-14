@@ -437,7 +437,7 @@
 ## Сквозные практики (все этапы)
 
 - [x] Каждый P0-баг закрывается с regression test  — regression tests в `crates/control-plane/tests/api.rs` + `migration_compat.rs` + e2e scripts
-- [ ] Каждая фича — через PR с зелёным CI (fmt/clippy/test/build/web/E2E)
+- [ ] Каждая фича — через PR с зелёным CI (fmt/clippy/test/build/web/E2E)  — частично: solo-режим ведёт direct-to-master; CI (rust/web/e2e/supply-chain) гоняет каждый push/PR + nightly. Локально: pre-commit hook (`.githooks/pre-commit`, fmt+clippy) через `git config core.hooksPath .githooks`
 - [x] ADR на каждое архитектурное решение (минимум: outcome model, ack, outbox, adapter registry, ACP north/south, skills trust, workflow DAG, Zeroshot ownership) — ADR 0001 (MVP scope, covers outcome model/ack/outbox/adapter registry), 0002 (Zeroshot ownership), 0003 (execution backends), 0004 (workflow DAG invariants). Skills trust + ACP north/south inlined в Stage docs (`docs/acp-interop.md`, threat-model) — follow-up: поднять до standalone ADR если требуется.
 - [x] CHANGELOG и semver теги: `v0.1.1`, `v0.2.0`, `v0.3.0`, далее по этапам  — `CHANGELOG.md` + git tags v0.1.1/v0.2.0/v0.3.0
 - [ ] Раз в неделю — ручной прогон happy path на двух реальных машинах; перед release — smoke на Linux/macOS/Windows

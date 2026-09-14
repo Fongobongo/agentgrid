@@ -373,9 +373,99 @@ export ENROLL_TOKEN=$(curl -fsS http://cp:7800/v1/nodes/enrollment-token)
 sudo systemctl restart agentgrid-node-daemon
 ```
 
+## Enrollment, Clone, Adapter & TLS (Plan 3.8 troubleshooting checklist)
+
+### Node enroll fails ("enroll failed: 401/403/422")
+
+**Symptoms:** `agentgrid-node-daemon` logs `enroll failed` and exits/retries.
+
+```bash
+# 1. Is the token still valid / used? Enrollment tokens are one-time.
+ag token create   # issue a fresh one (admin JWT required)
+# 2. Does the token reach the daemon? (env file vs shell env)
+grep AGENTGRID_ENROLL_TOKEN /etc/agentgrid/node.env
+# 3. Server reachable at all?
+curl -s http://cp-host:7800/health/ready
+```
+
+**Fixes:**
+- Reissue the token and restart the daemon; on success the token line is
+  **scrubbed from the env file** automatically (it is one-time, and a
+  leaked token on disk would let anyone enroll a node).
+- If the node previously enrolled, the persisted credential
+  (`$AGENTGRID_DATA_DIR/credential.json`) is reused and the token is
+  irrelevant — delete the file only when you WANT re-enrollment.
+
+### Task fails with `infrastructure_failed` / "adapter not found"
+
+**Symptoms:** attempt completes instantly with
+`error_code=infrastructure_failed`; `ag nodes list` shows the adapter
+greyed out or the node `degraded`.
+
+```bash
+# What does the node actually advertise? (capabilities are probed, not
+# declared: a missing binary means the node honestly reports not-ready)
+ag nodes list           # check the ADAPTERS column
+# Probe by hand on the node host:
+which adapter-claude    # adapter binaries live on PATH (typically /usr/local/bin)
+adapter-claude --version
+```
+
+**Fixes:**
+- Install the adapter binaries next to the daemon (same tarball:
+  `adapter-<id>` per adapter) or set `AGENTGRID_ACP_LAUNCH_<ID>` for a
+  native ACP agent (`claude --acp`).
+- The capability probe caches; restart the daemon (or wait for the next
+  heartbeat) after installing a binary.
+- A task for adapter B on a node with only A stays **queued** (not
+  failed) — the scheduler skips incompatible heads of line.
+
+### Worktree / clone failures (fetch, worktree add)
+
+**Symptoms:** attempt fails with git errors in the event log; two
+parallel attempts of one repo keep colliding.
+
+```bash
+# The node keeps a bare mirror per repo under the repository root:
+ls $AGENTGRID_REPOSITORY_ROOT   # <repo>.git-style bare mirror + <repo>.lock
+# Lock contention (rare): the cross-process flock auto-releases when the
+# holder dies; a 60s timeout means a real sibling clone is still running.
+```
+
+**Fixes:**
+- `git fetch` failures: check the token/URL the CP stores for the repo
+  (`ag repo` list) and that the node host can reach the remote.
+- A wedged worktree is best-effort-cleaned per attempt; the startup
+  sweep (`prune_stale_workspaces`) also runs `git worktree prune` per
+  repo — restarting the daemon clears residue.
+- NFS/network mounts for `AGENTGRID_REPOSITORY_ROOT` /
+  `AGENTGRID_WORKSPACE_ROOT` are **unsupported** (file locking is not
+  honest there).
+
+### TLS: daemon cannot connect to an HTTPS control plane
+
+**Symptoms:** `heartbeat failed: ... certificate` / `invalid peer
+certificate`.
+
+```bash
+# 1. Does the host trust the cert chain? (rustls uses the system store
+#    via rustls-native-certs on Linux)
+openssl s_client -connect cp-host:443 -servername cp-host </dev/null | head
+# 2. Self-signed lab CP? Ship the CA to the node host:
+cp lab-ca.pem /usr/local/share/ca-certificates/ && update-ca-certificates
+# 3. Debug logging:
+RUST_LOG=agentgrid_node_daemon=debug agentgrid-node-daemon
+```
+
+**Notes:** the CP-side TLS terminator uses rustls (no OpenSSL). If the
+CP is behind a reverse proxy doing TLS, the daemon sees the proxy's
+cert — trust that, not the CP's internal one. musl builds read the same
+system CA bundle; on Alpine-based images add `ca-certificates` to the
+image.
+
 ## Additional Resources
 
-- **Full documentation:** `README.md`, `docs/runbook-transport.md`
+- **Full documentation:** `README.md`, `docs/runbook-transport.md`, `docs/compatibility-matrix.md`
 - **Architecture decisions:** `docs/decisions/`
 - **API reference:** `docs/openapi.yaml`
 - **Changelog:** `CHANGELOG.md`

@@ -238,12 +238,18 @@ reproduce the web bundle in a pinned container image.
 
 ## Windows
 
-Windows hosts (and WSL1) are not supported. The supported path from a Windows
-workstation is a Linux node — WSL2 is a practical option: run
-`agentgrid-node-daemon` inside a WSL2 distro (systemd-enabled or `nohup`), and
-keep each attempt's worktree inside the WSL ext4 filesystem (`~/...`), not on
-`/mnt/c/...` (NTFS mount kills git performance and breaks file modes). Linux
-kernel >= 5.10 applies (stock WSL2 yes).
+Windows is not a supported **deployment** target (nodes and control planes
+are Linux — see `docs/compatibility-matrix.md`). Two supported paths from a
+Windows workstation:
+
+- **Dev host** — the workspace compiles and the pure unit tests run natively
+  on Windows (unix-shell tests are `#[cfg(unix)]`-gated and skip). See
+  "Local development on a Windows host" under Dev / ops notes.
+- **WSL2 node** — run `agentgrid-node-daemon` inside a WSL2 distro
+  (systemd-enabled or `nohup`), and keep each attempt's worktree inside the
+  WSL ext4 filesystem (`~/...`), not on `/mnt/c/...` (NTFS mount kills git
+  performance and breaks file modes). Linux kernel >= 5.10 applies (stock
+  WSL2 yes).
 
 ## Dev / ops notes
 
@@ -253,6 +259,51 @@ kernel >= 5.10 applies (stock WSL2 yes).
   is silent past the 30s assignment lease no longer triggers a duplicate attempt.
 - A warning is logged when an adapter exits 0 but produces no events, surfacing
   silent agents that yield empty "succeeded" tasks.
+
+### `ag` exit codes
+
+`ag` categorizes failures so scripts and CI can branch without parsing
+stderr (Plan 1.10 #3):
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | generic failure (unexpected error) |
+| 2 | usage error (bad arguments — clap convention) |
+| 3 | auth failed (401/403, login rejected, bad token) |
+| 4 | not found (unknown task/node/repo id) |
+| 5 | control plane unreachable (connect/timeout) |
+| 6 | request rejected by the server (409 conflict / 422 validation) |
+| 7 | rate limited (429) |
+| 10 | server error (5xx) |
+
+### Local development on a Windows host
+
+The workspace compiles and the pure unit tests run on Windows (dev-host
+convenience only — nodes/control planes are Linux deployments). Unix-shell
+tests (`sh -c` validation, flock, process-group kills) are `#[cfg(unix)]`-gated
+and skip on Windows. Git-based tests neutralize the host's
+`core.autocrlf` via a hermetic empty `GIT_CONFIG_SYSTEM/GLOBAL` so byte-exact
+patch assertions hold regardless of the host's git defaults.
+
+### Pre-commit hook (optional)
+
+To run `cargo fmt --check` + `cargo clippy -D warnings` locally before each
+commit (the same gates CI enforces):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook (`.githooks/pre-commit`) only fires when staged `.rs` files exist;
+full `cargo test --workspace` stays in CI.
+
+### Monitoring
+
+The control plane serves Prometheus metrics at `GET /metrics`; see
+`docs/monitoring.md` for the metric reference, alerting suggestions and a
+ready-to-import Grafana dashboard (`deploy/grafana-dashboard.json`).
+
 
 ### Operator notifications (webhook / Telegram)
 
