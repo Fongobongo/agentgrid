@@ -522,7 +522,7 @@
 - [x] Отключить ненужные default features зависимостей  — `reqwest` `default-features = false`
 - [x] Не включать одновременно несколько TLS backends  — rustls только
 - [x] Не включать тяжёлые telemetry exporters по умолчанию  — нет
-- [ ] Зафиксировать размеры release-бинарников в CI и выводить регрессию размера в build summary
+- [x] Зафиксировать размеры release-бинарников в CI и выводить регрессию размера в build summary  — release.yml: `binary size tracking` (actions/cache baseline per target) + `binary size report` в `$GITHUB_STEP_SUMMARY` (delta против baseline; первый прогон = baseline)
 
 ### 6.3 Минимальные ресурсы и бюджеты
 
@@ -535,15 +535,15 @@
 
 ### 6.4 Tokio и внутренняя топология процессов
 
-- [ ] Node daemon: ограничить Tokio worker threads до 1–2
-- [ ] Control plane: ограничить Tokio worker threads до 2–4
-- [ ] Ограничить `max_blocking_threads` (node 8–16, control plane 16–32)
-- [ ] Не выполнять Git/filesystem/blocking operations на async worker threads
-- [ ] Использовать subprocess или bounded blocking pool для blocking operations
-- [ ] Реализовать semaphores для параллельных Git fetch, worktree creation, uploads и validation
-- [ ] Scheduler, migrations, event dispatcher, artifact cleaner и heartbeat manager реализовать Tokio tasks внутри одного control-plane процесса
-- [ ] Adapter реализовать как Rust-модуль или декларативное описание команды; не запускать отдельный постоянный adapter service
-- [ ] Отдельным процессом запускать только coding-agent во время attempt
+- [x] Node daemon: ограничить Tokio worker threads до 1–2  — явный runtime Builder (2 workers / 8 blocking default; env `AGENTGRID_TOKIO_WORKERS`/`AGENTGRID_TOKIO_BLOCKING`)
+- [x] Control plane: ограничить Tokio worker threads до 2–4  — 4 workers / 32 blocking default, те же env-оверрайды
+- [x] Ограничить `max_blocking_threads` (node 8–16, control plane 16–32)  — node 8, CP 32 (`max_blocking_threads`)
+- [x] Не выполнять Git/filesystem/blocking operations на async worker threads  — git/fs в `spawn_blocking` (heartbeat outbox scan, git ops, artifact spool)
+- [x] Использовать subprocess или bounded blocking pool для blocking operations  — bounded blocking pool (`max_blocking_threads`)
+- [x] Реализовать semaphores для параллельных Git fetch, worktree creation, uploads и validation  — `repo_lock` per-repo `Mutex` (fetch/worktree serialization) + attempt semaphore (`max_concurrency`)
+- [x] Scheduler, migrations, event dispatcher, artifact cleaner и heartbeat manager реализовать Tokio tasks внутри одного control-plane процесса  — tickers в `serve()` (maintenance/workflow/agent-heartbeat/профиль-janitor)
+- [x] Adapter реализовать как Rust-модуль или декларативное описание команды; не запускать отдельный постоянный adapter service  — wrapper-бинарник на attempt; ACP-агенты через `AGENTGRID_ACP_LAUNCH_*`
+- [x] Отдельным процессом запускать только coding-agent во время attempt  — adapters spawn per-attempt; нет постоянного adapter-сервиса
 
 ### 6.5 Adaptive heartbeat и long polling
 
@@ -566,7 +566,7 @@
 - [x] Формировать log batches по 16–64 КБ или каждые 100–250 мс
 - [x] Отправлять status/error/result немедленно, не ожидая batch timeout
 - [x] Выполнять batch insert событий одной короткой SQLite-транзакцией
-- [ ] Включить gzip/zstd HTTP compression только выше порога 8–16 КБ  — сжатие не включено
+- [x] Включить gzip/zstd HTTP compression только выше порога 8–16 КБ  — `CompressionLayer` (brotli) с `SizeAbove::new(8 KiB)`; тест `compression_kicks_in_above_8kib` (большой events-listing сжимается, маленький JSON — нет)
 - [x] Проверить backpressure mock-сценарием `spam` с объёмом больше RAM/disk limits  — `run-disk-full.sh` (4 KiB spool)
 - [x] Проверить, что медленный или недоступный control plane не вызывает роста RSS node  — `run-cp-restart.sh` + `run-slow-net.sh`
 
@@ -591,8 +591,8 @@
 - [x] Не запускать `git gc`/maintenance во время активных attempts репозитория
 - [x] Запускать Git maintenance только в idle window  — `prune_stale_workspaces` on startup
 - [x] Удалять старые worktrees и ветки пакетно  — `AGENTS.md` retention; `git worktree prune`+`git branch -D` per-attempt + startup
-- [ ] Обнаруживать и публиковать Git LFS как capability
-- [ ] Обнаруживать и публиковать submodules support как capability
+- [x] Обнаруживать и публиковать Git LFS как capability  — heartbeat `git_lfs_installed` (probe `git-lfs version`, timeout-bounded); NodeView/UI видят флаг
+- [x] Обнаруживать и публиковать submodules support как capability  — heartbeat `git_submodules_supported` (PATH-резолв `git`; recursion — clone-time аргумент с 2.13)
 - [x] Не включать partial clone по умолчанию в MVP; оставить опцией после проверки offline-поведения  — не включен
 - [x] Тестировать отсутствие изменений исходной рабочей копии и повторное использование object database  — bare-mirror tests
 
@@ -610,16 +610,16 @@
 
 ### 6.10 Resource reservations и pressure hysteresis
 
-- [ ] Добавить конфиг `reserved_memory_mb`  — не сделано
-- [ ] Добавить `min_free_disk_mb` (default 5120)  — есть `AGENTGRID_DISK_LOW_MB` (1 GB default) для degraded, но scheduler не блокирует
-- [ ] Добавить `max_load_average_per_cpu`  — heartbeat шлёт load_avg, но scheduler-резервация не сделана
+- [x] Добавить конфиг `reserved_memory_mb`  — `AGENTGRID_RESERVED_MEM_MB` (default 256) на node; heartbeat шлёт `free_memory_mb = MemAvailable − reserved`; scheduler gate предпочитает `free_memory_mb`, legacy-фолбэк на `mem_available_mb` (миграция 0083)
+- [x] Добавить `min_free_disk_mb` (default 5120)  — node: `AGENTGRID_MIN_FREE_DISK_MB` (default 5120) с hysteresis-degraded; CP scheduler disk gate `AGENTGRID_MIN_FREE_DISK_MB` (default 2048) + eligibility-причина «low disk»
+- [x] Добавить `max_load_average_per_cpu`  — `AGENTGRID_MAX_LOAD_PER_CPU` (default 2.0): node hysteresis-degraded + CP scheduler load gate (per-CPU, `cpu_count` в heartbeat, миграция 0084) + eligibility-причина «high load»
 - [x] Сохранить `max_concurrency` как жёсткий верхний предел  — scheduler filter `active_attempts < max_concurrency`
-- [x] Heartbeat передаёт free RAM, free disk, load average и active attempts  — `free_disk_mb`+load_avg (no free RAM field)
-- [ ] Scheduler не назначает задачу при нарушении resource reservations  — только max_concurrency + adapter/repo + node status
-- [ ] Переводить node в `degraded(resource_pressure)` после трёх последовательных плохих измерений  — degraded для disk-low only
-- [ ] Возвращать node в `online` после пяти нормальных измерений
-- [ ] Не менять status из-за одного кратковременного load spike
-- [ ] Тестировать две тяжёлые задачи при `max_concurrency=2`, но недостаточной памяти для второй
+- [x] Heartbeat передаёт free RAM, free disk, load average и active attempts  — `free_disk_mb` + `free_memory_mb` (reserved-adjusted) + `mem_available_mb` + load_avg + `cpu_count` + active_attempts
+- [x] Scheduler не назначает задачу при нарушении resource reservations  — memory/disk/load gates в `try_assign_batch` (`rejected_due_to_low_host_memory|low_disk|high_load`), legacy 0 = not reported → admit
+- [x] Переводить node в `degraded(resource_pressure)` после трёх последовательных плохих измерений  — node-side `PressureState` (heartbeat.rs): 3 consecutive bad beats → degraded; unit-тесты `pressure_*`
+- [x] Возвращать node в `online` после пяти нормальных измерений  — 5 consecutive good beats → online (sticky, no flapping; тест `pressure_needs_five_good_beats_to_recover`)
+- [x] Не менять status из-за одного кратковременного load spike  — hysteresis поглощает спайки (тест `pressure_ignores_single_load_spikes`); hard disk floor (AGENTGRID_DISK_LOW_MB) остаётся мгновенным для near-ENOSPC
+- [x] Тестировать две тяжёлые задачи при `max_concurrency=2`, но недостаточной памяти для второй  — store-тесты `reserved_free_memory_gates_assignment` + `high_load_per_cpu_blocks_assignment` + `eligibility_reports_resource_pressure_reasons` (мемgate блокирует вторую задачу независимо от concurrency)
 
 ### 6.11 cgroups v2 и subprocess limits
 
@@ -636,7 +636,7 @@
 
 ### 6.12 Protocol и version compatibility
 
-- [ ] Передавать `node_version`  — `agent_version` в heartbeat есть; daemon `node_version` отдельно не выделен
+- [x] Передавать `node_version`  — `agent_version` в heartbeat/enroll шлёт версию daemon: default теперь `CARGO_PKG_VERSION` (было «0.1.0-dev»); override через `AGENTGRID_AGENT_VERSION`
 - [x] Передавать `protocol_version`  — `NODE_PROTOCOL_VERSION` в heartbeat/enroll/poll
 - [x] Передавать `capabilities_schema_version`  — `HeartbeatRequest.capabilities_schema_version` (`CAPABILITIES_SCHEMA_VERSION` в common; node шлёт, CP логирует mismatch, не гейтит)
 - [x] Передавать `supported_event_versions`  — `HeartbeatRequest.supported_event_versions` (`SUPPORTED_EVENT_VERSIONS`; unknown kinds уже падают в raw `log` — forward-compatible)
@@ -670,7 +670,7 @@
 - [x] Повторный attempt существующего repository не выполняет полный clone  — bare-mirror clone reused
 - [x] Две параллельные задачи одного repository не запускают два fetch одновременно  — `repo_lock` сериализует
 - [x] Node без нужного runtime не получает несовместимую задачу  — capability filter
-- [ ] Resource pressure блокирует assignment до запуска subprocess  — disk-low degraded, но scheduler не блокирует по RAM/load
+- [x] Resource pressure блокирует assignment до запуска subprocess  — memory/disk/load gates в `try_assign_batch` + node hysteresis-degraded (`PressureState`); тесты `reserved_free_memory_gates_assignment` / `high_load_per_cpu_blocks_assignment`
 - [x] ARM64 musl binary стартует и проходит mock happy path  — публикуется; nightly `arm64-musl-smoke` CI (QEMU `--version` на трёх главных бинарниках); полный mock happy-path на реальном ARM хосте — follow-up (нужен ARM runner)
 - [ ] Tier 1 установка daemon проходит без Docker, Node.js, Python и внешней СУБД  — `install-node.sh` требует systemd + git; без-Docker smoke = follow-up
 

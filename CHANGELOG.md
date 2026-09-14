@@ -4,6 +4,44 @@
 
 ### Added
 
+- **Resource reservations + pressure hysteresis (Plan 6.10).** Nodes now
+  report `free_memory_mb` (MemAvailable minus the operator-reserved
+  slice, `AGENTGRID_RESERVED_MEM_MB`, default 256 MiB) and `cpu_count`;
+  the scheduler refuses new work when free memory drops below
+  `AGENTGRID_MIN_FREE_MEM_MB`, disk below
+  `AGENTGRID_MIN_FREE_DISK_MB` (node-side degraded floor:
+  `AGENTGRID_MIN_FREE_DISK_MB`, default 5120), or load per CPU above
+  `AGENTGRID_MAX_LOAD_PER_CPU` (default 2.0). Sustained pressure
+  degrades a node only after 3 consecutive bad beats and requires 5
+  good beats to come back (`PressureState`, unit-tested: no single
+  load-spike flapping); a near-ENOSPC disk still degrades instantly.
+  The eligibility endpoint surfaces the same reasons ("low host
+  memory", "high load", …). Migrations 0083/0084; store tests
+  `reserved_free_memory_gates_assignment`,
+  `high_load_per_cpu_blocks_assignment`,
+  `eligibility_reports_resource_pressure_reasons`.
+- **Tokio topology caps (Plan 6.4).** Node daemon and control plane
+  build explicit multi-thread runtimes with bounded worker/blocking
+  pools (node 2/8, CP 4/32) to keep the idle footprint within the RSS
+  budgets; operators override via `AGENTGRID_TOKIO_WORKERS` /
+  `AGENTGRID_TOKIO_BLOCKING`.
+- **Response compression above 8 KiB (Plan 6.6).** The control plane
+  brotli-compresses large responses (event listings, task details)
+  when the client offers `Accept-Encoding`; small JSON skips the CPU
+  cost (`SizeAbove::new(8 KiB)`). Test:
+  `compression_kicks_in_above_8kib`.
+- **Git LFS / submodules capabilities (Plan 6.8).** The heartbeat
+  publishes `git_lfs_installed` (bounded `git-lfs version` probe) and
+  `git_submodules_supported`, so LFS-enabled repos on LFS-less nodes
+  are visible instead of silently yielding pointer files.
+- **Binary-size tracking in release CI (Plan 6.2).** Release builds
+  record per-target binary sizes against a cached baseline
+  (`actions/cache`) and print the delta into the build summary — size
+  regressions surface at review time, not only at the 60 MiB guardrail.
+- **Node version reporting (Plan 6.12).** The daemon's
+  `agent_version` heartbeat field now defaults to the real
+  `CARGO_PKG_VERSION` (was a hardcoded "0.1.0-dev"); override stays
+  `AGENTGRID_AGENT_VERSION`.
 - **`GET /v1/version` (public) + heartbeat contract versions (Plan 6.12).**
   The new endpoint reports the CP crate version plus the node-facing
   contract versions (`node_protocol`, `capabilities_schema`,
