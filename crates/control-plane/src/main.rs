@@ -40,8 +40,29 @@ fn acquire_instance_lock(_db_path: &str) -> anyhow::Result<Option<std::fs::File>
     Ok(None)
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+// Plan 6.4 process topology: the control plane is I/O-bound (axum + sqlite
+// + scheduler ticks) — a small worker pool keeps idle RSS within the 64 MiB
+// budget; blocking DB/IO work goes through spawn_blocking on a bounded pool.
+// Env overrides for operators: AGENTGRID_TOKIO_WORKERS,
+// AGENTGRID_TOKIO_BLOCKING.
+fn tokio_runtime() -> tokio::runtime::Runtime {
+    let workers = std::env::var("AGENTGRID_TOKIO_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let blocking = std::env::var("AGENTGRID_TOKIO_BLOCKING")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .max_blocking_threads(blocking)
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+}
+
+fn main() -> Result<()> {
     // OpenTelemetry metrics (optional feature)
     #[cfg(feature = "opentelemetry")]
     {
@@ -60,6 +81,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    tokio_runtime().block_on(amain())
+}
+
+async fn amain() -> Result<()> {
     let addr: SocketAddr = std::env::var("AGENTGRID_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:7800".into())
         .parse()?;

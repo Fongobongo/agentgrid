@@ -582,8 +582,29 @@ fn policy_decision(
     ))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+// Plan 6.4 process topology: the daemon is I/O-light (heartbeat, poll,
+// event ingest) — a couple of worker threads suffice and keep the idle
+// footprint small. Blocking work (git, fs scans, spool reads) goes
+// through spawn_blocking on a bounded pool. Env overrides for operators:
+// AGENTGRID_TOKIO_WORKERS, AGENTGRID_TOKIO_BLOCKING.
+fn tokio_runtime() -> tokio::runtime::Runtime {
+    let workers = std::env::var("AGENTGRID_TOKIO_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let blocking = std::env::var("AGENTGRID_TOKIO_BLOCKING")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .max_blocking_threads(blocking)
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+}
+
+fn main() -> Result<()> {
     // Hardening P2 item 30: the release smoke test invokes `--version` on
     // every published binary. The daemon otherwise takes no CLI args, so an
     // unrecognized flag used to be ignored and the daemon booted for real
@@ -626,6 +647,10 @@ async fn main() -> Result<()> {
         );
     }
 
+    tokio_runtime().block_on(amain())
+}
+
+async fn amain() -> Result<()> {
     let mut cfg = config_from_env();
     for a in &cfg.adapters {
         let probe = if a.id == "zeroshot" {

@@ -733,6 +733,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // correlatable across the whole request without per-handler plumbing.
         .layer(axum::middleware::from_fn(middleware::request_id_middleware))
         .fallback(middleware::spa_fallback)
+        // Plan 6.6: response compression for payloads above 8 KiB (event
+        // batches, task details, artifacts listings). Smaller responses
+        // skip the CPU cost — most API calls are tiny JSON. Brotli only
+        // (feature "compression-br"); Content-Encoding negotiated per
+        // client Accept-Encoding. Node->CP event ingest is a request body,
+        // not a response, so this targets the UI/CLI read paths.
+        .layer(
+            tower_http::compression::CompressionLayer::new()
+                .compress_when(tower_http::compression::predicate::SizeAbove::new(8 * 1024)),
+        )
         .with_state(state)
 }
 
