@@ -95,9 +95,12 @@ pub async fn run_validation(
         .arg("-c")
         .arg(command)
         .current_dir(workdir)
-        .process_group(0)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // Own process group so a cancel/timeout reaches the whole validation
+    // tree (POSIX only; Windows dev hosts degrade to child-only kill).
+    #[cfg(unix)]
+    cmd.process_group(0);
     // The validation command inherits the daemon env by default (it needs
     // PATH, repo state, etc.). The unsafe guard applies the same rule as the
     // agent path: unsandboxed runs do NOT get the unsafe bypass env.

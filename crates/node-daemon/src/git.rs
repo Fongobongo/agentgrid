@@ -154,7 +154,10 @@ fn dir_size(path: &Path) -> Result<u64> {
 /// clone's `fetch`/`worktree add`. Held alongside the in-process `repo_lock`.
 /// Blocks up to `timeout`; returns Err on timeout so the attempt fails loudly
 /// rather than wedging.
+/// Windows/local-dev: no flock — the in-process `repo_lock` still serializes
+/// within one daemon, which is the only mode a dev host runs anyway.
 struct RepoFlock {
+    #[cfg(unix)]
     file: std::fs::File,
 }
 
@@ -162,49 +165,60 @@ impl RepoFlock {
     fn acquire(repository_root: &Path, repo: &str, timeout: std::time::Duration) -> Result<Self> {
         std::fs::create_dir_all(repository_root).ok();
         let lock_path = repository_root.join(format!("{repo}.lock"));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| format!("open repo lock {lock_path:?}"))?;
-        let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            // libc::flock: exclusive, non-blocking; retry on contention.
-            let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-            if rc == 0 {
-                return Ok(RepoFlock { file });
+        #[cfg(unix)]
+        {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .with_context(|| format!("open repo lock {lock_path:?}"))?;
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                // libc::flock: exclusive, non-blocking; retry on contention.
+                let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+                if rc == 0 {
+                    return Ok(RepoFlock { file });
+                }
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::WouldBlock {
+                    return Err(err).context("flock repo lock");
+                }
+                if std::time::Instant::now() >= deadline {
+                    // Hardening P1 item 32: diagnostics + recovery note. A
+                    // `flock(LOCK_EX)` is released by the kernel when the holder
+                    // dies, so a genuine stale lock is rare — a timeout here almost
+                    // always means a long-running clone/fetch by a sibling process.
+                    // Surface the repo + the lock file path so an operator can check
+                    // the holder. The kernel auto-releases on holder exit, so no
+                    // manual stale-lock deletion is needed.
+                    tracing::warn!(
+                        repo = %repo,
+                        lock = %lock_path.display(),
+                        "timed out waiting for cross-process repo lock — a sibling clone/fetch may be in progress; kernel releases flock on holder exit"
+                    );
+                    anyhow::bail!("timed out waiting for repo lock on {repo}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::WouldBlock {
-                return Err(err).context("flock repo lock");
-            }
-            if std::time::Instant::now() >= deadline {
-                // Hardening P1 item 32: diagnostics + recovery note. A
-                // `flock(LOCK_EX)` is released by the kernel when the holder
-                // dies, so a genuine stale lock is rare — a timeout here almost
-                // always means a long-running clone/fetch by a sibling process.
-                // Surface the repo + the lock file path so an operator can check
-                // the holder. The kernel auto-releases on holder exit, so no
-                // manual stale-lock deletion is needed.
-                tracing::warn!(
-                    repo = %repo,
-                    lock = %lock_path.display(),
-                    "timed out waiting for cross-process repo lock — a sibling clone/fetch may be in progress; kernel releases flock on holder exit"
-                );
-                anyhow::bail!("timed out waiting for repo lock on {repo}");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (repository_root, repo, timeout, lock_path);
+            Ok(RepoFlock {})
         }
     }
 }
 
 impl Drop for RepoFlock {
     fn drop(&mut self) {
-        let fd = std::os::fd::AsRawFd::as_raw_fd(&self.file);
-        unsafe { libc::flock(fd, libc::LOCK_UN) };
+        #[cfg(unix)]
+        {
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&self.file);
+            unsafe { libc::flock(fd, libc::LOCK_UN) };
+        }
     }
 }
 
@@ -320,9 +334,19 @@ fn validate_token(s: &str) -> Result<()> {
 /// refused too (git treats spaces in scp-like URLs as argument separators),
 /// and the `ext::`/`fd::` transports are refused outright — git executes an
 /// `ext::` helper as an arbitrary command.
+/// On Windows (local dev) a plain local path may use `\` separators and a
+/// drive letter (`C:\repos\origin`) — git accepts those as a local path, and
+/// the value is still a single argv element, so the separator cannot inject
+/// anything. `\` stays rejected on unix (it is not a path separator there
+/// and a scp-like URL never carries one legitimately).
 fn validate_git_url(s: &str) -> Result<()> {
+    let metachars = if cfg!(windows) {
+        "\"';|&$()`><"
+    } else {
+        "\"';|&$()`><\\"
+    };
     if s.chars()
-        .any(|c| c.is_whitespace() || "\"';|&$()`><\\".contains(c))
+        .any(|c| c.is_whitespace() || metachars.contains(c))
     {
         anyhow::bail!("unsafe git url: {s:?}");
     }
@@ -701,10 +725,13 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
 /// traversal and redirect classes of attack.)
 fn safe_workspace_target(p: &std::path::Path) -> bool {
     use std::path::Component;
-    // Reject any ParentDir (`..`) or Windows prefix component — these are the
-    // traversal vectors. Absolute paths (RootDir) and normal segments are fine.
+    // Reject any ParentDir (`..`) component — the traversal vector. Absolute
+    // paths are fine on both unix (RootDir) and Windows (Prefix like `C:\`),
+    // matching the unix behaviour where a temp-dir workspace is absolute too;
+    // an absolute path outside the workspace root is an operator/CP
+    // misconfiguration, not an escape from a relative path.
     for c in p.components() {
-        if matches!(c, Component::ParentDir | Component::Prefix(_)) {
+        if matches!(c, Component::ParentDir) {
             return false;
         }
     }

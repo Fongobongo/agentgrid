@@ -91,13 +91,24 @@ async fn start_cancel(f: &AdapterFixture) {
     let bp = ProcessBackend.spawn(req).unwrap();
     // Give it a moment to enter the prompt turn.
     tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut child = bp.child;
     // Cancel = kill the process group (mirrors node `terminate_group`).
-    let pid = bp.child.id().expect("child has a pid");
-    unsafe {
-        libc::killpg(pid as i32, libc::SIGTERM);
+    // POSIX has process groups; on Windows the conformance contract
+    // degrades to killing the direct child (the same degradation the node
+    // daemon's terminate_group applies there).
+    #[cfg(unix)]
+    {
+        let pid = child.id().expect("child has a pid");
+        // SAFETY: pid is our spawned child's process-group id.
+        unsafe {
+            libc::killpg(pid as i32, libc::SIGTERM);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.start_kill();
     }
     // Must reap within a short grace; a wedged adapter would hang here.
-    let mut child = bp.child;
     let reaped = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     assert!(
         reaped.is_ok(),

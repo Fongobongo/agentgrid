@@ -3,7 +3,33 @@
 use super::*;
 use agentgrid_common::Assignment;
 
+// Hermetic git config: a developer host may carry `core.autocrlf=true` in
+// its system (`/etc/gitconfig` / `Git/etc/gitconfig`) or global (`~/.gitconfig`)
+// config (the git-for-Windows installer default), rewriting LF→CRLF in
+// worktrees and corrupting patch/merge assertions that compare byte-exact
+// content. Pointing GIT_CONFIG_SYSTEM/GIT_CONFIG_GLOBAL at an empty file
+// makes every git invocation in this suite see only the config passed via
+// `-c` flags, matching the clean-CI behaviour. Safe under parallel test
+// threads: the write happens once (first caller wins) and every test sets
+// the same fixed values.
+static EMPTY_GLOBAL_GIT_CONFIG: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn hermetic_git_config() {
+    EMPTY_GLOBAL_GIT_CONFIG.get_or_init(|| {
+        let f = std::env::temp_dir().join("ag-test-empty-gitconfig");
+        let _ = std::fs::write(&f, "");
+        // SAFETY: single-threaded init via OnceLock; the same fixed values
+        // are set by every caller, so concurrent set_var cannot interleave
+        // different values.
+        unsafe {
+            std::env::set_var("GIT_CONFIG_GLOBAL", &f);
+            std::env::set_var("GIT_CONFIG_SYSTEM", &f);
+        }
+    });
+}
+
 fn make_assignment(git_url: &str, default_branch: &str) -> Assignment {
+    hermetic_git_config();
     Assignment {
         attempt_id: "attempt-test".into(),
         fencing_token: String::new(),
@@ -285,6 +311,7 @@ fn raw_and_validation_logs_excluded_from_commit_and_patch() {
 
 #[test]
 fn parallel_prep_same_repo_does_not_race() {
+    hermetic_git_config();
     // Stage 2.3: two concurrent attempts of one repository must not corrupt
     // the shared clone (fetch / checkout -B / worktree add serialize per repo).
     let dir = std::env::temp_dir().join(format!("ag-git-par-{}", uuid::Uuid::new_v4()));
@@ -707,6 +734,9 @@ fn prepare_workspace_fail_closed_on_missing_pinned_base() {
 /// open-file-description, so a second open in the same process contends
 /// exactly like a sibling daemon's open — this test proves the
 /// serialization: holder blocks contender, release unblocks it.
+/// (Unix-only: the cross-process lock is flock; on Windows the lock is a
+/// no-op passthrough.)
+#[cfg(unix)]
 #[test]
 fn cross_process_flock_serializes_two_holders() {
     let dir = std::env::temp_dir().join(format!("ag-flock-928-{}", std::process::id()));
@@ -744,8 +774,12 @@ fn cross_process_flock_serializes_two_holders() {
 /// both-add conflict (both branches appended a different import line) and
 /// reports success; without the script configured it reports false (old
 /// LLM-only path).
+/// (Unix-only: the script pass shells out to `deploy/pre-merge-resolve.sh`,
+/// a bash program.)
+#[cfg(unix)]
 #[test]
 fn resolve_trivial_conflicts_resolves_both_add() {
+    hermetic_git_config();
     let dir = std::env::temp_dir().join(format!("ag-pmr-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("f.txt"), "line1\n").unwrap();
@@ -875,6 +909,7 @@ fn resolve_conflict_markers_non_trivial_and_malformed() {
 
 #[test]
 fn builtin_resolve_handles_whitespace_conflict_without_script() {
+    hermetic_git_config();
     let dir = std::env::temp_dir().join(format!("ag-pmr-bi-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("f.txt"), "line1\nfoo\n").unwrap();

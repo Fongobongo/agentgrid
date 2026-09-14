@@ -13,6 +13,10 @@ pub struct AdapterProbe {
 /// Resolve `bin` to an executable file on `PATH` (or a literal path if it
 /// contains `/`). No shell is involved, so a crafted adapter id cannot inject
 /// commands. Adapter ids come from operator config, not tasks.
+/// On Windows also probes the `.exe` form: a PATH lookup there resolves
+/// `adapter-foo` to `adapter-foo.exe` in a shell, but a raw `is_file` check
+/// does not, so the probe (and the capability heartbeat) missed every
+/// adapter on a Windows dev host.
 pub fn resolve_in_path(bin: &str) -> Option<PathBuf> {
     if bin.contains('/') {
         return if PathBuf::from(bin).is_file() {
@@ -26,6 +30,13 @@ pub fn resolve_in_path(bin: &str) -> Option<PathBuf> {
         let p = dir.join(bin);
         if p.is_file() {
             return Some(p);
+        }
+        #[cfg(windows)]
+        {
+            let pexe = dir.join(format!("{bin}.exe"));
+            if pexe.is_file() {
+                return Some(pexe);
+            }
         }
     }
     None
@@ -148,7 +159,10 @@ mod tests {
 
     #[tokio::test]
     async fn probe_adapter_finds_real_binary_and_reports_missing() {
-        let good = probe_adapter("sh").await;
+        // A binary that exists on every host: `cmd` on Windows, `sh` on
+        // unix (the previous `sh`-only probe failed on a Windows dev host).
+        let known = if cfg!(windows) { "cmd" } else { "sh" };
+        let good = probe_adapter(known).await;
         assert!(good.found);
         // version is optional - some binaries don't support --version or return non-standard output
 

@@ -360,29 +360,30 @@ pub struct CompletionOutbox {
 /// data is durable. No-op (warns) on platforms without `fdatasync`; best-effort
 /// — errors are surfaced so the caller can decide, but never panic.
 fn fsync_parent(path: &std::path::Path) -> Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    let dir = match std::fs::File::open(parent) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    // SAFETY: fdatasync(fd) on an open directory fd is a safe POSIX op.
-    let rc = unsafe { libc_fdatasync(dir.as_raw_fd()) };
-    drop(dir);
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().into());
+    // Directory fsync is POSIX-only; on Windows (local dev) a plain
+    // file-level sync_all above is the best available durability and the
+    // NTFS metadata journal covers the rename ordering in practice.
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        let dir = match std::fs::File::open(parent) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        // SAFETY: fdatasync(fd) on an open directory fd is a safe POSIX op.
+        let rc = unsafe { libc::fdatasync(dir.as_raw_fd()) };
+        drop(dir);
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
-}
-
-/// libc::fdatasync shim — kept here so the module compiles on unix only (the
-/// daemon is Linux-only per ADR). Returns 0 on success, -1 with errno on error.
-#[cfg(unix)]
-unsafe fn libc_fdatasync(fd: std::os::unix::io::RawFd) -> i32 {
-    libc::fdatasync(fd)
 }
 
 #[derive(Serialize, Deserialize)]

@@ -191,8 +191,11 @@ pub async fn probe_evals(workdir: &Path, timeout: Duration) -> Result<EvalOutcom
             .current_dir(workdir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+            .stderr(Stdio::piped());
+        // Own process group so a cancel/timeout can kill the eval's whole
+        // tree (POSIX only; Windows dev hosts degrade to child-only kill).
+        #[cfg(unix)]
+        cmd.process_group(0);
         // Audit X-N4 (parity with validation.rs): on an unsandboxed run the
         // eval `sh -c` must not inherit the daemon's unsafe-bypass env.
         for k in crate::sandbox::unsafe_env_guard(kind) {

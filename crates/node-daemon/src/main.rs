@@ -174,10 +174,12 @@ async fn drive_acp_session(
         // stream goes through. Pipe it and drain through the same masked
         // read_stream below.
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        // Own process group so terminate_group's killpg reaches the whole
-        // agent tree on cancel/timeout (matches validation.rs).
-        .process_group(0);
+        .kill_on_drop(true);
+    // Own process group so terminate_group's killpg reaches the whole
+    // agent tree on cancel/timeout (matches validation.rs). POSIX only —
+    // Windows dev hosts degrade to killing the direct child.
+    #[cfg(unix)]
+    cmd.process_group(0);
     // Hardening P0/P1 item 5: never let an unsandboxed agent run unsafe-unattended
     // unless the operator opted in — strip the bypass env the adapter otherwise
     // inherits from the daemon's parent process.
@@ -600,7 +602,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Stage 5.1: refuse to run as root unless explicitly allowed.
+    // Stage 5.1: refuse to run as root unless explicitly allowed. (POSIX
+    // only — Windows has no uid; a dev host never runs the daemon as a
+    // service there anyway.)
+    #[cfg(unix)]
     if unsafe { libc::getuid() } == 0 && std::env::var_os("AGENTGRID_ALLOW_ROOT").is_none() {
         anyhow::bail!("refusing to run as root; set AGENTGRID_ALLOW_ROOT=1 to override");
     }

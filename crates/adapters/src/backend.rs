@@ -162,6 +162,11 @@ impl ExecutionBackend for ProcessBackend {
             cmd.env_remove(k);
         }
         // Separate process group so a cancel can SIGTERM the whole tree.
+        // Unix-only: `process_group` is a POSIX API; on Windows there is no
+        // process-group kill (the daemon cancel path degrades to killing
+        // just the direct child, which is the pre-existing behaviour on
+        // every non-unix node anyway).
+        #[cfg(unix)]
         cmd.process_group(0);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -185,6 +190,40 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Platform truth command: `cmd /C rem` on Windows, `true` on unix.
+    fn truth() -> &'static str {
+        if cfg!(windows) {
+            "cmd"
+        } else {
+            "true"
+        }
+    }
+
+    fn truth_args() -> Vec<String> {
+        if cfg!(windows) {
+            vec!["/C".into(), "rem".into()]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Platform falsy command: exits non-zero on every host.
+    fn falsy() -> &'static str {
+        if cfg!(windows) {
+            "cmd"
+        } else {
+            "false"
+        }
+    }
+
+    fn falsy_args() -> Vec<String> {
+        if cfg!(windows) {
+            vec!["/C".into(), "exit".into(), "1".into()]
+        } else {
+            vec![]
+        }
+    }
+
     fn req(bin: &str) -> SpawnRequest {
         SpawnRequest {
             bin: bin.into(),
@@ -203,13 +242,17 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_runs_process_and_collects_exit() {
-        let mut bp = ProcessBackend.spawn(req("true")).unwrap();
+        let mut r = req(truth());
+        r.extra_args = truth_args();
+        let mut bp = ProcessBackend.spawn(r).unwrap();
         assert!(bp.child.wait().await.unwrap().success());
     }
 
     #[tokio::test]
     async fn spawn_failure_is_reported() {
-        let mut bp = ProcessBackend.spawn(req("false")).unwrap();
+        let mut r = req(falsy());
+        r.extra_args = falsy_args();
+        let mut bp = ProcessBackend.spawn(r).unwrap();
         assert!(!bp.child.wait().await.unwrap().success());
     }
 
@@ -224,7 +267,9 @@ mod tests {
     async fn process_backend_does_not_enforce_limits() {
         // ProcessBackend has no cgroup; it must admit enforced_limits=false so
         // profiles honestly refuse a strict run (Stage 12 capability-honesty).
-        let mut bp = ProcessBackend.spawn(req("true")).unwrap();
+        let mut r = req(truth());
+        r.extra_args = truth_args();
+        let mut bp = ProcessBackend.spawn(r).unwrap();
         assert!(!bp.enforced_limits);
         let _ = bp.child.wait().await;
     }
@@ -232,6 +277,8 @@ mod tests {
     /// Hardening P1 item 27: the child must NOT inherit the daemon's full
     /// environment. A secret set in the parent env stays invisible to the
     /// adapter unless explicitly allowlisted.
+    /// (Unix-only: asserts via `sh -c printf` in the child.)
+    #[cfg(unix)]
     #[tokio::test]
     async fn spawn_does_not_inherit_daemon_env() {
         std::env::set_var("AGENTGRID_TEST_DAEMON_SECRET", "shh");
@@ -269,13 +316,17 @@ mod tests {
     #[test]
     fn classify_exit_maps_cleanup() {
         // Normal exit → Exited with the code.
-        let s = std::process::Command::new("true").status().unwrap();
+        let mut t = std::process::Command::new(truth());
+        t.args(truth_args());
+        let s = t.status().unwrap();
         assert!(matches!(
             classify_exit(s),
             BackendOutcome::Exited { code: Some(0) }
         ));
         // Non-zero exit is still Exited (not Killed).
-        let s = std::process::Command::new("false").status().unwrap();
+        let mut f = std::process::Command::new(falsy());
+        f.args(falsy_args());
+        let s = f.status().unwrap();
         assert!(matches!(classify_exit(s), BackendOutcome::Exited { code: Some(c) } if c != 0));
     }
 

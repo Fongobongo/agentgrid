@@ -1,11 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use crate::config::AdapterProtocol;
     use crate::enrollment::scrub_token_from_file;
     use crate::event_sink::{read_stream, split_batch, EventSink};
     use crate::skills::render_trusted_skills_block;
-    use crate::validation::run_validation;
     use agentgrid_common::IncomingEvent;
+    #[cfg(unix)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::Mutex;
 
@@ -16,6 +15,8 @@ mod tests {
     /// clean CI runner never ran (locally it is always left over from
     /// previous builds, which masked this). The on-demand build is a cached
     /// no-op when the binary already exists.
+    /// (Unix-only callers.)
+    #[cfg(unix)]
     fn fake_acp_bin() -> std::path::PathBuf {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let find = || {
@@ -42,6 +43,8 @@ mod tests {
     /// `AGENTGRID_ENROLL_TOKEN` line must be removed from the env file so it
     /// can't be reused/leaked off disk; other vars are preserved; the file is
     /// rewritten atomically at 0600.
+    /// (Unix-only: asserts the 0600 mode bit, a POSIX concept.)
+    #[cfg(unix)]
     #[tokio::test]
     async fn scrub_removes_only_enroll_token_line() {
         let dir = std::env::temp_dir().join(format!(
@@ -84,13 +87,27 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         scrub_token_from_file(&p).await; // must not panic
     }
+    // The imports below serve the unix-gated validation/ACP tests (sh -c
+    // runner + unix fake-ACP agent); gating them keeps clippy quiet on a
+    // Windows dev host.
+    #[cfg(unix)]
+    use crate::config::AdapterProtocol;
+    #[cfg(unix)]
     use crate::config::AdapterSpec;
+    #[cfg(unix)]
+    use crate::drive_acp_session;
     use crate::outbox;
-    use crate::{drive_acp_session, policy_decision, PolicyDecision};
+    #[cfg(unix)]
+    use crate::validation::run_validation;
+    use crate::{policy_decision, PolicyDecision};
+    #[cfg(unix)]
     use crate::{sandbox, Config};
-    use agentgrid_common::{Assignment, AutonomyLevel, EventType};
+    #[cfg(unix)]
+    use agentgrid_common::Assignment;
+    use agentgrid_common::{AutonomyLevel, EventType};
     use serde_json::json;
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::time::Duration;
 
     /// Stage 9.1: a Bash `cat` at default L2 is auto-allowed; `rm -rf` is
@@ -238,6 +255,11 @@ mod tests {
         std::env::remove_var("AGENTGRID_EVENT_BUF_BYTES");
     }
 
+    // The two validation-command tests and the five drive_acp_session tests
+    // below exercise the `sh -c` validation runner / a unix shell-script
+    // fake-ACP agent — nodes are Linux Tier-1 hosts, so they are unix-only
+    // (a Windows dev host has no sh).
+    #[cfg(unix)]
     #[tokio::test]
     async fn validation_command_reports_exit_and_log() {
         let dir = std::env::temp_dir().join(format!("ag-val-{}", uuid::Uuid::new_v4()));
@@ -270,6 +292,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn validation_command_masks_secrets_in_output_and_log() {
         // Audit 22.1.1: a secret that appears in validation stdout must be
@@ -313,6 +336,8 @@ mod tests {
     /// Hardening P0 item 12 / plan tests: a validation timeout must tear down
     /// the WHOLE process tree — a forked child that ignores the parent exit is
     /// killed with the process group, not orphaned.
+    /// (Unix-only: relies on sh process groups + the killpg path.)
+    #[cfg(unix)]
     #[tokio::test]
     async fn validation_timeout_kills_forked_child_tree() {
         let dir = std::env::temp_dir().join(format!("ag-valto-{}", uuid::Uuid::new_v4()));
@@ -367,6 +392,8 @@ mod tests {
 
     /// Count live `sleep` processes (test helper — the only processes started
     /// by the validation test are sleepers).
+    /// (Unix-only: pgrep.)
+    #[cfg(unix)]
     fn run_pgrep(name: &str) -> usize {
         let out = std::process::Command::new("pgrep")
             .arg("-f")
@@ -467,6 +494,8 @@ mod tests {
     /// flushes without retry/backoff noise during the test. Serves a full
     /// HTTP/1.1 keep-alive connection (see `mcp::tests::dummy_profile_server`
     /// for the pooled-connection RST race this avoids).
+    /// (Unix-only callers — the ACP tests.)
+    #[cfg(unix)]
     async fn dummy_ingest_server() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -502,6 +531,8 @@ mod tests {
     /// Serves keep-alive connections (`wait_for_cancel` polls the same pooled
     /// connection repeatedly; exiting after one response would strand the pool
     /// on a closed socket).
+    /// (Unix-only callers — the ACP tests.)
+    #[cfg(unix)]
     async fn dummy_cancel_server() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -543,6 +574,7 @@ mod tests {
         format!("http://{addr}")
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_runs_fake_agent_and_streams_events() {
         // Make the test-only ACP agent discoverable on PATH. It is built into
@@ -667,6 +699,7 @@ mod tests {
     /// advances to the second token and the second drive of the SAME fake agent
     /// (test's marker file deleted) completes cleanly — primary 429 -> completed
     /// via second account.
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_flags_rate_limit_then_rotates() {
         let fake = fake_acp_bin();
@@ -830,6 +863,7 @@ mod tests {
     /// Stage 5: an ACP subprocess that hangs mid-frame (writes a truncated
     /// JSON line then blocks forever) must be torn down by the session
     /// timeout — the attempt fails with `timeout`, no hang.
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_hang_mid_frame_times_out() {
         let fake = fake_acp_bin();
@@ -953,6 +987,7 @@ mod tests {
     /// Stage 5 / line 192: a cancel requested mid prompt turn must interrupt
     /// the ACP `session/prompt`, send `session/cancel`, reap the subprocess,
     /// and resolve the attempt as `cancelled` (not timeout, not success).
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_cancel_mid_prompt_turn() {
         let fake = fake_acp_bin();
@@ -1081,6 +1116,8 @@ mod tests {
     /// `compose_skills_block` → `session/prompt` wiring inside
     /// `drive_acp_session` without a real control plane. Serves keep-alive
     /// connections (see `dummy_ingest_server` for the race this avoids).
+    /// (Unix-only callers — the ACP tests.)
+    #[cfg(unix)]
     async fn dummy_skills_server(skills_body: &'static str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1127,6 +1164,7 @@ mod tests {
     /// omitted (fail-closed). Both cases run sequentially in one test because
     /// they mutate the process-global `HOME` / `PATH` env (cargo runs
     /// `#[tokio::test]`s in parallel, which would race on those keys).
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_injects_trusted_skills_block_into_prompt() {
         async fn one_case(trusted: bool, expect_block: bool) {

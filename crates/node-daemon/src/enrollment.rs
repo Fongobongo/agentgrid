@@ -16,17 +16,24 @@ pub async fn load_or_enroll(cfg: &Config) -> Result<SavedCredential> {
     let cred = enroll_node(cfg).await?;
     // Node credential is secret material: 0600 regardless of umask (matches
     // the env-file scrub path), including for a pre-existing file.
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    // (0600 is a POSIX concept; on Windows the best effort is a normal
+    // private write — ACL hardening is out of scope for a dev host.)
     let data = serde_json::to_vec(&cred)?;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&cfg.credential_path)?;
-    f.write_all(&data)?;
-    std::fs::set_permissions(&cfg.credential_path, std::fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&cfg.credential_path)?;
+        f.write_all(&data)?;
+        std::fs::set_permissions(&cfg.credential_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&cfg.credential_path, &data)?;
     scrub_enroll_token_from_env(cfg).await;
     Ok(cred)
 }
@@ -95,8 +102,11 @@ pub async fn scrub_token_from_file(path: &std::path::Path) {
     if tokio::fs::write(&tmp, &new).await.is_err() {
         return;
     }
-    use std::os::unix::fs::PermissionsExt;
-    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    }
     if tokio::fs::rename(&tmp, path).await.is_err() {
         let _ = tokio::fs::remove_file(&tmp).await;
         return;

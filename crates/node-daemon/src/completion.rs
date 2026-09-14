@@ -84,33 +84,44 @@ pub async fn wait_for_cancel(attempt_id: &str, client: Client, url: String) {
 /// but only if the child is still alive at escalation time. If the child
 /// died on SIGTERM and the kernel recycled its pgid, the blind killpg would
 /// SIGKILL an unrelated process group.
+/// Windows/local-dev: no POSIX process groups — fall back to terminating
+/// the direct child only (best effort; the daemon is a Tier-1 Linux
+/// deployment, Windows is dev-host convenience).
 pub fn terminate_group(pid: u32) {
     if pid == 0 {
         return;
     }
-    unsafe {
-        // SAFETY: pid is a valid process-group id from our spawned child; SIGTERM is safe.
-        libc::killpg(pid as i32, libc::SIGTERM);
-    }
-    tokio::spawn(async move {
-        for _ in 0..10 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            // SAFETY: probing our own child's liveness; WNOHANG never blocks.
-            let alive = unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
-            if alive as u32 == pid
-                || (alive == -1
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
-            {
-                // Reaped by us (or already waited elsewhere): the group is
-                // gone — no SIGKILL escalation needed or safe.
-                return;
+    #[cfg(unix)]
+    {
+        tokio::spawn(async move {
+            unsafe {
+                // SAFETY: pid is a valid process-group id from our spawned child; SIGTERM is safe.
+                libc::killpg(pid as i32, libc::SIGTERM);
             }
-        }
-        unsafe {
-            // SAFETY: the group still belongs to our un-reaped child; SIGKILL after grace is safe.
-            libc::killpg(pid as i32, libc::SIGKILL);
-        }
-    });
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                // SAFETY: probing our own child's liveness; WNOHANG never blocks.
+                let alive =
+                    unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
+                if alive as u32 == pid
+                    || (alive == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
+                {
+                    // Reaped by us (or already waited elsewhere): the group is
+                    // gone — no SIGKILL escalation needed or safe.
+                    return;
+                }
+            }
+            unsafe {
+                // SAFETY: the group still belongs to our un-reaped child; SIGKILL after grace is safe.
+                libc::killpg(pid as i32, libc::SIGKILL);
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

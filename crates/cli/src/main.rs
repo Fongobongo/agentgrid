@@ -19,6 +19,11 @@ mod registry;
 mod tui;
 mod workflow;
 use phase::Phase;
+// Windows-local dev fix: the 0600 chmod is already `#[cfg(unix)]`-gated at
+// the call site, but the trait import was unconditional, so the CLI (and the
+// whole workspace build on a Windows host) failed with "could not find
+// `unix` in `os`". Gate the import to match.
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 #[derive(Parser)]
@@ -485,6 +490,43 @@ struct TuiArgs {
     no_color: bool,
 }
 
+/// Plan 1.10 (#3): categorized CLI exit codes — 0 success, then distinct
+/// numbers per failure class so scripts / CI can branch without parsing
+/// stderr. Documented in README "Exit codes".
+pub mod exit_code {
+    pub const USAGE: i32 = 2; // bad arguments (clap convention)
+    pub const AUTH: i32 = 3; // login failed / token rejected / 401|403
+    pub const NOT_FOUND: i32 = 4; // task/node/repo id does not exist
+    pub const SERVER_UNREACHABLE: i32 = 5; // connect/timeout error
+    pub const VALIDATION: i32 = 6; // server rejected the request (422/409)
+    pub const RATE_LIMITED: i32 = 7; // 429
+    pub const INTERNAL: i32 = 10; // 5xx / unexpected error
+}
+
+/// Map a command failure to its exit-code category. Inspects the anyhow
+/// error chain: reqwest status errors carry the HTTP code; connect/timeout
+/// errors map to SERVER_UNREACHABLE; everything else stays generic (1).
+pub fn classify_failure(e: &anyhow::Error) -> i32 {
+    for cause in e.chain() {
+        if let Some(he) = cause.downcast_ref::<reqwest::Error>() {
+            if he.is_connect() || he.is_timeout() {
+                return exit_code::SERVER_UNREACHABLE;
+            }
+            if let Some(status) = he.status() {
+                return match status.as_u16() {
+                    401 | 403 => exit_code::AUTH,
+                    404 => exit_code::NOT_FOUND,
+                    409 | 422 => exit_code::VALIDATION,
+                    429 => exit_code::RATE_LIMITED,
+                    s if s >= 500 => exit_code::INTERNAL,
+                    _ => 1,
+                };
+            }
+        }
+    }
+    1
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -505,7 +547,7 @@ async fn main() -> Result<()> {
     let client = client_builder.build()?;
     let base = cli.server.trim_end_matches('/').to_string();
 
-    match cli.command {
+    let res: Result<()> = match cli.command {
         AgCommand::Run(a) => cmd_run(&client, &base, a).await,
         AgCommand::Logs(a) => cmd_logs(&client, &base, a).await,
         AgCommand::Show(a) => cmd_show(&client, &base, a, cli.json).await,
@@ -546,6 +588,24 @@ async fn main() -> Result<()> {
         AgCommand::Setup(a) => cmd_setup(&client, &base, a).await,
         AgCommand::Doctor => cmd_doctor(&client, &base, cli.json).await,
         AgCommand::Learn(a) => registry::cmd_learn(&client, &base, a).await,
+    };
+    // Plan 1.10 (#3): categorized exit codes. `ag` used to flatten every
+    // failure to anyhow's exit 1; scripts could not branch on cause.
+    // The runtime wrapper (below) inspects the error chain.
+    runtime(res)
+}
+
+/// Exit-code wrapper around the real main body (see `classify_failure`).
+fn runtime(res: Result<()>) -> Result<()> {
+    match res {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let code = classify_failure(&e);
+            // Keep anyhow-style human error printing, but exit with the
+            // categorized code instead of the flat 1.
+            eprintln!("error: {e:#}");
+            std::process::exit(code);
+        }
     }
 }
 
@@ -1188,7 +1248,13 @@ async fn cmd_doctor(client: &reqwest::Client, base: &str, json: bool) -> Result<
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false);
-    let version_body: Option<serde_json::Value> = None; // reserved for a future /v1/version endpoint
+    // Plan 2.6: /v1/version (public) — CP build + node-facing contract
+    // versions, so doctor can surface daemon↔CP compatibility drift.
+    let version_body: Option<serde_json::Value> =
+        match client.get(format!("{base}/v1/version")).send().await {
+            Ok(r) if r.status().is_success() => r.json().await.ok(),
+            _ => None,
+        };
     let has_token = load_token().is_some();
     let nodes_ok = client
         .get(format!("{base}/v1/nodes?limit=1"))
@@ -1217,6 +1283,17 @@ async fn cmd_doctor(client: &reqwest::Client, base: &str, json: bool) -> Result<
     } else {
         println!("agentgrid doctor — {base}");
         println!("  healthy: {}", if health { "ok" } else { "FAIL" });
+        if let Some(v) = &version_body {
+            let cp = v
+                .get("control_plane")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?");
+            let proto = v
+                .get("node_protocol")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?");
+            println!("  server version: {cp} (node protocol v{proto})");
+        }
         println!("  auth token: {}", if has_token { "ok" } else { "MISSING" });
         println!("  /v1/nodes:  {}", if nodes_ok { "ok" } else { "FAIL" });
         println!("  /v1/tasks:  {}", if tasks_ok { "ok" } else { "FAIL" });
@@ -1996,6 +2073,46 @@ mod setup_tests {
         let parsed = <SetupArgs as clap::FromArgMatches>::from_arg_matches(&m).unwrap();
         assert!(parsed.accept_defaults);
         assert!(parsed.no_smoke);
+    }
+}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::*;
+
+    /// Plan 1.10 (#3): the classifier maps common failure shapes to
+    /// distinct codes. Constructing a real reqwest::Error with a status
+    /// requires an HTTP round trip, so assert the module contract that
+    /// scripts rely on (constants are stable) plus the fallback for a
+    /// plain anyhow error.
+    #[test]
+    fn exit_code_constants_are_distinct() {
+        let all = [
+            exit_code::USAGE,
+            exit_code::AUTH,
+            exit_code::NOT_FOUND,
+            exit_code::SERVER_UNREACHABLE,
+            exit_code::VALIDATION,
+            exit_code::RATE_LIMITED,
+            exit_code::INTERNAL,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for c in all {
+            assert!(c != 0, "0 is success, never a failure code");
+            assert!(seen.insert(c), "duplicate exit code {c}");
+        }
+    }
+
+    #[test]
+    fn plain_anyhow_error_maps_to_generic_1() {
+        let e = anyhow::anyhow!("task show failed");
+        assert_eq!(classify_failure(&e), 1);
+    }
+
+    #[test]
+    fn chained_plain_errors_stay_generic() {
+        let e = anyhow::anyhow!("outer").context("inner context");
+        assert_eq!(classify_failure(&e), 1);
     }
 }
 

@@ -249,7 +249,9 @@ pub async fn auto_loop<F: Fn() -> Client + Clone>(
     }
 }
 
-#[cfg(test)]
+// The ws integration tests below boot a sh-script mock adapter and assert
+// POSIX process behaviour — unix-only (matches the deployment target).
+#[cfg(all(test, unix))]
 mod tests {
     //! 2.3 acceptance: the node survives a CP restart on the same address and
     //! returns to the registry without manual intervention; assignments are
@@ -394,6 +396,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(unix)]
     async fn ws_node_survives_cp_restart() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -520,7 +523,9 @@ mod tests {
     /// Plan 0.3 2.4 failure injection: kill the CP mid-attempt. The attempt
     /// must complete once the CP is back, and its events must all land
     /// (durable event outbox + idempotent ingest + bounded retry).
+    /// (Unix-only: sh-script mock adapter + chmod 0755.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(unix)]
     async fn ws_attempt_survives_cp_kill_midflight() {
         use std::os::unix::fs::PermissionsExt;
 

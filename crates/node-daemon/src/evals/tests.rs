@@ -31,6 +31,10 @@ async fn probe_evals_passes_when_no_cases() {
     let _ = tokio::fs::remove_dir_all(&dir).await;
 }
 
+// The three probe_evals tests below execute their cases through `sh -c`
+// (the production eval runner's contract — nodes are Linux Tier-1 hosts).
+// Unix-only so a Windows dev host compiles the module without a shell.
+#[cfg(unix)]
 #[tokio::test]
 async fn probe_evals_failing_case_sets_ok_false() {
     // A `false` case fails the suite; output includes the case log tail.
@@ -56,6 +60,7 @@ async fn probe_evals_failing_case_sets_ok_false() {
     let _ = tokio::fs::remove_dir_all(&dir).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn probe_evals_all_passing() {
     let dir = std::env::temp_dir().join(format!(
