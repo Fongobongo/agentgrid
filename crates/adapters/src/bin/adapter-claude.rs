@@ -15,6 +15,58 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 
+/// Plan 3.5 (#13): classify a failed `result` line / observed stderr text
+/// into a distinct failure subtype so `agent_failed` stops collapsing
+/// rate-limit / auth / network / credit errors into one bucket. Pure and
+/// unit-tested; unknown text → None (plain agent_failed, unchanged).
+pub fn classify_error(text: &str) -> Option<&'static str> {
+    let t = text.to_ascii_lowercase();
+    // Rate limits: provider 429s / usage caps. Retryable upstream.
+    if t.contains("rate limit")
+        || t.contains("rate_limit")
+        || t.contains("429")
+        || t.contains("too many requests")
+        || t.contains("usage limit reached")
+        || t.contains("overloaded")
+    {
+        return Some("rate_limited");
+    }
+    // Auth: invalid/expired key or forbidden. Operator action needed.
+    if t.contains("invalid api key")
+        || t.contains("invalid x-api-key")
+        || t.contains("authentication")
+        || t.contains("unauthorized")
+        || t.contains("401")
+        || t.contains("403")
+        || t.contains("permission denied")
+    {
+        return Some("auth_failed");
+    }
+    // Credit / billing: operator action needed, never auto-retry.
+    if t.contains("credit") && (t.contains("balance") || t.contains("exhaust"))
+        || t.contains("billing")
+        || t.contains("payment")
+        || t.contains("quota exceeded")
+    {
+        return Some("billing_exhausted");
+    }
+    // Network: DNS/proxy/gateway blips. Retryable upstream.
+    if t.contains("connection reset")
+        || t.contains("connection refused")
+        || t.contains("timed out")
+        || t.contains("timeout")
+        || t.contains("network")
+        || t.contains("dns")
+        || t.contains("proxy")
+        || t.contains("502")
+        || t.contains("503")
+        || t.contains("504")
+    {
+        return Some("network_error");
+    }
+    None
+}
+
 fn emit_event(ev: serde_json::Value) {
     let line = serde_json::to_string(&ev).unwrap();
     let mut out = std::io::stdout();
@@ -85,6 +137,17 @@ fn translate(line: &str, saw_error: &mut bool) -> Vec<serde_json::Value> {
             }
             let text = v.get("result").and_then(|x| x.as_str()).unwrap_or("");
             out.push(json!({ "type": "result", "payload": { "text": text } }));
+            // Plan 3.5 (#13): a failed result carries a classified subtype
+            // (`rate_limited` / `auth_failed` / …) so the CP-side error trail
+            // and metrics can split failure causes without parsing prose.
+            if v.get("is_error").and_then(|x| x.as_bool()) == Some(true) {
+                if let Some(subtype) = classify_error(text) {
+                    out.push(json!({
+                        "type": "error",
+                        "payload": { "subtype": subtype, "text": text }
+                    }));
+                }
+            }
             // Stage 13 plan approval: surface fenced ```plan blocks from the
             // final answer as `plan` events.
             for plan in agentgrid_adapters::plan_blocks(text) {
@@ -229,6 +292,72 @@ mod tests {
         let evs = translate(&line, &mut err);
         assert_eq!(types(&evs), vec!["result"]);
         assert!(err);
+    }
+
+    #[test]
+    fn classify_error_splits_failure_causes() {
+        assert_eq!(
+            classify_error("API Error: 429 rate limit exceeded"),
+            Some("rate_limited")
+        );
+        assert_eq!(
+            classify_error("usage limit reached for this org"),
+            Some("rate_limited")
+        );
+        assert_eq!(
+            classify_error("invalid x-api-key provided"),
+            Some("auth_failed")
+        );
+        assert_eq!(
+            classify_error("401 unauthorized: bad token"),
+            Some("auth_failed")
+        );
+        assert_eq!(
+            classify_error("your credit balance is too low"),
+            Some("billing_exhausted")
+        );
+        assert_eq!(
+            classify_error("billing hard limit reached"),
+            Some("billing_exhausted")
+        );
+        assert_eq!(
+            classify_error("Connection reset by peer"),
+            Some("network_error")
+        );
+        assert_eq!(
+            classify_error("503 service unavailable upstream"),
+            Some("network_error")
+        );
+        assert_eq!(
+            classify_error("dns resolution failed"),
+            Some("network_error")
+        );
+        assert_eq!(classify_error("the model produced a bad edit"), None);
+        assert_eq!(classify_error(""), None);
+    }
+
+    #[test]
+    fn translate_failed_result_emits_classified_error_event() {
+        let mut err = false;
+        let line = json!({
+            "type": "result",
+            "result": "API Error: 429 {\"type\":\"rate_limit_error\"}",
+            "is_error": true
+        })
+        .to_string();
+        let evs = translate(&line, &mut err);
+        assert_eq!(types(&evs), vec!["result", "error"]);
+        assert_eq!(evs[1]["payload"]["subtype"], "rate_limited");
+        assert!(err);
+    }
+
+    #[test]
+    fn translate_ok_result_emits_no_error_event() {
+        let mut err = false;
+        let line = json!({ "type": "result", "result": "all good", "is_error": false }).to_string();
+        let evs = translate(&line, &mut err);
+        assert_eq!(types(&evs), vec!["result"]);
+        assert!(!err);
     }
 
     #[test]
