@@ -842,6 +842,45 @@ async fn retry_failed_task_reques() {
     assert_eq!(show_status(&app, &assign.task_id).await, TaskStatus::Queued);
 }
 
+/// Plan 6.12 / 2.6: `/v1/version` is public (like the health probes) and
+/// reports the CP crate version plus the node-facing contract versions so
+/// `ag doctor` can surface daemon↔CP compatibility drift.
+#[tokio::test]
+async fn version_endpoint_reports_contracts() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    // No authorization header — must not 401.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/version")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        v.get("node_protocol").and_then(|x| x.as_str()),
+        Some(agentgrid_common::NODE_PROTOCOL_VERSION)
+    );
+    assert_eq!(
+        v.get("capabilities_schema").and_then(|x| x.as_str()),
+        Some(agentgrid_common::CAPABILITIES_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        v.get("supported_event_versions").and_then(|x| x.as_str()),
+        Some(agentgrid_common::SUPPORTED_EVENT_VERSIONS)
+    );
+    assert!(
+        v.get("control_plane").and_then(|x| x.as_str()).is_some(),
+        "crate version present: {v}"
+    );
+}
+
 #[tokio::test]
 async fn revoked_node_gets_401() {
     let state = AppState::open_temp().await.unwrap();
@@ -881,6 +920,8 @@ async fn revoked_node_gets_401() {
         applied_opencode_hash: None,
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let resp = app
         .clone()
@@ -992,6 +1033,8 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
         applied_opencode_hash: None,
         active_rss_mib: 90,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let resp = app
         .clone()
@@ -1123,6 +1166,8 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
         applied_opencode_hash: None,
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let resp = app
         .clone()
@@ -2233,6 +2278,8 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
                 applied_opencode_hash: None,
                 active_rss_mib: 0,
                 max_rss_mib: 0,
+                capabilities_schema_version: None,
+                supported_event_versions: None,
             },
         )
         .await
@@ -2298,6 +2345,8 @@ async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
         applied_opencode_hash: None,
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let resp = app
         .clone()
@@ -2399,6 +2448,8 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         applied_opencode_hash: None,
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let resp = app
         .clone()
@@ -4933,6 +4984,8 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         applied_opencode_hash: None,
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let resp = app
         .clone()
@@ -7606,6 +7659,8 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         applied_opencode_hash: None,
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let resp = app
         .clone()
@@ -7684,6 +7739,8 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
         applied_opencode_hash: None,
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let resp = app
         .clone()
@@ -10766,6 +10823,8 @@ async fn opencode_heartbeat_drift_audit() {
         applied_opencode_hash: Some("deadbeef".repeat(8)),
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     let hb_req = post_auth(
         "/v1/node/heartbeat",

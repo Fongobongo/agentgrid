@@ -356,6 +356,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health/live", get(auth::health_live))
         .route("/health/ready", get(auth::health_ready))
+        // Plan 6.12 / 2.6: version info for doctor/smoke — public like the
+        // health probes (it carries contract versions, no instance data).
+        .route("/v1/version", get(routes::maintenance::version_info))
         .route("/metrics", get(routes::maintenance::metrics))
         .route(
             "/v1/tasks",

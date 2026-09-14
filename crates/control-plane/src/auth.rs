@@ -223,6 +223,12 @@ pub fn user_protected(path: &str) -> bool {
     if path.starts_with("/health") || path == "/metrics" {
         return false;
     }
+    // Plan 6.12 / 2.6: version info is public (health-adjacent — build +
+    // contract versions only, no instance data). Used by `ag doctor` and the
+    // release smoke test before any login.
+    if path == "/v1/version" {
+        return false;
+    }
     if path.starts_with("/v1/node/") {
         return false;
     }

@@ -107,6 +107,11 @@ pub trait CommandPolicyProvider: Send + Sync {
 /// follow-up if throughput matters.
 pub struct ExternalPolicyProvider {
     pub binary: String,
+    /// Extra argv between the binary and the `<version> <command>` contract
+    /// args. Empty in production (env-configured providers take the plain
+    /// `binary <version> <command>` contract); used by tests to drive
+    /// platform shells (`cmd /C …`, `sh -c …`).
+    pub pre_args: Vec<String>,
     pub version: String,
 }
 
@@ -114,6 +119,21 @@ impl ExternalPolicyProvider {
     pub fn new(binary: impl Into<String>, version: impl Into<String>) -> Self {
         ExternalPolicyProvider {
             binary: binary.into(),
+            pre_args: Vec::new(),
+            version: version.into(),
+        }
+    }
+
+    /// Test helper: `new` + fixed leading argv (see `pre_args`).
+    #[cfg(test)]
+    pub(crate) fn with_args(
+        binary: impl Into<String>,
+        pre_args: Vec<String>,
+        version: impl Into<String>,
+    ) -> Self {
+        ExternalPolicyProvider {
+            binary: binary.into(),
+            pre_args,
             version: version.into(),
         }
     }
@@ -122,9 +142,9 @@ impl ExternalPolicyProvider {
 impl CommandPolicyProvider for ExternalPolicyProvider {
     fn evaluate(&self, command: &str, _cwd: &str) -> Result<PolicyVerdict, PolicyError> {
         use std::process::Command;
-        let out = Command::new(&self.binary)
-            .arg(&self.version)
-            .arg(command)
+        let mut cmd = Command::new(&self.binary);
+        cmd.args(&self.pre_args).arg(&self.version).arg(command);
+        let out = cmd
             .output()
             .map_err(|e| PolicyError(format!("external policy binary failed: {e}")))?;
         if !out.status.success() {
@@ -613,8 +633,11 @@ mod tests {
     #[cfg_attr(miri, ignore = "spawns a subprocess; Miri cannot emulate posix_spawn")]
     fn external_provider_fail_closed_on_nonzero_exit() {
         use super::ExternalPolicyProvider;
-        // `false` exits 1 — a non-success exit must fail-closed to Ask.
-        let p = ExternalPolicyProvider::new("false", "0.1");
+        // `cmd /C exit 1` on Windows, `sh -c 'exit 1'` elsewhere — a
+        // non-success exit must fail-closed to Ask. (The previous `false`
+        // helper binary does not exist on a Windows host.)
+        let bin = if cfg!(windows) { "cmd" } else { "sh" };
+        let p = ExternalPolicyProvider::with_args(bin, exit_one_args(), "0.1");
         let v = p.evaluate("rm -rf /", "/w").unwrap();
         assert_eq!(v.decision, PolicyDecision::Ask);
         assert!(v.reason.contains("exited"));
@@ -624,11 +647,26 @@ mod tests {
     #[cfg_attr(miri, ignore = "spawns a subprocess; Miri cannot emulate posix_spawn")]
     fn external_provider_fail_closed_on_garbage_stdout() {
         use super::ExternalPolicyProvider;
-        // `true` prints nothing — empty stdout is not valid PolicyVerdict JSON.
-        let p = ExternalPolicyProvider::new("true", "0.1");
+        // `cmd /C rem` on Windows, `true` elsewhere — prints nothing, and
+        // empty stdout is not valid PolicyVerdict JSON.
+        let bin = if cfg!(windows) { "cmd" } else { "true" };
+        let p = if cfg!(windows) {
+            ExternalPolicyProvider::with_args(bin, vec!["/C".into(), "rem".into()], "0.1")
+        } else {
+            ExternalPolicyProvider::new(bin, "0.1")
+        };
         let v = p.evaluate("rm -rf /", "/w").unwrap();
         assert_eq!(v.decision, PolicyDecision::Ask);
         assert!(v.reason.contains("unparseable"));
+    }
+
+    /// Platform `exit 1` argv for [`external_provider_fail_closed_on_nonzero_exit`].
+    fn exit_one_args() -> Vec<String> {
+        if cfg!(windows) {
+            vec!["/C".into(), "exit".into(), "1".into()]
+        } else {
+            vec!["-c".into(), "exit 1".into()]
+        }
     }
 
     #[test]

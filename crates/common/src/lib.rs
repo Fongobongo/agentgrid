@@ -772,6 +772,40 @@ pub struct UserEntry {
 /// different major is marked `degraded(incompatible_protocol)`.
 pub const NODE_PROTOCOL_VERSION: &str = "1";
 
+/// Plan 6.12: schema version of the `capabilities` array a node reports in
+/// each heartbeat (what fields an `AdapterCapability` carries). Absent on
+/// legacy nodes; the CP currently accepts any value and logs a mismatch —
+/// the field is observability for rolling upgrades, not a gate.
+pub const CAPABILITIES_SCHEMA_VERSION: &str = "1";
+
+/// Plan 6.12: event-version contract — the envelope shape of the NDJSON
+/// events a node ingests (`POST /v1/node/attempts/{id}/events`). Absent on
+/// legacy nodes; unknown event kinds already fall back to a raw `log` event,
+/// so a newer minor stays forward-compatible.
+pub const SUPPORTED_EVENT_VERSIONS: &str = "1";
+
+/// Plan 6.12 / 2.6: what `GET /v1/version` reports — the CP's own crate
+/// version plus the node-facing contract versions, so `ag doctor` and the
+/// release smoke test can assert daemon↔CP compatibility without a task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VersionInfo {
+    pub control_plane: String,
+    pub node_protocol: String,
+    pub capabilities_schema: String,
+    pub supported_event_versions: String,
+}
+
+/// Plan 6.12: build the `/v1/version` body from the CP's compile-time crate
+/// version and the shared contract constants.
+pub fn version_info() -> VersionInfo {
+    VersionInfo {
+        control_plane: env!("CARGO_PKG_VERSION").to_string(),
+        node_protocol: NODE_PROTOCOL_VERSION.into(),
+        capabilities_schema: CAPABILITIES_SCHEMA_VERSION.into(),
+        supported_event_versions: SUPPORTED_EVENT_VERSIONS.into(),
+    }
+}
+
 /// True when a node-advertised `protocol_version` is incompatible with the
 /// current major. `None` (legacy node) is treated as compatible.
 pub fn is_incompatible_protocol(pv: &Option<String>) -> bool {
@@ -934,6 +968,14 @@ pub struct HeartbeatRequest {
     /// (legacy / value unset — the CP then keeps whatever row value it had).
     #[serde(default)]
     pub max_rss_mib: u64,
+    /// Plan 6.12: schema version of the `capabilities` array above. Absent
+    /// on legacy nodes; a mismatch with the CP is logged, never a gate.
+    #[serde(default)]
+    pub capabilities_schema_version: Option<String>,
+    /// Plan 6.12: event-version contract this node speaks for the NDJSON
+    /// ingest (`1` today). Absent on legacy nodes.
+    #[serde(default)]
+    pub supported_event_versions: Option<String>,
 }
 
 /// Plan 1.8 (#15): per-account usage reported by a node in its heartbeat so
@@ -1753,6 +1795,8 @@ mod tests {
             applied_opencode_hash: None,
             active_rss_mib: 0,
             max_rss_mib: 0,
+            capabilities_schema_version: None,
+            supported_event_versions: None,
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

@@ -1,10 +1,18 @@
-//! Maintenance routes: backup, storage GC, Prometheus metrics.
+//! Maintenance routes: backup, storage GC, Prometheus metrics, version info.
 
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
 
 use crate::AppState;
+
+/// Plan 6.12 / 2.6: `GET /v1/version` — the CP's crate version plus the
+/// node-facing contract versions (node protocol, capabilities schema, event
+/// versions). Public (health-adjacent): lets `ag doctor` and the release
+/// smoke test assert daemon↔CP compatibility without creating a task.
+pub async fn version_info() -> Json<agentgrid_common::VersionInfo> {
+    Json(agentgrid_common::version_info())
+}
 
 #[derive(serde::Deserialize)]
 pub(crate) struct BackupRequest {

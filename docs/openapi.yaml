@@ -43,6 +43,15 @@ paths:
   /metrics:
     get:
       summary: Prometheus metrics endpoint
+  /v1/version:
+    get:
+      summary: Build + contract versions (public)
+      description: |
+        Plan 6.12 / 2.6. Returns the control-plane crate version plus the
+        node-facing contract versions: `node_protocol` (enroll/heartbeat/poll
+        major; mismatch → node degraded), `capabilities_schema` (heartbeat
+        capabilities array), `supported_event_versions` (event ingest
+        contract). Used by `ag doctor` and the release smoke test.
   /v1/auth/setup:
     post:
       summary: Create the first admin user (one-time)

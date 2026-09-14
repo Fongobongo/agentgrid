@@ -91,6 +91,8 @@ async fn migrations_serve_legacy_happy_path() {
         applied_opencode_hash: None,
         active_rss_mib: 0,
         max_rss_mib: 0,
+        capabilities_schema_version: None,
+        supported_event_versions: None,
     };
     assert!(s.heartbeat(&node_id, &hb).await.unwrap());
 
