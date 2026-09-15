@@ -1,18 +1,22 @@
 //! Agent isolation (idea: sandcastle-style sandbox abstraction).
 //!
 //! A `Sandbox` wraps the command the node would run the agent as, so an agent
-//! can be confined to a container (Docker/Podman/microVM) instead of sharing
-//! the node's full environment. The default `NoSandbox` runs the agent
-//! directly in the worktree (legacy behavior). Configured via
-//! `AGENTGRID_SANDBOX` (`none` | `docker`) and `AGENTGRID_SANDBOX_IMAGE`.
+//! can be confined to a container (Docker/Podman/microVM) or a systemd
+//! transient scope (cgroups v2) instead of sharing the node's full
+//! environment. The default `NoSandbox` runs the agent directly in the
+//! worktree (legacy behavior). Configured via `AGENTGRID_SANDBOX`
+//! (`none` | `docker` | `systemd`) and `AGENTGRID_SANDBOX_IMAGE`.
 //!
 //! `sandbox_command` returns the `(program, args)` to spawn: either the raw
-//! command, or a hardened
+//! command, a hardened
 //! `docker run --rm -i --entrypoint "" --cap-drop=ALL … <image> <cmd>`
 //! prefix (`--entrypoint ""` clears any image ENTRYPOINT so the explicit
-//! command wins). Both the wrapper path and the ACP path route through it.
-//! Docker hardening knobs (plan §25): `AGENTGRID_SANDBOX_NETWORK` (default
-//! `none`),
+//! command wins), or a
+//! `systemd-run --user --scope --unit agentgrid-<attempt> --property … <cmd>`
+//! prefix (Plan 6.11: native cgroups v2 limits on a Tier-1 host without a
+//! container runtime). Both the wrapper path and the ACP path route through
+//! it. Docker hardening knobs (plan §25): `AGENTGRID_SANDBOX_NETWORK`
+//! (default `none`),
 //! `AGENTGRID_SANDBOX_READ_ONLY=1` (read-only root + tmpfs `/tmp`),
 //! `AGENTGRID_SANDBOX_PIDS_LIMIT`, `AGENTGRID_SANDBOX_MEMORY`,
 //! `AGENTGRID_SANDBOX_CPUS`, `AGENTGRID_SANDBOX_IMAGE_DIGEST` (pin by digest).
@@ -21,6 +25,11 @@
 pub enum SandboxKind {
     None,
     Docker,
+    /// Plan 6.11: run the attempt inside a systemd transient scope
+    /// (`systemd-run --user --scope`) so the whole agent tree lands in one
+    /// cgroup and the kernel enforces MemoryMax / CPUQuota / TasksMax. No
+    /// container runtime required — the native Tier-1 isolation backend.
+    Systemd,
 }
 
 impl SandboxKind {
@@ -32,6 +41,7 @@ impl SandboxKind {
             .as_str()
         {
             "docker" | "podman" => SandboxKind::Docker,
+            "systemd" | "systemd-scope" | "cgroups" => SandboxKind::Systemd,
             _ => SandboxKind::None,
         }
     }
@@ -45,6 +55,203 @@ pub fn container_name(attempt_id: &str) -> String {
     format!("agentgrid-{attempt_id}")
 }
 
+/// Plan 6.11: deterministic per-attempt transient-scope unit name. The
+/// `--user` manager namespaces units per user, so the same name in two
+/// concurrent daemons (different `agentgrid` users) cannot collide; within
+/// one daemon the attempt id is unique. `systemctl --user kill <unit>`
+/// reaches every process the scope holds — the whole agent tree, not just
+/// the direct child.
+pub fn scope_unit(attempt_id: &str) -> String {
+    // Unit names must stay in [a-zA-Z0-9:_.\\-] — attempt ids are
+    // `[a-zA-Z0-9-]` by construction (CP-generated), but be safe for any
+    // future id shape so an invalid unit name never reaches systemctl.
+    let safe: String = attempt_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("agentgrid-scope-{safe}")
+}
+
+/// Build the `systemd-run --user --scope --unit … --property …` head
+/// (Plan 6.11). `--user` runs the scope under the daemon's own user manager
+/// (the `agentgrid` systemd user from install-node.sh) — no root, no
+/// polkit rules needed; `--scope` attaches ALREADY-RUNNING processes: the
+/// command itself is exec'd by us (the daemon), so stdin/stdout pipes stay
+/// ours and the existing EventSink stream keeps working unchanged.
+///
+/// Resource limits map to the cgroups v2 properties: `MemoryMax`,
+/// `CPUQuota` (percent of one core; 200% = 2 cores), `TasksMax`. Per-attempt
+/// profile limits (Stage 12 / ADR 0003) override the node-wide env knobs —
+/// same precedence as the docker path.
+fn systemd_run_head(
+    unit: &str,
+    limits: Option<&agentgrid_adapters::ResourceLimits>,
+) -> Vec<String> {
+    let mut v = vec![
+        "run".to_string(),
+        "--user".to_string(),
+        "--scope".to_string(),
+        "--unit".to_string(),
+        unit.to_string(),
+    ];
+    let limits = limits.cloned().unwrap_or_default();
+    let mem = limits
+        .memory_max
+        .map(|b| format!("{}M", (b / (1024 * 1024)).max(1)))
+        .or_else(|| env_nonempty("AGENTGRID_SANDBOX_MEMORY"));
+    if let Some(m) = mem {
+        v.push(format!("--property=MemoryMax={m}"));
+    }
+    let quota = limits
+        .cpu_quota_percent
+        .map(|c| format!("{c}%"))
+        .or_else(|| {
+            env_nonempty("AGENTGRID_SANDBOX_CPUS").map(|c| {
+                // Reuse the same "% = cores×100" convention as the docker path
+                // when the operator pinned cores (e.g. "1.5" → 150%).
+                c.parse::<f64>()
+                    .ok()
+                    .map(|cores| format!("{}%", (cores * 100.0).round() as u64))
+                    .unwrap_or(c)
+            })
+        });
+    if let Some(q) = quota {
+        v.push(format!("--property=CPUQuota={q}"));
+    }
+    let tasks = limits
+        .tasks_max
+        .map(|n| n.to_string())
+        .or_else(|| env_nonempty("AGENTGRID_SANDBOX_PIDS_LIMIT"));
+    if let Some(t) = tasks {
+        v.push(format!("--property=TasksMax={t}"));
+    }
+    v
+}
+
+/// Plan 6.11: kill every process in the attempt's transient scope
+/// (`systemctl --user kill <unit>`), then stop the unit so a dead scope
+/// does not linger in the user manager. Best-effort — the process-group
+/// SIGTERM/SIGKILL from `terminate_group` still applies to the direct
+/// child, and the startup sweep (`cleanup_orphan_scopes`) is the backstop.
+pub async fn kill_scope_unit(attempt_id: &str) {
+    let sandbox = std::env::var("AGENTGRID_SANDBOX").unwrap_or_default();
+    if !matches!(
+        sandbox.trim().to_ascii_lowercase().as_str(),
+        "systemd" | "systemd-scope" | "cgroups"
+    ) {
+        return;
+    }
+    let unit = scope_unit(attempt_id);
+    for args in [["kill", &unit], ["stop", &unit]] {
+        match tokio::process::Command::new("systemctl")
+            .arg("--user")
+            .args(args)
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => tracing::warn!(
+                attempt_id,
+                "systemctl --user {} {} failed: {}",
+                args[0],
+                unit,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => tracing::warn!(attempt_id, "systemctl --user spawn failed: {e}"),
+        }
+    }
+}
+
+/// Plan 6.11: after a systemd-scope attempt exits, ask the user manager
+/// whether the kernel OOM-killed the scope's cgroup (memory.max breach).
+/// `systemctl --user show -p OOMKill --value <unit>` answers
+/// `1`/`0`; a failed/absent answer yields None (caller keeps the plain
+/// exit-code classification). Upgrades exit-137 into the first-class
+/// `resource_limit:memory` error code, mirroring
+/// [`inspect_container_oom`] for the docker path.
+pub async fn inspect_scope_oom(attempt_id: &str) -> Option<String> {
+    let sandbox = std::env::var("AGENTGRID_SANDBOX").unwrap_or_default();
+    if !matches!(
+        sandbox.trim().to_ascii_lowercase().as_str(),
+        "systemd" | "systemd-scope" | "cgroups"
+    ) {
+        return None;
+    }
+    let unit = scope_unit(attempt_id);
+    let out = tokio::process::Command::new("systemctl")
+        .args(["--user", "show", "-p", "OOMKill", "--value", &unit])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if stdout == "1" {
+        let limit = std::env::var("AGENTGRID_SANDBOX_MEMORY").unwrap_or_default();
+        Some(if limit.is_empty() {
+            "memory".to_string()
+        } else {
+            format!("memory (limit {limit})")
+        })
+    } else {
+        None
+    }
+}
+
+/// Plan 6.11: sweep this daemon's leftover scopes at startup — a SIGKILLed
+/// daemon can leave `agentgrid-scope-*` units registered in the user
+/// manager. Lists failed/running units matching the prefix and stops them
+/// (best-effort, like `cleanup_orphan_containers`).
+pub async fn cleanup_orphan_scopes() {
+    let out = match tokio::process::Command::new("systemctl")
+        .args(["--user", "list-units", "--all", "--plain", "--no-legend"])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            tracing::warn!(
+                "orphan-scope scan failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "orphan-scope scan spawn failed");
+            return;
+        }
+    };
+    let stale: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let name = l.split_whitespace().next()?;
+            (name.starts_with("agentgrid-scope-")).then(|| name.to_string())
+        })
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    let mut cmd = tokio::process::Command::new("systemctl");
+    cmd.arg("--user").arg("stop").args(&stale);
+    match cmd.output().await {
+        Ok(o) if o.status.success() => {
+            tracing::info!(count = stale.len(), "removed orphan agentgrid scopes");
+        }
+        Ok(o) => tracing::warn!(
+            "orphan-scope removal failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => tracing::warn!(error = %e, "orphan-scope removal spawn failed"),
+    }
+}
+
 /// Stage 12 / ADR 0003: after a sandboxed attempt exits, ask the runtime
 /// whether the container was OOM-killed (`docker inspect -f {{.State.OOMKilled}}`).
 /// Upgrades a bare exit-137 into the first-class `resource_limit` terminal
@@ -52,10 +259,17 @@ pub fn container_name(attempt_id: &str) -> String {
 /// auto-retry). `None` when not sandboxed, the container is already gone
 /// (raced removal / non-docker runtime quirk), or the answer is inconclusive —
 /// the caller keeps the plain exit-code classification then.
+/// Plan 6.11: a systemd-scope attempt routes to [`inspect_scope_oom`].
 pub async fn inspect_container_oom(attempt_id: &str) -> Option<String> {
     let sandbox = std::env::var("AGENTGRID_SANDBOX").unwrap_or_default();
     if sandbox.is_empty() || sandbox == "none" {
         return None;
+    }
+    if matches!(
+        sandbox.trim().to_ascii_lowercase().as_str(),
+        "systemd" | "systemd-scope" | "cgroups"
+    ) {
+        return inspect_scope_oom(attempt_id).await;
     }
     let runtime =
         std::env::var("AGENTGRID_SANDBOX_RUNTIME").unwrap_or_else(|_| "docker".to_string());
@@ -81,12 +295,21 @@ pub async fn inspect_container_oom(attempt_id: &str) -> Option<String> {
     }
 }
 
-/// Best-effort `rm -f` of the attempt's sandbox container. No-op when the
-/// daemon is not running a container sandbox (mirrors the env the startup
-/// config parsed `SandboxKind` from). Failures only warn: the startup orphan
-/// sweep remains the backstop.
+/// Best-effort teardown of the attempt's sandbox backend: `rm -f` the docker
+/// container, and for a systemd scope `kill_scope_unit` SIGTERMs the whole
+/// cgroup and stops the unit. No-op when the daemon is not running a
+/// container/scope sandbox (mirrors the env the startup config parsed
+/// `SandboxKind` from). Failures only warn: the startup orphan sweep
+/// remains the backstop.
 pub async fn remove_sandbox_container(attempt_id: &str) {
     let sandbox = std::env::var("AGENTGRID_SANDBOX").unwrap_or_default();
+    if matches!(
+        sandbox.trim().to_ascii_lowercase().as_str(),
+        "systemd" | "systemd-scope" | "cgroups"
+    ) {
+        kill_scope_unit(attempt_id).await;
+        return;
+    }
     if sandbox.is_empty() || sandbox == "none" {
         return;
     }
@@ -150,6 +373,18 @@ pub fn sandbox_prefix(
             prefix.push(image_ref());
             prefix.push(program.into());
             ("docker".into(), prefix)
+        }
+        // Plan 6.11: workdir/env are already the daemon's own — the scope
+        // only adds the cgroup boundary, so unlike docker there is no
+        // mount/env-forwarding to redo here.
+        SandboxKind::Systemd => {
+            let unit = container_name
+                .and_then(|n| n.strip_prefix("agentgrid-"))
+                .map(scope_unit)
+                .unwrap_or_else(|| "agentgrid-scope-unknown".to_string());
+            let mut prefix = systemd_run_head(&unit, limits);
+            prefix.push(program.into());
+            ("systemd-run".into(), prefix)
         }
     }
 }
@@ -513,7 +748,17 @@ pub fn sandbox_command(
             out.push(image_ref());
             out.push(program.to_string());
             out.extend(args.iter().cloned());
-            ("docker".to_string(), out)
+            ("docker".into(), out)
+        }
+        SandboxKind::Systemd => {
+            let unit = container_name
+                .and_then(|n| n.strip_prefix("agentgrid-"))
+                .map(scope_unit)
+                .unwrap_or_else(|| "agentgrid-scope-unknown".to_string());
+            let mut out = systemd_run_head(&unit, limits);
+            out.push(program.to_string());
+            out.extend(args.iter().cloned());
+            ("systemd-run".into(), out)
         }
     }
 }
@@ -623,6 +868,66 @@ pub async fn probe_adapter_in_sandbox(bin: &str) -> anyhow::Result<bool> {
         .output()
         .await?;
     Ok(out.status.success())
+}
+
+/// Plan 6.11: probe the systemd transient-scope capability at startup /
+/// heartbeat. A scope backend is usable when (a) `systemd-run` resolves,
+/// (b) the process runs under a systemd user manager (`--user` queries
+/// answer — a `systemd-run` from a plain SSH session without
+/// `loginctl enable-linger` fails here), and (c) the cgroups v2
+/// controller is mounted. Returns the systemd version when all three hold,
+/// `None` otherwise — the caller reports the scope backend absent
+/// (fail-closed: no scope, no scope sandbox).
+pub async fn probe_systemd_scope() -> Option<String> {
+    // (a) binary present.
+    resolve_binary("systemd-run")?;
+    // (b) a user manager answers: `systemctl --user is-system-running`
+    // succeeds (any "running/degraded" verdict) only with DBus + the user
+    // manager up. This is exactly what `systemd-run --user` needs.
+    let out = tokio::process::Command::new("systemctl")
+        .args(["--user", "is-system-running"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // (c) cgroups v2 (unified hierarchy) mounted — the properties
+    // MemoryMax/CPUQuota/TasksMax are v2 knobs.
+    if !std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
+        return None;
+    }
+    let v = tokio::process::Command::new("systemctl")
+        .arg("--version")
+        .output()
+        .await
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| {
+            s.lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1).map(|v| v.to_string()))
+        })
+        .filter(|s| !s.is_empty());
+    Some(v.unwrap_or_else(|| "unknown".to_string()))
+}
+
+fn resolve_binary(bin: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var("PATH").ok()?;
+    for dir in std::env::split_paths(&path) {
+        let p = dir.join(bin);
+        if p.is_file() {
+            return Some(p);
+        }
+        #[cfg(windows)]
+        {
+            let pexe = dir.join(format!("{bin}.exe"));
+            if pexe.is_file() {
+                return Some(pexe);
+            }
+        }
+    }
+    None
 }
 
 /// Per-daemon identity stamped as `--label agentgrid.node=<id>` on every
@@ -851,6 +1156,7 @@ mod tests {
             "AGENTGRID_SANDBOX_ARTIFACT_DIR",
             "AGENTGRID_SANDBOX_EGRESS_NETWORK",
             "AGENTGRID_SANDBOX_EGRESS_PROXY",
+            "AGENTGRID_SANDBOX",
         ] {
             std::env::remove_var(k);
         }
@@ -1358,5 +1664,149 @@ mod tests {
             transient.contains(&"--rm".to_string()),
             "transient unnamed probe keeps --rm: {transient:?}"
         );
+    }
+
+    // ---- Plan 6.11: systemd transient scope backend ----
+
+    #[test]
+    fn scope_unit_sanitizes_attempt_ids() {
+        assert_eq!(scope_unit("abc123"), "agentgrid-scope-abc123");
+        // Dots are legal in unit names and stay; slashes/spaces (any future
+        // id shape) collapse to dashes so an invalid unit name never reaches
+        // systemctl.
+        assert_eq!(scope_unit("a.b/c d"), "agentgrid-scope-a.b-c-d");
+        assert_eq!(scope_unit("weird:chars!"), "agentgrid-scope-weird-chars-");
+    }
+
+    #[test]
+    fn systemd_prefix_wraps_program_with_scope() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        let (p, a) = sandbox_prefix(
+            SandboxKind::Systemd,
+            std::path::Path::new("/w"),
+            "adapter-mock",
+            None,
+            false,
+            Some("agentgrid-att-42"),
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert_eq!(p, "systemd-run");
+        assert_eq!(a[0], "run");
+        assert_eq!(a[1], "--user");
+        assert_eq!(a[2], "--scope");
+        let unit = a.iter().position(|x| x == "--unit").unwrap() + 1;
+        assert_eq!(a[unit], "agentgrid-scope-att-42");
+        // Tail unchanged: <program>.
+        assert_eq!(a[a.len() - 1], "adapter-mock");
+        // No docker-only flags leak into the scope head.
+        assert!(!a.iter().any(|x| x == "--cap-drop=ALL"));
+        assert!(!a.iter().any(|x| x == "--"));
+    }
+
+    #[test]
+    fn systemd_maps_limits_to_cgroup_properties() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        let limits = ResourceLimits {
+            memory_max: Some(64 * 1024 * 1024),
+            cpu_quota_percent: Some(150),
+            tasks_max: Some(32),
+        };
+        let (_, a) = sandbox_prefix(
+            SandboxKind::Systemd,
+            std::path::Path::new("/w"),
+            "adapter-mock",
+            None,
+            false,
+            Some("agentgrid-att-42"),
+            &[],
+            Some(&limits),
+        );
+        clear_sandbox_env();
+        assert!(a.contains(&"--property=MemoryMax=64M".to_string()));
+        assert!(a.contains(&"--property=CPUQuota=150%".to_string()));
+        assert!(a.contains(&"--property=TasksMax=32".to_string()));
+    }
+
+    #[test]
+    fn systemd_unset_limits_fall_back_to_env_knobs() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_MEMORY", "256M");
+        std::env::set_var("AGENTGRID_SANDBOX_CPUS", "1.5");
+        std::env::set_var("AGENTGRID_SANDBOX_PIDS_LIMIT", "64");
+        let (_, a) = sandbox_prefix(
+            SandboxKind::Systemd,
+            std::path::Path::new("/w"),
+            "adapter-mock",
+            None,
+            false,
+            Some("agentgrid-att-42"),
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert!(a.contains(&"--property=MemoryMax=256M".to_string()));
+        // Cores knob ("1.5") is normalized into the same %-of-core unit the
+        // profile field uses, so one convention covers both sources.
+        assert!(a.contains(&"--property=CPUQuota=150%".to_string()));
+        assert!(a.contains(&"--property=TasksMax=64".to_string()));
+    }
+
+    #[test]
+    fn systemd_command_extends_args_after_head() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        let (p, a) = sandbox_command(
+            SandboxKind::Systemd,
+            "claude",
+            &["--acp".into()],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            Some("agentgrid-att-7"),
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert_eq!(p, "systemd-run");
+        assert_eq!(a[a.len() - 2], "claude");
+        assert_eq!(a[a.len() - 1], "--acp");
+        let unit = a.iter().position(|x| x == "--unit").unwrap() + 1;
+        assert_eq!(a[unit], "agentgrid-scope-att-7");
+    }
+
+    #[test]
+    fn sandbox_kind_parses_systemd_aliases() {
+        let _g = ENV_LOCK.lock().unwrap();
+        for v in [
+            "systemd",
+            "SYSTEMD",
+            " systemd ",
+            "systemd-scope",
+            "cgroups",
+        ] {
+            std::env::set_var("AGENTGRID_SANDBOX", v);
+            assert_eq!(SandboxKind::from_env(), SandboxKind::Systemd, "{v}");
+        }
+        std::env::remove_var("AGENTGRID_SANDBOX");
+        assert_eq!(SandboxKind::from_env(), SandboxKind::None);
+    }
+
+    #[test]
+    fn sandbox_kind_systemd_still_routes_to_none_on_garbage() {
+        let _g = ENV_LOCK.lock().unwrap();
+        for v in ["", "none", "jail", "kvm"] {
+            std::env::set_var("AGENTGRID_SANDBOX", v);
+            assert_eq!(
+                SandboxKind::from_env(),
+                SandboxKind::None,
+                "'{v}' must never select an isolation backend"
+            );
+        }
+        std::env::remove_var("AGENTGRID_SANDBOX");
     }
 }

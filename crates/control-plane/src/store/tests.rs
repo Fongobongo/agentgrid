@@ -3213,6 +3213,7 @@ mod mem_gate_tests {
             network_mode: "none".into(),
             sandbox_backend: "none".into(),
             enforced_limits: false,
+            systemd_scope_supported: false,
             capabilities_schema_version: None,
             supported_event_versions: None,
         }

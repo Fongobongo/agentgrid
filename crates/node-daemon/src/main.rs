@@ -812,6 +812,23 @@ async fn amain() -> Result<()> {
     if matches!(cfg.sandbox, sandbox::SandboxKind::Docker) {
         sandbox::cleanup_orphan_containers().await;
     }
+    // Plan 6.11: same sweep for systemd transient scopes — a SIGKILLed
+    // daemon leaves `agentgrid-scope-*` units registered in the user
+    // manager; stop them so stale scopes don't hold TasksMax slots. The
+    // probe doubles as fail-loud startup validation: a configured scope
+    // backend on a host without a reachable user manager reports the
+    // misconfiguration immediately (scope attempts would fail at spawn).
+    if matches!(cfg.sandbox, sandbox::SandboxKind::Systemd) {
+        match sandbox::probe_systemd_scope().await {
+            Some(v) => tracing::info!(systemd = %v, "systemd scope backend ready"),
+            None => tracing::warn!(
+                "AGENTGRID_SANDBOX=systemd but the user manager is not reachable \
+                 (no systemd-run / no user session / no cgroups v2); sandboxed \
+                 runs will fail at spawn"
+            ),
+        }
+        sandbox::cleanup_orphan_scopes().await;
+    }
     tracing::info!(
         node_id = %cred.node_id,
         server = %cfg.server,

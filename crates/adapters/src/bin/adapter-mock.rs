@@ -8,6 +8,9 @@
 //!   oom:<mb>          - allocate <mb> of RAM and touch it (Stage 12 E2E:
 //!                       trips the sandbox --memory limit → the runtime
 //!                       OOM-kills the container → resource_limit error code)
+//!   fork:<n>           - spawn n concurrent children and wait (Plan 6.11
+//!                       E2E: trips the sandbox TasksMax / --pids-limit →
+//!                       fork fails or the kernel kills the excess tasks)
 //! Any other line is logged as a note. Emits a final `result` event.
 
 use std::env;
@@ -95,6 +98,39 @@ fn main() {
             let n: usize = n.parse().unwrap_or(0);
             for i in 0..n {
                 emit("log", json!({ "text": format!("spam line {i}") }));
+            }
+        } else if let Some(n) = line.strip_prefix("fork:") {
+            // Plan 6.11 E2E: spawn n concurrent sleepers so the sandbox's
+            // TasksMax / --pids-limit is observable: with a low ceiling the
+            // kernel refuses the excess forks (children report a nonzero
+            // exit) instead of silently letting the tree grow.
+            let n: usize = n.parse().unwrap_or(0);
+            emit("log", json!({ "text": format!("forking {n} children") }));
+            if n > 0 {
+                let mut handles: Vec<std::process::Child> = Vec::with_capacity(n);
+                let mut failed = 0usize;
+                for _ in 0..n {
+                    match std::process::Command::new("sleep")
+                        .arg("5")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        Ok(c) => handles.push(c),
+                        Err(_) => failed += 1,
+                    }
+                }
+                let spawned = handles.len();
+                for mut c in handles {
+                    let _ = c.wait();
+                }
+                emit(
+                    "log",
+                    json!({ "text": format!("fork done: spawned={spawned} failed={failed}") }),
+                );
+                if failed > 0 {
+                    exit_code = 1;
+                }
             }
         } else if let Some(mb) = line.strip_prefix("oom:") {
             // Stage 12 E2E: allocate and touch <mb> MiB so the container

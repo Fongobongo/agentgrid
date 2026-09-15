@@ -558,6 +558,11 @@ pub struct NodeView {
     /// limits (memory, CPU, pids).
     #[serde(default)]
     pub enforced_limits: bool,
+    /// Plan 6.11: systemd transient scopes are usable on this host
+    /// (`systemd-run --user` answers + cgroups v2 mounted). false on
+    /// legacy nodes.
+    #[serde(default)]
+    pub systemd_scope_supported: bool,
     /// Hardening P2 item 37: node is drained — it keeps in-flight attempts but
     /// receives no NEW assignments (maintenance mode).
     #[serde(default)]
@@ -968,6 +973,11 @@ pub struct HeartbeatRequest {
     /// "docker" only when limits are actually configured. 0 on legacy nodes.
     #[serde(default)]
     pub enforced_limits: bool,
+    /// Plan 6.11: systemd transient scopes are usable on this host
+    /// (`systemd-run --user` answers + cgroups v2 mounted). Absent on
+    /// legacy nodes (defaults to false — the scope backend is optional).
+    #[serde(default)]
+    pub systemd_scope_supported: bool,
     /// Hardening P2 item 35: repository cache size in bytes. 0 on legacy nodes.
     #[serde(default)]
     pub repo_cache_bytes: u64,
@@ -1821,6 +1831,7 @@ mod tests {
             git_submodules_supported: true,
             sandbox_backend: "none".into(),
             enforced_limits: false,
+            systemd_scope_supported: false,
             repo_cache_bytes: 0,
             workspace_bytes: 0,
             network_mode: "none".into(),

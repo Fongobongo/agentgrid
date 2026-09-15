@@ -623,16 +623,16 @@
 
 ### 6.11 cgroups v2 и subprocess limits
 
-- [ ] Default executor запускает subprocess под отдельным Unix user  — нет; `agentgrid` systemd user для daemon, child бежит под ним
-- [ ] При наличии systemd/cgroups v2 создавать transient scope на attempt  — контракт `ResourceLimits` в `SpawnRequest`, real impl = follow-up (Stage 12)
-- [ ] Поддержать `MemoryMax` — docker-sandbox path: `--memory` из per-attempt `ResourceLimits.memory_max` или env (Stage 12); systemd transient scope — follow-up
-- [ ] Поддержать `CPUQuota` — docker-sandbox path: `--cpus` (CPUQuota% / 100) из per-attempt limits/env (Stage 12); systemd — follow-up
-- [ ] Поддержать `TasksMax` — docker-sandbox path: `--pids-limit` из per-attempt limits/env (Stage 12); systemd — follow-up
-- [ ] Завершать весь cgroup при cancel/timeout
+- [ ] Default executor запускает subprocess под отдельным Unix user  — частично: `agentgrid` systemd user для daemon (install-node.sh), scope-бэкенд запускает attempt в cgroup этого же user (без root; `loginctl enable-linger` для headless); отдельный user именно для child — follow-up
+- [x] При наличии systemd/cgroups v2 создавать transient scope на attempt  — `AGENTGRID_SANDBOX=systemd`: `systemd-run --user --scope --unit agentgrid-scope-<attempt>`; probe `probe_systemd_scope` (systemd-run + user manager + cgroups v2) на startup/heartbeat; startup sweep `cleanup_orphan_scopes`
+- [x] Поддержать `MemoryMax` — `--property=MemoryMax=<M>` из per-attempt `ResourceLimits.memory_max` или env (Stage 12; systemd transient scope реализован)
+- [x] Поддержать `CPUQuota` — `--property=CPUQuota=<%>` из per-attempt `cpu_quota_percent` или env (cores→% normalized; Stage 12)
+- [x] Поддержать `TasksMax` — `--property=TasksMax=<n>` из per-attempt `tasks_max` или env (Stage 12)
+- [x] Завершать весь cgroup при cancel/timeout  — `systemctl --user kill <unit>` + `stop` через `remove_sandbox_container`→`kill_scope_unit` (все cancel/timeout ветки ACP + wrapper + timeout paths); процесс-group kill остаётся дублирующей защитой
+- [x] Публиковать поддержку cgroups как capability  — heartbeat `systemd_scope_supported` (миграция 0085, NodeView + метрика `agentgrid_node_systemd_scope`); probe fail-closed (no user manager → false)
 - [x] Fallback при отсутствии systemd scope — process group + SIGTERM/SIGKILL  — process group + bounded reap
-- [ ] Публиковать поддержку cgroups как capability
-- [x] Тестировать превышение memory limit и корректный `error_code=resource_limit`  — unit-mapping есть (Stage 12); real E2E = follow-up — закрыто Stage 12: unit-тесты (sandbox.rs `per_attempt_*`, `cpu_quota_*`, `named_containers_*`) + процессный E2E `tests/e2e/run-oom-limit.sh` (OOMKilled → `resource_limit:memory`) в CI
-- [ ] Тестировать fork-heavy mock adapter и `TasksMax`
+- [x] Тестировать превышение memory limit и корректный `error_code=resource_limit`  — unit-mapping есть (Stage 12); real E2E = follow-up — закрыто Stage 12: unit-тесты (sandbox.rs `per_attempt_*`, `cpu_quota_*`, `named_containers_*`) + процессный E2E `tests/e2e/run-oom-limit.sh` (OOMKilled → `resource_limit:memory`) в CI — и для systemd: `systemctl --user show -p OOMKill` → `resource_limit:memory`, E2E `run-scope-limit.sh` scenario A
+- [x] Тестировать fork-heavy mock adapter и `TasksMax`  — mock `fork:<n>` (n concurrent sleep-children, reported spawned/failed); E2E `run-scope-limit.sh` scenario B (TasksMax=32, fork:200 → excess refused → failed); unit-тесты рендера `systemd_maps_limits_to_cgroup_properties` / `systemd_unset_limits_fall_back_to_env_knobs`
 
 ### 6.12 Protocol и version compatibility
 

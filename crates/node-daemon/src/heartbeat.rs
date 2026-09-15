@@ -419,6 +419,7 @@ pub fn spawn_heartbeat(
                 sandbox_backend: match cfg.sandbox {
                     sandbox::SandboxKind::None => "none".to_string(),
                     sandbox::SandboxKind::Docker => "docker".to_string(),
+                    sandbox::SandboxKind::Systemd => "systemd".to_string(),
                 },
                 // Plan 960: report exactly what is applied. Docker always
                 // applies cap-drop + no-new-privileges; `enforced_limits` is
@@ -428,11 +429,30 @@ pub fn spawn_heartbeat(
                 // feature; the proxy enforces the allowlist). A `--network
                 // bridge` override means egress isolation is NOT applied, so
                 // the flag reflects that honestly.
-                enforced_limits: matches!(cfg.sandbox, sandbox::SandboxKind::Docker)
-                    && sandbox::effective_egress_isolated(&cfg.network_mode)
-                    && (std::env::var("AGENTGRID_SANDBOX_PIDS_LIMIT").is_ok()
-                        || std::env::var("AGENTGRID_SANDBOX_MEMORY").is_ok()
-                        || std::env::var("AGENTGRID_SANDBOX_CPUS").is_ok()),
+                enforced_limits: match cfg.sandbox {
+                    sandbox::SandboxKind::Docker => {
+                        sandbox::effective_egress_isolated(&cfg.network_mode)
+                            && (std::env::var("AGENTGRID_SANDBOX_PIDS_LIMIT").is_ok()
+                                || std::env::var("AGENTGRID_SANDBOX_MEMORY").is_ok()
+                                || std::env::var("AGENTGRID_SANDBOX_CPUS").is_ok())
+                    }
+                    // Plan 6.11: a systemd scope enforces kernel-side limits
+                    // whenever any ceiling is configured (env knob or profile
+                    // — profiles ride in per-assignment, so the env knob is
+                    // the honest node-wide signal). Egress is NOT isolated by
+                    // a scope (no network namespace) — enforced_limits only
+                    // claims resource limits, same field as docker.
+                    sandbox::SandboxKind::Systemd => {
+                        std::env::var("AGENTGRID_SANDBOX_PIDS_LIMIT").is_ok()
+                            || std::env::var("AGENTGRID_SANDBOX_MEMORY").is_ok()
+                            || std::env::var("AGENTGRID_SANDBOX_CPUS").is_ok()
+                    }
+                    sandbox::SandboxKind::None => false,
+                },
+                // Plan 6.11: advertise whether systemd transient scopes are
+                // usable at all, so the UI/eligibility can distinguish
+                // "scope backend configured" from "scope backend available".
+                systemd_scope_supported: sandbox::probe_systemd_scope().await.is_some(),
                 // Node policy ceiling (max allowed task mode). The resolved
                 // docker network applied at spawn (restricted→none) is logged
                 // per-attempt (egress audit) — this field stays the policy.

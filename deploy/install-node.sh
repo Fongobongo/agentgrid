@@ -133,6 +133,11 @@ EOF
 echo ">> enabling + starting"
 systemctl daemon-reload
 systemctl enable --now agentgrid-node.service
+# Plan 6.11: AGENTGRID_SANDBOX=systemd (cgroups v2 transient scopes) needs
+# the agentgrid user's manager to exist while the system service runs.
+# enable-linger makes systemd spawn it at boot; without it `systemd-run
+# --user` from the daemon fails (no user session for a service user).
+loginctl enable-linger agentgrid
 echo ">> node '$NAME' enrolled and running. journalctl -u agentgrid-node -f"
 
 # Uninstall (documented procedure — no dedicated CLI yet):

@@ -88,6 +88,7 @@ async fn migrations_serve_legacy_happy_path() {
         git_submodules_supported: true,
         sandbox_backend: "none".into(),
         enforced_limits: false,
+        systemd_scope_supported: false,
         repo_cache_bytes: 0,
         workspace_bytes: 0,
         network_mode: "none".into(),

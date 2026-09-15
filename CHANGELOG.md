@@ -4,6 +4,29 @@
 
 ### Added
 
+- **Systemd transient-scope sandbox backend (Plan 6.11).**
+  `AGENTGRID_SANDBOX=systemd` runs each attempt inside a
+  `systemd-run --user --scope --unit agentgrid-scope-<attempt>` transient
+  scope — the whole agent tree lands in one cgroup, and the kernel enforces
+  `MemoryMax` / `CPUQuota` / `TasksMax` (per-attempt profile limits override
+  the `AGENTGRID_SANDBOX_MEMORY` / `_CPUS` / `_PIDS_LIMIT` env knobs, same
+  precedence as the docker path). No container runtime required — the
+  native Tier-1 isolation backend. Cancel/timeout kills the entire scope
+  (`systemctl --user kill` + `stop`, replacing a docker-only teardown), a
+  memory.max breach is detected post-exit (`systemctl --user show -p
+  OOMKill`) and completes with `error_code=resource_limit:memory`, and the
+  startup sweep stops leftover `agentgrid-scope-*` units after a daemon
+  crash. The heartbeat advertises `systemd_scope_supported` (migration
+  0085, `agentgrid_node_systemd_scope` metric) so the UI/eligibility can
+  distinguish "scope backend configured" from "scope backend available";
+  `install-node.sh` now runs `loginctl enable-linger` so the agentgrid
+  user's manager exists for headless services. New mock `fork:<n>` command
+  (spawns n concurrent children) makes TasksMax observable; E2E
+  `tests/e2e/run-scope-limit.sh` proves MemoryMax → OOM →
+  `resource_limit` and TasksMax → fork refusal → `failed` on any systemd
+  host (skips cleanly where no user manager answers, including GitHub
+  runners).
+
 - **Resource reservations + pressure hysteresis (Plan 6.10).** Nodes now
   report `free_memory_mb` (MemAvailable minus the operator-reserved
   slice, `AGENTGRID_RESERVED_MEM_MB`, default 256 MiB) and `cpu_count`;

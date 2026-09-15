@@ -622,6 +622,18 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
             if n.enforced_limits { 1 } else { 0 }
         ));
     }
+    // Plan 6.11: systemd transient scopes usable on the host.
+    s.push_str(
+        "# HELP agentgrid_node_systemd_scope Whether systemd transient scopes are usable.\n",
+    );
+    s.push_str("# TYPE agentgrid_node_systemd_scope gauge\n");
+    for n in &nodes {
+        s.push_str(&format!(
+            "agentgrid_node_systemd_scope{{node=\"{}\"}} {}\n",
+            prom_label(&n.name),
+            if n.systemd_scope_supported { 1 } else { 0 }
+        ));
+    }
     s.push_str("# HELP agentgrid_node_network_mode Network mode per node.\n");
     s.push_str("# TYPE agentgrid_node_network_mode gauge\n");
     for n in &nodes {

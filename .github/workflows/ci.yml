@@ -279,6 +279,17 @@ jobs:
         timeout-minutes: 15
         env:
           AGENTGRID_SANDBOX_IMAGE: ag-node:test
+      # Plan 6.11: the systemd transient-scope acceptance — a scoped attempt
+      # hits MemoryMax (kernel OOM → resource_limit error code) and TasksMax
+      # (fork refusal → failed), without any container runtime. GitHub's
+      # ubuntu runners have no systemd user manager for the runner user, so
+      # the script's own gate skips it there; it runs for real on any
+      # systemd host (manual, nightly self-hosted, dev box).
+      - name: systemd scope → cgroup limits (skips without a user manager)
+        run: |
+          cargo build --workspace -p agentgrid-control-plane -p agentgrid-node-daemon -p agentgrid-adapters
+          bash tests/e2e/run-scope-limit.sh
+        timeout-minutes: 15
 
   skill-bundle:
     name: skill bundle materializes identically local vs remote
