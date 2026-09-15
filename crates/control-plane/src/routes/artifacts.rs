@@ -50,7 +50,7 @@ pub async fn get_artifact(
         .await
         .ok()
         .flatten();
-    let Some((file, len)) = state
+    let Some(open) = state
         .store
         .open_artifact(&task_id, &name)
         .await
@@ -66,8 +66,7 @@ pub async fn get_artifact(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     Ok(stream_artifact_response(
-        file,
-        len,
+        open,
         mt.as_ref().and_then(|m| m.media_type.as_deref()),
         &name,
         mt.as_ref().and_then(|m| m.sha256.as_deref()),
@@ -106,7 +105,7 @@ pub async fn get_artifact_node(
         .await
         .ok()
         .flatten();
-    let Some((file, len)) = state
+    let Some(open) = state
         .store
         .open_artifact(&task_id, &name)
         .await
@@ -119,8 +118,7 @@ pub async fn get_artifact_node(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     Ok(stream_artifact_response(
-        file,
-        len,
+        open,
         mt.as_ref().and_then(|m| m.media_type.as_deref()),
         &name,
         mt.as_ref().and_then(|m| m.sha256.as_deref()),
@@ -205,8 +203,8 @@ pub async fn upload_artifact_raw(
     }
 }
 
-/// Plan 6.7 (streaming): build the artifact `Response` from an open file
-/// handle, honoring a single-range `Range` header (`bytes=<start>-<end>`,
+/// Plan 6.7 (streaming + zstd): build the artifact `Response` from an open
+/// file handle, honoring a single-range `Range` header (`bytes=<start>-<end>`,
 /// `bytes=<start>-`, `bytes=-<suffix>`) with 206/Content-Range, or 416 when
 /// the range cannot be satisfied. The body is a bounded `ReaderStream` over
 /// the (seeked) file — the content never lands in RAM whole, so a 1 GiB raw
@@ -214,18 +212,29 @@ pub async fn upload_artifact_raw(
 /// 200 stream (honest, simpler than interleaving multipart/byteranges for
 /// a download API nothing consumes in slices).
 ///
+/// A zstd-compressed backing file (Plan 6.7 log compression) streams
+/// through an async decoder; `Content-Length` stays the logical uncompressed
+/// length, and a Range header on a compressed body is ignored (full 200) —
+/// a server may ignore a Range it cannot honor (RFC 9110 §14.2), and random
+/// access into a zstd frame would require a seek-table we don't write.
+///
 /// Download-safety hardening (hardening P0) is unchanged from the previous
 /// in-memory builder: active content types are forced to octet-stream +
 /// attachment, everything else follows the inline allowlist, and every
 /// response carries nosniff + CSP + CORP.
 async fn stream_artifact_response(
-    file: tokio::fs::File,
-    len: u64,
+    open: crate::store::OpenArtifact,
     media_type: Option<&str>,
     name: &str,
     sha256: Option<&str>,
     range_spec: Option<&str>,
 ) -> Response {
+    use crate::store::OpenArtifact;
+    let OpenArtifact {
+        file,
+        len,
+        compressed,
+    } = open;
     const INLINE_SAFE: &[&str] = &[
         "application/octet-stream",
         "text/plain",
@@ -268,20 +277,25 @@ async fn stream_artifact_response(
         .to_string();
 
     // Range resolution (pure parser below): 0..serve_len from disk.
-    let (serve_from, serve_len, partial) = match range_spec {
-        Some(spec) => match parse_single_range(spec, len) {
-            RangeVerdict::Full => (0, len, false),
-            RangeVerdict::Partial { from, take } => (from, take, true),
-            RangeVerdict::Unsatisfiable => {
-                // RFC 9110: 416 must carry Content-Range: bytes */<len>.
-                return Response::builder()
-                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                    .header(header::CONTENT_RANGE, format!("bytes */{len}"))
-                    .body(Body::empty())
-                    .expect("static 416 response");
-            }
-        },
-        None => (0, len, false),
+    // Compressed bodies ignore Range entirely (see doc).
+    let (serve_from, serve_len, partial) = if compressed {
+        (0u64, len, false)
+    } else {
+        match range_spec {
+            Some(spec) => match parse_single_range(spec, len) {
+                RangeVerdict::Full => (0, len, false),
+                RangeVerdict::Partial { from, take } => (from, take, true),
+                RangeVerdict::Unsatisfiable => {
+                    // RFC 9110: 416 must carry Content-Range: bytes */<len>.
+                    return Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(header::CONTENT_RANGE, format!("bytes */{len}"))
+                        .body(Body::empty())
+                        .expect("static 416 response");
+                }
+            },
+            None => (0, len, false),
+        }
     };
 
     // Seek to the range start before any body byte is produced. A failure
@@ -295,8 +309,16 @@ async fn stream_artifact_response(
         }
     }
     use tokio::io::AsyncReadExt;
-    let reader = tokio::io::BufReader::with_capacity(64 * 1024, file).take(serve_len);
-    let body = Body::from_stream(tokio_util::io::ReaderStream::new(reader));
+    let body = if compressed {
+        // Decode the zstd frame on the wire; the decoder streams, never
+        // holding the full frame in RAM.
+        let decoder =
+            async_compression::tokio::bufread::ZstdDecoder::new(tokio::io::BufReader::new(file));
+        Body::from_stream(tokio_util::io::ReaderStream::new(decoder))
+    } else {
+        let reader = tokio::io::BufReader::with_capacity(64 * 1024, file).take(serve_len);
+        Body::from_stream(tokio_util::io::ReaderStream::new(reader))
+    };
 
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, content_type)
@@ -423,21 +445,43 @@ mod tests {
     }
 
     /// Open + serve a temp file through the stream builder (Plan 6.7).
+    /// `serve_shaped(.., true)` writes a zstd frame instead (the builder
+    /// must decode it on the wire).
     async fn serve(
         content: &[u8],
         media_type: Option<&str>,
         name: &str,
         range: Option<&str>,
     ) -> Response<Body> {
+        self::serve_shaped(content, media_type, name, range, false).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_shaped(
+        content: &[u8],
+        media_type: Option<&str>,
+        name: &str,
+        range: Option<&str>,
+        compress: bool,
+    ) -> Response<Body> {
         let dir =
             std::env::temp_dir().join(format!("ag-artifact-{}", uuid::Uuid::new_v4().simple()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let path = dir.join("a");
-        tokio::fs::write(&path, content).await.unwrap();
+        let bytes = if compress {
+            zstd::stream::encode_all(content, 3).unwrap()
+        } else {
+            content.to_vec()
+        };
+        tokio::fs::write(&path, bytes).await.unwrap();
         let file = tokio::fs::File::open(&path).await.unwrap();
-        let len = content.len() as u64;
+        let open = crate::store::OpenArtifact {
+            file,
+            len: content.len() as u64,
+            compressed: compress,
+        };
         let resp = Box::pin(stream_artifact_response(
-            file, len, media_type, name, None, range,
+            open, media_type, name, None, range,
         ))
         .await;
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -639,5 +683,65 @@ mod tests {
             hdr(&resp, "content-type").as_deref(),
             Some("application/json")
         );
+    }
+
+    // ---- Plan 6.7: zstd-compressed backing files ----
+
+    #[tokio::test]
+    async fn compressed_artifact_decodes_on_the_wire() {
+        // A zstd frame on disk must serve the ORIGINAL bytes with the
+        // logical (uncompressed) Content-Length — the compression is an
+        // on-disk detail invisible to API consumers.
+        let content: Vec<u8> = "agent log line\n".repeat(600).into_bytes(); // ~8.4 KiB, compresses well
+        let resp = serve_shaped(&content, Some("text/plain"), "big.log", None, true).await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            hdr(&resp, "content-length").as_deref(),
+            Some(content.len().to_string().as_str())
+        );
+        assert_eq!(body(resp).await, content);
+    }
+
+    #[tokio::test]
+    async fn compressed_artifact_ignores_range() {
+        // RFC 9110 §14.2: a server may ignore a Range it cannot honor —
+        // random access into a zstd frame would need a seek-table we don't
+        // write, so a compressed artifact answers a Range with the full
+        // 200 representation, never fewer bytes than requested.
+        let content: Vec<u8> = "0123456789".repeat(500).into_bytes();
+        let resp = serve_shaped(
+            &content,
+            Some("text/plain"),
+            "big.log",
+            Some("bytes=0-9"),
+            true,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert!(hdr(&resp, "content-range").is_none());
+        assert_eq!(body(resp).await, content);
+    }
+
+    #[test]
+    fn compress_if_worthwhile_floor_and_win() {
+        // Highly repetitive log: compresses → Some (smaller frame).
+        let log: Vec<u8> = "spam spam spam\n".repeat(1000).into_bytes();
+        let z = crate::store::compress_if_worthwhile_pub("a.log", &log);
+        assert!(z.is_some());
+        let z = z.unwrap();
+        assert!(z.len() < log.len());
+        // The frame round-trips.
+        assert_eq!(zstd::stream::decode_all(z.as_slice()).unwrap(), log);
+        // Incompressible content (high-entropy noise) → None (kept plain).
+        let mut x: u32 = 0x9E3779B9;
+        let noise: Vec<u8> = (0..4096u32)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        assert!(crate::store::compress_if_worthwhile_pub("a.log", &noise).is_none());
     }
 }

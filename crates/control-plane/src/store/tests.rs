@@ -1156,6 +1156,131 @@ mod workflow_tests {
     }
 
     #[tokio::test]
+    async fn log_artifact_stored_zstd_but_serves_logical_bytes() {
+        // Plan 6.7: a compressible log upload stores `<name>.zst` on disk
+        // (row flag set, size_bytes = UNCOMPRESSED length), the read path
+        // decodes transparently, retention unlinks the .zst shape, and
+        // storage_reconcile does not mistake the .zst file for an orphan.
+        // Isolated DB dir: Store::open derives artifact_root from the DB's
+        // parent, and the shared temp root legitimately holds other tests'
+        // artifacts (which reconcile WOULD call orphans).
+        let dir =
+            std::env::temp_dir().join(format!("ag-zst-test-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Store::open(dir.join("cp.db").to_str().unwrap())
+            .await
+            .unwrap();
+        let (_node_id, _task_id) = seed_task_attempt(&s, "task-att-zst", "att-zst").await;
+        let content = "spam spam agentgrid log line\n".repeat(400).into_bytes();
+        let resp = s
+            .save_artifact_bytes("att-zst", "big.log", &content, Some("text/plain"), None)
+            .await
+            .unwrap();
+        assert_eq!(resp.size_bytes as usize, content.len());
+        // On-disk shape: compressed, and smaller than the source.
+        let zst = s
+            .artifact_path("att-zst", "big.log")
+            .unwrap()
+            .with_file_name("big.log.zst");
+        assert!(tokio::fs::try_exists(&zst).await.unwrap(), ".zst missing");
+        let disk = tokio::fs::read(&zst).await.unwrap();
+        assert!(
+            disk.len() < content.len(),
+            "zstd must actually shrink the log"
+        );
+        let flag: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT stored_compressed FROM artifacts WHERE attempt_id='att-zst' AND name='big.log'",
+        )
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(flag, 1);
+        // Logical size served to APIs stays uncompressed.
+        let size: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT size_bytes FROM artifacts WHERE attempt_id='att-zst' AND name='big.log'",
+        )
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(size as usize, content.len());
+        // Read paths decode transparently.
+        let got = s
+            .read_artifact_bytes("task-att-zst", "big.log")
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some(content.as_slice()));
+        // Reconcile: the .zst is live, not an orphan; no metadata drift.
+        let (orphans, _ob, missing) = s.storage_reconcile(true).await.unwrap();
+        assert_eq!(orphans, 0, "zst backing file must not read as orphan");
+        assert_eq!(missing, 0);
+        // Retention (far past cutoff) removes the .zst shape too.
+        sqlx::query("UPDATE artifacts SET stored_at = ? WHERE attempt_id='att-zst'")
+            .bind(iso_plus_secs(-(200 * 3600)))
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        s.cleanup_artifacts(168).await.unwrap();
+        assert!(
+            !tokio::fs::try_exists(&zst).await.unwrap(),
+            "retention must unlink the .zst backing file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plain_artifact_stays_uncompressed() {
+        // Plan 6.7 floor: a binary/patch artifact (or an incompressible /
+        // small log) keeps the plain on-disk shape — no decode cost, no flag.
+        let s = temp_store().await;
+        let (_node_id, _task_id) = seed_task_attempt(&s, "task-att-plain", "att-plain").await;
+        let payload = vec![0u8; 64 * 1024];
+        let noise: Vec<u8> = {
+            let mut x: u32 = 0x9E3779B9;
+            (0..payload.len())
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    x as u8
+                })
+                .collect()
+        };
+        // High-entropy log under the 30% win floor → stays plain.
+        s.save_artifact_bytes("att-plain", "noise.log", &noise, Some("text/plain"), None)
+            .await
+            .unwrap();
+        let flag: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT stored_compressed FROM artifacts WHERE attempt_id='att-plain' AND name='noise.log'",
+        )
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(flag, 0);
+        assert!(
+            tokio::fs::try_exists(s.artifact_path("att-plain", "noise.log").unwrap())
+                .await
+                .unwrap()
+        );
+        // A patch is never a compression candidate.
+        s.save_artifact_bytes(
+            "att-plain",
+            "changes.patch",
+            b"diff --git a/x b/x\n+spam\n".repeat(64).as_slice(),
+            Some("text/x-diff"),
+            None,
+        )
+        .await
+        .unwrap();
+        let flag: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT stored_compressed FROM artifacts WHERE attempt_id='att-plain' AND name='changes.patch'",
+        )
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(flag, 0, "patches stay plain regardless of compressibility");
+    }
+
+    #[tokio::test]
     async fn scheduler_records_latency_metric() {
         let s = temp_store().await;
         let (token, _) = s.create_enrollment_token().await.unwrap();

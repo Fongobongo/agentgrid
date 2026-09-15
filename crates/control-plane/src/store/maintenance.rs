@@ -405,16 +405,22 @@ impl Store {
             let attempt_id: String = r.try_get("attempt_id")?;
             let name: String = r.try_get("name")?;
             if let Ok(path) = self.artifact_path(&attempt_id, &name) {
-                // Best-effort: a missing file is not an error (already gone).
-                // Hardening P2 item 35: tally reclaimed bytes before unlink.
-                if let Ok(meta) = tokio::fs::metadata(&path).await {
-                    let bytes = meta.len();
-                    if bytes > 0 {
-                        self.artifact_cleanup_bytes
-                            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+                // Plan 6.7: the backing file may be the zstd shape
+                // (`<name>.zst`); unlink both shapes best-effort so
+                // retention never leaves a shadow behind.
+                for p in [path.clone(), path.with_file_name(format!("{name}.zst"))] {
+                    // Best-effort: a missing file is not an error (already
+                    // gone). Hardening P2 item 35: tally reclaimed bytes
+                    // before unlink.
+                    if let Ok(meta) = tokio::fs::metadata(&p).await {
+                        let bytes = meta.len();
+                        if bytes > 0 {
+                            self.artifact_cleanup_bytes
+                                .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
+                    let _ = tokio::fs::remove_file(&p).await;
                 }
-                let _ = tokio::fs::remove_file(&path).await;
             }
         }
         // Hardening P1 item 15: drop now-empty attempt dirs so the artifact
@@ -463,16 +469,24 @@ impl Store {
     /// Returns `(orphan_files, orphan_bytes, metadata_without_file)`.
     #[allow(clippy::type_complexity)]
     pub async fn storage_reconcile(&self, dry_run: bool) -> Result<(u64, u64, u64)> {
-        // Load every live artifact path from metadata.
-        let rows = sqlx::query("SELECT attempt_id, name FROM artifacts")
+        // Load every live artifact path from metadata. Plan 6.7: a row may
+        // be stored zstd-compressed (`<name>.zst` on disk) — record the flag
+        // so the walk and the missing-file check look at the right shape.
+        let rows = sqlx::query("SELECT attempt_id, name, stored_compressed FROM artifacts")
             .fetch_all(&self.pool)
             .await?;
         let mut live: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
+        let mut compressed: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
         for r in &rows {
             let attempt_id: String = r.try_get("attempt_id")?;
             let name: String = r.try_get("name")?;
-            live.insert((attempt_id, name));
+            let zst: i64 = r.try_get("stored_compressed").unwrap_or(0);
+            live.insert((attempt_id.clone(), name.clone()));
+            if zst != 0 {
+                compressed.insert((attempt_id, name));
+            }
         }
 
         // Walk the artifact root, never following symlinks. Entire walk
@@ -507,9 +521,15 @@ impl Store {
                                 if !f.file_type().map(|t| t.is_file()).unwrap_or(false) {
                                     continue;
                                 }
-                                let name = f.file_name().to_string_lossy().to_string();
+                                let mut name = f.file_name().to_string_lossy().to_string();
                                 if name.ends_with(".tmp.upload") || name.ends_with(".tmp") {
                                     continue;
+                                }
+                                // Plan 6.7: a `.zst` suffix means the row
+                                // name is the stripped base — the live key
+                                // comparison must see through the shape.
+                                if let Some(base) = name.strip_suffix(".zst") {
+                                    name = base.to_string();
                                 }
                                 let key = (attempt_id.clone(), name.clone());
                                 if live_for_scan.contains(&key) {
@@ -538,18 +558,33 @@ impl Store {
         }
 
         // Metadata rows whose backing file is missing (async check to avoid
-        // blocking the executor on stat calls over many rows).
-        for (attempt_id, name) in &live {
-            if let Ok(path) = self.artifact_path(attempt_id, name) {
-                if tokio::fs::symlink_metadata(&path).await.is_err() {
-                    metadata_without_file += 1;
-                    if !dry_run {
-                        sqlx::query("DELETE FROM artifacts WHERE attempt_id = ? AND name = ?")
-                            .bind(attempt_id)
-                            .bind(name)
-                            .execute(&self.pool)
-                            .await?;
-                    }
+        // blocking the executor on stat calls over many rows). Plan 6.7: a
+        // compressed row's backing file is `<name>.zst`; check the flagged
+        // shape first, then the plain one (heals a flag/file race).
+        for key in &live {
+            let (attempt_id, name) = key;
+            let Ok(plain) = self.artifact_path(attempt_id, name) else {
+                continue;
+            };
+            let mut candidates = vec![plain.clone()];
+            if compressed.contains(key) {
+                candidates.insert(0, plain.with_file_name(format!("{name}.zst")));
+            }
+            let mut missing = true;
+            for p in &candidates {
+                if tokio::fs::symlink_metadata(p).await.is_ok() {
+                    missing = false;
+                    break;
+                }
+            }
+            if missing {
+                metadata_without_file += 1;
+                if !dry_run {
+                    sqlx::query("DELETE FROM artifacts WHERE attempt_id = ? AND name = ?")
+                        .bind(attempt_id)
+                        .bind(name)
+                        .execute(&self.pool)
+                        .await?;
                 }
             }
         }

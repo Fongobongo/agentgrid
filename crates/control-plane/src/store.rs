@@ -28,6 +28,11 @@ mod conversations;
 mod events;
 mod learnings;
 mod maintenance;
+// Plan 6.7: pure zstd-compression decision (routes tests prove the 30%
+// floor + round-trip without touching the store internals) and the opened
+// streaming-artifact handle the download handlers consume.
+pub use artifacts::compress_if_worthwhile_pub;
+pub use artifacts::OpenArtifact;
 mod nodes;
 pub(crate) mod opencode_profiles;
 mod profiles;

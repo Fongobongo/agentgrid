@@ -58,6 +58,8 @@ tower.workspace = true
 http-body-util = "0.1"
 # Plan 6.7: stream artifact files (Range-aware) without reading them into RAM.
 tokio-util = { version = "0.7", features = ["io"] }
+async-compression = { version = "0.4.47", default-features = false, features = ["tokio", "zstd"] }
+zstd = "0.14"
 
 [features]
 default = []

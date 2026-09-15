@@ -84,6 +84,13 @@ impl Store {
     /// Stage 2.2 binary-safe artifact write: raw bytes + optional media type
     /// and hex SHA-256. Idempotent per (attempt_id, name). The legacy text
     /// endpoint forwards here with `content.as_bytes()`.
+    ///
+    /// Plan 6.7 (zstd log compression): log-class artifacts (`.log` names /
+    /// text/plain) whose content compresses by at least 30% are stored as
+    /// `<name>.zst` with the row flagging `stored_compressed`; everything else
+    /// (patches, binaries, small logs) stays plain. `size_bytes` always keeps
+    /// the UNCOMPRESSED length — that is the logical size every API/Range
+    /// speaks; the on-disk shape is an internal detail.
     pub async fn save_artifact_bytes(
         &self,
         attempt_id: &str,
@@ -111,6 +118,29 @@ impl Store {
         let dir = self.artifact_root.join(attempt_id);
         tokio::fs::create_dir_all(&dir).await?;
         let path = self.artifact_path(attempt_id, name)?;
+        // Plan 6.7: compress log-class artifacts when it pays. The 30% floor
+        // keeps small/garbage-ish logs plain (a .zst that saves nothing just
+        // adds a decode cost to every download). The compressed candidate is
+        // built in a blocking task — zstd level 3 on a multi-MiB log is CPU
+        // work, not async work.
+        let log_class =
+            name.ends_with(".log") || media_type.map(|m| m.starts_with("text/")).unwrap_or(false);
+        let (write_bytes, stored_compressed, on_disk_name) = if log_class && bytes.len() >= 4096 {
+            let src = bytes.to_vec();
+            let name_probe = name.to_string();
+            let compressed = tokio::task::spawn_blocking(move || {
+                compress_if_worthwhile(&name_probe, &src, 0.30)
+            })
+            .await
+            .unwrap_or(None);
+            match compressed {
+                Some(z) => (z, true, format!("{name}.zst")),
+                // Incompressible or < 30% win: keep the plain shape.
+                None => (bytes.to_vec(), false, name.to_string()),
+            }
+        } else {
+            (bytes.to_vec(), false, name.to_string())
+        };
         // Hardening P0 (crash safety): write to a sibling temp file then
         // atomic rename, so a crash between write and metadata commit cannot
         // leave a half-written published artifact. Same dir => same fs rename.
@@ -119,20 +149,27 @@ impl Store {
         // other's tmp file — last-rename-wins bytes could mismatch the sha
         // row the other writer committed, and on Windows the second rename
         // onto an existing target fails outright.
-        let tmp = path.with_extension(format!("tmp.upload-{}", Uuid::new_v4()));
-        tokio::fs::write(&tmp, bytes).await?;
-        tokio::fs::rename(&tmp, &path).await?;
+        let disk_path = path.with_file_name(&on_disk_name);
+        let tmp = disk_path.with_extension(format!("tmp.upload-{}", Uuid::new_v4()));
+        tokio::fs::write(&tmp, write_bytes).await?;
+        tokio::fs::rename(&tmp, &disk_path).await?;
+        // A shape change (plain -> .zst or back) must not leave the previous
+        // shape behind as a shadow both readers and retention would miss.
+        if on_disk_name != name {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
         let size = bytes.len() as i64;
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         sqlx::query(
-            "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at, media_type, sha256) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at, media_type, sha256, stored_compressed) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(attempt_id, name) DO UPDATE SET \
                 size_bytes = excluded.size_bytes, \
                 stored_at = excluded.stored_at, \
                 media_type = excluded.media_type, \
-                sha256 = excluded.sha256",
+                sha256 = excluded.sha256, \
+                stored_compressed = excluded.stored_compressed",
         )
         .bind(&id)
         .bind(attempt_id)
@@ -141,6 +178,7 @@ impl Store {
         .bind(&now)
         .bind(media_type)
         .bind(&computed)
+        .bind(stored_compressed as i64)
         .execute(&self.pool)
         .await?;
         Ok(ArtifactUploadResponse {
@@ -209,8 +247,13 @@ impl Store {
             Ok(p) => p,
             Err(_) => return Ok(None),
         };
+        let (path, compressed) = resolve_on_disk(&path, &attempt_id, name, &self.pool).await;
         match tokio::fs::read(&path).await {
-            Ok(b) => Ok(Some(b)),
+            Ok(b) => Ok(Some(if compressed {
+                decompress_blocking(b).await
+            } else {
+                b
+            })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -246,8 +289,16 @@ impl Store {
             Ok(p) => p,
             Err(_) => return Ok(None),
         };
+        let (path, compressed) = resolve_on_disk(&path, attempt_id, name, &self.pool).await;
         match tokio::fs::read_to_string(&path).await {
-            Ok(s) => Ok(Some(s)),
+            Ok(s) => Ok(Some(if compressed {
+                // Compressed logs are bytes on disk; decode then re-read as
+                // UTF-8 (lossy keeps the String contract of this method).
+                let b = tokio::fs::read(&path).await.unwrap_or_default();
+                String::from_utf8_lossy(&decompress_blocking(b).await).to_string()
+            } else {
+                s
+            })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -259,11 +310,13 @@ impl Store {
     /// full-file handle so a serve path can seek anywhere. `None` when the
     /// task has no attempts / the artifact is missing (same semantics as
     /// `read_artifact_bytes`, so handlers keep a single 404 path).
-    pub async fn open_artifact(
-        &self,
-        task_id: &str,
-        name: &str,
-    ) -> Result<Option<(tokio::fs::File, u64)>> {
+    ///
+    /// Plan 6.7 (zstd): the returned struct flags a compressed backing
+    /// file — the serve path streams a decode of it (Content-Length stays
+    /// the logical uncompressed length) and ignores Range per RFC 9110
+    /// §14.2 (a server may ignore a Range header; it must then send the
+    /// full representation).
+    pub async fn open_artifact(&self, task_id: &str, name: &str) -> Result<Option<OpenArtifact>> {
         let Some(attempt_id) = self.latest_attempt_id(task_id).await? else {
             return Ok(None);
         };
@@ -271,13 +324,121 @@ impl Store {
             Ok(p) => p,
             Err(_) => return Ok(None),
         };
-        match tokio::fs::File::open(&path).await {
-            Ok(f) => {
-                let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
-                Ok(Some((f, len)))
+        let (disk_path, compressed) = resolve_on_disk(&path, &attempt_id, name, &self.pool).await;
+        match tokio::fs::File::open(&disk_path).await {
+            Ok(file) => {
+                // Logical length: the DB row's uncompressed size_bytes.
+                let len = sqlx::query_scalar::<_, i64>(
+                    "SELECT size_bytes FROM artifacts WHERE attempt_id = ? AND name = ?",
+                )
+                .bind(&attempt_id)
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?
+                .unwrap_or(0) as u64;
+                Ok(Some(OpenArtifact {
+                    file,
+                    len,
+                    compressed,
+                }))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+/// Plan 6.7: an artifact opened for streaming. `len` is the logical
+/// (uncompressed) byte length; `compressed` says the file handle holds a
+/// zstd frame that must be decoded on the wire.
+pub struct OpenArtifact {
+    pub file: tokio::fs::File,
+    pub len: u64,
+    pub compressed: bool,
+}
+
+/// Test-visible alias for the pure compression decision (routes tests prove
+/// the 30% floor + round-trip without touching the store internals).
+pub fn compress_if_worthwhile_pub(name: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+    compress_if_worthwhile(name, bytes, 0.30)
+}
+
+/// Pure decision + compression for Plan 6.7: return the zstd frame when the
+/// content compresses by at least `min_ratio` (0.30 = 30% smaller), else None.
+/// Runs inside `spawn_blocking` at the call site.
+pub(crate) fn compress_if_worthwhile(name: &str, bytes: &[u8], min_ratio: f64) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let mut enc =
+        zstd::stream::Encoder::new(Vec::new(), 3).expect("zstd encoder to memory cannot fail");
+    // write_all to a Vec writer cannot fail except for the source read,
+    // which is a slice.
+    if enc.write_all(bytes).is_err() {
+        return None;
+    }
+    let z = enc.finish().ok()?;
+    let win = 1.0 - (z.len() as f64 / bytes.len() as f64);
+    if win >= min_ratio {
+        tracing::debug!(
+            artifact = name,
+            raw = bytes.len(),
+            zst = z.len(),
+            "artifact stored zstd-compressed"
+        );
+        Some(z)
+    } else {
+        None
+    }
+}
+
+/// Decode a zstd frame off the async runtime (multi-MiB logs are CPU work).
+async fn decompress_blocking(bytes: Vec<u8>) -> Vec<u8> {
+    tokio::task::spawn_blocking(move || {
+        zstd::stream::decode_all(bytes.as_slice()).unwrap_or_else(|e| {
+            tracing::warn!("artifact zstd decode failed: {e}");
+            Vec::new()
+        })
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Plan 6.7 (zstd): pick the on-disk shape for an artifact. The row's
+/// `stored_compressed` flag is authoritative; a missing/zero flag falls back
+/// to the plain name (legacy rows + pre-migration files). Also heals a race
+/// where the flag says .zst but only the plain file exists (an in-flight
+/// re-upload between shapes): prefer whichever file is actually present.
+async fn resolve_on_disk(
+    plain_path: &std::path::Path,
+    attempt_id: &str,
+    name: &str,
+    pool: &sqlx::SqlitePool,
+) -> (std::path::PathBuf, bool) {
+    let flagged: Option<i64> = sqlx::query_scalar::<_, i64>(
+        "SELECT stored_compressed FROM artifacts WHERE attempt_id = ? AND name = ?",
+    )
+    .bind(attempt_id)
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    let zst = plain_path.with_file_name(format!("{name}.zst"));
+    match flagged {
+        Some(1) => {
+            if tokio::fs::try_exists(&zst).await.unwrap_or(false) {
+                (zst, true)
+            } else {
+                // Flag says compressed but the frame is gone (crash between
+                // rename and commit is impossible — both precede the row —
+                // but an operator restore may have dropped it): serve the
+                // plain file if it exists, else the missing .zst (→ 404).
+                if tokio::fs::try_exists(plain_path).await.unwrap_or(false) {
+                    (plain_path.to_path_buf(), false)
+                } else {
+                    (zst, true)
+                }
+            }
+        }
+        _ => (plain_path.to_path_buf(), false),
     }
 }

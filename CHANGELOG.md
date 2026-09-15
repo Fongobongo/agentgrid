@@ -4,6 +4,25 @@
 
 ### Added
 
+- **zstd-compressed log artifacts on disk (Plan 6.7).** Log-class
+  artifact uploads (`.log` names or `text/*` media types, ≥ 4 KiB) whose
+  content compresses by at least 30% are stored as `<name>.zst` on the
+  control-plane disk (row-flagged, migration 0086); patches, binaries and
+  incompressible logs keep the plain shape. `size_bytes` stays the logical
+  uncompressed length every API already reports, downloads decode the
+  zstd frame on the wire (streamed, never in RAM whole), and the
+  in-memory read paths decode transparently. Retention unlinks both
+  shapes; `storage_reconcile` sees through the `.zst` suffix so a
+  compressed backing file is never misread as an orphan. Range requests
+  against a compressed body answer a full 200 (RFC 9110 lets a server
+  ignore a Range it cannot honor; random access into a zstd frame would
+  need a seek-table we don't write). Covered by
+  `log_artifact_stored_zstd_but_serves_logical_bytes`,
+  `plain_artifact_stays_uncompressed`,
+  `compressed_artifact_decodes_on_the_wire`,
+  `compressed_artifact_ignores_range`,
+  `compress_if_worthwhile_floor_and_win`.
+
 - **Range-aware streaming artifact downloads (Plan 6.7).**
   `GET /v1/tasks/{id}/artifacts/{name}` (and the node-credential mirror
   `/v1/node/tasks/{id}/artifacts/{name}`) no longer reads the artifact into
