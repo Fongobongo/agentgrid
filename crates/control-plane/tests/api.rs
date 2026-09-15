@@ -1495,6 +1495,85 @@ async fn artifact_binary_raw_upload_round_trips() {
 }
 
 #[tokio::test]
+async fn artifact_download_honors_range_and_streams_partial() {
+    // Plan 6.7: the download endpoint must not materialize the artifact in
+    // RAM — the response is a bounded file stream that honors a single
+    // `Range` (206 + Content-Range + the sliced bytes) and answers an
+    // unsatisfiable range with 416 + `bytes */<len>`.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-rng", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:r.txt:r").await;
+    ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await;
+    let art = UploadArtifactRequest {
+        name: "big.log".into(),
+        content: "0123456789".into(),
+        ..Default::default()
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/artifacts", assign.attempt_id),
+            serde_json::to_string(&art).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let token = test_token(&app).await;
+    let build_req = |range: Option<&str>| {
+        let mut b = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/tasks/{}/artifacts/big.log", assign.task_id))
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(r) = range {
+            b = b.header("range", r);
+        }
+        b.body(()).unwrap()
+    };
+    // Full: 200 + accept-ranges.
+    let resp = app
+        .clone()
+        .oneshot(build_req(None).map(|()| Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("accept-ranges").unwrap(), "bytes");
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), b"0123456789");
+    // Partial: 206 + slice.
+    let resp = app
+        .clone()
+        .oneshot(build_req(Some("bytes=2-5")).map(|()| Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-range").unwrap(), "bytes 2-5/10");
+    assert_eq!(resp.headers().get("content-length").unwrap(), "4");
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), b"2345");
+    // Suffix: last 4 bytes.
+    let resp = app
+        .clone()
+        .oneshot(build_req(Some("bytes=-4")).map(|()| Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), b"6789");
+    // Unsatisfiable: 416 + bytes */len.
+    let resp = app
+        .clone()
+        .oneshot(build_req(Some("bytes=10-")).map(|()| Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(resp.headers().get("content-range").unwrap(), "bytes */10");
+}
+
+#[tokio::test]
 async fn metrics_endpoint_exposes_counts() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);

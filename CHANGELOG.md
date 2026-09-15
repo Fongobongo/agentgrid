@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Range-aware streaming artifact downloads (Plan 6.7).**
+  `GET /v1/tasks/{id}/artifacts/{name}` (and the node-credential mirror
+  `/v1/node/tasks/{id}/artifacts/{name}`) no longer reads the artifact into
+  RAM — the response is a bounded 64 KiB-chunk file stream, so a 1 GiB
+  `agent-raw-output.log` serves at flat memory cost. Single-range `Range`
+  headers are honored: `bytes=a-b` / `bytes=a-` / `bytes=-n` → 206 +
+  `Content-Range`, unsatisfiable → 416 + `bytes */len` (RFC 9110);
+  multi-range / non-`bytes` / garbage specs fall back to a full 200
+  stream. Every response advertises `Accept-Ranges: bytes`. The pure
+  parser (`parse_single_range`) and the 206/416/208 slice semantics are
+  unit-tested; an API-level integration test proves upload → Range GET
+  round-trips exact slices.
+
 - **Systemd transient-scope sandbox backend (Plan 6.11).**
   `AGENTGRID_SANDBOX=systemd` runs each attempt inside a
   `systemd-run --user --scope --unit agentgrid-scope-<attempt>` transient

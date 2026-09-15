@@ -56,6 +56,8 @@ prometheus = { version = "0.14", optional = true }
 tower-http = { version = "0.7", features = ["fs", "compression-br"] }
 tower.workspace = true
 http-body-util = "0.1"
+# Plan 6.7: stream artifact files (Range-aware) without reading them into RAM.
+tokio-util = { version = "0.7", features = ["io"] }
 
 [features]
 default = []

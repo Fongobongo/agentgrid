@@ -577,7 +577,7 @@
 - [ ] После завершения закрывать и сжимать raw log в `.zst`  — сжатие не сделано
 - [x] Удалять bulk log chunks из SQLite после формирования artifact
 - [ ] Оставлять в SQLite последние 500–2000 строк для быстрого Task details  — все events в SQLite; отдельный tail-limit не введён
-- [ ] Полный лог отдавать через artifacts API с Range/streaming, не загружая файл целиком в RAM  — binary streaming upload/download API (migration 0029); Range не сделан
+- [x] Полный лог отдавать через artifacts API с Range/streaming, не загружая файл целиком в RAM  — download handlers стримят файл 64-килобайтными чанками (`open_artifact` + `ReaderStream`), single-range `Range` даёт 206 + `Content-Range`, unsatisfiable → 416 `bytes */len` (RFC 9110), multi-range/garbage → полный 200; тесты `range_parser_*`, `range_request_serves_206_slice`, `suffix_and_open_ranges`, `unsatisfiable_range_is_416` + API-интеграционный `artifact_download_honors_range_and_streams_partial`
 - [x] Adapter парсит только стабильные события `status/stdout/stderr/tool/result/error/artifact`
 - [x] Неизвестные записи CLI сохранять как raw log, а не завершать adapter ошибкой
 

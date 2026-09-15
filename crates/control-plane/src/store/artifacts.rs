@@ -252,4 +252,32 @@ impl Store {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Plan 6.7 (streaming downloads): resolve a stored artifact to an
+    /// open file handle + its byte length, WITHOUT reading the content into
+    /// RAM. `Range` handling (start/end) is the caller's — this returns the
+    /// full-file handle so a serve path can seek anywhere. `None` when the
+    /// task has no attempts / the artifact is missing (same semantics as
+    /// `read_artifact_bytes`, so handlers keep a single 404 path).
+    pub async fn open_artifact(
+        &self,
+        task_id: &str,
+        name: &str,
+    ) -> Result<Option<(tokio::fs::File, u64)>> {
+        let Some(attempt_id) = self.latest_attempt_id(task_id).await? else {
+            return Ok(None);
+        };
+        let path = match self.artifact_path(&attempt_id, name) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        match tokio::fs::File::open(&path).await {
+            Ok(f) => {
+                let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+                Ok(Some((f, len)))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
 }

@@ -379,52 +379,6 @@ impl ArtifactService {
                 _ => ArtifactError::Internal,
             })
     }
-
-    /// Read an artifact (user path — public download) with name safety.
-    pub async fn read(
-        state: &crate::AppState,
-        task_id: &str,
-        name: &str,
-    ) -> Result<Option<(Vec<u8>, Option<agentgrid_common::ArtifactMeta>)>, ArtifactError> {
-        if !is_safe_artifact_name(name) {
-            return Ok(None); // 404: deny without disclosing existence
-        }
-        match state.store.read_artifact_bytes(task_id, name).await {
-            Ok(Some(bytes)) => {
-                let meta = state
-                    .store
-                    .read_artifact_meta(task_id, name)
-                    .await
-                    .ok()
-                    .flatten();
-                Ok(Some((bytes, meta)))
-            }
-            Ok(None) => Ok(None),
-            Err(_) => Err(ArtifactError::Internal),
-        }
-    }
-
-    /// Read an artifact on behalf of a node (workflow upstream fetch) — the
-    /// caller node must be authorized to read the producer task's artifact.
-    pub async fn read_node(
-        state: &crate::AppState,
-        node_id: &str,
-        task_id: &str,
-        name: &str,
-    ) -> Result<Option<(Vec<u8>, Option<agentgrid_common::ArtifactMeta>)>, ArtifactError> {
-        if !is_safe_artifact_name(name) {
-            return Ok(None); // 404: deny without disclosing existence
-        }
-        let allowed = state
-            .store
-            .can_node_read_upstream_artifact(node_id, task_id)
-            .await
-            .map_err(|_| ArtifactError::Internal)?;
-        if !allowed {
-            return Ok(None); // 404 on denial, same as the old handler
-        }
-        Self::read(state, task_id, name).await
-    }
 }
 
 #[cfg(test)]
