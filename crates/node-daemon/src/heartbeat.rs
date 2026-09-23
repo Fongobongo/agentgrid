@@ -401,6 +401,9 @@ pub fn spawn_heartbeat(
                 discovered_skills,
                 unsafe_active: node_unsafe_active(&cfg),
                 permission_interception: node_permission_interception(&cfg),
+                // Plan 2.5 (#204): per-repository attach state
+                // (`cloning` | `ready` | `invalid` + error).
+                repo_states: crate::git::repo_attach_snapshot(),
                 outbox_bytes: hb_outbox_bytes,
                 artifact_spool_bytes: hb_spool_bytes,
                 outbox_rows: hb_outbox_rows,

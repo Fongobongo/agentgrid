@@ -201,7 +201,7 @@
 - [x] `POST /v1/repositories` — регистрация: name, git_url, default_branch, validation_command
 - [x] Команда/поток attach: node клонирует репозиторий в `repository_root/<repo-name>` (bare или полный clone — зафиксировать решение)  — bare-mirror clone (`--mirror`) per dev-plan 2.3
 - [x] Поддержка существующего локального пути как источника (валидация: это git-репозиторий, ветка существует)  — `validate_local_source` в `prepare_workspace`: локальный путь (без `://`, не scp-like) проверяется на git-репо + наличие default-ветки, иначе fail-closed с понятной ошибкой; нелокальные URL и несуществующие пути идут в git как раньше; тесты `local_path_validates_repo_and_branch`, `scp_like_detection`
-- [ ] Статусы node_repository: `cloning → ready | invalid` c описанием ошибки  — node repository state не моделируется (нет UI/таблицы статусов attach)
+- [x] Статусы node_repository: `cloning → ready | invalid` c описанием ошибки  — node ведёт per-mirror attach map (fetch start → `cloning`, outcome → `ready`/`invalid` + причина, cap 500), heartbeat несёт `repo_states`, CP хранит в `nodes.repo_states` (миграция 0087) и отдаёт в NodeView; CLI `ag nodes list` колонка REPOS; тесты node + store
 - [x] Для каждого attempt:
   - [x] `git fetch` до актуального `default_branch`
   - [x] создание ветки `agent/<task-id>/<attempt-number>` от default_branch

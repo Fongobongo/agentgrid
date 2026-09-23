@@ -658,8 +658,8 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         return Ok(());
     }
     println!(
-        "{:<36} {:<10} {:<8} {:<6} {:<10} {:<12} {:<14} {:<12}",
-        "ID", "STATUS", "ACTIVE", "MAX", "DISK", "INTERCEPT", "UNSAFE", "SPOOL"
+        "{:<36} {:<10} {:<8} {:<6} {:<10} {:<12} {:<14} {:<12} {:<10}",
+        "ID", "STATUS", "ACTIVE", "MAX", "DISK", "INTERCEPT", "UNSAFE", "SPOOL", "REPOS"
     );
     for n in &nodes {
         let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("-");
@@ -702,8 +702,26 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         } else {
             "-".to_string()
         };
+        // Plan 2.5 (#204): per-repository attach state — `ready/total`,
+        // with `!` when any repo is cloning/invalid (details in JSON).
+        let repos = n.get("repo_states").and_then(|v| v.as_array());
+        let repo_cell = match repos {
+            None => "-".to_string(),
+            Some(arr) if arr.is_empty() => "-".to_string(),
+            Some(arr) => {
+                let ready = arr
+                    .iter()
+                    .filter(|r| r.get("state").and_then(|s| s.as_str()) == Some("ready"))
+                    .count();
+                if ready == arr.len() {
+                    format!("{}/{}", ready, arr.len())
+                } else {
+                    format!("{}/{} !", ready, arr.len())
+                }
+            }
+        };
         println!(
-            "{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10} {intercept:<12} {unsafe_flag:<14} {spool:<12}"
+            "{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10} {intercept:<12} {unsafe_flag:<14} {spool:<12} {repo_cell:<10}"
         );
     }
     Ok(())

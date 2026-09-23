@@ -153,6 +153,81 @@ fn scp_like_detection() {
     assert!(!is_scp_like("ext::helper arg"));
 }
 
+// ---- Plan 2.5 (#204): repository attach states ----
+
+#[test]
+fn repo_attach_snapshot_round_trips_and_truncates() {
+    // Unique mirror keys: the attach map is process-global and other tests
+    // record their own mirrors concurrently.
+    let k1 = format!("attach-a-{}|repo", uuid::Uuid::new_v4());
+    let k2 = format!("attach-b-{}|repo", uuid::Uuid::new_v4());
+    set_repo_attach(&k1, "repo", "cloning", "");
+    set_repo_attach(&k2, "repo", "invalid", &"e".repeat(2000));
+    let snap = repo_attach_snapshot();
+    let a = snap
+        .iter()
+        .find(|v| v.name == "repo" && v.state == "cloning");
+    assert!(a.is_some(), "cloning state recorded");
+    // Long git errors are capped so the heartbeat stays small.
+    let b = snap
+        .iter()
+        .find(|v| v.name == "repo" && v.state == "invalid")
+        .unwrap();
+    assert!(
+        b.error.len() <= 500,
+        "error truncated, len={}",
+        b.error.len()
+    );
+    // Re-recording the same mirror overwrites (last writer wins).
+    set_repo_attach(&k1, "repo", "ready", "");
+    let snap = repo_attach_snapshot();
+    assert!(
+        snap.iter().any(|v| v.name == "repo" && v.state == "ready"),
+        "ready overwrites cloning"
+    );
+}
+
+#[test]
+fn prepare_records_repo_attach_ready_and_invalid() {
+    hermetic_git_config();
+    let dir = std::env::temp_dir().join(format!("ag-git-attach-{}", uuid::Uuid::new_v4()));
+    let origin = init_origin(&dir);
+    commit_file(&origin, "base.txt", "base", "init");
+    let url = origin.to_str().unwrap().to_string();
+    let repos = dir.join("repos");
+    let ws = dir.join("ws");
+
+    // Successful prepare → ready.
+    let a = make_attempt(&url, "main", "att-ok", "task-ok");
+    prepare_workspace(&repos, &ws, &a, &[], &[]).unwrap();
+    let snap = repo_attach_snapshot();
+    assert!(
+        snap.iter().any(|v| v.name == "repo" && v.state == "ready"),
+        "successful prepare marks the mirror ready: {snap:?}"
+    );
+
+    // A prepare whose bulk fetch fails → invalid + cause. A refused
+    // localhost connection passes URL validation but fails the clone
+    // fast (no network timeout).
+    let mut bad = make_attempt(
+        "https://127.0.0.1:1/repo.git",
+        "main",
+        "att-bad",
+        "task-bad",
+    );
+    bad.repository = "badrepo".into();
+    let err = prepare_workspace(&repos, &ws, &bad, &[], &[])
+        .expect_err("bogus remote must fail the fetch");
+    let _ = err;
+    let snap = repo_attach_snapshot();
+    let bad_state = snap.iter().find(|v| v.name == "badrepo");
+    assert!(
+        matches!(bad_state, Some(v) if v.state == "invalid" && !v.error.is_empty()),
+        "failed fetch marks the mirror invalid with a cause: {snap:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn plain_dir_has_no_commit() {
     let dir = std::env::temp_dir().join(format!("ag-git-plain-{}", uuid::Uuid::new_v4()));

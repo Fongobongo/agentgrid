@@ -123,6 +123,9 @@ impl Store {
         let status = req.status.unwrap_or(NodeStatus::Online);
         let adapters = serde_json::to_string(&req.adapters)?;
         let repos = serde_json::to_string(&req.repositories)?;
+        // Plan 2.5 (#204): per-repository attach state as a JSON array —
+        // same storage shape as `adapters`/`repositories` above.
+        let repo_states = serde_json::to_string(&req.repo_states)?;
         let now = now_iso();
         let affected = sqlx::query(
             "UPDATE nodes SET name = ?, \
@@ -131,7 +134,7 @@ impl Store {
                load_avg = ?, free_disk_mb = ?, free_memory_mb = ?, cpu_count = ?, mem_available_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
                outbox_bytes = ?, artifact_spool_bytes = ?, \
-               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ? \
+               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ? \
              WHERE id = ?",
         )
         // active_attempts is intentionally not heartbeat-settable: it is the
@@ -168,6 +171,8 @@ impl Store {
         .bind(req.max_rss_mib as i64)
         // Plan 6.11: systemd transient-scope capability.
         .bind(req.systemd_scope_supported as i64)
+        // Plan 2.5 (#204): per-repository attach state (JSON array).
+        .bind(&repo_states)
         .bind(node_id)
         .execute(&self.pool)
         .await?

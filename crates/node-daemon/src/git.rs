@@ -202,6 +202,43 @@ impl Drop for FetchLeader {
     }
 }
 
+/// Plan 2.5 (#204): per-mirror attach state (`cloning` → `ready` |
+/// `invalid` + error), reported in the heartbeat so the control plane can
+/// model which repositories are actually usable on a node. Keyed by the
+/// same mirror key as the fetch cohort. Last writer wins per mirror —
+/// concurrent prepares of one repo converge on the final outcome.
+static REPO_ATTACH: OnceLock<Mutex<HashMap<String, agentgrid_common::RepoAttachView>>> =
+    OnceLock::new();
+
+/// Record a mirror's attach state. `error` is capped so a verbose git
+/// failure cannot bloat the heartbeat.
+pub fn set_repo_attach(mirror_key: &str, repo: &str, state: &str, error: &str) {
+    let map = REPO_ATTACH.get_or_init(Mutex::default);
+    if let Ok(mut m) = map.lock() {
+        let mut err = error.to_string();
+        if err.len() > 500 {
+            err.truncate(500);
+        }
+        m.insert(
+            mirror_key.to_string(),
+            agentgrid_common::RepoAttachView {
+                name: repo.to_string(),
+                state: state.to_string(),
+                error: err,
+            },
+        );
+    }
+}
+
+/// Snapshot all known attach states for the heartbeat.
+pub fn repo_attach_snapshot() -> Vec<agentgrid_common::RepoAttachView> {
+    REPO_ATTACH
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Hardening P2 item 35: get configured quota limits from environment.
 /// Returns None if unlimited (env not set or 0).
 fn repo_cache_quota_mb() -> Option<u64> {
@@ -665,6 +702,8 @@ pub fn prepare_workspace(
     // leader); followers and fresh-window prepares skip it. Point-fetches
     // for pinned SHAs further down always run.
     if need_fetch {
+        // Plan 2.5 (#204): the mirror is being (re)attached right now.
+        set_repo_attach(&cohort_key, repo, "cloning", "");
         let res: Result<()> = (|| {
             if repo_dir.join("HEAD").exists() {
                 // Already a bare mirror: refresh all refs.
@@ -701,6 +740,12 @@ pub fn prepare_workspace(
             Ok(())
         })();
         let outcome: FetchOutcome = res.map_err(|e| format!("{e:#}"));
+        // Plan 2.5 (#204): record the attach outcome for the heartbeat —
+        // `ready` on success, `invalid` + cause on failure.
+        match &outcome {
+            Ok(()) => set_repo_attach(&cohort_key, repo, "ready", ""),
+            Err(e) => set_repo_attach(&cohort_key, repo, "invalid", e),
+        }
         // Leader is Some exactly when this prepare joined as leader
         // (Fresh/Follower paths never hold a guard).
         if let Some(g) = leader.take() {

@@ -3339,6 +3339,7 @@ mod mem_gate_tests {
             sandbox_backend: "none".into(),
             enforced_limits: false,
             systemd_scope_supported: false,
+            repo_states: vec![],
             capabilities_schema_version: None,
             supported_event_versions: None,
         }
@@ -3534,5 +3535,48 @@ mod mem_gate_tests {
             reasons.iter().any(|r| r.contains("high load")),
             "expected a high load reason, got {reasons:?}"
         );
+    }
+
+    /// Plan 2.5 (#204): the heartbeat persists per-repository attach state
+    /// and `get_node` surfaces it; the next heartbeat replaces the picture
+    /// (a healed repo goes `invalid` → `ready`, a dropped repo disappears).
+    #[tokio::test]
+    async fn heartbeat_persists_repo_attach_states() {
+        use agentgrid_common::RepoAttachView;
+        let (s, node_id) = fresh().await;
+        let mut req = hb(4096);
+        req.repo_states = vec![
+            RepoAttachView {
+                name: "web".into(),
+                state: "ready".into(),
+                error: "".into(),
+            },
+            RepoAttachView {
+                name: "broken".into(),
+                state: "invalid".into(),
+                error: "clone failed: auth".into(),
+            },
+        ];
+        s.heartbeat(&node_id, &req).await.unwrap();
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(n.repo_states.len(), 2);
+        let broken = n.repo_states.iter().find(|r| r.name == "broken").unwrap();
+        assert_eq!(broken.state, "invalid");
+        assert_eq!(broken.error, "clone failed: auth");
+        // Next heartbeat replaces the whole picture.
+        let mut req = hb(4096);
+        req.repo_states = vec![RepoAttachView {
+            name: "broken".into(),
+            state: "ready".into(),
+            error: "".into(),
+        }];
+        s.heartbeat(&node_id, &req).await.unwrap();
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(n.repo_states.len(), 1);
+        assert_eq!(n.repo_states[0].state, "ready");
+        // And list_nodes carries the states too.
+        let all = s.list_nodes(None, None).await.unwrap();
+        let n = all.iter().find(|x| x.id == node_id).unwrap();
+        assert_eq!(n.repo_states.len(), 1);
     }
 }

@@ -579,6 +579,22 @@ pub struct NodeView {
     /// Hardening P2 item 659: node-level network mode (`none` | `restricted` | `unrestricted`).
     #[serde(default = "default_network_mode")]
     pub network_mode: String,
+    /// Plan 2.5 (#204): per-repository attach state on this node
+    /// (`cloning` | `ready` | `invalid` + error text). Empty on legacy
+    /// nodes (unknown — not invalid).
+    #[serde(default)]
+    pub repo_states: Vec<RepoAttachView>,
+}
+
+/// Plan 2.5 (#204): one repository's attach state on a node. `state` is
+/// `cloning` (a clone/fetch is in flight), `ready` (mirror usable) or
+/// `invalid` (last clone/fetch failed — `error` names the cause).
+/// A plain string (not an enum) so future states stay wire-compatible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoAttachView {
+    pub name: String,
+    pub state: String,
+    pub error: String,
 }
 
 fn default_network_mode() -> String {
@@ -978,6 +994,10 @@ pub struct HeartbeatRequest {
     /// legacy nodes (defaults to false — the scope backend is optional).
     #[serde(default)]
     pub systemd_scope_supported: bool,
+    /// Plan 2.5 (#204): per-repository attach state (`cloning` | `ready` |
+    /// `invalid` + error text). Absent on legacy nodes (empty — unknown).
+    #[serde(default)]
+    pub repo_states: Vec<RepoAttachView>,
     /// Hardening P2 item 35: repository cache size in bytes. 0 on legacy nodes.
     #[serde(default)]
     pub repo_cache_bytes: u64,
@@ -1832,6 +1852,7 @@ mod tests {
             sandbox_backend: "none".into(),
             enforced_limits: false,
             systemd_scope_supported: false,
+            repo_states: vec![],
             repo_cache_bytes: 0,
             workspace_bytes: 0,
             network_mode: "none".into(),

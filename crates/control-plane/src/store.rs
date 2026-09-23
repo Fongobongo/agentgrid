@@ -483,7 +483,7 @@ impl Store {
         const MAX_NODES: i64 = 1000;
         let limit = limit.unwrap_or(100).min(MAX_NODES as u64) as i64;
         let mut sql = String::from(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states \
              FROM nodes WHERE 1=1",
         );
         if after.is_some() {
@@ -503,7 +503,7 @@ impl Store {
     /// `None` when the id is unknown.
     pub async fn get_node(&self, node_id: &str) -> Result<Option<NodeView>> {
         let row = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
@@ -895,6 +895,14 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
         enforced_limits: r.try_get::<i64, _>("enforced_limits").unwrap_or(0) != 0,
         // Plan 6.11: optional systemd transient-scope capability.
         systemd_scope_supported: r.try_get::<i64, _>("systemd_scope_supported").unwrap_or(0) != 0,
+        // Plan 2.5 (#204): per-repository attach state (JSON array; empty
+        // when unknown). A corrupt blob degrades to empty, never to a
+        // failed node listing.
+        repo_states: r
+            .try_get::<String, _>("repo_states")
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
         drained: r.try_get::<i64, _>("drained").unwrap_or(0) != 0,
         repo_cache_bytes: r.try_get::<i64, _>("repo_cache_bytes").unwrap_or(0) as u64,
         workspace_bytes: r.try_get::<i64, _>("workspace_bytes").unwrap_or(0) as u64,

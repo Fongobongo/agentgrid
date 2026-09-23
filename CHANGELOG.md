@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Per-repository attach states (Plan 2.5 #204).** The node tracks each
+  mirror as `cloning` → `ready` | `invalid` (+ error text, capped at 500
+  chars) and reports the picture in every heartbeat; the control plane
+  persists it (`nodes.repo_states` JSON column, migration 0087) and
+  surfaces it in `NodeView` (`GET /v1/nodes`, `GET /v1/nodes/{id}`), so
+  operators can see which repositories are actually usable on a node
+  instead of guessing from failed attempts. `ag nodes list` gains a
+  `REPOS` column (`ready/total`, `!` when any repo is cloning/invalid).
+  Covered by `repo_attach_snapshot_round_trips_and_truncates`,
+  `prepare_records_repo_attach_ready_and_invalid` and
+  `heartbeat_persists_repo_attach_states`.
+
 - **Local-path repository sources validated up front (Plan 2.5).** A
   `git_url` that is a local filesystem path (no `://` scheme, not
   scp-like) is now validated before any clone: the path must be a git
