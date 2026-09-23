@@ -4,6 +4,26 @@
 
 ### Added
 
+- **Fetch cohort: one bulk fetch per starting task group (Plan 6.8).**
+  Concurrently starting tasks of one mirror used to serialize N identical
+  `git fetch origin --prune` runs behind the repo lock (a 4-worker
+  parallel step fetched 4 times in a row). Now the first prepare becomes
+  the cohort leader and performs the fetch; prepares arriving while it is
+  in flight wait on its outcome and skip their own, and a prepare landing
+  within `AGENTGRID_FETCH_COHORT_SECS` (default 30s, 0 disables) of a
+  successful fetch skips the bulk refresh too. The leader failure path
+  falls back to an own fetch (pre-cohort behavior), a dropped leader
+  unblocks followers via a Drop guard, and point-fetches for pinned
+  `base_commit` / upstream SHAs always run (per-attempt correctness, never
+  coalesced). Cohort waits feed the existing `repo_lock_wait_ms`
+  contention metric. Covered by
+  `fetch_cohort_single_flight_shares_outcome`,
+  `fetch_cohort_leader_failure_unblocks_followers`,
+  `fetch_cohort_window_zero_disables_freshness`,
+  `fetch_cohort_concurrent_prepares_share_one_fetch` (3 workers, 0 bulk
+  fetches during the burst) and
+  `fetch_cohort_fresh_window_skips_then_refetches`.
+
 - **zstd-compressed log artifacts on disk (Plan 6.7).** Log-class
   artifact uploads (`.log` names or `text/*` media types, ≥ 4 KiB) whose
   content compresses by at least 30% are stored as `<name>.zst` on the

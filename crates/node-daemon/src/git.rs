@@ -64,6 +64,144 @@ fn repo_lock(repo: &str) -> std::sync::Arc<Mutex<()>> {
         .clone()
 }
 
+/// Plan 6.8: fetch cohort — concurrently starting tasks of one mirror share
+/// a single bulk `fetch --prune` instead of serializing N identical fetches
+/// behind the repo lock (a 4-worker parallel step used to fetch 4 times in a
+/// row). Two mechanisms:
+///
+/// - single-flight: the first prepare becomes the leader and performs the
+///   fetch; prepares arriving while it is in flight wait on its outcome and
+///   skip their own. A leader failure (or wait timeout) falls back to an own
+///   fetch — the failure path behaves exactly like the pre-cohort code.
+/// - freshness window (`AGENTGRID_FETCH_COHORT_SECS`, default 30s, 0
+///   disables): a prepare landing shortly after a successful fetch skips the
+///   bulk refresh. The mirror is at most `window` seconds stale — fine for
+///   agents (the CP pins exact bases via `base_commit`, whose point-fetch
+///   below always runs and is never coalesced).
+///
+/// Keyed by `repository_root|repo` (the actual mirror), not the bare repo
+/// name, so two roots never share a cohort. Point-fetches for
+/// `base_commit` / upstream SHAs are per-attempt correctness and always run.
+type FetchOutcome = Result<(), String>;
+
+struct FetchFlight {
+    waiters: Mutex<Vec<std::sync::mpsc::Sender<FetchOutcome>>>,
+}
+
+static FETCH_FLIGHTS: OnceLock<Mutex<HashMap<String, std::sync::Arc<FetchFlight>>>> =
+    OnceLock::new();
+static FETCH_LAST_OK: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
+
+enum CohortJoin {
+    Leader(FetchLeader),
+    Follower(std::sync::mpsc::Receiver<FetchOutcome>),
+    Fresh,
+}
+
+fn fetch_cohort_secs() -> u64 {
+    std::env::var("AGENTGRID_FETCH_COHORT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30)
+}
+
+fn fetch_cohort_wait_secs() -> u64 {
+    std::env::var("AGENTGRID_FETCH_COHORT_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600)
+}
+
+fn join_fetch_cohort(key: &str) -> CohortJoin {
+    // Freshness window: a recent successful fetch covers this prepare.
+    if fetch_cohort_secs() > 0 {
+        if let Some(map) = FETCH_LAST_OK.get() {
+            if let Ok(m) = map.lock() {
+                if let Some(t) = m.get(key) {
+                    if t.elapsed().as_secs() < fetch_cohort_secs() {
+                        return CohortJoin::Fresh;
+                    }
+                }
+            }
+        }
+    }
+    let map = FETCH_FLIGHTS.get_or_init(Mutex::default);
+    let mut m = map.lock().unwrap();
+    if let Some(flight) = m.get(key) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        flight.waiters.lock().unwrap().push(tx);
+        return CohortJoin::Follower(rx);
+    }
+    let flight = std::sync::Arc::new(FetchFlight {
+        waiters: Mutex::new(Vec::new()),
+    });
+    m.insert(key.to_string(), flight.clone());
+    CohortJoin::Leader(FetchLeader {
+        key: key.to_string(),
+        flight,
+        done: false,
+    })
+}
+
+fn finish_flight(key: &str, flight: &std::sync::Arc<FetchFlight>, outcome: FetchOutcome) {
+    if let Some(map) = FETCH_FLIGHTS.get() {
+        if let Ok(mut m) = map.lock() {
+            // Remove only our own flight: a newer leader can only exist
+            // after we removed, but ptr_eq makes a double-complete airtight.
+            if m.get(key)
+                .map(|f| std::sync::Arc::ptr_eq(f, flight))
+                .unwrap_or(false)
+            {
+                m.remove(key);
+            }
+        }
+    }
+    if outcome.is_ok() {
+        let map = FETCH_LAST_OK.get_or_init(Mutex::default);
+        if let Ok(mut m) = map.lock() {
+            m.insert(key.to_string(), std::time::Instant::now());
+        }
+    }
+    let waiters = flight
+        .waiters
+        .lock()
+        .map(|mut w| std::mem::take(&mut *w))
+        .unwrap_or_default();
+    for tx in waiters {
+        // A gone receiver means the follower timed out and went ahead on
+        // its own — nothing to deliver.
+        let _ = tx.send(outcome.clone());
+    }
+}
+
+struct FetchLeader {
+    key: String,
+    flight: std::sync::Arc<FetchFlight>,
+    done: bool,
+}
+
+impl FetchLeader {
+    fn complete(mut self, outcome: FetchOutcome) {
+        self.done = true;
+        finish_flight(&self.key, &self.flight, outcome);
+    }
+}
+
+impl Drop for FetchLeader {
+    fn drop(&mut self) {
+        if !self.done {
+            // Panic or an early `?` before complete(): unblock followers with
+            // an error so they fall back to their own fetch (pre-cohort
+            // behavior), and release the flight slot.
+            finish_flight(
+                &self.key,
+                &self.flight,
+                Err("fetch leader dropped before completing".to_string()),
+            );
+        }
+    }
+}
+
 /// Hardening P2 item 35: get configured quota limits from environment.
 /// Returns None if unlimited (env not set or 0).
 fn repo_cache_quota_mb() -> Option<u64> {
@@ -400,6 +538,38 @@ pub fn prepare_workspace(
 
     // Stage 2.3: serialize shared bare-mirror mutations (fetch / worktree
     // add) per repository across concurrent attempts.
+    // Plan 6.8: join the fetch cohort BEFORE taking the lock — followers
+    // wait on the leader's outcome holding no locks, then serialize only
+    // for the (fast, local) worktree add.
+    let cohort_key = format!("{}|{repo}", repository_root.display());
+    let mut need_fetch = true;
+    let mut leader: Option<FetchLeader> = None;
+    match join_fetch_cohort(&cohort_key) {
+        CohortJoin::Leader(g) => {
+            leader = Some(g);
+        }
+        CohortJoin::Follower(rx) => {
+            let waited = std::time::Instant::now();
+            match rx.recv_timeout(std::time::Duration::from_secs(fetch_cohort_wait_secs())) {
+                Ok(Ok(())) => {
+                    need_fetch = false;
+                    tracing::debug!(repo = %repo, "fetch cohort: leader refreshed the mirror; skipping own fetch");
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(repo = %repo, leader_err = %e, "fetch cohort: leader failed; attempting own fetch");
+                }
+                Err(_) => {
+                    tracing::debug!(repo = %repo, "fetch cohort: wait timed out or leader gone; attempting own fetch");
+                }
+            }
+            REPO_LOCK_WAIT_MS.fetch_add(waited.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
+        CohortJoin::Fresh => {
+            need_fetch = false;
+            tracing::debug!(repo = %repo, "fetch cohort: mirror refreshed recently; skipping fetch");
+        }
+    }
+
     let _repo_arc = repo_lock(repo);
     // Hardening P2 item 35: account block time waiting on the per-repo lock
     // so an operator can alert on repository contention.
@@ -414,35 +584,52 @@ pub fn prepare_workspace(
     // between parallel attempts using different default branches/commits).
     // All refs are mirrored under the same names (`refs/heads/main` etc.), so
     // the default branch is addressed by `db` directly (no `origin/` prefix).
-    if repo_dir.join("HEAD").exists() {
-        // Already a bare mirror: refresh all refs.
-        git(&repo_dir, &["fetch", "origin", "--prune"])?;
-        // Hardening P2 item 35: check repo cache quota after fetch.
-        update_quota_metrics(repository_root, workspace_root);
-        if let Ok(size) = dir_size(repository_root) {
-            check_repo_cache_quota(size.saturating_sub(REPO_CACHE_BYTES.load(Ordering::Relaxed)))?;
-            REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
+    // Plan 6.8: the bulk refresh below runs at most once per cohort (the
+    // leader); followers and fresh-window prepares skip it. Point-fetches
+    // for pinned SHAs further down always run.
+    if need_fetch {
+        let res: Result<()> = (|| {
+            if repo_dir.join("HEAD").exists() {
+                // Already a bare mirror: refresh all refs.
+                git(&repo_dir, &["fetch", "origin", "--prune"])?;
+                // Hardening P2 item 35: check repo cache quota after fetch.
+                update_quota_metrics(repository_root, workspace_root);
+                if let Ok(size) = dir_size(repository_root) {
+                    check_repo_cache_quota(
+                        size.saturating_sub(REPO_CACHE_BYTES.load(Ordering::Relaxed)),
+                    )?;
+                    REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
+                }
+            } else {
+                // Audit X-N7: a clone killed mid-write leaves a populated directory
+                // without HEAD; `clone --mirror` refuses a non-empty destination, so
+                // every future attempt of this repo would fail until an operator
+                // removed it by hand. Detect the partial state and re-clone fresh.
+                if repo_dir.exists() {
+                    tracing::warn!(
+                        repo = %repo,
+                        dir = %repo_dir.display(),
+                        "partial mirror clone detected (no HEAD); removing and re-cloning"
+                    );
+                    std::fs::remove_dir_all(&repo_dir)?;
+                }
+                std::fs::create_dir_all(repository_root)?;
+                git(repository_root, &["clone", "--mirror", gurl, repo])?;
+                // Hardening P2 item 35: check repo cache quota after clone.
+                if let Ok(size) = dir_size(repository_root) {
+                    check_repo_cache_quota(size)?;
+                    REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
+                }
+            }
+            Ok(())
+        })();
+        let outcome: FetchOutcome = res.map_err(|e| format!("{e:#}"));
+        // Leader is Some exactly when this prepare joined as leader
+        // (Fresh/Follower paths never hold a guard).
+        if let Some(g) = leader.take() {
+            g.complete(outcome.clone());
         }
-    } else {
-        // Audit X-N7: a clone killed mid-write leaves a populated directory
-        // without HEAD; `clone --mirror` refuses a non-empty destination, so
-        // every future attempt of this repo would fail until an operator
-        // removed it by hand. Detect the partial state and re-clone fresh.
-        if repo_dir.exists() {
-            tracing::warn!(
-                repo = %repo,
-                dir = %repo_dir.display(),
-                "partial mirror clone detected (no HEAD); removing and re-cloning"
-            );
-            std::fs::remove_dir_all(&repo_dir)?;
-        }
-        std::fs::create_dir_all(repository_root)?;
-        git(repository_root, &["clone", "--mirror", gurl, repo])?;
-        // Hardening P2 item 35: check repo cache quota after clone.
-        if let Ok(size) = dir_size(repository_root) {
-            check_repo_cache_quota(size)?;
-            REPO_CACHE_BYTES.store(size, Ordering::Relaxed);
-        }
+        outcome.map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
     // Stage 8: if a fixed base_commit is requested, every attempt of this step

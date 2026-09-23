@@ -587,7 +587,7 @@
 - [x] Не выполнять полный clone для каждого attempt  — worktrees from mirror
 - [x] Создавать worktrees через общую Git object database  — bare-mirror + `git worktree add`
 - [x] Сериализовать `git fetch` mutex/file lock-ом на repository  — `repo_lock` per-repo `Mutex`
-- [ ] Объединять fetch для группы одновременно стартующих задач  — single lock, не объединяет
+- [x] Объединять fetch для группы одновременно стартующих задач  — fetch cohort (single-flight + freshness window `AGENTGRID_FETCH_COHORT_SECS` default 30s): лидер выполняет bulk `fetch --prune`, конкуренты ждут outcome и пропускают свой; падение лидера → собственный fetch (старое поведение); Drop-guard разблокирует followers; point-fetch pinned SHAs всегда выполняются; тесты `fetch_cohort_*` (5 шт., включая детерминированный «3 prepares → 0 fetches» и «skip → refetch при window=0»)
 - [x] Не запускать `git gc`/maintenance во время активных attempts репозитория
 - [x] Запускать Git maintenance только в idle window  — `prune_stale_workspaces` on startup
 - [x] Удалять старые worktrees и ветки пакетно  — `AGENTS.md` retention; `git worktree prune`+`git branch -D` per-attempt + startup

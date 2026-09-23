@@ -62,6 +62,43 @@ fn make_assignment(git_url: &str, default_branch: &str) -> Assignment {
     }
 }
 
+/// Plan 6.8 test helper: same repo, distinct attempt/task ids (distinct
+/// worktree dirs + branches).
+fn make_attempt(git_url: &str, branch: &str, attempt_id: &str, task_id: &str) -> Assignment {
+    let mut a = make_assignment(git_url, branch);
+    a.attempt_id = attempt_id.to_string();
+    a.task_id = task_id.to_string();
+    a
+}
+
+/// Plan 6.8 test helper: commit a file in the origin repo.
+fn commit_file(origin: &std::path::Path, name: &str, content: &str, msg: &str) {
+    std::fs::write(origin.join(name), content).unwrap();
+    git(origin, &["add", "-A"]).unwrap();
+    git(
+        origin,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@x",
+            "commit",
+            "-q",
+            "-m",
+            msg,
+        ],
+    )
+    .unwrap();
+}
+
+fn init_origin(dir: &std::path::Path) -> std::path::PathBuf {
+    hermetic_git_config();
+    let origin = dir.join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]).unwrap();
+    origin
+}
+
 #[test]
 fn plain_dir_has_no_commit() {
     let dir = std::env::temp_dir().join(format!("ag-git-plain-{}", uuid::Uuid::new_v4()));
@@ -391,6 +428,217 @@ fn parallel_prep_same_repo_does_not_race() {
     }
     assert_eq!(ok, 4, "all parallel prepares must succeed");
     assert_eq!(paths.len(), 4, "four distinct worktrees");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- Plan 6.8: fetch cohort (single-flight + freshness window) ----
+
+/// Plan 6.8: the cohort primitive — one leader, N followers sharing its
+/// outcome; a completed fetch opens the freshness window; window=0
+/// disables the window (single-flight only). No git involved.
+#[test]
+fn fetch_cohort_single_flight_shares_outcome() {
+    let key = format!("cohort-prim-{}", uuid::Uuid::new_v4());
+    // First joiner becomes the leader.
+    let leader = match join_fetch_cohort(&key) {
+        CohortJoin::Leader(g) => g,
+        _ => panic!("first joiner must be the leader"),
+    };
+    // While the flight is open, joiners become followers.
+    let mut rxs = vec![];
+    for _ in 0..3 {
+        match join_fetch_cohort(&key) {
+            CohortJoin::Follower(rx) => rxs.push(rx),
+            _ => panic!("concurrent joiner must be a follower"),
+        }
+    }
+    leader.complete(Ok(()));
+    for rx in rxs {
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(Ok(())),
+            "follower must receive the leader outcome"
+        );
+    }
+    // A completed fetch opens the freshness window: the next join skips.
+    match join_fetch_cohort(&key) {
+        CohortJoin::Fresh => {}
+        _ => panic!("recent successful fetch must open the Fresh window"),
+    }
+}
+
+#[test]
+fn fetch_cohort_leader_failure_unblocks_followers() {
+    let key = format!("cohort-fail-{}", uuid::Uuid::new_v4());
+    let leader = match join_fetch_cohort(&key) {
+        CohortJoin::Leader(g) => g,
+        _ => panic!("first joiner must be the leader"),
+    };
+    let rx = match join_fetch_cohort(&key) {
+        CohortJoin::Follower(rx) => rx,
+        _ => panic!("concurrent joiner must be a follower"),
+    };
+    leader.complete(Err("boom".to_string()));
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(Err("boom".to_string())),
+        "follower must receive the leader failure and fall back to its own fetch"
+    );
+    // A failed fetch records no timestamp: the next join fetches again.
+    match join_fetch_cohort(&key) {
+        CohortJoin::Leader(_) => {}
+        _ => panic!("failed fetch must not open the Fresh window"),
+    }
+}
+
+#[test]
+fn fetch_cohort_window_zero_disables_freshness() {
+    // AGENTGRID_FETCH_COHORT_SECS is process-global, but the window only
+    // affects keys WITH a recorded fetch; every other test uses unique
+    // mirror paths with no timestamp, so they always join as Leader and
+    // behave exactly as before.
+    let key = format!("cohort-w0-{}", uuid::Uuid::new_v4());
+    let leader = match join_fetch_cohort(&key) {
+        CohortJoin::Leader(g) => g,
+        _ => panic!("first joiner must be the leader"),
+    };
+    leader.complete(Ok(()));
+    std::env::set_var("AGENTGRID_FETCH_COHORT_SECS", "0");
+    let join = join_fetch_cohort(&key);
+    std::env::remove_var("AGENTGRID_FETCH_COHORT_SECS");
+    match join {
+        CohortJoin::Leader(_) => {}
+        _ => panic!("window=0 must disable the Fresh path"),
+    }
+}
+
+/// Plan 6.8 wiring: N concurrent prepares against one mirror run ZERO bulk
+/// fetches when a fetch is already in flight — the test thread holds the
+/// flight open as leader, workers join as followers, and the mirror refs
+/// prove no fetch ran (a new origin commit stays invisible) while every
+/// worktree still materializes.
+#[test]
+fn fetch_cohort_concurrent_prepares_share_one_fetch() {
+    hermetic_git_config();
+    let dir = std::env::temp_dir().join(format!("ag-git-cohort-{}", uuid::Uuid::new_v4()));
+    let origin = init_origin(&dir);
+    commit_file(&origin, "base.txt", "base", "init");
+    let repos = dir.join("repos");
+    let ws_root = dir.join("ws");
+    let url = origin.to_str().unwrap().to_string();
+
+    // Prepare #0 clones the mirror; the bulk fetch timestamp is recorded.
+    let a0 = make_attempt(&url, "main", "att-0", "task-0");
+    prepare_workspace(&repos, &ws_root, &a0, &[], &[]).unwrap();
+    let mirror = repos.join("repo");
+    let c0 = git_out(&mirror, &["rev-parse", "refs/heads/main"]).unwrap();
+    // A new origin commit AFTER the clone: any bulk fetch would pick it up.
+    commit_file(&origin, "new.txt", "new", "c1");
+
+    // Hold the flight open as leader; workers must join as followers.
+    // prepare #0 recorded a freshness timestamp, so disable the window for
+    // the manual join (single-flight stays active) — otherwise this join
+    // would itself return Fresh.
+    std::env::set_var("AGENTGRID_FETCH_COHORT_SECS", "0");
+    let key = format!("{}|repo", repos.display());
+    let leader = match join_fetch_cohort(&key) {
+        CohortJoin::Leader(g) => g,
+        _ => panic!("test thread must become the cohort leader (stale flight?)"),
+    };
+    let mut handles = vec![];
+    for n in 1..=3u32 {
+        let repos = repos.clone();
+        let ws_root = ws_root.clone();
+        let url = url.clone();
+        handles.push(std::thread::spawn(move || {
+            let a = make_attempt(&url, "main", &format!("att-{n}"), &format!("task-{n}"));
+            prepare_workspace(&repos, &ws_root, &a, &[], &[])
+        }));
+    }
+    // Wait until all three workers registered as waiters (30s cap — fail
+    // loudly instead of hanging if a worker never joins).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let n = FETCH_FLIGHTS
+            .get()
+            .and_then(|m| m.lock().ok())
+            .and_then(|m| m.get(&key).map(|f| f.waiters.lock().unwrap().len()))
+            .unwrap_or(0);
+        if n >= 3 {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("workers did not join the cohort flight in time");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    leader.complete(Ok(()));
+    std::env::remove_var("AGENTGRID_FETCH_COHORT_SECS");
+    let mut paths = std::collections::HashSet::new();
+    for h in handles {
+        let ws = h.join().unwrap().expect("follower prepare must succeed");
+        assert!(paths.insert(ws.path.clone()), "duplicate worktree path");
+    }
+    assert_eq!(paths.len(), 3, "three distinct worktrees");
+    // No bulk fetch ran during the burst: the new origin commit is still
+    // invisible in the mirror.
+    let main_after = git_out(&mirror, &["rev-parse", "refs/heads/main"]).unwrap();
+    assert_eq!(
+        main_after, c0,
+        "mirror must be untouched — followers skipped their fetch"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Plan 6.8 wiring: the freshness window skips the bulk refresh for a
+/// prepare landing right after a fetch (mirror stays at the old HEAD),
+/// while window=0 restores the always-fetch behavior.
+#[test]
+fn fetch_cohort_fresh_window_skips_then_refetches() {
+    hermetic_git_config();
+    let dir = std::env::temp_dir().join(format!("ag-git-cohortw-{}", uuid::Uuid::new_v4()));
+    let origin = init_origin(&dir);
+    commit_file(&origin, "base.txt", "base", "init");
+    let repos = dir.join("repos");
+    let ws_root = dir.join("ws");
+    let url = origin.to_str().unwrap().to_string();
+
+    let a0 = make_attempt(&url, "main", "att-0", "task-0");
+    prepare_workspace(&repos, &ws_root, &a0, &[], &[]).unwrap();
+    let mirror = repos.join("repo");
+    let c0 = git_out(&mirror, &["rev-parse", "refs/heads/main"]).unwrap();
+    commit_file(&origin, "new.txt", "new", "c1");
+    let c1 = git_out(&origin, &["rev-parse", "HEAD"]).unwrap();
+    assert_ne!(c0, c1);
+
+    // Immediately after: bulk fetch skipped, worktree pins the stale mirror.
+    let a1 = make_attempt(&url, "main", "att-1", "task-1");
+    let ws1 = prepare_workspace(&repos, &ws_root, &a1, &[], &[]).unwrap();
+    assert_eq!(
+        git_out(&mirror, &["rev-parse", "refs/heads/main"]).unwrap(),
+        c0,
+        "fresh-window prepare must skip the bulk fetch"
+    );
+    assert_eq!(
+        git_out(&ws1.path, &["rev-parse", "HEAD"]).unwrap(),
+        c0,
+        "worktree pins the (stale) mirrored HEAD"
+    );
+    // window=0: the next prepare fetches and lands the new commit.
+    std::env::set_var("AGENTGRID_FETCH_COHORT_SECS", "0");
+    let a2 = make_attempt(&url, "main", "att-2", "task-2");
+    let ws2 = prepare_workspace(&repos, &ws_root, &a2, &[], &[]).unwrap();
+    std::env::remove_var("AGENTGRID_FETCH_COHORT_SECS");
+    assert_eq!(
+        git_out(&mirror, &["rev-parse", "refs/heads/main"]).unwrap(),
+        c1,
+        "window=0 prepare must refresh the mirror"
+    );
+    assert_eq!(
+        git_out(&ws2.path, &["rev-parse", "HEAD"]).unwrap(),
+        c1,
+        "worktree pins the refreshed HEAD"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
