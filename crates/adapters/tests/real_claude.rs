@@ -57,7 +57,8 @@ async fn claude_creates_file_in_mini_repo() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir: PathBuf = std::env::temp_dir().join(format!("ag-real-claude-{}-{nanos}", std::process::id()));
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("ag-real-claude-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     git(&dir, &["init", "-q", "-b", "main"]);
     std::fs::write(dir.join("base.txt"), "base\n").unwrap();
@@ -90,7 +91,7 @@ async fn claude_creates_file_in_mini_repo() {
         .env("AGENTGRID_UNSAFE_UNATTENDED", "1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().expect("adapter-claude must spawn");
+    let child = cmd.spawn().expect("adapter-claude must spawn");
     let out = tokio::time::timeout(Duration::from_secs(300), child.wait_with_output())
         .await
         .expect("real claude call must finish within 300s")
