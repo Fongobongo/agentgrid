@@ -99,6 +99,60 @@ fn init_origin(dir: &std::path::Path) -> std::path::PathBuf {
     origin
 }
 
+// ---- Plan 2.5: local-path sources ----
+
+#[test]
+fn local_path_validates_repo_and_branch() {
+    hermetic_git_config();
+    let dir = std::env::temp_dir().join(format!("ag-git-local-{}", uuid::Uuid::new_v4()));
+    let origin = init_origin(&dir);
+    commit_file(&origin, "base.txt", "base", "init");
+    let url = origin.to_str().unwrap().to_string();
+    let repos = dir.join("repos");
+    let ws = dir.join("ws");
+
+    // A non-repository directory fails closed with a clear error.
+    let not_repo = dir.join("not-a-repo");
+    std::fs::create_dir_all(&not_repo).unwrap();
+    let mut a = make_assignment(not_repo.to_str().unwrap(), "main");
+    let err = prepare_workspace(&repos, &ws, &a, &[], &[]).unwrap_err();
+    assert!(
+        err.to_string().contains("not a git repository"),
+        "must name the problem: {err}"
+    );
+
+    // A repository without the requested branch fails closed.
+    a = make_assignment(&url, "no-such-branch");
+    let err = prepare_workspace(&repos, &ws, &a, &[], &[]).unwrap_err();
+    assert!(
+        err.to_string().contains("has no branch"),
+        "must name the missing branch: {err}"
+    );
+
+    // A valid local repo + branch works end to end (clone from disk).
+    a = make_assignment(&url, "main");
+    let w = prepare_workspace(&repos, &ws, &a, &[], &[]).unwrap();
+    assert!(w.is_git);
+    assert!(w.path.join("base.txt").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn scp_like_detection() {
+    // scp-like remotes skip local validation (they reach git as-is).
+    assert!(is_scp_like("git@github.com:org/repo.git"));
+    assert!(is_scp_like("host:path/to/repo"));
+    assert!(is_scp_like("user@host.x:repo.git"));
+    // URLs with schemes, plain paths and Windows drives are not scp-like.
+    assert!(!is_scp_like("https://github.com/org/repo.git"));
+    assert!(!is_scp_like("ssh://git@github.com/org/repo.git"));
+    assert!(!is_scp_like("/srv/repos/foo"));
+    assert!(!is_scp_like("./relative/repo"));
+    assert!(!is_scp_like("C:/repos/foo"));
+    assert!(!is_scp_like("C:\\repos\\foo"));
+    assert!(!is_scp_like("ext::helper arg"));
+}
+
 #[test]
 fn plain_dir_has_no_commit() {
     let dir = std::env::temp_dir().join(format!("ag-git-plain-{}", uuid::Uuid::new_v4()));

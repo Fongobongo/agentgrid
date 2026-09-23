@@ -360,6 +360,7 @@ impl Drop for RepoFlock {
     }
 }
 
+#[derive(Debug)]
 pub struct Workspace {
     /// Directory the adapter runs in.
     pub path: PathBuf,
@@ -467,6 +468,79 @@ fn validate_token(s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Plan 2.5 (local-path sources): a `git_url` that is a local filesystem
+/// path (no `://` scheme, not scp-like `[user@]host:path`) must be validated
+/// up front — it is a git repository and it carries the requested default
+/// branch — instead of failing deep inside `clone --mirror` with a generic
+/// git error. Non-local URLs and non-existent local paths skip validation
+/// (a scp-like remote that merely *looks* local must still reach git, which
+/// reports its own error).
+fn validate_local_source(git_url: &str, default_branch: &str) -> Result<()> {
+    if git_url.contains("://") || is_scp_like(git_url) {
+        return Ok(());
+    }
+    let path = Path::new(git_url);
+    if !path.exists() {
+        return Ok(());
+    }
+    // It exists locally: it must be a git repository...
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(path)
+        .output();
+    match git_dir {
+        Ok(o) if o.status.success() => {}
+        _ => anyhow::bail!("local git_url {git_url:?} exists but is not a git repository"),
+    }
+    // ...carrying the requested default branch.
+    validate_token(default_branch)?;
+    let branch_ok = Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{default_branch}"),
+        ])
+        .current_dir(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !branch_ok {
+        anyhow::bail!(
+            "local git_url {git_url:?} has no branch {default_branch:?} \
+             (not a branch in the source repository)"
+        );
+    }
+    Ok(())
+}
+
+/// True for scp-like `[user@]host:path` remotes: a colon before the first
+/// slash (git's own rule), excluding Windows drive-letter paths (`C:\…` /
+/// `C:/…`) which are local.
+fn is_scp_like(s: &str) -> bool {
+    // A scheme (`://`) is never scp-like — git treats it as an explicit URL.
+    // The `ext::`/`fd::` transports are helpers, not `[user@]host:path`
+    // remotes (validate_git_url rejects them outright anyway).
+    let lower = s.to_ascii_lowercase();
+    if s.contains("://") || lower.starts_with("ext::") || lower.starts_with("fd::") {
+        return false;
+    }
+    // Windows drive letter: `C:` + `/` or `\` → local, not scp-like.
+    let mut chars = s.chars();
+    if let (Some(d), Some(':')) = (chars.next(), chars.next()) {
+        if d.is_ascii_alphabetic() {
+            let rest = &s[2..];
+            if rest.starts_with('/') || rest.starts_with('\\') {
+                return false;
+            }
+        }
+    }
+    match s.find(':') {
+        Some(colon) => !s[..colon].contains('/'),
+        None => false,
+    }
+}
+
 /// Reject a git URL that embeds shell metacharacters (defense-in-depth; the URL
 /// is passed as a single git argument, not through a shell). Whitespace is
 /// refused too (git treats spaces in scp-like URLs as argument separators),
@@ -529,6 +603,9 @@ pub fn prepare_workspace(
     validate_token(&assignment.task_id)?;
     validate_token(&assignment.default_branch)?;
     validate_git_url(&assignment.git_url)?;
+    // Plan 2.5: a local-path source is validated up front (is a git repo,
+    // carries the requested branch) with a clear error.
+    validate_local_source(&assignment.git_url, &assignment.default_branch)?;
 
     let repo_dir = repository_root.join(&assignment.repository);
     let branch = format!("agent/{}/{}", assignment.task_id, assignment.number);

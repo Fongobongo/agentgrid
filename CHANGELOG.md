@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Local-path repository sources validated up front (Plan 2.5).** A
+  `git_url` that is a local filesystem path (no `://` scheme, not
+  scp-like) is now validated before any clone: the path must be a git
+  repository and must carry the requested default branch, otherwise
+  `prepare_workspace` fails closed with a clear error (`not a git
+  repository` / `has no branch`) instead of a generic git failure deep
+  inside `clone --mirror`. Non-local URLs and not-yet-existing paths
+  skip validation and reach git unchanged. Covered by
+  `local_path_validates_repo_and_branch` and `scp_like_detection`.
+
 - **Fetch cohort: one bulk fetch per starting task group (Plan 6.8).**
   Concurrently starting tasks of one mirror used to serialize N identical
   `git fetch origin --prune` runs behind the repo lock (a 4-worker
