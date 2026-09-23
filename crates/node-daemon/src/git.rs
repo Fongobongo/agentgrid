@@ -472,6 +472,47 @@ fn git_out_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(v)
 }
 
+/// Plan 2.5: initialize worktree submodules. The fast path (no
+/// `.gitmodules`) costs one stat and no git invocation. Otherwise the
+/// submodules are updated recursively; any failure bails with a clear
+/// submodule-naming error instead of leaving hollow directories behind.
+fn init_worktree_submodules(ws: &Path) -> Result<()> {
+    if !ws.join(".gitmodules").exists() {
+        return Ok(());
+    }
+    let status = Command::new("git")
+        .args(["submodule", "status"])
+        .current_dir(ws)
+        .output();
+    let has_submodules = match status {
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        // `status` itself failed: assume submodules are present and let the
+        // init below produce the actionable error.
+        _ => true,
+    };
+    if !has_submodules {
+        return Ok(());
+    }
+    match Command::new("git")
+        .args(["submodule", "update", "--init", "--recursive"])
+        .current_dir(ws)
+        .output()
+    {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => {
+            let mut detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if detail.len() > 300 {
+                detail.truncate(300);
+            }
+            anyhow::bail!(
+                "repository uses git submodules that could not be initialized \
+                 (the worktree would contain empty submodule directories): {detail}"
+            )
+        }
+        Err(e) => anyhow::bail!("failed to initialize git submodules: {e}"),
+    }
+}
+
 /// Per-worktree path to git's `info/exclude`, resolved via `git rev-parse`
 /// so linked worktrees get their own gitdir-scoped file, not the shared clone's.
 fn worktree_git_info_exclude(ws: &Path) -> Option<PathBuf> {
@@ -844,6 +885,12 @@ pub fn prepare_workspace(
         check_workspace_quota(size.saturating_sub(WORKSPACE_BYTES.load(Ordering::Relaxed)))?;
         WORKSPACE_BYTES.store(size, Ordering::Relaxed);
     }
+    // Plan 2.5: submodules are initialized, not silently left hollow. A
+    // worktree with empty submodule directories would mislead the agent
+    // (missing sources, phantom build failures); when init fails (no
+    // network in the sandbox, bad URL) the prepare fails closed with a
+    // clear error naming submodules.
+    init_worktree_submodules(&ws)?;
     // Stage 8 / line 239 / line 240: land upstream worker commits into
     // this worktree before the agent runs.
     //  - Integrator: cherry-pick *each* upstream worker commit so the worktree

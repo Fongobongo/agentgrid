@@ -228,6 +228,113 @@ fn prepare_records_repo_attach_ready_and_invalid() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// ---- Plan 2.5: submodules ----
+
+#[test]
+fn prepare_initializes_local_submodule() {
+    // A repository with a (local, offline-capable) submodule prepares with
+    // the submodule content present — not a hollow directory.
+    hermetic_git_config();
+    let dir = std::env::temp_dir().join(format!("ag-git-subok-{}", uuid::Uuid::new_v4()));
+    // The submodule source repo.
+    let sub = dir.join("subsrc");
+    std::fs::create_dir_all(&sub).unwrap();
+    git(&sub, &["init", "-q", "-b", "main"]).unwrap();
+    commit_file(&sub, "inner.txt", "inner", "sub init");
+    // The superproject references it by relative path (resolves against the
+    // superproject remote — a local path here, so no network needed).
+    // Modern git blocks the `file` transport for submodule clones by
+    // default (CVE-2022-39253); allow it for this offline test only. The
+    // var is scoped to this test's git invocations below — every other
+    // test in this suite uses plain local paths (unaffected by the
+    // transport allowlist), and no test touches the network.
+    std::env::set_var("GIT_ALLOW_PROTOCOL", "file");
+    let origin = init_origin(&dir);
+    commit_file(&origin, "base.txt", "base", "init");
+    git(&origin, &["submodule", "add", "-q", "../subsrc", "sub"]).unwrap();
+    git(
+        &origin,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@x",
+            "commit",
+            "-q",
+            "-m",
+            "add submodule",
+        ],
+    )
+    .unwrap();
+
+    let url = origin.to_str().unwrap().to_string();
+    let a = make_assignment(&url, "main");
+    let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
+    std::env::remove_var("GIT_ALLOW_PROTOCOL");
+    assert!(ws.is_git);
+    assert_eq!(
+        std::fs::read_to_string(ws.path.join("sub").join("inner.txt")).unwrap(),
+        "inner",
+        "submodule content must be initialized, not hollow"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prepare_fails_closed_on_unreachable_submodule() {
+    // Plan 2.5 minimum: a submodule that cannot be initialized (no network
+    // in the sandbox, dead URL) fails the prepare with a clear error naming
+    // submodules — never a worktree with hollow directories. The gitlink is
+    // hand-crafted (a real `submodule add` would need the network to clone).
+    hermetic_git_config();
+    let dir = std::env::temp_dir().join(format!("ag-git-subbad-{}", uuid::Uuid::new_v4()));
+    let origin = init_origin(&dir);
+    commit_file(&origin, "base.txt", "base", "init");
+    std::fs::write(
+        origin.join(".gitmodules"),
+        "[submodule \"deadsub\"]\n\tpath = deadsub\n\turl = https://127.0.0.1:1/deadsub.git\n",
+    )
+    .unwrap();
+    git(
+        &origin,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,deadsub",
+        ],
+    )
+    .unwrap();
+    // Stage ONLY .gitmodules: a blanket `add -A` reconciles the index and
+    // drops a gitlink whose path does not exist on disk (verified manually).
+    git(&origin, &["add", ".gitmodules"]).unwrap();
+    git(
+        &origin,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@x",
+            "commit",
+            "-q",
+            "-m",
+            "add dead submodule",
+        ],
+    )
+    .unwrap();
+
+    let url = origin.to_str().unwrap().to_string();
+    let a = make_assignment(&url, "main");
+    let err = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[])
+        .expect_err("uninitializable submodule must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("submodule"),
+        "error must name submodules: {msg}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn plain_dir_has_no_commit() {
     let dir = std::env::temp_dir().join(format!("ag-git-plain-{}", uuid::Uuid::new_v4()));

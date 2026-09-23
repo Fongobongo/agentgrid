@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Submodules initialized, never silently hollow (Plan 2.5).** After
+  the worktree is added, `prepare_workspace` runs `git submodule update
+  --init --recursive`: a repository with submodules lands with content,
+  and when initialization fails (no network in the sandbox, dead URL)
+  the prepare fails closed with a clear error naming submodules instead
+  of handing the agent empty directories. Covered by
+  `prepare_initializes_local_submodule` and
+  `prepare_fails_closed_on_unreachable_submodule`.
+
 - **Per-repository attach states (Plan 2.5 #204).** The node tracks each
   mirror as `cloning` → `ready` | `invalid` (+ error text, capped at 500
   chars) and reports the picture in every heartbeat; the control plane

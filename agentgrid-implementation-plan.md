@@ -214,7 +214,7 @@
   - [x] при ошибке/отмене: сохранить незакоммиченные изменения (diff рабочего дерева) как артефакт
 - [x] Retention: удаление worktree через 24 часа после завершения (фоновая job) + ручная очистка  — `prune_stale_workspaces` + `AGENTGRID_WORKSPACE_RETENTION_HOURS`
 - [x] Гарантия: исходная рабочая копия пользователя и base clone не изменяются (тест)
-- [ ] Тесты: создание/удаление worktree, повторный attempt, конфликт имён веток, репозиторий с submodules (минимум — понятная ошибка)  — worktree/branch cleanup тесты есть; submodules — не проверен
+- [x] Тесты: создание/удаление worktree, повторный attempt, конфликт имён веток, репозиторий с submodules (минимум — понятная ошибка)  — worktree/branch cleanup тесты есть; submodules: `init_worktree_submodules` в prepare (`update --init --recursive`), неуспех → fail-closed с понятной ошибкой; тесты `prepare_initializes_local_submodule`, `prepare_fails_closed_on_unreachable_submodule`
 
 ### 2.6 События, стриминг и идемпотентность
 
