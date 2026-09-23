@@ -279,7 +279,7 @@
 - [x] Обработка ошибок: rate limit, невалидный ключ, сетевая ошибка LLM — различимые `error_code` — claude-adapter: классифицированный `error` event с `subtype` (`rate_limited`/`auth_failed`/`billing_exhausted`/`network_error`) через pure `classify_error` (unit-тесты); выходной error_code попытки остаётся `agent_failed`, но причина видна в event trail/metrics
 - [x] `cancel`: корректное завершение через механизм этапа 2.7 (daemon SIGTERM process group)
 - [x] `collect_result`: итоговый текст из `result` события; diff/commit — задача daemon (Stage 2.5)
-- [ ] Интеграционный тест на реальном мини-репозитории (`#[ignore]`, нужен ключ) — отложен; unit-тесты `translate` покрывают маппинг
+- [x] Интеграционный тест на реальном мини-репозитории (`#[ignore]`, нужен ключ)  — `crates/adapters/tests/real_claude.rs`: реальный `adapter-claude` + Claude CLI против throwaway git-репо (prompt → файл → `result` event); двойной гейт `#[ignore]` + `ANTHROPIC_API_KEY` (платный вызов), без ключа/бинарника — skip, не failure; unit-тесты `translate` покрывают маппинг
 
 ### 3.3 Validation-команда
 

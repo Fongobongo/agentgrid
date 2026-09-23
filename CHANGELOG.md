@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Real-key Claude mini-repo integration test (Plan 3.2 #282).**
+  `crates/adapters/tests/real_claude.rs` drives the real
+  `adapter-claude` wrapper + Claude Code CLI against a throwaway git
+  repo: prompt → file on disk → `result` event, asserting exit 0, the
+  created file's content, and the result event line. Gated twice —
+  `#[ignore]` plus `ANTHROPIC_API_KEY` in the environment (a real LLM
+  call costs money); without the key/binary it reports a skip instead
+  of failing. `AGENTGRID_UNSAFE_UNATTENDED=1` is set on the child
+  process only, inside the temp repo.
+
 - **Submodules initialized, never silently hollow (Plan 2.5).** After
   the worktree is added, `prepare_workspace` runs `git submodule update
   --init --recursive`: a repository with submodules lands with content,
