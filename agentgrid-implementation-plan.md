@@ -501,7 +501,7 @@
 
 - [x] Использовать `rustls`; не требовать системный OpenSSL  — `reqwest` rustls-tls; control plane rustls
 - [x] Собирать SQLite внутрь бинарника (`bundled`), не требовать системную SQLite library  — `libsqlite3-sys` `bundled` feature
-- [ ] Проверить запуск node daemon на чистой Tier 1 машине, где отсутствуют Docker, Node.js, Python, Java и внешняя СУБД  — manual/CI
+- [x] Проверить запуск node daemon на чистой Tier 1 машине, где отсутствуют Docker, Node.js, Python, Java и внешняя СУБД  — CI-job `tier1-clean-host` (nightly): debian:12-slim + только git/ca-certificates/curl, assert отсутствия запрещённого, musl CP+node+mock happy path (`tests/e2e/run-clean-host.sh`)
 - [x] Обязательные зависимости node ограничить Linux kernel ≥ 5.10, Git ≥ 2.30, CA certificates и выбранным CLI-agent/runtime  — AGENTS.md hard constraints
 - [x] Отделить требования daemon от требований adapter и проекта: отсутствие Node.js не мешает работе daemon и adapters, которым Node.js не нужен  — adapters запускаются на своём env; daemon не требует nodejs
 - [x] Сделать Docker/Podman опциональным executor; default executor — `process`  — `AGENTGRID_SANDBOX=none|docker` (default none); Dockerfile optional
@@ -512,7 +512,7 @@
 - [x] Публиковать `x86_64-unknown-linux-musl` как основной Tier 1 artifact  — `release.yml`
 - [x] Публиковать `aarch64-unknown-linux-musl` как Tier 2 artifact  — `release.yml`
 - [x] Публиковать `x86_64-unknown-linux-gnu` как fallback для корпоративных Linux-систем  — `release.yml`
-- [ ] Проверить DNS, системные CA, proxy и credential flows в musl-сборке  — smoke на real host в развитии
+- [x] Проверить DNS, системные CA, proxy и credential flows в musl-сборке  — тот же `run-clean-host.sh`: hostname-доступ (musl resolver, node + `ag`), credential flow полностью, proxy-failover live (rotation + direct); system CA не требуется by construction (reqwest `rustls-tls` = bundled webpki roots); live forward-proxy success — follow-up (нужен network-calling adapter)
 - [x] Настроить release profile:
   - [x] `opt-level = "s"`
   - [x] `lto = "thin"`

@@ -156,6 +156,44 @@ jobs:
           curl -sf http://127.0.0.1:7891/health/ready
           docker rm -f ag-tier1
 
+  tier1-clean-host:
+    # Plan 6.1/6.2 items 504+515: the static musl stack on a Tier-1 host
+    # with ONLY the documented minimal dependencies (kernel, git,
+    # CA certificates, an agent CLI) — no Docker, Node.js, Python, Java
+    # or external DB. Runs the mock happy path plus DNS/hostname,
+    # credential and proxy-failover flows inside debian:12-slim.
+    # Nightly + manual (musl cross build + container boot are slow).
+    name: tier1 clean host (minimal deps, musl)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: install cross
+        run: cargo install cross --locked
+      - name: build musl binaries
+        run: |
+          cross build --release --target x86_64-unknown-linux-musl \
+            -p agentgrid-control-plane -p agentgrid-cli \
+            -p agentgrid-node-daemon -p agentgrid-adapters
+      - name: clean-host smoke (debian:12-slim, git+ca-certs+curl only)
+        run: |
+          set -euo pipefail
+          docker pull debian:12-slim
+          docker run --rm \
+            -v "$PWD/target/x86_64-unknown-linux-musl/release:/bins:ro" \
+            -v "$PWD/tests/e2e:/e2e:ro" \
+            --add-host cp-local:127.0.0.1 \
+            debian:12-slim sh -c "
+              set -euo pipefail
+              apt-get update -qq
+              apt-get install -y -qq git ca-certificates curl
+              AG_CLEAN_BIN=/bins sh /e2e/run-clean-host.sh
+            "
+
   arm64-musl-smoke:
     # Plan 6.13/6.14 item: the aarch64-musl binary is published but never
     # smoke-tested. QEMU-emulated Debian arm64 proves the release binary at

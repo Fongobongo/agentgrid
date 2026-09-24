@@ -4,6 +4,20 @@
 
 ### Added
 
+- **Tier-1 clean-host smoke (Plan 6.1/6.2 #504 + #515).**
+  `tests/e2e/run-clean-host.sh` (CI job `tier1-clean-host`, nightly +
+  manual) runs the static musl stack inside `debian:12-slim` with only
+  git + ca-certificates + curl: it asserts docker/podman/node/python/
+  java are absent, talks to the control plane by hostname (musl
+  resolver, twice — node and `ag`), runs the full credential flow
+  (setup-token bootstrap → login → enrollment → bearer loop) and a mock
+  task to `succeeded`, then restarts the node with a dead
+  `AGENTGRID_PROXY_URLS` entry and asserts proxy rotation + direct
+  fallback. TLS identity uses bundled webpki roots by construction
+  (reqwest `rustls-tls`, no system-CA dependency); pool semantics stay
+  unit-tested, live forward-proxy success needs a network-calling
+  adapter (follow-up).
+
 - **`--version` on every shipped binary (Plan 5.3 #391).**
   `adapter-mock` was the last binary without it — now it prints
   `adapter-mock <version>` like the other wrappers (the node capability
