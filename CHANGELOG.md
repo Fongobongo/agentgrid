@@ -4,6 +4,14 @@
 
 ### Added
 
+- **N / N-1 wire-contract tests (Plan 6.12 #647).**
+  `crates/control-plane/tests/version_compat.rs` pins the node↔CP
+  contract with hand-written JSON (not re-serialized current types):
+  an N-1 minimal heartbeat is accepted and reads online with defaults,
+  unknown N+1 fields are ignored (never 400), a different protocol
+  major degrades the node while the heartbeat stays 200, a newer minor
+  stays online, and an N-1 minimal poll is accepted with an empty batch.
+
 - **Structured repository requirements + semver matching (Plan 6.9).**
   Repositories carry optional structured `requirements` (OS, arch,
   tools with version requirements, host memory/disk floors; migration

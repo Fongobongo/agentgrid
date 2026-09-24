@@ -644,7 +644,7 @@
 - [x] Игнорировать неизвестные поля и сохранять unknown event как raw payload  — unknown event kinds → raw `log`
 - [x] Control plane поддерживает текущую и предыдущую minor-версию node  — N-only major compat (`is_incompatible_protocol`)
 - [x] Несовместимую node переводить в `degraded(incompatible_protocol)`, а не завершать процесс  — `is_incompatible_protocol` → `set_node_degraded`
-- [ ] Добавить contract tests для N и N-1 node/control-plane versions
+- [x] Добавить contract tests для N и N-1 node/control-plane versions  — `tests/version_compat.rs` (hand-written JSON, не сериализация текущих типов): N-1 heartbeat → online с дефолтами, N+1 unknown fields → ignore, major mismatch → degraded при 200 heartbeat, minor → online, N-1 poll → empty batch
 - [x] Автоматические migrations поддерживают upgrade; downgrade базы явно не гарантировать  — `migration_compat.rs`
 
 ### 6.13 Матрица ОС и файловых систем
