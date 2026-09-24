@@ -4,6 +4,20 @@
 
 ### Added
 
+- **RSS budget bench in the release pipeline (Plan 6.3 #532).**
+  `tests/e2e/run-rss-bench.sh` measures idle control-plane RSS (≤ 64
+  MiB), idle node RSS (≤ 25 MiB) and streaming node RSS under a
+  `spam:3000` task (≤ 60 MiB, child excluded) from `/proc` VmRSS;
+  `AG_RSS_MODE=assert` fails the run on breach (wired into `release.yml`
+  for runner-arch targets), `report` only prints (manual/dev use).
+- **Per-attempt child peak RSS (Plan 6.3 #534).** The node samples
+  `RUSAGE_CHILDREN` before spawn and after reap on both the wrapper and
+  ACP paths and emits a `resource_usage` status event
+  (`child_peak_rss_kb`, growth) plus a daemon log line — daemon RSS was
+  already in the heartbeat as `active_rss_mib`, now the agent/build side
+  is visible too (approximate under `max_concurrency > 1`, documented
+  in the payload).
+
 - **Tier-1 clean-host smoke (Plan 6.1/6.2 #504 + #515).**
   `tests/e2e/run-clean-host.sh` (CI job `tier1-clean-host`, nightly +
   manual) runs the static musl stack inside `debian:12-slim` with only

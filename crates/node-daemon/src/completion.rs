@@ -234,6 +234,49 @@ pub enum AckOutcome {
     Unreachable,
 }
 
+/// Plan 6.3 (#534): peak resident set (KiB) of this process's reaped
+/// children — the `RUSAGE_CHILDREN` high-water mark. Sampled before spawn
+/// and after reap; the growth across an attempt attributes the agent/build
+/// subprocess peak. Process-global and monotonic: with `max_concurrency >
+/// 1` the peak may belong to a sibling attempt running at the same time
+/// (the payload says so via `grew`, not via a false exact attribution).
+/// `None` off-unix (Windows has no rusage) or when the syscall fails.
+#[cfg(unix)]
+pub fn child_peak_rss_kb() -> Option<u64> {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage with a valid out-pointer never fails for
+    // RUSAGE_CHILDREN; rc is still checked.
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+    if rc != 0 {
+        return None;
+    }
+    let raw = usage.ru_maxrss.max(0) as u64;
+    // Linux reports KiB; macOS reports bytes.
+    Some(if cfg!(target_os = "macos") {
+        raw / 1024
+    } else {
+        raw
+    })
+}
+
+#[cfg(not(unix))]
+pub fn child_peak_rss_kb() -> Option<u64> {
+    None
+}
+
+/// Plan 6.3 (#534): build the `resource_usage` status-event payload from a
+/// pre-spawn `child_peak_rss_kb` sample. `None` when unsampled (the caller
+/// skips the event — observability must never fail an attempt).
+pub fn child_peak_event(before_kb: Option<u64>) -> Option<serde_json::Value> {
+    let (before, after) = (before_kb?, child_peak_rss_kb()?);
+    Some(serde_json::json!({
+        "kind": "resource_usage",
+        "child_peak_rss_kb": after,
+        "child_peak_grew_kb": after.saturating_sub(before),
+        "grew": after > before,
+    }))
+}
+
 /// Explicit assignment acknowledgement (Stage 1.3): tell the control plane the
 /// agent actually started so the assignment is not reverted by the ack deadline.
 pub async fn ack_attempt(
@@ -284,5 +327,32 @@ pub async fn create_agent_session(
     }
     if let Err(e) = req.send().await {
         tracing::warn!("agent session create failed for {attempt_id}: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rusage plumbing works: reaping a real child is observable and
+    /// the high-water mark never goes backwards.
+    #[test]
+    fn child_peak_rss_monotonic_across_reaped_child() {
+        let before = child_peak_rss_kb();
+        #[cfg(unix)]
+        {
+            let before = before.expect("getrusage works on unix");
+            // Reap a real child so RUSAGE_CHILDREN has something to report.
+            std::process::Command::new("true")
+                .status()
+                .expect("true(1) must spawn");
+            // `status()` reaps; the mark must not go backwards.
+            let after = child_peak_rss_kb().expect("getrusage works on unix");
+            assert!(after >= before, "high-water mark monotonic");
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(before.is_none(), "no rusage off-unix");
+        }
     }
 }

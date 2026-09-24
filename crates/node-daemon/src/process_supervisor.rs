@@ -42,6 +42,9 @@ pub async fn supervise_adapter(
     attempt_id: &str,
     guard: Arc<CommandGuard>,
 ) -> Result<SupervisedRun> {
+    // Plan 6.3 (#534): sample the children high-water mark before spawn so
+    // the attempt's agent/build peak is attributable at reap time.
+    let rss_before = crate::completion::child_peak_rss_kb();
     let bp = ProcessBackend.spawn(req)?;
     let pid = bp.pid;
     let timeout = bp.timeout;
@@ -128,5 +131,16 @@ pub async fn supervise_adapter(
 
     let _ = r1.await;
     let _ = r2.await;
+    // Plan 6.3 (#534): report the agent subprocess peak RSS (daemon RSS is
+    // already in the heartbeat as `active_rss_mib`). Best-effort: a missing
+    // sample only skips the event.
+    if let Some(payload) = crate::completion::child_peak_event(rss_before) {
+        tracing::info!(
+            attempt_id,
+            child_peak_rss_kb = payload.get("child_peak_rss_kb").and_then(|v| v.as_u64()),
+            "agent subprocess peak RSS"
+        );
+        sink.push(EventKind::Log.to_event_type(), payload).await;
+    }
     Ok(SupervisedRun { code, kill_reason })
 }

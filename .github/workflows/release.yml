@@ -138,6 +138,16 @@ jobs:
             fi
           done
 
+      - name: RSS budgets (idle CP/node + streaming node)
+        # Plan 6.3 (#532): idle RSS budgets on release binaries (CP ≤64
+        # MiB, node ≤25 MiB, streaming node ≤60 MiB, child excluded).
+        # Only runner-arch (x86_64) binaries can execute — the musl build
+        # runs natively (static), aarch64 skips like the smoke test above.
+        if: startsWith(matrix.target, 'x86_64')
+        run: |
+          AG_RSS_MODE=assert BIN="$PWD/target/${{ matrix.target }}/release" bash tests/e2e/run-rss-bench.sh
+        timeout-minutes: 15
+
       - name: checksums (SHA256SUMS)
         run: |
           cd "target/${{ matrix.target }}/release"

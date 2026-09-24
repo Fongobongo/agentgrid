@@ -236,6 +236,8 @@ async fn drive_acp_session(
     // sat `running` until the CP reaper, the worktree leaked, and ND-4
     // redelivery later re-ran the whole task. A spawn failure is an
     // infrastructure failure result like the missing-binary arm above.
+    // Plan 6.3 (#534): sample the children high-water mark before spawn.
+    let rss_before = crate::completion::child_peak_rss_kb();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -463,6 +465,17 @@ async fn drive_acp_session(
     };
     stream_task.abort();
     flusher.abort();
+    // Plan 6.3 (#534): report the ACP agent subprocess peak RSS, mirroring
+    // the wrapper path (daemon RSS is already in the heartbeat).
+    if let Some(payload) = crate::completion::child_peak_event(rss_before) {
+        tracing::info!(
+            attempt_id = %assignment.attempt_id,
+            child_peak_rss_kb = payload.get("child_peak_rss_kb").and_then(|v| v.as_u64()),
+            "agent subprocess peak RSS"
+        );
+        sink.push(agentgrid_common::EventKind::Log.to_event_type(), payload)
+            .await;
+    }
     Ok(outcome)
 }
 
