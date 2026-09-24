@@ -488,3 +488,181 @@ async fn load_baseline_mock_nodes() {
     let handles = drive(sp.clone(), &transport, poll_ms).await;
     finalize_load(sp, start, handles).await;
 }
+
+/// Plan 6.5: 100 idle nodes heartbeat+poll load. The fulfillment harness
+/// above drives BUSY nodes; an idle fleet only hits two hot paths —
+/// `POST /v1/node/heartbeat` and `POST /v1/node/poll` — so this parks N
+/// nodes with nothing to do (zero tasks) and hammers exactly those two,
+/// asserting zero errors, zero write-lock failures, and every node online
+/// at the end. Prints IDLE-RESULT with wall time + latency percentiles.
+///
+/// Knobs: AG_LOAD_IDLE_NODES (default 100), AG_LOAD_IDLE_ROUNDS (default
+/// 10 → N×rounds×2 requests back-to-back, worst-case burst, no sleeps).
+/// `#[ignore]`d — run via `tests/e2e/run-load.sh` (`AG_LOAD_IDLE=1`) or
+/// directly with `--ignored`.
+async fn idle_loop(
+    node: EnrollResponse,
+    sp: Arc<Spinup>,
+    rounds: usize,
+    hb_lat: Arc<tokio::sync::Mutex<Vec<u128>>>,
+    poll_lat: Arc<tokio::sync::Mutex<Vec<u128>>>,
+    errors: Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let cred = format!("Bearer {}", node.credential);
+    for _ in 0..rounds {
+        // Heartbeat (minimal body — serde defaults fill the rest, exactly
+        // like an old N-1 node reporting in).
+        let t0 = Instant::now();
+        let hb_ok = sp
+            .http
+            .post(format!("{}/v1/node/heartbeat", sp.base))
+            .header("authorization", &cred)
+            .json(&json!({
+                "name": "idle",
+                "adapters": ["mock"],
+                "repositories": ["*"],
+                "max_concurrency": 2,
+                "agent_version": "load",
+                "load_avg": 0.1,
+                "free_disk_mb": 100000,
+                "active_attempts": 0,
+            }))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        hb_lat.lock().await.push(t0.elapsed().as_millis());
+        if !hb_ok {
+            errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Poll (no tasks queued — the CP answers empty immediately).
+        let t0 = Instant::now();
+        let poll_ok = sp
+            .http
+            .post(format!("{}/v1/node/poll", sp.base))
+            .header("authorization", &cred)
+            .json(&json!({
+                "node_id": node.node_id,
+                "name": "idle",
+                "adapters": ["mock"],
+                "repositories": ["*"],
+                "max_concurrency": 2,
+            }))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        poll_lat.lock().await.push(t0.elapsed().as_millis());
+        if !poll_ok {
+            errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "load harness; run via tests/e2e/run-load.sh (AG_LOAD_IDLE=1)"]
+async fn idle_nodes_heartbeat_poll_load() {
+    let nodes_n = env_usize("AG_LOAD_IDLE_NODES", 100);
+    let rounds = env_usize("AG_LOAD_IDLE_ROUNDS", 10);
+    // Empty polls park for the full long-poll timeout; shrink it for the
+    // burst (the point is request throughput, not park time). The var is
+    // process-global and other tests in this binary may poll, so restore
+    // on Drop (panic-safe), not just at the end.
+    struct RestorePollTimeout(Option<String>);
+    impl Drop for RestorePollTimeout {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("AGENTGRID_POLL_TIMEOUT_SECS", v),
+                None => std::env::remove_var("AGENTGRID_POLL_TIMEOUT_SECS"),
+            }
+        }
+    }
+    let _restore = RestorePollTimeout(std::env::var("AGENTGRID_POLL_TIMEOUT_SECS").ok());
+    std::env::set_var("AGENTGRID_POLL_TIMEOUT_SECS", "1");
+    let start = Instant::now();
+    // Zero tasks: the fleet is idle by construction.
+    let sp = Arc::new(spinup_load(nodes_n, 0).await);
+    let hb_lat = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let poll_lat = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let errors = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut handles = Vec::new();
+    for node in sp.nodes.clone() {
+        let (sp, hb_lat, poll_lat, errors) =
+            (sp.clone(), hb_lat.clone(), poll_lat.clone(), errors.clone());
+        handles.push(tokio::spawn(async move {
+            idle_loop(node, sp, rounds, hb_lat, poll_lat, errors).await
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+    let wall = start.elapsed().as_secs_f64();
+    let errors_n = errors.load(std::sync::atomic::Ordering::Relaxed);
+    let mut hb = hb_lat.lock().await.clone();
+    hb.sort_unstable();
+    let mut pl = poll_lat.lock().await.clone();
+    pl.sort_unstable();
+    let pct = |v: &[u128], p: f64| {
+        if v.is_empty() {
+            0
+        } else {
+            v[(v.len() as f64 * p).min(v.len() as f64 - 1.0) as usize]
+        }
+    };
+
+    // Every node must still be online (heartbeats kept them fresh past the
+    // 30s offline sweep) and no request may have failed.
+    let nodes: serde_json::Value = sp
+        .http
+        .get(format!("{}/v1/nodes?limit=1000", sp.base))
+        .header("authorization", format!("Bearer {}", sp.token))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let items = nodes
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let online = items
+        .iter()
+        .filter(|n| n.get("status").and_then(|s| s.as_str()) == Some("online"))
+        .count();
+    let m: String = sp
+        .http
+        .get(format!("{}/metrics", sp.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let lock_failures: u64 = m
+        .lines()
+        .find(|l| {
+            l.starts_with("agentgrid_sqlite_write_lock_failures_total") && !l.starts_with("#")
+        })
+        .and_then(|l| l.rsplit(' ').next())
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|v| v as u64)
+        .unwrap_or(0);
+    let reqs = nodes_n * rounds * 2;
+    println!(
+        "IDLE-RESULT nodes={nodes_n} rounds={rounds} reqs={reqs} wall_s={wall:.1} \
+         hb_p50_ms={} hb_p99_ms={} poll_p50_ms={} poll_p99_ms={} \
+         errors={errors_n} online={online}/{nodes_n} write_lock_failures={lock_failures}",
+        pct(&hb, 0.50),
+        pct(&hb, 0.99),
+        pct(&pl, 0.50),
+        pct(&pl, 0.99),
+    );
+    assert_eq!(errors_n, 0, "idle heartbeat/poll burst must not error");
+    assert_eq!(online, nodes_n, "every idle node must stay online");
+    assert_eq!(
+        lock_failures, 0,
+        "idle load must not contend the SQLite write lock"
+    );
+}

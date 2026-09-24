@@ -4,6 +4,18 @@
 
 ### Added
 
+- **100-idle-nodes heartbeat/poll load test (Plan 6.5).** A new
+  `idle_nodes_heartbeat_poll_load` harness parks 100 nodes with zero
+  tasks and hammers the two hot paths an idle fleet hits
+  (`POST /v1/node/heartbeat`, `POST /v1/node/poll`): 2000 requests,
+  zero errors, 100/100 online, zero SQLite write-lock failures
+  (measured locally: 13s wall, hb p50 7ms, poll p50 ~1s park).
+  `AG_LOAD_IDLE=1 bash tests/e2e/run-load.sh` runs it (wired into the
+  CI failinject job); `AG_LOAD_IDLE_NODES/ROUNDS` tune the scale.
+  Empty polls park for the full long-poll timeout, so the test shrinks
+  it via the new `AGENTGRID_POLL_TIMEOUT_SECS` override (default 25s,
+  clamped to the plan's 1..=60s range).
+
 - **RSS budget gate on release binaries (Plan 6.3 #532).**
   The existing `tests/e2e/run-rss-budget.sh` gate (idle CP ≤ 64 MiB,
   idle node ≤ 25 MiB, streaming node ≤ 60 MiB) is now also wired into

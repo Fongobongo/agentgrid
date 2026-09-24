@@ -553,7 +553,7 @@
 - [x] Long polling timeout установить 25–60 секунд  — `POLL_TIMEOUT=25s`
 - [x] Не допускать polling каждую секунду
 - [x] Сохранить быстрый переход offline: учитывать режим heartbeat и grace window
-- [ ] Нагрузочный тест heartbeat/poll для 100 idle nodes на одном control plane
+- [x] Нагрузочный тест heartbeat/poll для 100 idle nodes на одном control plane  — `idle_nodes_heartbeat_poll_load` в tests/load.rs (100 nodes × 10 rounds heartbeat+poll, zero tasks): 0 errors, 100/100 online, 0 write-lock failures; `AG_LOAD_IDLE=1 run-load.sh` + CI failinject-job; `AGENTGRID_POLL_TIMEOUT_SECS` (default 25, clamp 1..=60) чтобы пустые poll не парковались по 25s
 
 ### 6.6 Batching, bounded queues и backpressure
 

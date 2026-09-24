@@ -14,8 +14,8 @@ use std::time::Instant;
 use agentgrid_common::{CompleteAttemptRequest, PollRequest};
 use tokio::sync::Notify;
 
+use crate::poll_timeout;
 use crate::store::{is_safe_artifact_name, Store};
-use crate::POLL_TIMEOUT;
 
 /// Attempt lifecycle orchestration: completing an attempt is atomic in the
 /// store, but a completed task that belongs to a workflow run must also
@@ -223,7 +223,7 @@ impl SchedulerService {
         }
         self.store.register_or_touch_node(req).await?;
 
-        let deadline = Instant::now() + POLL_TIMEOUT;
+        let deadline = Instant::now() + poll_timeout();
         loop {
             // Construct the waiter before checking for work: Notify's permit
             // captures a notify that lands between try_assign returning None
@@ -392,6 +392,48 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// Plan 6.5: the long-poll park time defaults to 25s and the
+    /// `AGENTGRID_POLL_TIMEOUT_SECS` override is clamped to the plan's
+    /// 1..=60s range (garbage → default). Serialized with its sibling
+    /// env-mutating tests via the shared harness discipline (save/restore
+    /// around the assertions; no other test in this binary reads this var
+    /// except the ignored load harness, which sets it explicitly).
+    #[test]
+    fn poll_timeout_default_and_clamp() {
+        let prev = std::env::var("AGENTGRID_POLL_TIMEOUT_SECS").ok();
+        let get = || {
+            std::env::remove_var("AGENTGRID_POLL_TIMEOUT_SECS");
+            let d = poll_timeout();
+            if let Some(v) = prev.clone() {
+                std::env::set_var("AGENTGRID_POLL_TIMEOUT_SECS", v);
+            }
+            d
+        };
+        // Unset → default 25s.
+        assert_eq!(get(), std::time::Duration::from_secs(25));
+        for (raw, expect) in [
+            ("5", 5),
+            ("1", 1),
+            ("60", 60),
+            ("0", 1),    // clamped up
+            ("999", 60), // clamped down
+            ("abc", 25), // garbage → default
+            ("", 25),
+            ("-3", 25), // unparsable as u64 → default
+        ] {
+            std::env::set_var("AGENTGRID_POLL_TIMEOUT_SECS", raw);
+            assert_eq!(
+                poll_timeout(),
+                std::time::Duration::from_secs(expect),
+                "raw={raw:?}"
+            );
+        }
+        match prev {
+            Some(v) => std::env::set_var("AGENTGRID_POLL_TIMEOUT_SECS", v),
+            None => std::env::remove_var("AGENTGRID_POLL_TIMEOUT_SECS"),
+        }
+    }
 
     async fn temp_store() -> Store {
         std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");

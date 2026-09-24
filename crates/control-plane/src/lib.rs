@@ -35,7 +35,16 @@ use store::Store;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-pub(crate) const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+/// Long-poll park time when no assignment is available (plan 6.5: 25–60s).
+/// Overridable via `AGENTGRID_POLL_TIMEOUT_SECS` (clamped to 1..=60) for
+/// load tests and constrained environments; the default 25s is unchanged.
+pub(crate) fn poll_timeout() -> std::time::Duration {
+    let secs: u64 = std::env::var("AGENTGRID_POLL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(25);
+    std::time::Duration::from_secs(secs.clamp(1, 60))
+}
 
 /// Stage 2.5: the cookie name carrying the session JWT, set HttpOnly so the
 /// browser cannot read it (no XSS token theft) with SameSite=Strict (CSRF
