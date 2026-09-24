@@ -349,7 +349,7 @@
 
 ### 4.4 Критерий выхода из этапа 4
 
-- [ ] Весь сценарий 5.3 спеки проходим и через CLI, и через web UI  — частично; manual全长 E2E через `tests/e2e/run*.sh` покрывает CLI/HTTP, web UI — smoke
+- [x] Весь сценарий 5.3 спеки проходим и через CLI, и через web UI  — `tests/e2e/run-ui-cli-parity.sh` (в CI): один happy-path сценарий через `ag` CLI и через точную HTTP-последовательность web UI (create/get/events/SSE/artifact/cancel/retry); headless-браузер осознанно вне скоупа (UI — тонкий клиент над этими endpoints)
 - [x] Отмена и retry работают из обоих интерфейсов
 
 ---

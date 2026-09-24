@@ -4,6 +4,16 @@
 
 ### Added
 
+- **CLI + web-UI contract parity E2E (Plan 4.4).**
+  `tests/e2e/run-ui-cli-parity.sh` drives the same happy-path scenario
+  (run → logs → succeeded → artifact, cancel → retry) through both
+  operator interfaces: the `ag` CLI binary (`run`/`show`/`logs`/`cancel`/
+  `retry`) and the exact HTTP sequence the React web UI uses
+  (`POST /v1/tasks`, `GET` task/events, `GET events/stream` SSE,
+  `GET` artifact, `POST` cancel/retry). A headless browser stays out of
+  scope — the UI is a thin client over these endpoints. Wired into the
+  CI e2e job; `PYTHON3` overrides the JSON helper binary.
+
 - **Real-key Claude mini-repo integration test (Plan 3.2 #282).**
   `crates/adapters/tests/real_claude.rs` drives the real
   `adapter-claude` wrapper + Claude Code CLI against a throwaway git

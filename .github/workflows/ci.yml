@@ -279,6 +279,17 @@ jobs:
         timeout-minutes: 15
         env:
           AGENTGRID_SANDBOX_IMAGE: ag-node:test
+      # Plan 4.4 exit criterion: the same happy-path scenario (run →
+      # logs → succeeded → artifact, cancel → retry) driven through both
+      # the `ag` CLI binary and the exact HTTP sequence the React web UI
+      # uses (web/src/api.ts). Process-based (no docker); a headless
+      # browser stays out of scope — the UI is a thin client over these
+      # endpoints, so the UI-consumed contract proves the UI can drive it.
+      - name: CLI + web-UI contract parity
+        run: |
+          cargo build --workspace -p agentgrid-control-plane -p agentgrid-node-daemon -p agentgrid-adapters -p agentgrid-cli
+          bash tests/e2e/run-ui-cli-parity.sh
+        timeout-minutes: 15
       # Plan 6.11: the systemd transient-scope acceptance — a scoped attempt
       # hits MemoryMax (kernel OOM → resource_limit error code) and TasksMax
       # (fork refusal → failed), without any container runtime. GitHub's
