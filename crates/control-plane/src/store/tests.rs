@@ -1929,6 +1929,107 @@ mod workflow_tests {
         assert_eq!(ack.highest_contiguous_sequence, Some(6));
     }
 
+    /// Plan 6.7 (#579): tail mode serves the LAST N events ascending without
+    /// a cursor walk; a forward cursor wins over tail; oversized tails clamp
+    /// to MAX_TAIL_EVENTS.
+    #[tokio::test]
+    async fn get_events_tail_serves_last_n_ascending() {
+        let s = temp_store().await;
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec![String::new()],
+                max_concurrency: 2,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        let task = s
+            .create_task(&CreateTaskRequest {
+                prompt: "p".into(),
+                repository: String::new(),
+                adapter: "mock".into(),
+                requested_node_id: None,
+                timeout_secs: Some(60),
+                validation_command: None,
+                base_commit: None,
+                parent_acp_session_id: None,
+                security_profile: None,
+                network_mode: None,
+                group_id: None,
+                agent_id: None,
+                consensus_group_id: None,
+                consensus_member: None,
+                opencode_override: None,
+                github_push: false,
+                github_repo: None,
+                github_issue: None,
+                github_base_ref: None,
+                max_attempts: 1,
+                consensus_mode: None,
+                review_of: None,
+            })
+            .await
+            .unwrap();
+        let a = s.try_assign(&node_id).await.unwrap().unwrap();
+        let evs: Vec<IncomingEvent> = (1..=10u64)
+            .map(|seq| IncomingEvent {
+                sequence: seq,
+                r#type: EventType::Stdout,
+                payload: serde_json::json!({"text": format!("line {seq}")}),
+            })
+            .collect();
+        s.ingest_events(&a.attempt_id, &IngestEventsRequest { events: evs })
+            .await
+            .unwrap();
+        // Tail 3 → lines 8,9,10 ascending.
+        let tail = s
+            .get_events(&task.id, None, 0, None, Some(3))
+            .await
+            .unwrap();
+        assert_eq!(tail.len(), 3);
+        assert_eq!(tail[0].sequence, 8);
+        assert_eq!(tail[2].sequence, 10);
+        assert!(
+            tail.windows(2).all(|w| w[0].ingest_id <= w[1].ingest_id),
+            "tail must arrive in ascending ingest order"
+        );
+        // Tail larger than history → whole history.
+        let all = s
+            .get_events(&task.id, None, 0, None, Some(500))
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 10);
+        // A forward cursor wins over tail.
+        let fwd = s
+            .get_events(&task.id, Some(0), 0, None, Some(3))
+            .await
+            .unwrap();
+        assert_eq!(fwd.len(), 10, "after_ingest=Some(0) is forward paging");
+        let fwd = s
+            .get_events(&task.id, None, 5, None, Some(3))
+            .await
+            .unwrap();
+        assert!(
+            fwd.iter().all(|e| e.sequence > 5),
+            "legacy after_sequence wins over tail"
+        );
+        // tail=0 / None → legacy forward paging (first page).
+        let page = s
+            .get_events(&task.id, None, 0, None, Some(0))
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 10);
+        assert_eq!(page[0].sequence, 1);
+    }
+
     // Plan 0.3 item 1.4: duplicates INSIDE one batch land once, and a large
     // batch ingests in a single write transaction.
     #[tokio::test]

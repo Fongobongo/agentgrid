@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { ApiError, reqOk, getJson, postJson } from './api';
+import { ApiError, reqOk, getJson, postJson, getTaskEvents } from './api';
 
 // Response/Request are global in the vitest node environment (Node 22).
 
@@ -35,12 +35,36 @@ describe('getJson / postJson', () => {
   });
 
   it('postJson sends JSON with content-type and parses the reply', async () => {
-    const f = vi.fn(async () => new Response('{"ok":true}', { status: 201 }));
+    const f = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     vi.stubGlobal('fetch', f);
     await expect(postJson<{ ok: boolean }>('/v1/tasks', { prompt: 'x' })).resolves.toEqual({ ok: true });
     const init = (f.mock.calls[0] as unknown[])[1] as RequestInit;
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
     expect(init.body).toBe(JSON.stringify({ prompt: 'x' }));
+  });
+});
+
+describe('getTaskEvents', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  // Plan 6.7 (#579): cursor wins, else tail, else plain listing.
+  it('builds after_ingest / tail / plain query strings', async () => {
+    const urls: string[] = [];
+    const f = vi.fn(async (url: string) => {
+      urls.push(url);
+      return new Response('[]', { status: 200 });
+    });
+    vi.stubGlobal('fetch', f);
+    await getTaskEvents('t1', 42);
+    await getTaskEvents('t1', 0, 500);
+    await getTaskEvents('t1', 7, 500);
+    await getTaskEvents('t1');
+    expect(urls).toEqual([
+      '/v1/tasks/t1/events?after_ingest=42',
+      '/v1/tasks/t1/events?tail=500',
+      '/v1/tasks/t1/events?after_ingest=7',
+      '/v1/tasks/t1/events',
+    ]);
   });
 });

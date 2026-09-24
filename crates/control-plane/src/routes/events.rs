@@ -57,7 +57,7 @@ pub async fn events_stream(
         loop {
             match state
                 .store
-                .get_events(&task_id, after_ingest, after_sequence, Some(500))
+                .get_events(&task_id, after_ingest, after_sequence, Some(500), None)
                 .await
             {
                 Ok(events) => {
@@ -160,7 +160,7 @@ pub async fn get_events(
     // not read it as "no events".
     match state
         .store
-        .get_events(&task_id, q.after_ingest, q.after_sequence, q.limit)
+        .get_events(&task_id, q.after_ingest, q.after_sequence, q.limit, q.tail)
         .await
     {
         Ok(e) => Ok(Json(e)),

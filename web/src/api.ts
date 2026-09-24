@@ -297,9 +297,16 @@ export function getEligibility(id: string) {
   return getJson<TaskEligibility>(`/v1/tasks/${id}/eligibility`);
 }
 
-export function getTaskEvents(taskId: string, after?: number) {
+export function getTaskEvents(taskId: string, after?: number, tail?: number) {
   // Hardening P0 item 9: resume on the global ingest cursor (0 = from start).
-  const q = after && after > 0 ? `?after_ingest=${after}` : "";
+  // Plan 6.7 (#579): `tail` serves the last N events for fast Task details
+  // (applies only without a forward cursor — the server ignores it then).
+  const q =
+    after && after > 0
+      ? `?after_ingest=${after}`
+      : tail && tail > 0
+        ? `?tail=${tail}`
+        : "";
   return getJson<TaskEvent[]>(`/v1/tasks/${taskId}/events${q}`);
 }
 

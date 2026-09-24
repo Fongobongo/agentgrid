@@ -1383,6 +1383,13 @@ pub struct EventsQuery {
     /// Hardening P0 item 9: server-side page size cap (default 1000).
     #[serde(default)]
     pub limit: Option<u64>,
+    /// Plan 6.7 (#579): tail mode — return the LAST N events (ascending)
+    /// instead of paging forward from a cursor, so Task details paints
+    /// fast without walking the whole history. Applies only when no
+    /// forward cursor is set (`after_ingest`/`after_sequence` win); the
+    /// server clamps to 1..=2000. `None`/0 = forward paging (unchanged).
+    #[serde(default)]
+    pub tail: Option<u64>,
 }
 
 /// Unified response envelope for list endpoints with keyset cursor pagination.

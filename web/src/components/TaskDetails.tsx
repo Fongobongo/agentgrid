@@ -106,11 +106,14 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   // Initial history, then live stream with automatic reconnect/resume. The
   // stream opens only after the history resolves, seeded with the history's
   // max ingest_id — starting both from 0 double-delivered every event.
+  // Plan 6.7 (#579): the initial history is the TAIL (last 500 events), so
+  // Task details paints fast without walking the whole history; the stream
+  // backfills everything after the tail's max cursor.
   useEffect(() => {
     setEvents([]);
     let cancelled = false;
     let handle: { close: () => void } | null = null;
-    getTaskEvents(taskId, 0)
+    getTaskEvents(taskId, 0, 500)
       .then((hist) => {
         if (cancelled) return;
         setEvents(hist);

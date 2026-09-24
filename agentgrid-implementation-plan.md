@@ -576,7 +576,7 @@
 - [x] Полный stdout/stderr писать последовательно в append-only файл attempt  — `agent-raw-output.log`
 - [x] После завершения закрывать и сжимать raw log в `.zst`  — CP-side: лог-артефакты (`.log`/`text/*`, ≥4 KiB, выигрыш ≥30%) хранятся на диске как `<name>.zst` (миграция 0086 `stored_compressed`); `size_bytes` — несжатый логический размер, download стримит через zstd-декодер, retention/reconcile видят обе формы; node-side raw log живёт в worktree до upload и удаляется с worktree (сжатие там ничего не экономит)
 - [x] Удалять bulk log chunks из SQLite после формирования artifact
-- [ ] Оставлять в SQLite последние 500–2000 строк для быстрого Task details  — все events в SQLite; отдельный tail-limit не введён
+- [x] Оставлять в SQLite последние 500–2000 строк для быстрого Task details  — tail mode: `GET events?tail=N` отдаёт последние N ascending (clamp 2000, курсоры побеждают tail); web UI открывает details на tail=500 + live stream от его курсора; тесты store/API/vitest
 - [x] Полный лог отдавать через artifacts API с Range/streaming, не загружая файл целиком в RAM  — download handlers стримят файл 64-килобайтными чанками (`open_artifact` + `ReaderStream`), single-range `Range` даёт 206 + `Content-Range`, unsatisfiable → 416 `bytes */len` (RFC 9110), multi-range/garbage → полный 200; тесты `range_parser_*`, `range_request_serves_206_slice`, `suffix_and_open_ranges`, `unsatisfiable_range_is_416` + API-интеграционный `artifact_download_honors_range_and_streams_partial`
 - [x] Adapter парсит только стабильные события `status/stdout/stderr/tool/result/error/artifact`
 - [x] Неизвестные записи CLI сохранять как raw log, а не завершать adapter ошибкой

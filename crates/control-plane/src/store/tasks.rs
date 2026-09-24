@@ -345,14 +345,43 @@ impl Store {
     /// `limit` caps the page (server enforces a hard cap). The legacy
     /// `after_sequence` cursor is honoured as a per-attempt filter so pre-0037
     /// clients keep working; results still carry `ingest_id`.
+    /// Plan 6.7 (#579): `tail` returns the LAST N events ascending (no
+    /// cursor walk) for fast Task details; applies only when no forward
+    /// cursor is set, clamped to 1..=MAX_TAIL_EVENTS.
     pub async fn get_events(
         &self,
         task_id: &str,
         after_ingest: Option<u64>,
         after_sequence: u64,
         limit: Option<u64>,
+        tail: Option<u64>,
     ) -> Result<Vec<TaskEvent>> {
         let limit = limit.unwrap_or(DEFAULT_EVENT_PAGE).min(DEFAULT_EVENT_PAGE) as i64;
+        // Plan 6.7 (#579): tail mode — newest N first, reversed to ascending
+        // below so the wire shape matches forward paging exactly.
+        let tail_rows = match tail {
+            Some(n) if n > 0 && after_ingest.is_none() && after_sequence == 0 => {
+                let n = n.min(MAX_TAIL_EVENTS) as i64;
+                Some(
+                    sqlx::query(
+                        "SELECT e.attempt_id, e.sequence, e.type, e.payload, e.created_at, e.ingest_id \
+                         FROM task_events e \
+                         JOIN attempts a ON a.id = e.attempt_id \
+                         WHERE a.task_id = ? \
+                         ORDER BY e.ingest_id DESC LIMIT ?",
+                    )
+                    .bind(task_id)
+                    .bind(n)
+                    .fetch_all(&self.pool)
+                    .await?,
+                )
+            }
+            _ => None,
+        };
+        if let Some(mut rows) = tail_rows {
+            rows.reverse();
+            return rows_to_events(rows);
+        }
         let rows = match after_ingest {
             Some(after) => sqlx::query(
                 "SELECT e.attempt_id, e.sequence, e.type, e.payload, e.created_at, e.ingest_id \
@@ -382,19 +411,7 @@ impl Store {
                 .await?
             }
         };
-        let mut events = Vec::with_capacity(rows.len());
-        for r in rows {
-            let payload_text: String = r.try_get("payload")?;
-            events.push(TaskEvent {
-                attempt_id: r.try_get("attempt_id")?,
-                sequence: r.try_get::<i64, _>("sequence")? as u64,
-                r#type: event_type_of(&r.try_get::<String, _>("type")?),
-                payload: serde_json::from_str(&payload_text).unwrap_or(serde_json::Value::Null),
-                created_at: r.try_get("created_at")?,
-                ingest_id: r.try_get::<i64, _>("ingest_id")? as u64,
-            });
-        }
-        Ok(events)
+        rows_to_events(rows)
     }
 
     /// Age in seconds of the oldest `queued` task (plan 0.3 stage 0 metric);
@@ -408,6 +425,29 @@ impl Store {
         .await?;
         Ok(row.try_get::<Option<f64>, _>("age")?)
     }
+}
+
+/// Plan 6.7 (#579): tail-mode ceiling — the Task-details fast path serves
+/// at most this many trailing events (plan range 500–2000).
+pub const MAX_TAIL_EVENTS: u64 = 2000;
+
+/// Map raw `task_events` rows to `TaskEvent` (shared by forward paging and
+/// tail mode so both serve the identical wire shape).
+fn rows_to_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> Result<Vec<TaskEvent>> {
+    use sqlx::Row;
+    let mut events = Vec::with_capacity(rows.len());
+    for r in rows {
+        let payload_text: String = r.try_get("payload")?;
+        events.push(TaskEvent {
+            attempt_id: r.try_get("attempt_id")?,
+            sequence: r.try_get::<i64, _>("sequence")? as u64,
+            r#type: event_type_of(&r.try_get::<String, _>("type")?),
+            payload: serde_json::from_str(&payload_text).unwrap_or(serde_json::Value::Null),
+            created_at: r.try_get("created_at")?,
+            ingest_id: r.try_get::<i64, _>("ingest_id")? as u64,
+        });
+    }
+    Ok(events)
 }
 
 /// Insert a queued task inside the caller's transaction. Same shape as

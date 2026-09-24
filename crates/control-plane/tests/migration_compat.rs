@@ -181,7 +181,7 @@ async fn migrations_serve_legacy_happy_path() {
 
     // 8. Event continuity: both ingested events are retrievable in sequence
     // (proves the events table + sequence column survived migrations).
-    let evs = s.get_events(&task.id, None, 0, None).await.unwrap();
+    let evs = s.get_events(&task.id, None, 0, None, None).await.unwrap();
     assert_eq!(evs.len(), 2, "both events must be retrievable");
     assert_eq!(evs[0].sequence, 1);
     assert_eq!(evs[1].sequence, 2);

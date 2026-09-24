@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Event tail mode for fast Task details (Plan 6.7 #579).**
+  `GET /v1/tasks/{id}/events?tail=N` serves the last N events ascending
+  (no cursor walk; clamped to 2000, forward cursors win). The web UI
+  Task-details view opens on the 500-event tail and resumes the live
+  stream from its max cursor, so long histories paint fast. Covered by
+  `get_events_tail_serves_last_n_ascending` (store),
+  `events_tail_query_serves_last_n` (API) and a vitest URL-builder
+  test.
+
 - **100-idle-nodes heartbeat/poll load test (Plan 6.5).** A new
   `idle_nodes_heartbeat_poll_load` harness parks 100 nodes with zero
   tasks and hammers the two hot paths an idle fleet hits

@@ -1577,6 +1577,63 @@ async fn artifact_download_honors_range_and_streams_partial() {
 }
 
 #[tokio::test]
+async fn events_tail_query_serves_last_n() {
+    // Plan 6.7 (#579): `GET /v1/tasks/{id}/events?tail=N` serves the last
+    // N events ascending (Task-details fast path); no tail = forward from
+    // the start (unchanged).
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, cred) = enroll(&app, "node-tail", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:t.txt:t").await;
+    ack_attempt(&app, &assign.attempt_id, &cred, &assign.fencing_token).await;
+    let ev = IngestEventsRequest {
+        events: (1..=6u64)
+            .map(|seq| IncomingEvent {
+                sequence: seq,
+                r#type: EventType::Stdout,
+                payload: json!({"text": format!("line {seq}")}),
+            })
+            .collect(),
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_node(
+            &format!("/v1/node/attempts/{}/events", assign.attempt_id),
+            serde_json::to_string(&ev).unwrap(),
+            &cred,
+            &assign.fencing_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let token = test_token(&app).await;
+    let get = |q: &str| {
+        Request::builder()
+            .method("GET")
+            .uri(format!("/v1/tasks/{}/events{q}", assign.task_id))
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    // Tail 2 → lines 5,6 ascending.
+    let resp = app.clone().oneshot(get("?tail=2")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let evs: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(evs.len(), 2);
+    assert_eq!(evs[0]["sequence"], 5);
+    assert_eq!(evs[1]["sequence"], 6);
+    // No tail → forward from the start, all 6.
+    let resp = app.clone().oneshot(get("")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let evs: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(evs.len(), 6);
+    assert_eq!(evs[0]["sequence"], 1);
+}
+
+#[tokio::test]
 async fn metrics_endpoint_exposes_counts() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
@@ -5799,7 +5856,7 @@ async fn verification_note_flags_silent_success_and_claim_without_commit() {
         .unwrap();
     let events = state
         .store
-        .get_events(&task.id, None, 0, Some(100))
+        .get_events(&task.id, None, 0, Some(100), None)
         .await
         .unwrap();
     let note = events
@@ -5847,7 +5904,7 @@ async fn verification_note_flags_silent_success_and_claim_without_commit() {
         .unwrap();
     let events2 = state
         .store
-        .get_events(&task2.id, None, 0, Some(100))
+        .get_events(&task2.id, None, 0, Some(100), None)
         .await
         .unwrap();
     assert!(
@@ -5893,7 +5950,7 @@ async fn verification_note_flags_silent_success_and_claim_without_commit() {
         .unwrap();
     let events3 = state
         .store
-        .get_events(&task3.id, None, 0, Some(100))
+        .get_events(&task3.id, None, 0, Some(100), None)
         .await
         .unwrap();
     assert!(
@@ -11621,7 +11678,7 @@ async fn scope_creep_guard_event_and_false_positives() {
         .unwrap();
     let events = state
         .store
-        .get_events(&task.id, None, 0, Some(100))
+        .get_events(&task.id, None, 0, Some(100), None)
         .await
         .unwrap();
     let creep: Vec<_> = events
@@ -11677,7 +11734,7 @@ async fn scope_creep_guard_event_and_false_positives() {
         .unwrap();
     let events2 = state
         .store
-        .get_events(&task2.id, None, 0, Some(100))
+        .get_events(&task2.id, None, 0, Some(100), None)
         .await
         .unwrap();
     assert!(
@@ -11729,7 +11786,7 @@ async fn scope_creep_guard_event_and_false_positives() {
         .unwrap();
     let events3 = state
         .store
-        .get_events(&task3.id, None, 0, Some(100))
+        .get_events(&task3.id, None, 0, Some(100), None)
         .await
         .unwrap();
     assert!(
