@@ -4,12 +4,12 @@
 
 ### Added
 
-- **RSS budget bench in the release pipeline (Plan 6.3 #532).**
-  `tests/e2e/run-rss-bench.sh` measures idle control-plane RSS (≤ 64
-  MiB), idle node RSS (≤ 25 MiB) and streaming node RSS under a
-  `spam:3000` task (≤ 60 MiB, child excluded) from `/proc` VmRSS;
-  `AG_RSS_MODE=assert` fails the run on breach (wired into `release.yml`
-  for runner-arch targets), `report` only prints (manual/dev use).
+- **RSS budget gate on release binaries (Plan 6.3 #532).**
+  The existing `tests/e2e/run-rss-budget.sh` gate (idle CP ≤ 64 MiB,
+  idle node ≤ 25 MiB, streaming node ≤ 60 MiB) is now also wired into
+  `release.yml` for runner-arch targets via `AG_BIN_DIR`, so the
+  budgets are enforced on the numbers that matter (release), not just
+  in CI on debug builds.
 - **Per-attempt child peak RSS (Plan 6.3 #534).** The node samples
   `RUSAGE_CHILDREN` before spawn and after reap on both the wrapper and
   ACP paths and emits a `resource_usage` status event

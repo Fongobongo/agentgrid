@@ -529,7 +529,7 @@
 - [x] Зафиксировать минимальную машину daemon: 1 CPU, 128 МБ RAM, 100–300 МБ диска сверх workspaces  — AGENTS.md / dev-plan budgets
 - [x] Зафиксировать целевой RSS node daemon: 8–25 МБ idle, ≤ 60 МБ streaming без agent subprocess  — dev-plan
 - [x] Зафиксировать целевой RSS control plane: ≤ 64 МБ idle при типовой конфигурации  — dev-plan
-- [x] Добавить benchmark/smoke test RSS в CI или release pipeline  — `tests/e2e/run-rss-bench.sh` (CP idle ≤64 МБ, node idle ≤25 МБ, streaming ≤60 МБ по /proc VmRSS; `AG_RSS_MODE=assert` в release.yml для x86_64, report для ручного прогона)
+- [x] Добавить benchmark/smoke test RSS в CI или release pipeline  — `tests/e2e/run-rss-budget.sh` (CP ≤64 МБ, node idle ≤25 МБ, streaming ≤60 МБ; exit 1 при нарушении): wired в CI e2e-job + в release.yml для x86_64 через `AG_BIN_DIR` (бюджеты на релизных бинарниках)
 - [x] Документировать, что реальные требования задачи зависят от проекта: 512 МБ–1 ГБ для простого editing, 2–4 ГБ для Node/Python tests, 4–8+ ГБ для Rust/Java/C++  — AGENTS.md
 - [x] Выводить отдельно ресурсы daemon и дочернего agent/build процесса  — daemon RSS в heartbeat (`active_rss_mib`); child peak RSS (`RUSAGE_CHILDREN`) — `resource_usage` status event + лог на обоих путях (wrapper/ACP); unit-тест монотонности
 
