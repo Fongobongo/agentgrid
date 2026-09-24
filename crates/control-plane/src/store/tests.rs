@@ -3558,7 +3558,67 @@ mod mem_gate_tests {
         );
     }
 
-    /// Plan 6.10 load gate: load per CPU above AGENTGRID_MAX_LOAD_PER_CPU
+    /// Plan 6.9: a repository `memory_mb` floor gates assignment — a host
+    /// below the floor is ineligible with a visible reason; a host above
+    /// it assigns. Unregistered/plain-dir repos skip the gate.
+    #[tokio::test]
+    async fn repo_memory_floor_gates_assignment() {
+        use agentgrid_common::{CreateRepositoryRequest, RepoRequirements};
+        let (s, node_id) = fresh().await;
+        s.create_repository(&CreateRepositoryRequest {
+            name: "big".into(),
+            git_url: "https://example.com/big.git".into(),
+            default_branch: "main".into(),
+            validation_command: None,
+            requirements: Some(RepoRequirements {
+                os: Some("linux".into()),
+                arch: None,
+                tools: vec![],
+                memory_mb: Some(8192),
+                disk_mb: None,
+            }),
+        })
+        .await
+        .unwrap();
+        let task_id = s
+            .create_task(&CreateTaskRequest {
+                repository: "big".into(),
+                prompt: "p".into(),
+                adapter: "mock".into(),
+                requested_node_id: Some(node_id.clone()),
+                timeout_secs: None,
+                validation_command: None,
+                base_commit: None,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .id;
+        // 4096 MiB host < 8192 floor → no assignment + visible reason.
+        let mut req = hb(4096);
+        req.free_memory_mb = 4096;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        assert!(
+            s.try_assign(&node_id).await.unwrap().is_none(),
+            "host below the repo memory floor must not assign"
+        );
+        let elig = s.task_eligibility(&task_id).await.unwrap().unwrap();
+        let reasons: Vec<String> = elig.nodes.iter().flat_map(|n| n.reasons.clone()).collect();
+        assert!(
+            reasons.iter().any(|r| r.contains("requires 8192 MiB")),
+            "expected a repo memory-floor reason, got {reasons:?}"
+        );
+        // 16384 MiB host ≥ floor → assigns.
+        let mut req = hb(16384);
+        req.free_memory_mb = 16384;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        assert!(
+            s.try_assign(&node_id).await.unwrap().is_some(),
+            "host above the floor must assign"
+        );
+    }
+
+    /// Plan 6.9 load gate: load per CPU above AGENTGRID_MAX_LOAD_PER_CPU
     /// (default 2.0) refuses new work; normal load admits.
     #[tokio::test]
     async fn high_load_per_cpu_blocks_assignment() {

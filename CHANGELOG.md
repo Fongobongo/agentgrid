@@ -4,6 +4,20 @@
 
 ### Added
 
+- **Structured repository requirements + semver matching (Plan 6.9).**
+  Repositories carry optional structured `requirements` (OS, arch,
+  tools with version requirements, host memory/disk floors; migration
+  0088, validated at registration with 400 on typos/absurd floors).
+  Tool versions compare as real semver ranges (`*`, exact, `^`, `~`,
+  `>=`/`>`/`<=`/`<`/`=`, `1.2.*`, npm-style pre-release gating —
+  hand-rolled, no new dependency), wired into the capability probe
+  (semver-first, legacy prefix fallback so pins like `"0."` keep
+  working). The scheduler enforces `memory_mb`/`disk_mb` floors
+  against reported host memory/disk with visible eligibility reasons;
+  `ag repo add --requirements '<json>'` sets them, the web UI shows a
+  one-line summary per repo. Covered by matcher/probe unit tests,
+  registry round-trip + 400 tests, and a scheduler floor-gate test.
+
 - **Event tail mode for fast Task details (Plan 6.7 #579).**
   `GET /v1/tasks/{id}/events?tail=N` serves the last N events ascending
   (no cursor walk; clamped to 2000, forward cursors win). The web UI

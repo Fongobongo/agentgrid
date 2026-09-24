@@ -99,6 +99,7 @@ pub mod mcp;
 pub mod profile;
 pub mod skills_trust;
 mod state_machine;
+pub mod version;
 
 pub use approval::{
     next_approval, ApprovalEvent, ApprovalStatus, ApprovalView, InvalidApprovalTransition,
@@ -111,6 +112,7 @@ pub use skills_trust::SkillTrustView;
 pub use state_machine::{
     next_attempt_status, next_task_status, AttemptTransition, InvalidTransition, TaskTransition,
 };
+pub use version::{valid_version_req, version_matches_req};
 
 /// A single streamed event tied to an attempt, with a monotonic `sequence`.
 ///
@@ -1201,6 +1203,10 @@ pub struct CreateRepositoryRequest {
     pub default_branch: String,
     #[serde(default)]
     pub validation_command: Option<String>,
+    /// Plan 6.9: structured host/tool requirements for tasks on this
+    /// repository. Absent = unconstrained (legacy rows / plain tasks).
+    #[serde(default)]
+    pub requirements: Option<RepoRequirements>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1211,6 +1217,90 @@ pub struct RepositoryView {
     pub default_branch: String,
     pub validation_command: Option<String>,
     pub created_at: String,
+    /// Plan 6.9: structured requirements (None = unconstrained).
+    #[serde(default)]
+    pub requirements: Option<RepoRequirements>,
+}
+
+/// Plan 6.9: structured repository requirements — OS, arch, tools with
+/// version requirements, and host resource floors. Stored as JSON on the
+/// repository row; the scheduler enforces the fields it has node data
+/// for today (`memory_mb`), the rest is operator-visible eligibility
+/// context (and the contract future gates build on).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepoRequirements {
+    /// Required host OS (`linux`, `darwin`, `windows`). None = any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    /// Required host arch (`x86_64`, `aarch64`). None = any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    /// Required tools with version requirements (`git >=2.39`,
+    /// `node ^22`). Empty = none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolRequirement>,
+    /// Minimum host memory (MiB). None = no floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    /// Minimum free disk (MiB). None = no floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mb: Option<u64>,
+}
+
+/// One required tool: name + semver requirement (see [`version`] for the
+/// accepted forms). An empty `version_req` is rejected at validation —
+/// omit the tool instead of constraining nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRequirement {
+    pub name: String,
+    pub version_req: String,
+}
+
+/// Validate structured requirements at the trust boundary (registration):
+/// sane charset/length on names, parseable version requirements,
+/// non-absurd resource floors. `Ok(())` = storable.
+pub fn validate_repo_requirements(r: &RepoRequirements) -> Result<(), String> {
+    fn token_ok(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'/'
+            })
+    }
+    if let Some(os) = &r.os {
+        if !token_ok(os) {
+            return Err(format!("invalid requirements.os: {os:?}"));
+        }
+    }
+    if let Some(arch) = &r.arch {
+        if !token_ok(arch) {
+            return Err(format!("invalid requirements.arch: {arch:?}"));
+        }
+    }
+    if r.tools.len() > 32 {
+        return Err("requirements.tools: at most 32 entries".to_string());
+    }
+    for t in &r.tools {
+        if !token_ok(&t.name) {
+            return Err(format!("invalid tool name: {:?}", t.name));
+        }
+        if !valid_version_req(&t.version_req) {
+            return Err(format!(
+                "invalid version_req for tool {:?}: {:?}",
+                t.name, t.version_req
+            ));
+        }
+    }
+    // Resource floors: >0 when present, below absurd (1 TiB) so a typo
+    // like 999999999 cannot silently fence every node off.
+    for (label, v) in [("memory_mb", r.memory_mb), ("disk_mb", r.disk_mb)] {
+        if let Some(mb) = v {
+            if mb == 0 || mb > 1_048_576 {
+                return Err(format!("invalid requirements.{label}: {mb}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A multi-turn chat conversation routed through the control plane to a coding

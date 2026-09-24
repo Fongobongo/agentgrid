@@ -63,6 +63,10 @@ pub struct ClusterHandle {
 /// cluster executor? Resolves `available` from the presence of the runtime +
 /// the pinned binary. The real probe shells out; the helper below is the pure
 /// combine the probe uses, so it can be tested without Docker.
+///
+/// Plan 6.9: `required` accepts a semver requirement (`^0.5`, `>=0.5.0`,
+/// `0.5.*`, … — see [`crate::version`]) and falls back to the legacy
+/// prefix match, so pins like `"0."` keep working unchanged.
 pub fn probe_decision(
     runtime_present: bool,
     executor_version: Option<&str>,
@@ -73,7 +77,12 @@ pub fn probe_decision(
         (true, _) => (false, Some("container runtime not found".into())),
         (false, true) => (false, Some("executor binary not found".into())),
         (false, false) => match executor_version {
-            Some(v) if v.starts_with(required_prefix) => (true, None),
+            Some(v)
+                if crate::version::version_matches_req(v, required_prefix)
+                    || v.starts_with(required_prefix) =>
+            {
+                (true, None)
+            }
             Some(v) => (
                 false,
                 Some(format!(
@@ -124,5 +133,20 @@ mod tests {
         let p = probe_decision(true, None, "0.5", true);
         assert!(!p.available);
         assert!(p.reason.as_deref().unwrap().contains("unknown"));
+    }
+
+    /// Plan 6.9: a semver requirement is honored where a prefix would
+    /// over- or under-match (`^0.5` admits `0.5.9` but not `0.6.0`;
+    /// `>=0.5.0 <0.6.0` is exact); the legacy prefix stays as fallback
+    /// (`"0."` still pins the 0.x line).
+    #[test]
+    fn probe_honors_semver_requirement_with_prefix_fallback() {
+        assert!(probe_decision(true, Some("0.5.9"), "^0.5", true).available);
+        assert!(!probe_decision(true, Some("0.6.0"), "^0.5", true).available);
+        assert!(probe_decision(true, Some("1.2.3"), ">=1.0.0 <2.0.0", true).available);
+        assert!(!probe_decision(true, Some("2.0.0"), ">=1.0.0 <2.0.0", true).available);
+        // Legacy pins keep working through the prefix fallback.
+        assert!(probe_decision(true, Some("0.9.1"), "0.", true).available);
+        assert!(!probe_decision(true, Some("1.0.0"), "0.", true).available);
     }
 }

@@ -756,12 +756,15 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
 /// Stage 2.4 scheduler filter. Returns every reason `node` cannot run a task
 /// for `(repository, adapter)`; empty => eligible. Shared by [`Store::try_assign`]
 /// (per-node assignment) and [`Store::task_eligibility`] (visibility).
+/// `repo_requirements` carries the task repository's structured requirements
+/// (None for plain-dir/unregistered repos — no requirement gates apply).
 fn node_ineligibility(
     node: &NodeView,
     repository: &str,
     adapter: &str,
     security_profile: Option<&str>,
     task_network_mode: Option<&str>,
+    repo_requirements: Option<&agentgrid_common::RepoRequirements>,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
     if node.status != NodeStatus::Online {
@@ -806,6 +809,27 @@ fn node_ineligibility(
             "low disk on workspace root ({} MiB free < {} MiB)",
             node.free_disk_mb, min_disk
         ));
+    }
+    // Plan 6.9: repository resource floors — a task whose repo declares
+    // `memory_mb`/`disk_mb` needs a host with at least that much RAM/free
+    // disk. Same 0/unknown-admits contract as the host gates above; only
+    // a known-below-floor value rejects.
+    if let Some(req) = repo_requirements {
+        if let Some(min_mb) = req.memory_mb {
+            if node_free_mem > 0 && node_free_mem < min_mb {
+                reasons.push(format!(
+                    "repository requires {min_mb} MiB host memory ({node_free_mem} MiB free)"
+                ));
+            }
+        }
+        if let Some(min_disk) = req.disk_mb {
+            if node.free_disk_mb > 0 && node.free_disk_mb < min_disk {
+                reasons.push(format!(
+                    "repository requires {min_disk} MiB free disk ({} MiB free)",
+                    node.free_disk_mb
+                ));
+            }
+        }
     }
     // Plan 6.10 load gate mirror: load per CPU above
     // AGENTGRID_MAX_LOAD_PER_CPU (default 2.0) is visible pressure. cpu_count

@@ -1314,6 +1314,94 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
 }
 
 #[tokio::test]
+async fn repository_requirements_round_trip_and_reject_invalid() {
+    // Plan 6.9: structured requirements store + list back; a typo'd
+    // version_req or absurd floor is 400, not silent dead data.
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+    let post_repo = |body: serde_json::Value| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/repositories")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    // Valid requirements round-trip.
+    let resp = post_repo(serde_json::json!({
+        "name": "big",
+        "git_url": "https://example.com/big.git",
+        "default_branch": "main",
+        "requirements": {
+            "os": "linux",
+            "arch": "x86_64",
+            "tools": [{"name": "git", "version_req": ">=2.39"}],
+            "memory_mb": 2048,
+        },
+    }))
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let rv: RepositoryView = serde_json::from_slice(&body).unwrap();
+    let reqs = rv.requirements.expect("requirements echoed");
+    assert_eq!(reqs.os.as_deref(), Some("linux"));
+    assert_eq!(reqs.memory_mb, Some(2048));
+    assert_eq!(reqs.tools.len(), 1);
+    // Listed back identically.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/repositories", &token))
+        .await
+        .unwrap();
+    let repos: ListResponse<RepositoryView> =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let got = repos.items.iter().find(|r| r.name == "big").unwrap();
+    assert_eq!(
+        got.requirements.as_ref().and_then(|r| r.memory_mb),
+        Some(2048)
+    );
+    // Invalid version_req → 400 with a message.
+    let resp = post_repo(serde_json::json!({
+        "name": "bad",
+        "git_url": "https://example.com/bad.git",
+        "default_branch": "main",
+        "requirements": {"tools": [{"name": "git", "version_req": "not-a-version!!!"}]},
+    }))
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Absurd floor → 400.
+    let resp = post_repo(serde_json::json!({
+        "name": "bad2",
+        "git_url": "https://example.com/bad2.git",
+        "default_branch": "main",
+        "requirements": {"memory_mb": 999999999},
+    }))
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // No requirements → None (legacy shape preserved).
+    let resp = post_repo(serde_json::json!({
+        "name": "plain",
+        "git_url": "https://example.com/plain.git",
+        "default_branch": "main",
+    }))
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let rv: RepositoryView = serde_json::from_slice(&body).unwrap();
+    assert!(rv.requirements.is_none());
+}
+
+#[tokio::test]
 async fn repository_create_and_list() {
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
@@ -1322,6 +1410,7 @@ async fn repository_create_and_list() {
         git_url: "https://example.com/demo.git".into(),
         default_branch: "main".into(),
         validation_command: Some("cargo test".into()),
+        requirements: None,
     };
     let resp = app
         .clone()
@@ -5827,6 +5916,7 @@ async fn verification_note_flags_silent_success_and_claim_without_commit() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -7405,6 +7495,7 @@ async fn repository_create_rejects_unsafe_git_url_scheme() {
         git_url: url.into(),
         default_branch: "main".into(),
         validation_command: None,
+        requirements: None,
     };
     let mut n = 0;
     for bad in ["javascript://evil/x", "data:text/plain,a", "ftp://x", ""] {
@@ -9279,6 +9370,7 @@ async fn search_events_finds_event_by_payload_word() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -9811,6 +9903,7 @@ async fn repo_learnings_top_approved_reaches_prompt() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -9887,6 +9980,7 @@ async fn consensus_disagreement_creates_human_review_approval() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -10026,6 +10120,7 @@ async fn resume_digest_bm25_after_failure() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -10136,6 +10231,7 @@ async fn resume_digest_multibyte_fragment_does_not_panic() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -11195,6 +11291,7 @@ async fn completion_persists_validation_rounds() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -11275,6 +11372,7 @@ async fn task_auto_retry_requeues_until_budget_exhausted() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -11354,6 +11452,7 @@ async fn review_consensus_verdicts_gate_patch_review() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -11516,6 +11615,7 @@ async fn review_consensus_reject_keeps_human_gate() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();
@@ -11624,6 +11724,7 @@ async fn scope_creep_guard_event_and_false_positives() {
             git_url: "https://example.com/demo.git".into(),
             default_branch: "main".into(),
             validation_command: None,
+            requirements: None,
         })
         .await
         .unwrap();

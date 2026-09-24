@@ -12,9 +12,17 @@ impl Store {
     pub async fn create_repository(&self, req: &CreateRepositoryRequest) -> Result<RepositoryView> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
+        // Plan 6.9: structured requirements ride as JSON (NULL = none).
+        // Validation happens at the route (400 on invalid); a corrupt blob
+        // can only arrive out-of-band and degrades to None on read.
+        let requirements = req
+            .requirements
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         sqlx::query(
-            "INSERT INTO repositories (id, name, git_url, default_branch, validation_command, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO repositories (id, name, git_url, default_branch, validation_command, created_at, requirements) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&req.name)
@@ -22,6 +30,7 @@ impl Store {
         .bind(&req.default_branch)
         .bind(&req.validation_command)
         .bind(&now)
+        .bind(&requirements)
         .execute(&self.pool)
         .await?;
         Ok(RepositoryView {
@@ -31,6 +40,7 @@ impl Store {
             default_branch: req.default_branch.clone(),
             validation_command: req.validation_command.clone(),
             created_at: now,
+            requirements: req.requirements.clone(),
         })
     }
 
@@ -48,7 +58,7 @@ impl Store {
     ) -> Result<Vec<RepositoryView>> {
         let limit = page_limit(limit);
         let mut sql = String::from(
-            "SELECT id, name, git_url, default_branch, validation_command, created_at FROM repositories WHERE 1=1",
+            "SELECT id, name, git_url, default_branch, validation_command, created_at, requirements FROM repositories WHERE 1=1",
         );
         if after.is_some() {
             sql.push_str(KEYSET_PREDICATE);
@@ -69,6 +79,13 @@ impl Store {
                 default_branch: r.try_get("default_branch").unwrap_or_default(),
                 validation_command: r.try_get("validation_command").unwrap_or_default(),
                 created_at: r.try_get("created_at").unwrap_or_default(),
+                // Plan 6.9: corrupt/out-of-band blobs degrade to None —
+                // a dashboard must never fail listing repositories.
+                requirements: r
+                    .try_get::<Option<String>, _>("requirements")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok()),
             })
             .collect())
     }

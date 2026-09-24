@@ -29,6 +29,18 @@ pub async fn create_repository(
             Json(serde_json::json!({"error": msg})),
         ));
     }
+    // Plan 6.9: structured requirements are validated at the trust
+    // boundary (400 on invalid) so a typo'd version_req or absurd floor
+    // cannot silently fence every node off.
+    if let Some(r) = &req.requirements {
+        if let Err(msg) = agentgrid_common::validate_repo_requirements(r) {
+            tracing::warn!("create_repository rejected requirements: {msg}");
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            ));
+        }
+    }
     match state.store.create_repository(&req).await {
         Ok(v) => {
             let _ = state

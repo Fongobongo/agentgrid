@@ -1,6 +1,18 @@
 import { useEffect, useState } from "react";
-import { createRepository, listRepos, RepositoryView } from "../api";
+import { createRepository, listRepos, RepoRequirements, RepositoryView } from "../api";
 import { ErrorBox, Loading, fmtTime } from "./util";
+
+// Plan 6.9: compact one-line summary of structured requirements
+// (`linux/x86_64, git>=2.39, ≥2048 MiB RAM`) — "—" when unconstrained.
+function formatRequirements(r?: RepoRequirements | null): string {
+  if (!r) return "—";
+  const parts: string[] = [];
+  if (r.os || r.arch) parts.push([r.os, r.arch].filter(Boolean).join("/"));
+  for (const t of r.tools ?? []) parts.push(`${t.name}${t.version_req}`);
+  if (r.memory_mb) parts.push(`≥${r.memory_mb} MiB RAM`);
+  if (r.disk_mb) parts.push(`≥${r.disk_mb} MiB disk`);
+  return parts.length > 0 ? parts.join(", ") : "—";
+}
 
 export default function Repositories() {
   const [repos, setRepos] = useState<RepositoryView[] | null>(null);
@@ -48,26 +60,28 @@ export default function Repositories() {
       ) : (
         <table>
           <thead>
-            <tr>
-              <th>Name</th>
-              <th>Git URL</th>
-              <th>Branch</th>
-              <th>Validation</th>
-              <th>Added</th>
-            </tr>
-          </thead>
-          <tbody>
-            {repos.map((r) => (
-              <tr key={r.id}>
-                <td>{r.name}</td>
-                <td>
-                  <code>{r.git_url}</code>
-                </td>
-                <td>{r.default_branch}</td>
-                <td>{r.validation_command ?? "—"}</td>
-                <td>{fmtTime(r.created_at)}</td>
+              <tr>
+                <th>Name</th>
+                <th>Git URL</th>
+                <th>Branch</th>
+                <th>Validation</th>
+                <th>Requirements</th>
+                <th>Added</th>
               </tr>
-            ))}
+            </thead>
+            <tbody>
+              {repos.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.name}</td>
+                  <td>
+                    <code>{r.git_url}</code>
+                  </td>
+                  <td>{r.default_branch}</td>
+                  <td>{r.validation_command ?? "—"}</td>
+                  <td>{formatRequirements(r.requirements)}</td>
+                  <td>{fmtTime(r.created_at)}</td>
+                </tr>
+              ))}
           </tbody>
         </table>
       )}

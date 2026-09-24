@@ -481,6 +481,11 @@ struct RepoAddArgs {
     /// Optional validation command run after the agent succeeds.
     #[arg(long)]
     validate: Option<String>,
+    /// Plan 6.9: structured requirements as a JSON object
+    /// (`{"memory_mb":2048,"tools":[{"name":"git","version_req":">=2.39"}]}`).
+    /// Rejected client-side when it is not valid JSON.
+    #[arg(long)]
+    requirements: Option<String>,
 }
 
 #[derive(Args)]
@@ -1803,11 +1808,22 @@ async fn cmd_retry(client: &reqwest::Client, base: &str, a: RetryArgs) -> Result
 async fn cmd_repo(client: &reqwest::Client, base: &str, a: RepoArgs) -> Result<()> {
     match a.action {
         RepoAction::Add(add) => {
+            // Plan 6.9: parse the requirements JSON client-side so a typo
+            // fails fast with a clear message (the server re-validates
+            // with 400 anyway).
+            let requirements: Option<serde_json::Value> = match &add.requirements {
+                Some(s) => Some(
+                    serde_json::from_str(s)
+                        .with_context(|| format!("--requirements is not valid JSON: {s}"))?,
+                ),
+                None => None,
+            };
             let req = serde_json::json!({
                 "name": add.name,
                 "git_url": add.git_url,
                 "default_branch": add.branch,
                 "validation_command": add.validate,
+                "requirements": requirements,
             });
             let resp = client
                 .post(format!("{base}/v1/repositories"))

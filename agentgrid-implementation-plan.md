@@ -603,9 +603,9 @@
 - [x] Не запускать `--version` перед каждой задачей; кэшировать capability snapshot  — heartbeat probe loop
 - [x] Обновлять capabilities при старте, периодически, вручную и после `command not found`  — startup + heartbeat cadence
 - [x] Представлять readiness каждого adapter отдельно: `ready`, `missing`, `incompatible`, `misconfigured`  — `AgentCapability` readiness
-- [ ] Repository requirements хранить структурированно: OS, arch, tools, versions, memory, disk
+- [x] Repository requirements хранить структурированно: OS, arch, tools, versions, memory, disk  — `RepoRequirements` (common, валидация) + `requirements` JSON-колонка registry (миграция 0088, 400 на invalid); scheduler гейтит `memory_mb`/`disk_mb` по данным heartbeat + eligibility-причины; CLI `repo add --requirements`, web UI summary
 - [x] Scheduler проверяет требования до assignment  — adapter/repository filters
-- [ ] Поддержать semver/range comparison для совместимых tools  — prefix-match only (`probe_decision required_prefix`)
+- [x] Поддержать semver/range comparison для совместимых tools  — hand-rolled semver matcher (`*`/exact/`^`/`~`/comparators/wildcards, npm pre-release gate, без новых зависимостей); `probe_decision` — semver-first, prefix-fallback; unit-тесты ranges + probe
 - [x] Показывать пользователю точную причину `no_eligible_nodes`  — `GET /v1/tasks/:id/eligibility`
 
 ### 6.10 Resource reservations и pressure hysteresis

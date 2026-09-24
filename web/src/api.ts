@@ -64,6 +64,14 @@ export interface NodeView {
   opencode_profile_id?: string | null;
 }
 
+export interface RepoRequirements {
+  os?: string | null;
+  arch?: string | null;
+  tools?: { name: string; version_req: string }[];
+  memory_mb?: number | null;
+  disk_mb?: number | null;
+}
+
 export interface RepositoryView {
   id: string;
   name: string;
@@ -71,6 +79,7 @@ export interface RepositoryView {
   default_branch: string;
   validation_command: string | null;
   created_at: string;
+  requirements?: RepoRequirements | null;
 }
 
 export interface ApprovalView {

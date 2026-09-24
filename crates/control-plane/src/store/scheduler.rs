@@ -382,6 +382,47 @@ impl Store {
         // fields + the node view, so it runs here with no DB traffic; the
         // prefetch below then covers exactly the tasks the loop consumes.
         // The emptiness guard also keeps every `IN (...)` below non-empty.
+        // Plan 6.9: repository requirements ride one bulk query (parsed
+        // JSON per repo; unregistered/plain-dir repos miss the map and
+        // skip requirement gates). The `placeholders` helper is shared
+        // with every bulk prefetch below.
+        let placeholders = |n: usize| {
+            let mut s = String::new();
+            for i in 0..n {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push('?');
+            }
+            s
+        };
+        let cand_repos: Vec<String> = cands
+            .iter()
+            .map(|c| c.try_get::<String, _>("repository"))
+            .collect::<std::result::Result<_, _>>()?;
+        let mut repo_reqs: std::collections::HashMap<
+            String,
+            Option<agentgrid_common::RepoRequirements>,
+        > = std::collections::HashMap::new();
+        if !cand_repos.is_empty() {
+            let mut rq_sql =
+                String::from("SELECT name, requirements FROM repositories WHERE name IN (");
+            rq_sql.push_str(&placeholders(cand_repos.len()));
+            rq_sql.push(')');
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(rq_sql.as_str()));
+            for n in &cand_repos {
+                q = q.bind(n);
+            }
+            for r in q.fetch_all(&mut *tx).await? {
+                let name: String = r.try_get("name")?;
+                let reqs: Option<agentgrid_common::RepoRequirements> = r
+                    .try_get::<Option<String>, _>("requirements")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok());
+                repo_reqs.insert(name, reqs);
+            }
+        }
         let mut eligible: Vec<_> = Vec::new();
         for c in &cands {
             if eligible.len() >= cap {
@@ -397,6 +438,7 @@ impl Store {
                 &adapter,
                 security_profile.as_deref(),
                 network_mode.as_deref(),
+                repo_reqs.get(&repository).and_then(|o| o.as_ref()),
             )
             .is_empty()
             {
@@ -420,20 +462,12 @@ impl Store {
         // holding the only writer permit). They are invariant during the
         // flip loop, so resolve them in bulk BEFORE it and keep only the
         // cheap CAS UPDATE + INSERT per candidate inside the txn.
+        // (The `placeholders` helper is hoisted above the eligibility
+        // filter: the Plan 6.9 requirements prefetch shares it.)
         let cap_ids: Vec<String> = eligible
             .iter()
             .map(|c| c.try_get::<String, _>("id"))
             .collect::<std::result::Result<_, _>>()?;
-        let placeholders = |n: usize| {
-            let mut s = String::new();
-            for i in 0..n {
-                if i > 0 {
-                    s.push(',');
-                }
-                s.push('?');
-            }
-            s
-        };
         let mut in_sql = String::new();
         in_sql.push_str(
             "SELECT rr.task_id AS tid, ws.role AS role FROM role_runs rr \
@@ -752,6 +786,20 @@ impl Store {
             None => all,
         };
 
+        // Plan 6.9: the task repository's structured requirements (None for
+        // plain-dir/unregistered repos — no requirement gates apply).
+        let repo_requirements: Option<agentgrid_common::RepoRequirements> =
+            sqlx::query("SELECT requirements FROM repositories WHERE name = ?")
+                .bind(&repository)
+                .fetch_optional(&self.pool)
+                .await?
+                .and_then(|r| {
+                    r.try_get::<Option<String>, _>("requirements")
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|s| serde_json::from_str(&s).ok());
+
         let mut nodes = Vec::new();
         for n in &considered {
             let reasons = node_ineligibility(
@@ -760,6 +808,7 @@ impl Store {
                 &adapter,
                 security_profile.as_deref(),
                 network_mode.as_deref(),
+                repo_requirements.as_ref(),
             );
             nodes.push(NodeEligibility {
                 node_id: n.id.clone(),
