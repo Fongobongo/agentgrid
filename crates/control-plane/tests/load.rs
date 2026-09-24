@@ -650,19 +650,31 @@ async fn idle_nodes_heartbeat_poll_load() {
         .map(|v| v as u64)
         .unwrap_or(0);
     let reqs = nodes_n * rounds * 2;
+    // Plan 6.14 (#669): an idle fleet must not saturate the CP — parks are
+    // event-driven (no wakeup storms), so client-observed poll latency stays
+    // flat at ~park time. p99 far above the 1s park would mean queueing
+    // collapse under 100-idle load. (Server CPU itself is not separable
+    // in-process — server and clients share this runtime; a dedicated
+    // multi-process CPU soak stays a self-hosted-nightly follow-up. The
+    // server-side handler work per idle poll is one SELECT + write txn by
+    // construction, and write_lock_failures above stays zero.)
+    let poll_p99 = pct(&pl, 0.99);
     println!(
         "IDLE-RESULT nodes={nodes_n} rounds={rounds} reqs={reqs} wall_s={wall:.1} \
-         hb_p50_ms={} hb_p99_ms={} poll_p50_ms={} poll_p99_ms={} \
+         hb_p50_ms={} hb_p99_ms={} poll_p50_ms={} poll_p99_ms={poll_p99} \
          errors={errors_n} online={online}/{nodes_n} write_lock_failures={lock_failures}",
         pct(&hb, 0.50),
         pct(&hb, 0.99),
         pct(&pl, 0.50),
-        pct(&pl, 0.99),
     );
     assert_eq!(errors_n, 0, "idle heartbeat/poll burst must not error");
     assert_eq!(online, nodes_n, "every idle node must stay online");
     assert_eq!(
         lock_failures, 0,
         "idle load must not contend the SQLite write lock"
+    );
+    assert!(
+        poll_p99 < 5000,
+        "idle poll p99 {poll_p99}ms far above the 1s park — the CP is saturated by an idle fleet"
     );
 }

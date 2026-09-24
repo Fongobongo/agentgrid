@@ -1139,6 +1139,60 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Plan 6.14 (#668): 1 GiB of mock stdout through the spool must not
+    /// grow RAM linearly — the outbox appends to disk with a bounded
+    /// in-memory footprint (one serialized event at a time). Pushes
+    /// 1024 × 1 MiB Stdout events (spool limit off, quota raised past the
+    /// gigabyte) and asserts VmRSS growth stays far sublinear while the
+    /// spool file holds the full gigabyte. Linux-only (/proc self stat).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spool_one_gib_stdout_without_linear_ram_growth() {
+        let dir = tmpdir("spool-1gib");
+        std::env::set_var("AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES", "0");
+        std::env::set_var(
+            "AGENTGRID_OUTBOX_QUOTA_BYTES",
+            (4u64 * 1024 * 1024 * 1024).to_string(),
+        );
+        let ob = EventOutbox::open(&dir, "att-1gib").unwrap();
+        let rss_kb = || {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| {
+                    s.lines().find_map(|l| {
+                        l.strip_prefix("VmRSS:")
+                            .and_then(|v| v.split_whitespace().next())
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+                })
+                .unwrap_or(0)
+        };
+        let before = rss_kb();
+        let chunk = "x".repeat(1024 * 1024);
+        for seq in 1..=1024u64 {
+            ob.push(&IncomingEvent {
+                sequence: seq,
+                r#type: EventType::Stdout,
+                payload: serde_json::json!({ "text": chunk }),
+            })
+            .unwrap();
+        }
+        let growth_mb = rss_kb().saturating_sub(before) / 1024;
+        let file_mb = std::fs::metadata(&ob.path).map(|m| m.len() / (1024 * 1024));
+        std::env::remove_var("AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES");
+        std::env::remove_var("AGENTGRID_OUTBOX_QUOTA_BYTES");
+        let file_mb = file_mb.unwrap_or(0);
+        assert!(
+            file_mb >= 1024,
+            "spool must hold ~1 GiB on disk, got {file_mb} MiB"
+        );
+        assert!(
+            growth_mb < 256,
+            "1 GiB streamed with {growth_mb} MiB RSS growth — must stay sublinear"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Hardening P1 item 34: terminal events can exceed the spool limit by
     /// TERMINAL_RESERVED_BYTES, while non-terminal (Stdout/Stderr/Metric)
     /// events are blocked at the hard limit.

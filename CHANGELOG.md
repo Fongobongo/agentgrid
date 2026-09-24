@@ -4,6 +4,15 @@
 
 ### Added
 
+- **6.14 performance acceptance coverage.** 1 GiB of mock stdout
+  streams through the node outbox with sublinear RAM growth
+  (`spool_one_gib_stdout_without_linear_ram_growth`: 1024×1 MiB
+  events, VmRSS growth < 256 MiB with ~1 GiB on disk, Linux-only).
+  The 100-idle-nodes harness additionally asserts poll p99 stays flat
+  near park time (no saturation collapse); server CPU in a shared
+  test-process runtime is not separable, so a dedicated multi-process
+  soak stays a self-hosted-nightly follow-up.
+
 - **N / N-1 wire-contract tests (Plan 6.12 #647).**
   `crates/control-plane/tests/version_compat.rs` pins the node↔CP
   contract with hand-written JSON (not re-serialized current types):

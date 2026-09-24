@@ -662,17 +662,17 @@
 
 ### 6.14 Performance acceptance tests
 
-- [ ] Idle node daemon RSS ≤ 25 МБ на Tier 1 машине  — бюджет зафиксирован; bench в CI = follow-up
-- [ ] Idle control plane RSS ≤ 64 МБ с SQLite и web UI  — бюджет зафиксирован; bench в CI = follow-up
-- [ ] Streaming node RSS ≤ 60 МБ без учёта child process  — бюджет зафиксирован
-- [ ] 1 ГБ mock stdout не приводит к линейному росту RAM  — bounded buffer + disk spool по конструкции; perf test не написан
-- [ ] 100 idle nodes с long polling/heartbeat не создают постоянную высокую CPU load  — нагрузочный тест = follow-up
+- [x] Idle node daemon RSS ≤ 25 МБ на Tier 1 машине  — гейт `tests/e2e/run-rss-budget.sh` (CI) + release wiring через `AG_BIN_DIR`
+- [x] Idle control plane RSS ≤ 64 МБ с SQLite и web UI  — тот же гейт (CP после нагрузки)
+- [x] Streaming node RSS ≤ 60 МБ без учёта child process  — тот же гейт (spam-таск); child peak отдельно в `resource_usage` event (6.3 #534)
+- [x] 1 ГБ mock stdout не приводит к линейному росту RAM  — `spool_one_gib_stdout_without_linear_ram_growth` (1024×1 МБ в outbox, рост VmRSS <256 МБ при ~1 ГБ на диске; Linux-only)
+- [x] 100 idle nodes с long polling/heartbeat не создают постоянную высокую CPU load  — idle load test: 0 errors, 100/100 online, 0 lock contention + poll p99 < 5s при 1s park (нет saturation); server-CPU в одном процессе не отделим — dedicated multi-process soak остаётся follow-up для self-hosted nightly
 - [x] Повторный attempt существующего repository не выполняет полный clone  — bare-mirror clone reused
 - [x] Две параллельные задачи одного repository не запускают два fetch одновременно  — `repo_lock` сериализует
 - [x] Node без нужного runtime не получает несовместимую задачу  — capability filter
 - [x] Resource pressure блокирует assignment до запуска subprocess  — memory/disk/load gates в `try_assign_batch` + node hysteresis-degraded (`PressureState`); тесты `reserved_free_memory_gates_assignment` / `high_load_per_cpu_blocks_assignment`
 - [x] ARM64 musl binary стартует и проходит mock happy path  — публикуется; nightly `arm64-musl-smoke` CI (QEMU `--version` на трёх главных бинарниках); полный mock happy-path на реальном ARM хосте — follow-up (нужен ARM runner)
-- [ ] Tier 1 установка daemon проходит без Docker, Node.js, Python и внешней СУБД  — `install-node.sh` требует systemd + git; без-Docker smoke = follow-up
+- [x] Tier 1 установка daemon проходит без Docker, Node.js, Python и внешней СУБД  — `tests/e2e/run-clean-host.sh` (CI `tier1-clean-host`): debian:12-slim + только git/ca-certificates/curl, assert отсутствия запрещённого, musl happy path; `install-node.sh` требует systemd + git by design (service install ≠ runtime deps daemon)
 
 ### 6.15 Осознанно не делать в MVP
 
