@@ -388,7 +388,7 @@
 - [x] Проверить корректный SIGTERM, WAL checkpoint и сохранность volume после пересоздания контейнера  — graceful shutdown ловит SIGTERM→wal_checkpoint
 - [x] Скрипт/команда установки node: создание пользователя, каталогов `/var/lib/agentgrid/...`, systemd unit, enroll — целевое время подключения < 10 минут (критерий приёмки)  — `deploy/install-node.sh` + `deploy/install-control-plane.sh`
 - [x] Release-бинарники для Ubuntu LTS и Debian stable (+ проверка glibc-совместимости или musl static build)  — `.github/workflows/release.yml` (musl x86_64 + aarch64, GNU fallback)
-- [ ] Версионирование: semver, `--version` у всех бинарников, проверка совместимости версий daemon ↔ control plane (warning при расхождении)  — `protocol_version` в heartbeat есть; `--version` у бинарников не реализовано
+- [x] Версионирование: semver, `--version` у всех бинарников, проверка совместимости версий daemon ↔ control plane (warning при расхождении)  — `protocol_version` в heartbeat + degraded при major-расхождении + `agent_version`; `--version` теперь у всех шиппаемых бинарников (последним добавлен adapter-mock), release smoke больше не скипает; per-PR тесты `adapters/tests/version.rs` + `version_flag_reports_crate_version`
 
 ### 5.4 End-to-end тесты
 

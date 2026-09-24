@@ -42,6 +42,16 @@ fn parse_prompt() -> String {
 }
 
 fn main() {
+    // Plan 5.3 (#391): every shipped binary reports `--version` (the
+    // release smoke test invokes it; the node capability probe calls it
+    // on every adapter binary).
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-v")
+    {
+        println!("adapter-mock {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let prompt = parse_prompt();
     emit(
         "log",

@@ -2114,6 +2114,30 @@ mod exit_code_tests {
         let e = anyhow::anyhow!("outer").context("inner context");
         assert_eq!(classify_failure(&e), 1);
     }
+
+    /// Plan 5.3 (#391): `ag --version` (and `-V`) must keep reporting the
+    /// crate version — operators and the release smoke test rely on it.
+    /// Asserted through clap's parser (no process exit in tests):
+    /// `--version` short-circuits to a DisplayVersion error carrying the
+    /// version string.
+    #[test]
+    fn version_flag_reports_crate_version() {
+        use clap::Parser;
+        for argv in [["ag", "--version"], ["ag", "-V"]] {
+            // `unwrap_err` needs Cli: Debug; match instead (no new derives
+            // on the production arg structs for one test).
+            let err = match Cli::try_parse_from(argv) {
+                Ok(_) => panic!("{argv:?} must short-circuit to DisplayVersion"),
+                Err(e) => e,
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+            let msg = err.to_string();
+            assert!(
+                msg.contains(env!("CARGO_PKG_VERSION")),
+                "--version must print the crate version, got {msg:?}"
+            );
+        }
+    }
 }
 
 /// `ag watch` — one-screen live view: nodes on top, recent tasks below.

@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`--version` on every shipped binary (Plan 5.3 #391).**
+  `adapter-mock` was the last binary without it — now it prints
+  `adapter-mock <version>` like the other wrappers (the node capability
+  probe calls `--version` on every adapter binary each heartbeat). The
+  release smoke test no longer skips it. Per-PR coverage:
+  `adapters/tests/version.rs` runs `--version` on all six wrappers
+  (exit 0 + version token, 30s hang-guard) and `ag` asserts clap's
+  `DisplayVersion` carries the crate version.
+
 - **CLI + web-UI contract parity E2E (Plan 4.4).**
   `tests/e2e/run-ui-cli-parity.sh` drives the same happy-path scenario
   (run → logs → succeeded → artifact, cancel → retry) through both
