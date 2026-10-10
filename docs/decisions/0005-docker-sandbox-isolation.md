@@ -62,6 +62,17 @@ full egress, and `--internal` blocks all egress too. "Internet but no LAN" and
    verify the deployed policy from daemon logs. Per-connection audit requires
    the egress-proxy upgrade path (proxy access logs).
 
+8. **Attempts can run as a separate Unix user (Plan 6.11).**
+   `AGENTGRID_RUN_AS_USER=<user>[:<group>]` (or `<uid>[:<gid>]`) is validated
+   at startup (strict charset, `root`/`0` refused). Docker enforces it as
+   `docker run --user` (no privilege needed — the runtime fails the run
+   loudly for unknown users); the native/systemd paths wrap the command in
+   `runuser -u … -- …`, which needs root, so a non-root daemon with the var
+   set refuses to start instead of silently running the agent as the daemon
+   user. The daemon user keeps owning the worktree mount — the operator must
+   grant the run-as user write access (e.g. `setfacl -R -m u:worker:rwx
+   <workspace-root>`).
+
 ## Consequences
 
 - `restricted` tasks lose all network today (they gained nothing before — the
@@ -105,3 +116,7 @@ full egress, and `--internal` blocks all egress too. "Internet but no LAN" and
 - **Unchanged**: cap-drop/no-new-privileges/read-only/mount policy; the proxy
   upgrade path is the remaining gap for LAN filtering and per-connection
   audit, tracked in the hardening plan (§25/§27).
+- **New**: separate run-as user shrinks the "malicious agent rewrites daemon
+  state" vector to shared-mount paths only (the worktree/artifact mounts
+  remain writable by design); daemon-owned dirs outside the mounts are no
+  longer reachable with the daemon uid.

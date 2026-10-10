@@ -20,6 +20,16 @@
 //! `AGENTGRID_SANDBOX_READ_ONLY=1` (read-only root + tmpfs `/tmp`),
 //! `AGENTGRID_SANDBOX_PIDS_LIMIT`, `AGENTGRID_SANDBOX_MEMORY`,
 //! `AGENTGRID_SANDBOX_CPUS`, `AGENTGRID_SANDBOX_IMAGE_DIGEST` (pin by digest).
+//!
+//! Plan 6.11: separate Unix user for the attempt subprocess via
+//! `AGENTGRID_RUN_AS_USER=<user>[:<group>]` (or `<uid>[:<gid>]`). Docker
+//! enforces it as `docker run --user` (no privilege needed); the native and
+//! systemd-scope paths wrap the command in `runuser -u … -- …`, which needs
+//! root — a non-root daemon with the var set refuses to start (fail-closed)
+//! instead of silently running the agent as the daemon user. The daemon user
+//! keeps owning the worktree mount, so the operator must grant the run-as
+//! user write access there (e.g. `useradd -r -m agentgrid-worker` +
+//! `setfacl -R -m u:agentgrid-worker:rwx <workspace-root>`).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxKind {
@@ -360,7 +370,19 @@ pub fn sandbox_prefix(
     limits: Option<&agentgrid_adapters::ResourceLimits>,
 ) -> (String, Vec<String>) {
     match kind {
-        SandboxKind::None => (program.to_string(), vec![]),
+        // Plan 6.11: a configured run-as user wraps the raw command in
+        // `runuser -u … -- …` (needs root; a non-root daemon refuses to
+        // start — see the startup gate in `main`).
+        SandboxKind::None => {
+            let mut prefix = valid_run_as_prefix();
+            prefix.push(program.to_string());
+            if prefix.len() == 1 {
+                (program.to_string(), vec![])
+            } else {
+                let bin = prefix.remove(0);
+                (bin, prefix)
+            }
+        }
         SandboxKind::Docker => {
             let mut prefix = docker_run_head(
                 workdir,
@@ -376,13 +398,15 @@ pub fn sandbox_prefix(
         }
         // Plan 6.11: workdir/env are already the daemon's own — the scope
         // only adds the cgroup boundary, so unlike docker there is no
-        // mount/env-forwarding to redo here.
+        // mount/env-forwarding to redo here. A configured run-as user wraps
+        // the program in `runuser` INSIDE the scope (cgroup still applies).
         SandboxKind::Systemd => {
             let unit = container_name
                 .and_then(|n| n.strip_prefix("agentgrid-"))
                 .map(scope_unit)
                 .unwrap_or_else(|| "agentgrid-scope-unknown".to_string());
             let mut prefix = systemd_run_head(&unit, limits);
+            prefix.extend(valid_run_as_prefix());
             prefix.push(program.into());
             ("systemd-run".into(), prefix)
         }
@@ -532,6 +556,16 @@ fn docker_run_head(
     v.push("".to_string());
     v.push("--cap-drop=ALL".to_string());
     v.push("--security-opt=no-new-privileges".to_string());
+    // Plan 6.11: separate Unix user for the attempt subprocess. `--user` is
+    // enforced by the container runtime itself (an unknown user fails the run
+    // loudly — fail-closed by construction), so no privilege is needed on the
+    // daemon side. Only a validated spec is ever emitted (see
+    // `validate_run_as_user`); an invalid value falls back to the daemon
+    // user rather than reaching `--user` verbatim.
+    if let Some(spec) = run_as_spec().filter(|s| validate_run_as_user(s).is_ok()) {
+        v.push("--user".to_string());
+        v.push(spec);
+    }
     // Audit ND-6: a deterministic per-attempt name so cancel/timeout can
     // `docker rm -f` the actual container. Killing the attached `docker run`
     // client only proxies SIGTERM; the 10s SIGKILL escalation kills the
@@ -735,7 +769,19 @@ pub fn sandbox_command(
     limits: Option<&agentgrid_adapters::ResourceLimits>,
 ) -> (String, Vec<String>) {
     match kind {
-        SandboxKind::None => (program.to_string(), args.to_vec()),
+        // Plan 6.11: same `runuser` wrap as `sandbox_prefix` for the raw
+        // command (needs root; non-root daemons fail fast at startup).
+        SandboxKind::None => {
+            let mut out = valid_run_as_prefix();
+            out.push(program.to_string());
+            out.extend(args.iter().cloned());
+            if out.len() == args.len() + 1 {
+                (program.to_string(), args.to_vec())
+            } else {
+                let bin = out.remove(0);
+                (bin, out)
+            }
+        }
         SandboxKind::Docker => {
             let mut out = docker_run_head(
                 workdir,
@@ -756,11 +802,100 @@ pub fn sandbox_command(
                 .map(scope_unit)
                 .unwrap_or_else(|| "agentgrid-scope-unknown".to_string());
             let mut out = systemd_run_head(&unit, limits);
+            out.extend(valid_run_as_prefix());
             out.push(program.to_string());
             out.extend(args.iter().cloned());
             ("systemd-run".into(), out)
         }
     }
+}
+
+/// Plan 6.11: the configured separate-Unix-user spec
+/// (`AGENTGRID_RUN_AS_USER`), trimmed. Empty/unset → `None` (the attempt
+/// subprocess keeps the daemon's uid — the pre-existing behaviour).
+pub fn run_as_spec() -> Option<String> {
+    match std::env::var("AGENTGRID_RUN_AS_USER") {
+        Ok(s) => {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// Plan 6.11: fail-closed validation of the run-as spec at daemon startup
+/// (mirrors [`validate_network_mode`]). Accepts `<user>[:<group>]` or
+/// `<uid>[:<gid>]`: each part is 1–32 chars of `[A-Za-z0-9_.-]`, not
+/// starting with `-` (so no flag-smuggling into `runuser`/`--user`, no
+/// `/`, whitespace or shell metacharacters). `root`/`0` as the user is
+/// refused — a root child is not separation. Returns `Err` for anything
+/// else; the daemon refuses to start rather than running attempts under
+/// an unintended identity.
+pub fn validate_run_as_user(spec: &str) -> anyhow::Result<()> {
+    let (user, group) = match spec.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (spec, None),
+    };
+    for part in std::iter::once(user).chain(group) {
+        if part.is_empty() {
+            anyhow::bail!(
+                "AGENTGRID_RUN_AS_USER={spec:?}: empty user/group part (expected <user>[:<group>])"
+            );
+        }
+        if part.len() > 32 {
+            anyhow::bail!("AGENTGRID_RUN_AS_USER={spec:?}: part {part:?} exceeds 32 chars");
+        }
+        let mut chars = part.chars();
+        let first = chars.next().unwrap_or('\0');
+        if !(first.is_ascii_alphanumeric() || first == '_') {
+            anyhow::bail!(
+                "AGENTGRID_RUN_AS_USER={spec:?}: part {part:?} must start with a letter, digit or '_'"
+            );
+        }
+        if !part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+        {
+            anyhow::bail!(
+                "AGENTGRID_RUN_AS_USER={spec:?}: part {part:?} may only contain [A-Za-z0-9_.-]"
+            );
+        }
+    }
+    if user == "root" || user == "0" {
+        anyhow::bail!(
+            "AGENTGRID_RUN_AS_USER={spec:?}: running the attempt as root is not user separation — refusing"
+        );
+    }
+    Ok(())
+}
+
+/// Plan 6.11: the `runuser -u <user> [-g <group>] --` argv head for the
+/// native/systemd paths. Empty when no (valid) spec is configured — the
+/// spawn-path backstop: an invalid value never reaches `runuser` verbatim
+/// even if a caller skipped the startup gate.
+fn valid_run_as_prefix() -> Vec<String> {
+    let Some(spec) = run_as_spec().filter(|s| validate_run_as_user(s).is_ok()) else {
+        return Vec::new();
+    };
+    let (user, group) = match spec.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (spec.as_str(), None),
+    };
+    // `runuser` (util-linux, present on Tier-1 Debian/Ubuntu) switches uid
+    // without PAM/session setup — the minimal tool for a daemon-spawned
+    // child. `--` stops flag parsing so the validated program name can
+    // never be mistaken for a runuser flag.
+    let mut v = vec!["runuser".to_string(), "-u".to_string(), user.to_string()];
+    if let Some(g) = group {
+        v.push("-g".to_string());
+        v.push(g.to_string());
+    }
+    v.push("--".to_string());
+    v
 }
 
 /// Hardening P0/P1 (item 5): an unsafe-unattended adapter run (one that
@@ -1014,6 +1149,11 @@ mod tests {
 
     #[test]
     fn none_passthrough() {
+        // No sandbox and no run-as user → identity. Lock + clear: sibling
+        // tests set AGENTGRID_RUN_AS_USER under ENV_LOCK and the process
+        // env is shared.
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
         let (p, a) = sandbox_command(
             SandboxKind::None,
             "claude",
@@ -1070,6 +1210,9 @@ mod tests {
     #[test]
     fn none_prefix_passthrough() {
         // Stage 11.2 / line 358: no sandbox → identity bin, empty prefix.
+        // Lock + clear: AGENTGRID_RUN_AS_USER is process-global (see above).
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
         let (p, a) = sandbox_prefix(
             SandboxKind::None,
             std::path::Path::new("/w"),
@@ -1156,6 +1299,7 @@ mod tests {
             "AGENTGRID_SANDBOX_ARTIFACT_DIR",
             "AGENTGRID_SANDBOX_EGRESS_NETWORK",
             "AGENTGRID_SANDBOX_EGRESS_PROXY",
+            "AGENTGRID_RUN_AS_USER",
             "AGENTGRID_SANDBOX",
         ] {
             std::env::remove_var(k);
@@ -1518,6 +1662,169 @@ mod tests {
         let remove = unsafe_env_guard(SandboxKind::None);
         assert!(remove.is_empty(), "explicit override keeps the unsafe env");
         std::env::remove_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX");
+    }
+
+    // ---- Plan 6.11: separate Unix user for the attempt subprocess ----
+
+    #[test]
+    fn run_as_spec_validation_accepts_users_groups_and_uids() {
+        for ok in [
+            "worker",
+            "agentgrid-worker",
+            "nobody:nogroup",
+            "worker:staff",
+            "1001",
+            "1001:1001",
+            "a.b-c_d",
+        ] {
+            assert!(validate_run_as_user(ok).is_ok(), "{ok} must pass");
+        }
+    }
+
+    #[test]
+    fn run_as_spec_validation_rejects_garbage_and_root() {
+        for bad in [
+            "",
+            ":",
+            ":group",
+            "user:",
+            "root",
+            "0",
+            "root:staff",
+            "0:0",
+            "a/b",
+            "a;b",
+            "a b",
+            "-worker",
+            "work er",
+            "worker:sta ff",
+            "a`id`",
+            "a$(id)",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 33 chars
+        ] {
+            assert!(
+                validate_run_as_user(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_run_emits_user_when_configured() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        std::env::set_var("AGENTGRID_RUN_AS_USER", "worker:staff");
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
+        assert_eq!(a[at("--user")], "worker:staff");
+    }
+
+    #[test]
+    fn docker_run_omits_user_by_default_and_on_garbage() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        assert!(
+            !a.iter().any(|x| x == "--user"),
+            "no --user without configuration: {a:?}"
+        );
+        // Backstop: an invalid spec never reaches --user verbatim even if a
+        // caller skipped the startup gate.
+        std::env::set_var("AGENTGRID_RUN_AS_USER", "a;b");
+        let (_, a2) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert!(
+            !a2.iter().any(|x| x == "--user"),
+            "invalid spec must not reach --user: {a2:?}"
+        );
+    }
+
+    #[test]
+    fn none_prefix_wraps_runuser_when_configured() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_RUN_AS_USER", "worker");
+        let (p, a) = sandbox_prefix(
+            SandboxKind::None,
+            std::path::Path::new("/w"),
+            "adapter-mock",
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert_eq!(p, "runuser");
+        assert_eq!(a[0], "-u");
+        assert_eq!(a[1], "worker");
+        assert_eq!(a[2], "--");
+        assert_eq!(a[3], "adapter-mock");
+    }
+
+    #[test]
+    fn systemd_prefix_wraps_runuser_inside_scope() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_RUN_AS_USER", "1001:1001");
+        let (p, a) = sandbox_command(
+            SandboxKind::Systemd,
+            "adapter-mock",
+            &["--prompt".into(), "hi".into()],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            Some("agentgrid-att1"),
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert_eq!(p, "systemd-run");
+        // Scope head first (cgroup still applies), runuser inside it.
+        let ru = a
+            .iter()
+            .position(|x| x == "runuser")
+            .expect("runuser missing");
+        assert!(a[..ru].contains(&"--scope".to_string()));
+        assert_eq!(a[ru + 1], "-u");
+        assert_eq!(a[ru + 2], "1001");
+        assert_eq!(a[ru + 3], "-g");
+        assert_eq!(a[ru + 4], "1001");
+        assert_eq!(a[ru + 5], "--");
+        assert_eq!(a[ru + 6], "adapter-mock");
     }
 
     // ---- Stage 12 / ADR 0003: per-attempt resource limits ----

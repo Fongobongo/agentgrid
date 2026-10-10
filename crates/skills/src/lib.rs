@@ -299,6 +299,73 @@ pub fn standard_roots(
     roots
 }
 
+/// Stage 13 (Swarms import): build a [`WorkflowTemplate`](agentgrid_common::WorkflowTemplate)
+/// from dependency-aware local skills. Each (collision-resolved) skill becomes
+/// one worker step (`Apply skill '<name>': <description>`); edges come from
+/// the `depends_on` metadata key (CSV of skill names, e.g.
+/// `depends_on: base, helpers`). Unknown or self-referencing deps are an `Err`
+/// (fail-closed before DAG validation); the finished template is
+/// DAG-validated, so cycles surface here — never on the control plane.
+pub fn swarms_to_template(
+    name: &str,
+    skills: &[DiscoveredSkill],
+) -> Result<agentgrid_common::WorkflowTemplate, String> {
+    use agentgrid_common::{WorkflowRole, WorkflowStep, WorkflowTemplate};
+    let known: std::collections::HashSet<&str> =
+        skills.iter().map(|d| d.skill.name.as_str()).collect();
+    let mut steps = Vec::with_capacity(skills.len());
+    for d in skills {
+        let deps: Vec<String> = d
+            .skill
+            .metadata
+            .get("depends_on")
+            .map(|csv| {
+                csv.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for dep in &deps {
+            if !known.contains(dep.as_str()) {
+                return Err(format!(
+                    "skill '{}' depends on unknown skill '{}'",
+                    d.skill.name, dep
+                ));
+            }
+            if dep == &d.skill.name {
+                return Err(format!("skill '{}' depends on itself", d.skill.name));
+            }
+        }
+        steps.push(WorkflowStep {
+            id: d.skill.name.clone(),
+            prompt: format!(
+                "Apply skill '{}' ({}): {}",
+                d.skill.name,
+                d.source.as_str(),
+                d.skill.description
+            ),
+            depends_on: deps,
+            role: WorkflowRole::Worker,
+            adapter: None,
+            requested_node_id: None,
+            base_commit: None,
+            retryable: None,
+            max_attempts: None,
+            expandable: None,
+        });
+    }
+    let tpl = WorkflowTemplate {
+        id: String::new(),
+        name: name.to_string(),
+        steps,
+        budget: None,
+        created_at: String::new(),
+    };
+    tpl.validate_dag()?;
+    Ok(tpl)
+}
+
 mod bundle;
 pub use bundle::*;
 
@@ -359,5 +426,65 @@ mod tests {
     fn missing_closing_delimiter_errors() {
         let bad = "---\nname: x\ndescription: y\n";
         assert!(parse_skill_md(bad, true).is_err());
+    }
+
+    fn swarm_skill(name: &str, depends_on: Option<&str>) -> DiscoveredSkill {
+        let mut metadata = HashMap::new();
+        if let Some(d) = depends_on {
+            metadata.insert("depends_on".to_string(), d.to_string());
+        }
+        DiscoveredSkill {
+            skill: Skill {
+                name: name.to_string(),
+                description: format!("does {name}"),
+                license: None,
+                compatibility: None,
+                allowed_tools: vec![],
+                metadata,
+                body: String::new(),
+            },
+            source: SkillSource::Project,
+            path: std::path::PathBuf::from(format!("/skills/{name}")),
+        }
+    }
+
+    #[test]
+    fn swarms_import_builds_dag_from_depends_on() {
+        let skills = vec![
+            swarm_skill("base", None),
+            swarm_skill("mid", Some("base")),
+            swarm_skill("top", Some("base, mid")),
+        ];
+        let tpl = swarms_to_template("swarm", &skills).unwrap();
+        assert_eq!(tpl.name, "swarm");
+        assert_eq!(tpl.steps.len(), 3);
+        let by_id: HashMap<&str, &agentgrid_common::WorkflowStep> =
+            tpl.steps.iter().map(|s| (s.id.as_str(), s)).collect();
+        assert!(by_id["mid"].depends_on == vec!["base"]);
+        assert!(by_id["top"].depends_on == vec!["base", "mid"]);
+        assert!(by_id["top"].prompt.contains("top"));
+    }
+
+    #[test]
+    fn swarms_import_rejects_unknown_self_and_cyclic_deps() {
+        // Unknown dep.
+        let e = swarms_to_template("s", &[swarm_skill("a", Some("ghost"))]).unwrap_err();
+        assert!(e.contains("unknown skill"), "{e}");
+        // Self dep.
+        let e = swarms_to_template("s", &[swarm_skill("a", Some("a"))]).unwrap_err();
+        assert!(e.contains("itself"), "{e}");
+        // Cycle a↔b passes the local checks but fails DAG validation.
+        let e = swarms_to_template(
+            "s",
+            &[swarm_skill("a", Some("b")), swarm_skill("b", Some("a"))],
+        )
+        .unwrap_err();
+        assert!(!e.is_empty());
+    }
+
+    #[test]
+    fn swarms_import_empty_is_an_empty_template() {
+        let tpl = swarms_to_template("empty", &[]).unwrap();
+        assert!(tpl.steps.is_empty());
     }
 }

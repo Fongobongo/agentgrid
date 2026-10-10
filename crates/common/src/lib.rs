@@ -727,6 +727,14 @@ pub struct Assignment {
     /// Base ref for the PR (falls back to `default_branch`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_base_ref: Option<String>,
+    /// Stage 10: workflow role that owns this task (`architect`/`worker`/
+    /// `reviewer`/`integrator`/`verifier`, snake_case), resolved from
+    /// `role_runs` at assign time. `None` for direct (non-workflow) tasks.
+    /// The node forwards it to cluster executors as the executor/verifier
+    /// side selector (see `zeroshot_role`). Optional + defaulted so N/N-1
+    /// nodes/CPs ignore it safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1893,6 +1901,7 @@ mod tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                workflow_role: None,
             }),
             assignments: vec![],
             proxy_urls: vec![],

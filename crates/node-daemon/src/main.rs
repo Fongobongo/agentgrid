@@ -25,6 +25,7 @@ mod command_guard;
 mod completion;
 mod config;
 mod config_error;
+mod ctx;
 mod enrollment;
 pub mod evals;
 mod event_sink;
@@ -44,6 +45,7 @@ mod secret_redactor;
 pub(crate) mod skills;
 mod validation;
 mod ws;
+mod zeroshot;
 
 use capabilities::{probe_adapter, probe_cluster_adapter, resolve_acp_launch, resolve_adapter_bin};
 use completion::{terminate_group, wait_for_cancel};
@@ -391,10 +393,30 @@ async fn drive_acp_session(
 
     let acp3 = acp.clone();
     let mut prompt_text = assignment.prompt.clone();
-    // Stage 11 (CTX): append a repo context pack (if a provider is configured).
-    // Noop by default → empty body → agent proceeds without a digest.
-    let ctx_provider = NoopContextProvider;
-    prompt_text.push_str(&compose_context_block(&ctx_provider, assignment, &sink).await);
+    // Stage 11 (CTX): append a repo context pack. An external indexer
+    // (`AGENTGRID_CTX_BIN`) serves warm cache packs without re-indexing;
+    // unset/missing/failing → Noop (empty body, agent proceeds pack-less).
+    // The cache lives next to the artifact spool (node data dir).
+    let ctx_cache = ctx::CtxCache::open(
+        ctx::default_cache_dir(&cfg.artifact_spool_root),
+        ctx::cache_quota_bytes(),
+    );
+    let ctx_noop = NoopContextProvider;
+    let ctx_cached;
+    let ctx_provider: &dyn agentgrid_common::ContextProvider =
+        match ctx::ExternalContextProvider::from_env() {
+            Some(ext) => {
+                let version = ext.probe().unwrap_or_else(|| "unknown".to_string());
+                let config_hash = ext.config_hash();
+                tracing::info!(version = %version, "ctx indexer active");
+                ctx_cached = ctx::CachedProvider::new(ext, ctx_cache, version, config_hash);
+                &ctx_cached
+            }
+            None => &ctx_noop,
+        };
+    prompt_text.push_str(
+        &compose_context_block(ctx_provider, assignment, &sink, ctx::ctx_budget_bytes()).await,
+    );
     // Competitor-gap feature (project brain): append the repo's persistent
     // project memory (AGENTS-BRAIN.md) when present in the worktree.
     prompt_text.push_str(&compose_brain_block(ws_path).await);
@@ -667,7 +689,7 @@ async fn amain() -> Result<()> {
     let mut cfg = config_from_env();
     for a in &cfg.adapters {
         let probe = if a.id == "zeroshot" {
-            probe_cluster_adapter("zeroshot", "docker").await
+            probe_cluster_adapter(&zeroshot::zeroshot_bin(), "docker").await
         } else {
             let bin = format!("adapter-{}", a.id.replace('_', "-"));
             probe_adapter(&bin).await
@@ -705,6 +727,21 @@ async fn amain() -> Result<()> {
             }
         }
     }
+    // Stage 11 (CTX): capability probe for the external context indexer.
+    // Informational only — attempts always fall back to pack-less on any
+    // failure, so this never blocks startup.
+    match ctx::ExternalContextProvider::from_env() {
+        Some(ext) => match ext.probe() {
+            Some(v) => tracing::info!(version = %v, "ctx context indexer ready"),
+            None => tracing::warn!(
+                bin = %ctx::ctx_bin().unwrap_or_default(),
+                "ctx indexer configured but unavailable (missing binary or --version failed); attempts run pack-less"
+            ),
+        },
+        None => tracing::debug!(
+            "no ctx indexer configured (AGENTGRID_CTX_BIN unset); attempts run pack-less"
+        ),
+    }
     tokio::fs::create_dir_all(&cfg.workspace_root).await?;
     // Plan §25: verify the container runtime (version + daemon reachable)
     // when the sandbox is configured. Fails loud at startup so a broken
@@ -721,6 +758,30 @@ async fn amain() -> Result<()> {
             ),
             Err(e) => tracing::warn!(error = %e, "container runtime probe failed"),
         }
+    }
+    // Plan 6.11: separate Unix user for the attempt subprocess. The spec is
+    // validated for every backend; the native/systemd paths additionally need
+    // privilege (`runuser`), so a non-root daemon with the var set refuses to
+    // start instead of silently running the agent as the daemon user. The
+    // docker path needs no privilege (`--user` is enforced by the runtime).
+    if let Some(spec) = sandbox::run_as_spec() {
+        sandbox::validate_run_as_user(&spec)?;
+        // No `runuser` without privilege (and none on Windows at all);
+        // the docker path needs none (`--user` is enforced by the runtime).
+        #[cfg(unix)]
+        let need_privilege =
+            !matches!(cfg.sandbox, sandbox::SandboxKind::Docker) && unsafe { libc::getuid() } != 0;
+        #[cfg(not(unix))]
+        let need_privilege = !matches!(cfg.sandbox, sandbox::SandboxKind::Docker);
+        if need_privilege {
+            anyhow::bail!(
+                "AGENTGRID_RUN_AS_USER={spec} needs AGENTGRID_SANDBOX=docker or a Unix root \
+                 daemon (AGENTGRID_ALLOW_ROOT=1): an unprivileged daemon cannot switch uid for \
+                 native/systemd runs — refusing to start rather than running the \
+                 agent as the daemon user"
+            );
+        }
+        tracing::info!(run_as = %spec, "attempt subprocesses run as a separate Unix user");
     }
     // Stage 2.3: reclaim workspace dirs + worktree gitlinks a prior (killed)
     // run left behind. Default 24h retention; tune with

@@ -59,6 +59,7 @@ fn make_assignment(git_url: &str, default_branch: &str) -> Assignment {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        workflow_role: None,
     }
 }
 
@@ -646,6 +647,7 @@ fn parallel_prep_same_repo_does_not_race() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                workflow_role: None,
             };
             prepare_workspace(&repos, &ws_root, &a, &[], &[])
         }));

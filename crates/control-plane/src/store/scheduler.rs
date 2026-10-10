@@ -35,6 +35,7 @@ struct AssignmentFields {
     github_repo: Option<String>,
     github_issue: Option<i64>,
     github_base_ref: Option<String>,
+    workflow_role: Option<String>,
 }
 
 fn finish_assignment(
@@ -75,6 +76,7 @@ fn finish_assignment(
         github_repo: f.github_repo,
         github_issue: f.github_issue,
         github_base_ref: f.github_base_ref,
+        workflow_role: f.workflow_role,
     }
 }
 
@@ -117,6 +119,9 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
             let read_only = role.as_deref() == Some("verifier");
+            // Stage 10: carry the owning workflow role (if any) so cluster
+            // executors can select the executor/verifier side.
+            let workflow_role = role.clone();
             let number: i64 = c.try_get("number")?;
             let eval_cases: Vec<String> = if number > 1 {
                 sqlx::query_scalar(
@@ -166,6 +171,7 @@ impl Store {
                     github_repo: c.try_get("github_repo").ok().flatten(),
                     github_issue: c.try_get("github_issue").ok().flatten(),
                     github_base_ref: c.try_get("github_base_ref").ok().flatten(),
+                    workflow_role,
                 },
             ));
         }
@@ -585,6 +591,9 @@ impl Store {
             // mounts the worktree with `:ro`. A verifier validates; it must
             // not silently edit the code it is checking.
             let read_only = roles.get(&task_id).map(String::as_str) == Some("verifier");
+            // Stage 10: owning workflow role for cluster executors (None for
+            // direct tasks). Bound before `task_id` moves into the call below.
+            let workflow_role = roles.get(&task_id).cloned();
 
             // Plan 2.9 (#20): consensus run tag — when the task was created
             // as part of an `--consensus N --models ...` batch the columns
@@ -686,6 +695,9 @@ impl Store {
                         github_repo: c.try_get("github_repo").ok().flatten(),
                         github_issue: c.try_get("github_issue").ok().flatten(),
                         github_base_ref: c.try_get("github_base_ref").ok().flatten(),
+                        // Stage 10: prefetched role_runs map — None for
+                        // direct (non-workflow) tasks.
+                        workflow_role,
                     },
                 ),
                 created_at,

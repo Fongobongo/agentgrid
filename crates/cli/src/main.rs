@@ -373,6 +373,12 @@ struct RunArgs {
     /// Feature "opencode profiles": per-task small-model override.
     #[arg(long = "opencode-small-model")]
     opencode_small_model: Option<String>,
+    /// Security profile for the task (e.g. "default-strict"). A name ending
+    /// in "-strict" only assigns to nodes with structured permission
+    /// interception (Stage 12 Secure profile) — wrapper-only nodes report
+    /// the task as ineligible instead of running it.
+    #[arg(long = "security-profile")]
+    security_profile: Option<String>,
 }
 
 #[derive(Args)]
@@ -1002,7 +1008,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 validation_command: a.validate.clone(),
                 base_commit: None,
                 parent_acp_session_id: None,
-                security_profile: None,
+                security_profile: a.security_profile.clone(),
                 network_mode: None,
                 group_id: None,
                 agent_id: None,
@@ -1052,7 +1058,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         validation_command: a.validate,
         base_commit: None,
         parent_acp_session_id: None,
-        security_profile: None,
+        security_profile: a.security_profile,
         network_mode: None,
         group_id: a.group,
         agent_id: None,

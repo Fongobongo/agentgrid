@@ -15,9 +15,14 @@
 | systemd + Git >= 2.39 | assumed by `deploy/` units + `install-node.sh` | Hard constraint; the daemon works without systemd too (plain process), only the shipped unit files assume it. |
 
 Filesystems: **ext4** is what every CI runner and lab host uses (implicit
-coverage). **xfs** is expected to work identically (no ext4-specific
-ioctls anywhere; artifact writes are plain `write_all` + `fdatasync`),
-but has no dedicated CI — treat as supported-by-construction, not tested.
+coverage + the `run-fs-compat.sh` e2e job, which puts the DB/WAL, artifact
+root, node outbox, workspaces and repo mirror on one fs and runs a mock
+happy path with an online backup round-trip). **xfs** needs no code fork
+(no ext4-specific ioctls anywhere; artifact writes are plain `write_all` +
+`fdatasync`) — run it on demand where an xfs mount exists:
+`AG_FS_MOUNT=/mnt/xfs bash tests/e2e/run-fs-compat.sh`. A passing xfs run
+is the recorded proof; until one is logged, treat xfs as
+supported-by-construction, not tested.
 
 ## Tier 2 — published binaries, smoke-tested
 

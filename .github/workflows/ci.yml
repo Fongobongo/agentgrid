@@ -51,6 +51,28 @@ jobs:
             echo "no .agentgrid/workflows/*.yaml files to validate"
           fi
 
+  portable:
+    # Cross-cutting CI matrix: pure crates must build + test on Windows and
+    # macOS (dev/support tier — nodes are Linux Tier-1, but the workspace
+    # compiles and pure unit tests run off-Linux). No `continue-on-error`:
+    # a platform failure is a failure, not a masked skip. OS-specific tests
+    # stay `#[cfg(unix)]`-gated in-tree.
+    name: portable pure crates (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: test pure crates
+        run: cargo test -p agentgrid-common -p agentgrid-skills
+
   web:
     name: web build / lint
     runs-on: ubuntu-latest
@@ -262,6 +284,27 @@ jobs:
         run: bash tests/e2e/run-sdk.sh
       - name: backup/restore rehearsal
         run: bash tests/e2e/run-restore.sh
+      # Plan 6.13: filesystem compat — whole stack on one fs (DB+WAL,
+      # artifacts, outbox, worktrees) + online backup. Without AG_FS_MOUNT
+      # this runs on the runner default (ext4) and guards harness rot; a
+      # manual AG_FS_MOUNT=/mnt/xfs run gives the xfs coverage CI cannot.
+      - name: filesystem compat (DB+WAL+backup on one fs)
+        run: bash tests/e2e/run-fs-compat.sh
+      # Stage 10: Zeroshot cluster path via the contract stub (run → stream
+      # → export/kill; happy + failure + cancel-total). A real binary run is
+      # AGENTGRID_ZEROSHOT_BIN=... (manual; needs docker + the binary).
+      - name: zeroshot cluster path (stub executor)
+        run: bash tests/e2e/run-zeroshot.sh
+      # Stage 11: CTX exit — repeat attempt serves the warm on-disk pack
+      # without re-spawning the stub indexer (fake-acp worker, ACP path).
+      # A real indexer run is AGENTGRID_CTX_BIN=... (manual).
+      - name: ctx cache (index once, warm repeat)
+        run: bash tests/e2e/run-ctx.sh
+      # Stage 12: Secure-profile gate — a default-strict task stays queued
+      # on a wrapper-only node (visible eligibility reason) and succeeds
+      # once a structured (ACP) node appears. Process-based, no docker.
+      - name: secure profile gate (strict needs structured)
+        run: bash tests/e2e/run-secure-profile.sh
       # Telegram gateway vs a mock Bot API: approvals listing + inline
       # keyboard + deny callback (process-based, no Docker, no real Telegram).
       - name: telegram gateway (mock Bot API)
@@ -319,6 +362,14 @@ jobs:
         run: |
           cargo build --workspace -p agentgrid-control-plane -p agentgrid-node-daemon -p agentgrid-adapters
           bash tests/e2e/run-oom-limit.sh
+        timeout-minutes: 15
+        env:
+          AGENTGRID_SANDBOX_IMAGE: ag-node:test
+      # Stage 12 / Exit 12: the same workflow manifest runs unchanged on two
+      # backends — native leg, then isolated (docker) leg with identical step
+      # verdicts. Skips without docker/the image; ag-node:test has the mock.
+      - name: one workflow on native + isolated backends
+        run: bash tests/e2e/run-workflow-backends.sh
         timeout-minutes: 15
         env:
           AGENTGRID_SANDBOX_IMAGE: ag-node:test

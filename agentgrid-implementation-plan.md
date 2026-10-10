@@ -623,7 +623,7 @@
 
 ### 6.11 cgroups v2 и subprocess limits
 
-- [ ] Default executor запускает subprocess под отдельным Unix user  — частично: `agentgrid` systemd user для daemon (install-node.sh), scope-бэкенд запускает attempt в cgroup этого же user (без root; `loginctl enable-linger` для headless); отдельный user именно для child — follow-up
+- [x] Default executor запускает subprocess под отдельным Unix user  — `AGENTGRID_RUN_AS_USER=<user>[:<group]>` (startup-валидация, `root`/`0` refused): Docker → `docker run --user` (без привилегий, runtime fail-closed); native/systemd → `runuser -u … -- …` внутри scope (нужен root, иначе daemon отказывается стартовать, а не молча бежит как daemon user); оператор выдаёт worker-пользователю доступ к worktree (setfacl); unit-тесты валидации/префиксов + ADR 0005 §8
 - [x] При наличии systemd/cgroups v2 создавать transient scope на attempt  — `AGENTGRID_SANDBOX=systemd`: `systemd-run --user --scope --unit agentgrid-scope-<attempt>`; probe `probe_systemd_scope` (systemd-run + user manager + cgroups v2) на startup/heartbeat; startup sweep `cleanup_orphan_scopes`
 - [x] Поддержать `MemoryMax` — `--property=MemoryMax=<M>` из per-attempt `ResourceLimits.memory_max` или env (Stage 12; systemd transient scope реализован)
 - [x] Поддержать `CPUQuota` — `--property=CPUQuota=<%>` из per-attempt `cpu_quota_percent` или env (cores→% normalized; Stage 12)
@@ -651,7 +651,7 @@
 
 - [x] Tier 1: Ubuntu 24.04 LTS x86_64, полный CI/E2E  — CI `ubuntu-latest`; manual E2E
 - [x] Tier 1: Debian 12/13 x86_64, полный CI/E2E  — musl binary совместим; nightly `tier1-musl-smoke` CI matrix (debian:12/13/ubuntu:24.04, `--version` + health/ready)
-- [ ] Tier 1 filesystem: ext4 и xfs  — ext4 implicit; xfs не тестируется
+- [x] Tier 1 filesystem: ext4 и xfs  — ext4 implicit + `tests/e2e/run-fs-compat.sh` в CI (весь стек на одной ФС: DB/WAL, artifacts, outbox, worktrees + online backup); xfs — тот же скрипт вручную (`AG_FS_MOUNT=/mnt/xfs`), кода под конкретную ФС нет (plain `write_all` + `fdatasync`, без ext4-ioctls); см. `docs/compatibility-matrix.md`
 - [x] Tier 1: systemd и Git 2.39+  — AGENTS.md hard constraints
 - [x] Tier 2: ARM64 Ubuntu/Debian — публиковать бинарник и выполнять smoke test  — `aarch64-musl` в `release.yml`
 - [x] Tier 2: Fedora, Rocky/Alma, Arch — документировать limited testing  — `docs/compatibility-matrix.md` (musl = works-by-construction, no CI; contributions welcome)

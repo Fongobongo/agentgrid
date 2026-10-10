@@ -654,37 +654,79 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // Stage 2.4: run strictly the adapter the control plane assigned; an
     // unknown or missing adapter binary is an infrastructure failure, not a
     // silent fallback to whatever binary happens to be configured.
-    let bin = match resolve_adapter_bin(&assignment.adapter) {
-        Some(b) => b,
-        None => {
-            tracing::error!(
-                attempt_id = %assignment.attempt_id,
-                adapter = %assignment.adapter,
-                "adapter binary not found; reporting infrastructure_failed"
-            );
-            report_complete(
-                &client,
-                &cfg.server,
-                &assignment.attempt_id,
-                127,
-                None,
-                Some("infrastructure_failed".into()),
-                None,
-                None,
-                None,
-                None,
-                None,
-                assignment.provenance.clone().or_else(provenance_from_env),
-                vec![],
-                0,
-                &cfg.completion_outbox,
-                &assignment.fencing_token,
-            )
-            .await;
-            drop_workspace_early(&ws, &assignment.attempt_id).await;
-            return Ok(());
+    // Stage 10: `zeroshot` is a cluster executor, not a wrapper binary — it
+    // resolves to the executor CLI (`AGENTGRID_ZEROSHOT_BIN`, default
+    // `zeroshot`), and a missing binary reports the reserved
+    // `zeroshot_unavailable` detail (ADR 0014).
+    let is_zeroshot = assignment.adapter == "zeroshot";
+    let bin = if is_zeroshot {
+        match crate::zeroshot::resolve_zeroshot_bin() {
+            Some(b) => b,
+            None => {
+                tracing::error!(
+                    attempt_id = %assignment.attempt_id,
+                    "zeroshot executor binary not found; reporting infrastructure_failed:zeroshot_unavailable"
+                );
+                report_complete(
+                    &client,
+                    &cfg.server,
+                    &assignment.attempt_id,
+                    127,
+                    None,
+                    Some("infrastructure_failed:zeroshot_unavailable".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    assignment.provenance.clone().or_else(provenance_from_env),
+                    vec![],
+                    0,
+                    &cfg.completion_outbox,
+                    &assignment.fencing_token,
+                )
+                .await;
+                drop_workspace_early(&ws, &assignment.attempt_id).await;
+                return Ok(());
+            }
+        }
+    } else {
+        match resolve_adapter_bin(&assignment.adapter) {
+            Some(b) => b,
+            None => {
+                tracing::error!(
+                    attempt_id = %assignment.attempt_id,
+                    adapter = %assignment.adapter,
+                    "adapter binary not found; reporting infrastructure_failed"
+                );
+                report_complete(
+                    &client,
+                    &cfg.server,
+                    &assignment.attempt_id,
+                    127,
+                    None,
+                    Some("infrastructure_failed".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    assignment.provenance.clone().or_else(provenance_from_env),
+                    vec![],
+                    0,
+                    &cfg.completion_outbox,
+                    &assignment.fencing_token,
+                )
+                .await;
+                drop_workspace_early(&ws, &assignment.attempt_id).await;
+                return Ok(());
+            }
         }
     };
+    // Stage 10: the host-side executor binary for post-run kill/export — the
+    // per-round `sb_program` may be a sandbox router, but kill/export always
+    // run on the host, never inside the sandbox.
+    let zs_host_bin: Option<String> = if is_zeroshot { Some(bin.clone()) } else { None };
     // Stage 3.2: spawn through the ExecutionBackend contract (native process).
     // Stage 11.2 / line 358: the legacy wrapper path is now sandboxed too via
     // `sandbox_prefix` -> `SpawnRequest::sandbox_prefix_args` (matches the ACP
@@ -759,6 +801,19 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     )
     .await;
     let flusher = tokio::spawn(sink.clone().run_flusher());
+
+    // Stage 10: mark the cluster creation in the event trail (cluster id =
+    // attempt id by contract, so no executor round-trip is needed to know it).
+    if is_zeroshot {
+        sink.push(
+            EventKind::Log.to_event_type(),
+            crate::zeroshot::cluster_created_payload(
+                &assignment.attempt_id,
+                crate::zeroshot::zeroshot_side(assignment.workflow_role.as_deref()),
+            ),
+        )
+        .await;
+    }
 
     // Stage 13 capability check (legacy raw path): the profile's declared
     // adapter_version is checked against the cached probe. On mismatch we only
@@ -854,6 +909,18 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // and the sandbox prefix both — the sandbox applies them as
         // --memory/--cpus/--pids-limit, SpawnRequest keeps the contract honest.
         let limits = profile_limits(cp_profile.as_ref());
+        // Stage 10: a zeroshot run is driven as
+        // `<bin> run --id … --workdir … [--role …] --prompt <prompt>` with
+        // full argv control (`raw_args`), so the backend appends nothing.
+        let (zs_raw_args, zs_extra_args) = if is_zeroshot {
+            let side = crate::zeroshot::zeroshot_side(assignment.workflow_role.as_deref());
+            (
+                true,
+                crate::zeroshot::run_extra_args(&assignment.attempt_id, &ws.path, side, &prompt),
+            )
+        } else {
+            (false, Vec::new())
+        };
         let (sb_program, sb_prefix) = sandbox::sandbox_prefix(
             cfg.sandbox,
             &ws.path,
@@ -868,8 +935,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             bin: sb_program,
             sandbox_prefix_args: sb_prefix,
             prompt: prompt.clone(),
-            extra_args: vec![],
-            raw_args: false,
+            extra_args: zs_extra_args,
+            raw_args: zs_raw_args,
             workdir: ws.path.clone(),
             attempt_id: assignment.attempt_id.clone(),
             timeout: Duration::from_secs(assignment.timeout_secs.max(1)),
@@ -904,6 +971,15 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         };
         let code = run.code;
         let kill_reason = run.kill_reason;
+        // Stage 10 / ADR 0002 cancel-total: a cut-short (cancel/timeout/
+        // resource-limit) or failed cluster run must not survive the attempt
+        // — kill the cluster (idempotent, bounded 15s, best-effort). Success
+        // keeps it: a validation-feedback round re-attaches by the same --id.
+        if is_zeroshot && (kill_reason.is_some() || code != 0) {
+            if let Some(host) = zs_host_bin.as_deref() {
+                crate::zeroshot::kill_cluster(host, &assignment.attempt_id).await;
+            }
+        }
         // Stage 2.1 / audit X-N6: record the terminal completion BEFORE the
         // post-adapter sends so a daemon kill during the (possibly blocking)
         // flush/upload window still redelivers a terminal outcome on the next
@@ -1074,6 +1150,15 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // (was: flusher.abort() here, before the post-adapter sends.)
 
     let patch_path = workdir.join("changes.patch");
+    // Stage 10: materialize the cluster's result files into the worktree so
+    // finalize (diff/commit) and the artifact uploads below see them. Only on
+    // a natural exit (no cut-short — the cluster is already killed then);
+    // best-effort, never fails the attempt.
+    if is_zeroshot && last_kill_reason.is_none() {
+        if let Some(host) = zs_host_bin.as_deref() {
+            crate::zeroshot::export_results(host, &assignment.attempt_id, &workdir).await;
+        }
+    }
     // Stage 2.3: keep the per-attempt repo_dir/branch so the worktree and its
     // ref can be reclaimed after the attempt is terminal (finalize takes ws).
     let cleanup_repo = ws.repo_dir.clone();
@@ -1150,6 +1235,21 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         cfg.max_artifact_size,
     )
     .await;
+    // Stage 10: the cluster's exported result manifest (written by
+    // `zeroshot export` above; absent for wrapper adapters — skipped then).
+    if is_zeroshot {
+        upload_if_exists(
+            &client,
+            &cfg.server,
+            &assignment.attempt_id,
+            "zeroshot-result.json",
+            &workdir.join("zeroshot-result.json"),
+            &assignment.fencing_token,
+            &spool_root,
+            cfg.max_artifact_size,
+        )
+        .await;
+    }
 
     // Competitor-gap feature (GitHub write-back): on a successful git task
     // flagged `github_push`, push the agent branch, open a PR and comment on

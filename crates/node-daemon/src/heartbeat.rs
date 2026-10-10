@@ -240,7 +240,9 @@ pub fn spawn_heartbeat(
                         version: None,
                     }
                 } else if a.id == "zeroshot" {
-                    probe_cluster_adapter("zeroshot", "docker").await
+                    // Stage 10: honor AGENTGRID_ZEROSHOT_BIN so operators (and
+                    // E2E stubs) can point the executor at a non-PATH binary.
+                    probe_cluster_adapter(&crate::zeroshot::zeroshot_bin(), "docker").await
                 } else {
                     let bin = adapter_bin_name(&a.id);
                     probe_adapter(&bin).await

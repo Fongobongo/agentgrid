@@ -4,6 +4,86 @@
 
 ### Added
 
+- **Separate Unix user for attempt subprocesses (Plan 6.11).**
+  `AGENTGRID_RUN_AS_USER=<user>[:<group>]` (or `<uid>[:<gid>]`) runs the
+  agent as a different uid than the daemon: Docker enforces it as
+  `docker run --user` (no privilege needed), the native/systemd paths wrap
+  the command in `runuser -u … -- …` inside the scope. Startup validation is
+  fail-closed (strict charset, `root`/`0` refused; a non-root daemon with the
+  var set refuses to start rather than silently running as the daemon user).
+  Operator recipe (`useradd agentgrid-worker` + `setfacl` on workspaces) and
+  the threat-model delta live in ADR 0005 §8. Covered by validation/prefix
+  unit tests (`run_as_spec_validation_*`, `docker_run_emits_user_*`,
+  `none_prefix_wraps_runuser_*`, `systemd_prefix_wraps_runuser_inside_scope`).
+
+- **Filesystem-compat E2E (Plan 6.13).** `tests/e2e/run-fs-compat.sh` puts the
+  whole stack (CP SQLite DB+WAL, artifact root, node outbox, workspaces, repo
+  mirror) on one filesystem and runs a mock happy path (contiguous events)
+  plus an online backup round-trip. Wired into the CI e2e job (ext4, guards
+  harness rot); xfs coverage is one manual command away
+  (`AG_FS_MOUNT=/mnt/xfs`), no per-filesystem code fork (plain `write_all` +
+  `fdatasync`). Matrix documented in `docs/compatibility-matrix.md`.
+
+- **Zeroshot cluster adapter (Stage 10).** Tasks with `adapter = "zeroshot"`
+  run inside a Zeroshot cluster via the new node driver
+  (`crates/node-daemon/src/zeroshot.rs`): `run --id/--workdir/--role/--prompt`
+  streams adapter-contract events through the existing pipeline (finalize,
+  validation, artifacts all reused), `kill` runs after every cut-short or
+  failed run (cancel-total, ADR 0002), `export` materializes
+  `zeroshot-result.json` before finalize. Cluster id = attempt id (retry =
+  new cluster by construction); missing binary →
+  `infrastructure_failed:zeroshot_unavailable` (reserved name from ADR 0014).
+  Workflow roles ride the assignment (`Assignment.workflow_role`, resolved
+  from `role_runs`, N/N-1 safe) and map to `--role executor|verifier`.
+  Security review: driver argv mounts nothing (unit-asserted), kill/export
+  spawn with `env_clear`. E2E `tests/e2e/run-zeroshot.sh` with the
+  contract-conformant stub `tests/e2e/zeroshot-stub.sh` (happy + failure +
+  cancel-total; CI-wired; real binary via `AGENTGRID_ZEROSHOT_BIN`). Full
+  contract + verified-profile recipe in ADR 0002 (now accepted).
+
+- **CTX external indexer + on-disk index cache (Stage 11).** The node drives
+  an external index binary (`AGENTGRID_CTX_BIN`: `--version` probe,
+  `index --repo/--base --format json`) through a quota-bounded on-disk cache
+  (`CtxCache`: atomic publish, oldest-mtime eviction, hashed key file names,
+  corrupt-entry fail-safe) wrapped as `CachedProvider` — a repeat attempt on
+  the same `(repo, base)` serves the warm pack with `cache_hit = true` and no
+  subprocess spawn (miss/hit visible in the `context_pack` status event).
+  Startup probe is informational (attempts always fall back pack-less);
+  the indexer child gets a cleared env plus the operator's `CTX_*` namespace
+  only (unit-asserted). E2E `tests/e2e/run-ctx.sh` with stub
+  `tests/e2e/ctx-stub.sh` (fake-acp worker: cold miss + digest in the recorded
+  prompt,   warm hit, exactly one index invocation; CI-wired).
+
+- **Stage 12: Secure profile + backend spikes + two-backend workflow E2E.**
+  ADR 0015 ships the Secure profile as a composition (isolated backend +
+  `*-strict` task gate + autonomy ≤ l2 + uid separation + unsafe interlock),
+  proven by `tests/e2e/run-secure-profile.sh` (strict task queued on a
+  wrapper-only node with the visible reason, succeeded on a structured node;
+  CI-wired). `ag run` gains `--security-profile` (the field previously
+  existed API-only). `tests/e2e/run-workflow-backends.sh` runs one manifest
+  on native then docker legs with identical step verdicts (CI docker job).
+  h5i (ADR 0016) and CubeSandbox (ADR 0017) spikes conclude no-go for new
+  code without binaries to evaluate, go for the existing contracts.
+
+- **Stage 13 closers: Swarms import, context optimizer, Guild memory.**
+  `agentgrid_skills::swarms_to_template` builds a DAG-validated
+  `WorkflowTemplate` from dependency-aware local skills (`depends_on`
+  metadata; unknown/self deps fail closed), operable via
+  `ag workflows import <dir> [--create]`. The existing
+  `agentgrid_common::compress` becomes the optional context optimizer
+  (`AGENTGRID_CTX_BUDGET_BYTES`, off by default; `trimmed_bytes` in the
+  `context_pack` event, full pack retained in cache). Guild shared memory
+  ships as an operator recipe (MCP registry + per-profile subset, no code
+  for the external binary). Details in ADR 0018.
+
+- **Cross-cutting: portable CI, plan hygiene.** New `portable` CI job builds
+  and tests the pure crates (`agentgrid-common`, `agentgrid-skills`) on
+  `windows-latest`/`macos-latest` with no failure masking; dev-plan
+  cross-cutting section updated to match reality (SBOM + provenance
+  attestation + keyless cosign were already in `release.yml`). Remaining
+  honest follow-ups (need live hosts/repeats, not code): p50/p95 bench
+  harness, weekly two-machine happy-path runs, Gates A/B/D, final DoD.
+
 - **6.14 performance acceptance coverage.** 1 GiB of mock stdout
   streams through the node outbox with sublinear RAM growth
   (`spool_one_gib_stdout_without_linear_ram_growth`: 1024×1 MiB

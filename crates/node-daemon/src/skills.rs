@@ -62,13 +62,21 @@ pub async fn compose_skills_block(client: &Client, server: &str, ws_path: &Path)
 /// before/after bytes + cache-hit metrics. Any provider error is swallowed:
 /// the agent simply proceeds without a context digest (graceful fallback).
 ///
-/// `ponytail:` single provider instance, no on-disk cache yet; the cache key
-/// is computed by the provider so a future CTX impl can consult a warm cache
-/// on disk and skip re-indexing (Stage 11 exit criterion).
+/// Stage 13 (RTK/Headroom, optional output optimizer): when `budget_bytes > 0`
+/// and the body exceeds it, the body is compressed (duplicate-line collapse +
+/// newline-safe truncation via `agentgrid_common::compress`) and the event
+/// records `trimmed_bytes`. Raw evidence is never lost: the full pack stays in
+/// the on-disk index cache under its `cache_key`, and the truncated marker
+/// states the dropped byte count.
+/// `ponytail:` the provider may be cache-wrapped (`CachedProvider` in
+/// `ctx.rs`) — the repeat-attempt no-reindex exit lives there, keyed by
+/// `cache_key_for(repo, base, version, config)`; this function only renders
+/// whatever pack the provider returns.
 pub async fn compose_context_block(
     provider: &dyn ContextProvider,
     assignment: &Assignment,
     sink: &Arc<EventSink>,
+    budget_bytes: usize,
 ) -> String {
     let repo = assignment.repository.as_str();
     let base = assignment.base_commit.as_deref().unwrap_or("");
@@ -85,6 +93,12 @@ pub async fn compose_context_block(
     if pack.is_empty() {
         return String::new();
     }
+    let (body, trimmed_bytes) = if budget_bytes > 0 && pack.body.len() > budget_bytes {
+        let (text, saved) = agentgrid_common::compress::compress(&pack.body, budget_bytes);
+        (text, saved.saved_bytes as u64)
+    } else {
+        (pack.body.clone(), 0)
+    };
     // Metrics event: bytes_in/bytes_out/cache_hit/index_ms.
     sink.push(
         EventType::Status,
@@ -98,10 +112,11 @@ pub async fn compose_context_block(
             "bytes_in": pack.bytes_in,
             "bytes_out": pack.bytes_out,
             "index_ms": pack.index_ms,
+            "trimmed_bytes": trimmed_bytes,
         }),
     )
     .await;
-    pack.body
+    body
 }
 
 /// Pure render of the trusted subset of discovered skills. Separated so it can

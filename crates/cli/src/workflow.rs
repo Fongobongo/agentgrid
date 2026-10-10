@@ -32,6 +32,10 @@ enum WorkflowSub {
     /// Plan 1.9 (#17): validate a `.agentgrid/workflows/*.yaml` file against
     /// the strict schema + DAG (no server round-trip). Exit code 1 on error.
     Validate(WorkflowValidateArgs),
+    /// Stage 13 (Swarms import): build a workflow template from
+    /// dependency-aware local skills (`SKILL.md` + `depends_on` metadata).
+    /// Prints the template JSON; `--create` also posts it to the server.
+    Import(WorkflowImportArgs),
 }
 
 #[derive(Args)]
@@ -102,6 +106,19 @@ struct WorkflowCancelArgs {
     id: String,
 }
 
+#[derive(Args)]
+struct WorkflowImportArgs {
+    /// Skills directory to import (each child dir with a SKILL.md becomes one
+    /// worker step; `depends_on` metadata lists upstream skill names).
+    dir: String,
+    /// Template name for the imported DAG.
+    #[arg(long, default_value = "swarm-import")]
+    name: String,
+    /// Also create the template on the server (default: print JSON only).
+    #[arg(long)]
+    create: bool,
+}
+
 pub(crate) async fn cmd_workflow(
     client: &reqwest::Client,
     base: &str,
@@ -114,6 +131,7 @@ pub(crate) async fn cmd_workflow(
         WorkflowSub::Show(s) => cmd_workflow_show(client, base, s, json).await,
         WorkflowSub::Run(r) => cmd_workflow_run(client, base, r).await,
         WorkflowSub::Validate(v) => cmd_workflow_validate(v).await,
+        WorkflowSub::Import(i) => cmd_workflow_import(client, base, i).await,
         WorkflowSub::Cancel(c) => cmd_workflow_cancel(client, base, c).await,
         WorkflowSub::Schedules(s) => cmd_workflow_schedules(client, base, s).await,
     }
@@ -143,6 +161,49 @@ async fn cmd_workflow_create(
     let tpl: WorkflowTemplate = resp.json().await.context("parse workflow response")?;
     println!("workflow {} created ({} steps)", tpl.id, tpl.steps.len());
     println!("{}", tpl.id);
+    Ok(())
+}
+
+/// Stage 13 (Swarms import): discover dependency-aware skills under `dir`,
+/// build the DAG template (validated locally — unknown deps and cycles fail
+/// here, before any server round-trip), print it, and optionally create it.
+async fn cmd_workflow_import(
+    client: &reqwest::Client,
+    base: &str,
+    a: WorkflowImportArgs,
+) -> Result<()> {
+    let dir = std::path::PathBuf::from(&a.dir);
+    let (discovered, diags) =
+        agentgrid_skills::discover(&[(agentgrid_skills::SkillSource::Project, dir)]);
+    for d in &diags {
+        eprintln!("import note: {d}");
+    }
+    let tpl = agentgrid_skills::swarms_to_template(&a.name, &discovered)
+        .map_err(|e| anyhow::anyhow!("swarm import failed: {e}"))?;
+    println!("{}", serde_json::to_string_pretty(&tpl)?);
+    if !a.create {
+        return Ok(());
+    }
+    let req = CreateWorkflowRequest {
+        name: tpl.name.clone(),
+        steps: tpl.steps.clone(),
+        context: None,
+        budget: None,
+    };
+    let resp = client
+        .post(format!("{base}/v1/workflows"))
+        .json(&req)
+        .send()
+        .await
+        .context("create workflow request failed")?;
+    err_if_fail(resp.status(), "create workflow")?;
+    let created: WorkflowTemplate = resp.json().await.context("parse workflow response")?;
+    println!(
+        "workflow {} created ({} steps)",
+        created.id,
+        created.steps.len()
+    );
+    println!("{}", created.id);
     Ok(())
 }
 
