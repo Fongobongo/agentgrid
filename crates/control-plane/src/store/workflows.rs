@@ -215,12 +215,89 @@ impl Store {
             github_repo: req.github_repo.clone(),
             github_issue: req.github_issue,
             github_create: req.github_create,
+            assembly: false,
+            adapter: None,
+        })
+    }
+
+    /// One-button assembly (`POST /v1/assembly`): build an ephemeral template
+    /// (one expandable architect step carrying the composed goal prompt),
+    /// start a run marked `assembly`, and return it. The usual machinery
+    /// carries it from there: ticks activate the architect, its plan pauses
+    /// `PlanReady` (or auto-expands), approval appends the collector, workers
+    /// fan out, the collector merges, write-back publishes.
+    pub async fn create_assembly_run(
+        &self,
+        req: &agentgrid_common::AssemblyRequest,
+        prompt_limit: usize,
+    ) -> Result<WorkflowRun> {
+        if req.goal.trim().is_empty() {
+            anyhow::bail!("goal must not be empty");
+        }
+        if req.goal.len() > prompt_limit {
+            anyhow::bail!("goal exceeds prompt limit");
+        }
+        agentgrid_common::validate_github_refs(
+            req.github_push,
+            req.github_repo.as_deref(),
+            req.github_issue,
+            req.github_create,
+        )
+        .map_err(|e| anyhow::anyhow!("invalid assembly github target: {e}"))?;
+        let adapter = req.adapter.clone().unwrap_or_else(|| "mock".to_string());
+        let arch = agentgrid_common::WorkflowStep {
+            id: "arch".into(),
+            prompt: agentgrid_common::assembly_architect_prompt(&req.goal, &adapter),
+            depends_on: vec![],
+            role: agentgrid_common::WorkflowRole::Architect,
+            adapter: Some(adapter.clone()),
+            requested_node_id: None,
+            base_commit: req.base_commit.clone(),
+            retryable: None,
+            max_attempts: None,
+            expandable: Some(true),
+        };
+        let tpl = self
+            .create_workflow_template(
+                &format!("assembly-{}", &Uuid::new_v4().to_string()[..8]),
+                &[arch],
+                &if req.auto_approve_plan && req.budget.is_none() {
+                    Some(agentgrid_common::default_assembly_budget())
+                } else {
+                    req.budget.clone()
+                },
+            )
+            .await?;
+        let run = self
+            .create_workflow_run_full(
+                &tpl.id,
+                &agentgrid_common::CreateWorkflowRunRequest {
+                    context: req.context.clone(),
+                    repository: req.repository.clone(),
+                    base_commit: req.base_commit.clone(),
+                    auto_approve_plan: req.auto_approve_plan,
+                    github_push: req.github_push,
+                    github_repo: req.github_repo.clone(),
+                    github_issue: req.github_issue,
+                    github_create: req.github_create,
+                },
+            )
+            .await?;
+        sqlx::query("UPDATE workflow_runs SET assembly = 1, adapter = ? WHERE id = ?")
+            .bind(&adapter)
+            .bind(&run.id)
+            .execute(&self.pool)
+            .await?;
+        Ok(WorkflowRun {
+            assembly: true,
+            adapter: Some(adapter),
+            ..run
         })
     }
 
     pub async fn get_workflow_run(&self, id: &str) -> Result<Option<WorkflowRun>> {
         let row = sqlx::query(
-            "SELECT id, template_id, status, context, repository, base_commit, auto_approve_plan, github_push, github_repo, github_issue, github_create, created_at, finished_at \
+            "SELECT id, template_id, status, context, repository, base_commit, auto_approve_plan, github_push, github_repo, github_issue, github_create, assembly, adapter, created_at, finished_at \
              FROM workflow_runs WHERE id = ?",
         )
         .bind(id)
@@ -247,6 +324,12 @@ impl Store {
             github_repo: r.try_get::<Option<String>, _>("github_repo").ok().flatten(),
             github_issue: r.try_get::<Option<i64>, _>("github_issue").ok().flatten(),
             github_create: r.try_get::<bool, _>("github_create").unwrap_or_default(),
+            assembly: r.try_get::<bool, _>("assembly").unwrap_or_default(),
+            adapter: r
+                .try_get::<Option<String>, _>("adapter")
+                .ok()
+                .flatten()
+                .filter(|s| !s.is_empty()),
         }))
     }
 
@@ -260,7 +343,7 @@ impl Store {
     ) -> Result<Vec<WorkflowRun>> {
         let limit = page_limit(limit);
         let mut sql = String::from(
-            "SELECT id, template_id, status, context, repository, base_commit, auto_approve_plan, github_push, github_repo, github_issue, github_create, created_at, finished_at \
+            "SELECT id, template_id, status, context, repository, base_commit, auto_approve_plan, github_push, github_repo, github_issue, github_create, assembly, adapter, created_at, finished_at \
              FROM workflow_runs WHERE 1=1",
         );
         if after.is_some() {
@@ -296,6 +379,12 @@ impl Store {
                 github_repo: r.try_get::<Option<String>, _>("github_repo").ok().flatten(),
                 github_issue: r.try_get::<Option<i64>, _>("github_issue").ok().flatten(),
                 github_create: r.try_get::<bool, _>("github_create").unwrap_or_default(),
+                assembly: r.try_get::<bool, _>("assembly").unwrap_or_default(),
+                adapter: r
+                    .try_get::<Option<String>, _>("adapter")
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty()),
             })
             .collect())
     }
@@ -1120,7 +1209,15 @@ impl Store {
             .bind(&step.prompt)
             .bind(&depends_json)
             .bind(role_str_status(step.role))
-            .bind(&step.adapter)
+            // One-button assembly: a plan step without an adapter inherits
+            // the run default (legacy runs carry none → NULL → activation
+            // falls back to "mock" exactly as before).
+            .bind(
+                step.adapter
+                    .clone()
+                    .filter(|a| !a.is_empty())
+                    .or_else(|| run.adapter.clone()),
+            )
             .bind(step.requested_node_id.as_deref())
             .bind(step.base_commit.as_deref())
             .bind(step.retryable.map(|b| if b { 1i64 } else { 0 }))
@@ -1136,6 +1233,42 @@ impl Store {
             .bind(&role_run_id)
             .bind(&step_run_id)
             .bind(role_str_status(step.role))
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        // One-button assembly: runs owning an ephemeral architect template
+        // get a system-appended collector depending on every expanded step —
+        // unless the plan already names one (the agent's own merge wins).
+        // Same txn as the expansion + CAS flip, so a crash cannot leave a
+        // half-expanded run.
+        if run.assembly
+            && !steps
+                .iter()
+                .any(|s| s.role == agentgrid_common::WorkflowRole::Collector)
+        {
+            let dep_ids: Vec<String> = steps.iter().map(|s| s.id.clone()).collect();
+            let collector_id = format!("wfs-{}", Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO workflow_steps \
+                 (id, run_id, step_id, prompt, depends_on, role, adapter, requested_node_id, base_commit, retryable, max_attempts, attempts, status, created_at, expandable) \
+                 VALUES (?, ?, 'collect', ?, ?, 'collector', ?, NULL, NULL, NULL, NULL, 0, 'pending', ?, NULL)",
+            )
+            .bind(&collector_id)
+            .bind(run_id)
+            .bind(agentgrid_common::assembly_collector_prompt())
+            .bind(serde_json::to_string(&dep_ids)?)
+            .bind(run.adapter.as_deref())
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+            let role_run_id = format!("wrr-{}", Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO role_runs (id, step_run_id, role, task_id, status, created_at) \
+                 VALUES (?, ?, 'collector', NULL, 'pending', ?)",
+            )
+            .bind(&role_run_id)
+            .bind(&collector_id)
             .bind(&now)
             .execute(&mut *tx)
             .await?;

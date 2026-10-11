@@ -250,6 +250,69 @@ impl ControlPlane {
         let r = self.post(&format!("/v1/tasks/{id}/cancel")).send().await?;
         Ok(format!("cancel {id}: {}", r.status()))
     }
+    /// One-button assembly: goal in, architect-planned multi-host build out.
+    /// Auto-approved (the gateway allowlist is trusted operators); merge-only
+    /// (no GitHub publish from chat — use `ag assemble` for that).
+    async fn assemble(&self, adapter: &str, goal: &str) -> Result<String> {
+        let r = self
+            .post("/v1/assembly")
+            .json(&serde_json::json!({
+                "goal": goal,
+                "adapter": adapter,
+                "auto_approve_plan": true,
+            }))
+            .send()
+            .await?;
+        if !r.status().is_success() {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            return Ok(format!("create assembly failed ({status}): {body}"));
+        }
+        let v: serde_json::Value = r.json().await.unwrap_or_default();
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let answer = self.await_run_answer(&id).await?;
+        Ok(answer)
+    }
+    /// Poll a workflow run until terminal (or timeout), returning a compact
+    /// step-verdict summary. Mirrors `await_task_answer` for runs.
+    async fn await_run_answer(&self, run_id: &str) -> Result<String> {
+        // Assembly runs outlive single tasks (architect → workers → merge);
+        // the dispatch spawn owns this wait, not the bot loop.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1800);
+        loop {
+            let run = self
+                .get(&format!("/v1/workflow-runs/{run_id}"))
+                .send()
+                .await?
+                .json::<serde_json::Value>()
+                .await
+                .ok();
+            let st = run
+                .as_ref()
+                .and_then(|v| v.get("run"))
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if matches!(st, "succeeded" | "failed" | "cancelled" | "blocked") {
+                let proj = self
+                    .get(&format!("/v1/workflow-runs/{run_id}/projection"))
+                    .send()
+                    .await?
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap_or_default();
+                return Ok(fmt_run_summary(run_id, st, &proj));
+            }
+            if std::time::Instant::now() > deadline {
+                break Ok(format!("assembly run {run_id} still {st} (timed out)"));
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
     async fn logs(&self, id: &str) -> Result<String> {
         let r = self.get(&format!("/v1/tasks/{id}/events")).send().await?;
         let v: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Array(vec![]));
@@ -493,6 +556,17 @@ async fn dispatch(ctl: &ControlPlane, text: &str, chat_id: i64, conv: &ConvState
                 _ => "usage: /run <repo-url> <adapter> <prompt...>".into(),
             }
         }
+        "assemble" => {
+            let adapter = parts.next();
+            let goal: String = parts.collect::<Vec<_>>().join(" ");
+            match adapter {
+                Some(adapter) if !goal.is_empty() => ctl
+                    .assemble(adapter, &goal)
+                    .await
+                    .unwrap_or_else(|e| e.to_string()),
+                _ => "usage: /assemble <adapter> <goal...>".into(),
+            }
+        }
         _ => {
             // plain text without a slash = a chat message to the current
             // conversation. If no conversation is bound for this chat, nudge the
@@ -528,7 +602,7 @@ create one with:\n  /new <adapter> [repository]\n\
     }
 }
 
-const HELP: &str = "agentgrid gateway — /help /whoami /nodes /tasks /approvals /allow <id> /deny <id> /show <id> /cancel <id> /logs <id> /run <repo-url> <adapter> <prompt...> /new <adapter> [repo]. /start and /whoami are open (they show your chat id + the host-side approval command).";
+const HELP: &str = "agentgrid gateway — /help /whoami /nodes /tasks /approvals /allow <id> /deny <id> /show <id> /cancel <id> /logs <id> /run <repo-url> <adapter> <prompt...> /assemble <adapter> <goal...> /new <adapter> [repo]. /start and /whoami are open (they show your chat id + the host-side approval command).";
 
 // ---- formatting ----
 
@@ -613,6 +687,31 @@ fn fmt_approvals(v: &serde_json::Value) -> String {
         out.push_str(&format!("... ({} more)\n", arr.len() - 10));
     }
     out.push_str("\ntap Allow/Deny under an entry (or /allow <id> / /deny <id>)");
+    out
+}
+
+/// Human text for an assembly run report: terminal status plus one line per
+/// step (`step_id role verdict`). Pure — unit-tested without a server.
+fn fmt_run_summary(run_id: &str, status: &str, proj: &serde_json::Value) -> String {
+    let mut out = format!("assembly run {run_id}: {status}\n");
+    let steps = proj
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if steps.is_empty() {
+        out.push_str("(no steps yet)");
+        return out;
+    }
+    for s in steps.iter().take(20) {
+        let sid = s.get("step_id").and_then(|v| v.as_str()).unwrap_or("-");
+        let role = s.get("role").and_then(|v| v.as_str()).unwrap_or("-");
+        let verdict = s.get("verdict").and_then(|v| v.as_str()).unwrap_or("-");
+        out.push_str(&format!("- {sid} [{role}] {verdict}\n"));
+    }
+    if steps.len() > 20 {
+        out.push_str(&format!("... ({} more)\n", steps.len() - 20));
+    }
     out
 }
 
@@ -965,5 +1064,19 @@ mod tests {
         let kb = approvals_keyboard(&v);
         let label = kb["inline_keyboard"][0][0]["text"].as_str().unwrap();
         assert!(label.chars().count() < 40, "label must stay button-sized");
+    }
+
+    #[test]
+    fn fmt_run_summary_lists_step_verdicts() {
+        let proj = serde_json::json!({"steps": [
+            {"step_id":"w1","role":"worker","verdict":"succeeded"},
+            {"step_id":"c","role":"collector","verdict":"running"},
+        ]});
+        let s = fmt_run_summary("wfr-1", "running", &proj);
+        assert!(s.contains("wfr-1"));
+        assert!(s.contains("w1 [worker] succeeded"));
+        assert!(s.contains("c [collector] running"));
+        let empty = fmt_run_summary("wfr-2", "pending", &serde_json::json!({}));
+        assert!(empty.contains("(no steps yet)"));
     }
 }

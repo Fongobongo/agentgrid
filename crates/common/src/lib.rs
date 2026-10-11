@@ -7,10 +7,11 @@ pub use policy::{
     PolicyVerdict, RiskClass,
 };
 pub use workflow::{
-    build_handoff_payload, compute_budget_usage, parse_plan_steps, ratify_l4_schedule,
-    render_handoff_block, AgentMessage, AgentMessageKind, BudgetBreach, BudgetSnapshot,
-    BudgetUsage, CreateWorkflowRequest, CreateWorkflowRunRequest, HandoffPackage, RoleRunStatus,
-    StepProjection, WorkflowBudget, WorkflowProjection, WorkflowRole, WorkflowRun,
+    assembly_architect_prompt, assembly_collector_prompt, build_handoff_payload,
+    compute_budget_usage, default_assembly_budget, parse_plan_steps, ratify_l4_schedule,
+    render_handoff_block, AgentMessage, AgentMessageKind, AssemblyRequest, BudgetBreach,
+    BudgetSnapshot, BudgetUsage, CreateWorkflowRequest, CreateWorkflowRunRequest, HandoffPackage,
+    RoleRunStatus, StepProjection, WorkflowBudget, WorkflowProjection, WorkflowRole, WorkflowRun,
     WorkflowRunStatus, WorkflowRunWithSteps, WorkflowSchedule, WorkflowScheduleCreate,
     WorkflowStep, WorkflowStepRun, WorkflowStepStatus, WorkflowTemplate,
 };

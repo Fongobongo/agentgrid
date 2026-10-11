@@ -3533,6 +3533,187 @@ mod verifier_ro_tests {
             w.prompt
         );
     }
+
+    #[tokio::test]
+    async fn assembly_run_carries_flag_adapter_and_architect() {
+        // `POST /v1/assembly` store half: ephemeral template (one expandable
+        // architect step with the composed goal prompt) + marked run.
+        use agentgrid_common::AssemblyRequest;
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("ag-asm-{nanos}.db"));
+        let _ = std::fs::remove_file(&path);
+        let s = Store::open(path.to_str().unwrap()).await.unwrap();
+        let run = s
+            .create_assembly_run(
+                &AssemblyRequest {
+                    goal: "build a blog".into(),
+                    repository: Some("demo".into()),
+                    adapter: Some("claude".into()),
+                    auto_approve_plan: true,
+                    github_push: true,
+                    github_repo: Some("acme/blog".into()),
+                    github_create: true,
+                    ..Default::default()
+                },
+                65536,
+            )
+            .await
+            .unwrap();
+        assert!(run.assembly, "run must be marked assembly");
+        assert_eq!(run.adapter.as_deref(), Some("claude"));
+        assert!(run.auto_approve_plan);
+        assert_eq!(run.github_repo.as_deref(), Some("acme/blog"));
+        let tpl = s
+            .get_workflow_template(&run.template_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tpl.steps.len(), 1, "one architect step");
+        assert_eq!(tpl.steps[0].role, WorkflowRole::Architect);
+        assert_eq!(tpl.steps[0].expandable, Some(true));
+        assert_eq!(tpl.steps[0].adapter.as_deref(), Some("claude"));
+        assert!(tpl.steps[0].prompt.contains("build a blog"));
+        // Empty goal and oversized goal fail closed.
+        assert!(s
+            .create_assembly_run(
+                &AssemblyRequest {
+                    goal: "  ".into(),
+                    ..Default::default()
+                },
+                65536,
+            )
+            .await
+            .is_err());
+        assert!(s
+            .create_assembly_run(
+                &AssemblyRequest {
+                    goal: "x".repeat(65537),
+                    ..Default::default()
+                },
+                65536,
+            )
+            .await
+            .is_err());
+        // Bad github target fails closed too.
+        assert!(s
+            .create_assembly_run(
+                &AssemblyRequest {
+                    goal: "x".into(),
+                    github_push: true,
+                    github_repo: Some("nope".into()),
+                    ..Default::default()
+                },
+                65536,
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn approve_appends_collector_for_assembly_runs() {
+        // Plan approval on an assembly run appends a collector step depending
+        // on every expanded step and fills blank adapters from the run
+        // default; an explicit plan collector is respected (no duplicate).
+        use agentgrid_common::{AssemblyRequest, CompleteAttemptRequest, WorkflowRole as WR};
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        async fn drive_to_planready(plan: &str) -> (Store, String) {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("ag-asmcol-{nanos}.db"));
+            let _ = std::fs::remove_file(&path);
+            let s = Store::open(path.to_str().unwrap()).await.unwrap();
+            let (token, _) = s.create_enrollment_token().await.unwrap();
+            let node = EnrollRequest {
+                token,
+                name: "n1".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 4,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            };
+            let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+            let run = s
+                .create_assembly_run(
+                    &AssemblyRequest {
+                        goal: "assemble it".into(),
+                        repository: Some("demo".into()),
+                        ..Default::default()
+                    },
+                    65536,
+                )
+                .await
+                .unwrap();
+            assert!(run.assembly);
+            let _ = s.tick_workflow_run(&run.id).await.unwrap();
+            let a = s.try_assign(&node_id).await.unwrap().expect("arch assign");
+            s.ack_attempt(&a.attempt_id).await.unwrap();
+            s.complete_attempt(
+                &a.attempt_id,
+                &CompleteAttemptRequest {
+                    exit_code: 0,
+                    commit_sha: None,
+                    error_code: None,
+                    resolved_base_sha: None,
+                    remote_head_at_start: None,
+                    remote_head_at_finish: None,
+                    acp_session_id: None,
+                    plan: Some(plan.into()),
+                    provenance: None,
+                    pending_artifacts: vec![],
+                    validation_rounds: 0,
+                },
+            )
+            .await
+            .unwrap();
+            let _ = s.tick_workflow_run(&run.id).await.unwrap();
+            (s, run.id)
+        }
+        // Plan without collector → system appends one depending on all.
+        let (s, run_id) = drive_to_planready(
+            "- id: w1\n  prompt: do one\n- id: w2\n  prompt: do two\n  depends_on: [w1]\n",
+        )
+        .await;
+        s.approve_workflow_plan(&run_id).await.unwrap();
+        let steps = s.get_workflow_run_steps(&run_id).await.unwrap();
+        let ids: Vec<&str> = steps.iter().map(|x| x.step_id.as_str()).collect();
+        assert!(ids.contains(&"w1") && ids.contains(&"w2") && ids.contains(&"collect"));
+        let collect = steps.iter().find(|x| x.step_id == "collect").unwrap();
+        assert_eq!(collect.role, WR::Collector);
+        assert_eq!(
+            collect.adapter.as_deref(),
+            Some("mock"),
+            "run default fills"
+        );
+        let mut deps = collect.depends_on.clone();
+        deps.sort();
+        assert_eq!(deps, vec!["w1".to_string(), "w2".to_string()]);
+        // Expanded workers inherit the run default adapter too.
+        let w1 = steps.iter().find(|x| x.step_id == "w1").unwrap();
+        assert_eq!(w1.adapter.as_deref(), Some("mock"));
+
+        // Plan WITH an explicit collector → respected, no duplicate.
+        let (s, run_id) = drive_to_planready(
+            "- id: w1\n  prompt: do one\n- id: mine\n  prompt: merge\n  role: collector\n  depends_on: [w1]\n",
+        )
+        .await;
+        s.approve_workflow_plan(&run_id).await.unwrap();
+        let steps = s.get_workflow_run_steps(&run_id).await.unwrap();
+        let collectors: Vec<_> = steps.iter().filter(|x| x.role == WR::Collector).collect();
+        assert_eq!(
+            collectors.len(),
+            1,
+            "explicit collector wins, no system one"
+        );
+        assert_eq!(collectors[0].step_id, "mine");
+    }
 }
 
 #[cfg(test)]

@@ -100,6 +100,18 @@
   CI), client unit tests against a dummy API, scaffold/finalize tests,
   auto-approve and 400 tests. Details in ADR 0019.
 
+- **One-button assembly: goal in, merged project out.** `POST /v1/assembly`
+  builds an ephemeral architect template from a composed goal prompt and
+  starts a marked run (admin-only by middleware; 400/413 on bad input).
+  Plan approval appends a system collector (unless the plan names one) and
+  fills blank step adapters from the run default. Auto-approved runs
+  without an explicit budget get a conservative default (50 rounds, 4h).
+  Entries: `ag assemble`, Telegram `/assemble` (trusted allowlist,
+  merge-only, step-verdict report), `#/assemble` web form. Proof:
+  `tests/e2e/run-autoassembly.sh` (plan-stub architect through auto-approve
+  to merged patch; CI), store/API/CLI/gateway/web tests. Details in
+  ADR 0020.
+
 - **6.14 performance acceptance coverage.** 1 GiB of mock stdout
   streams through the node outbox with sublinear RAM growth
   (`spool_one_gib_stdout_without_linear_ram_growth`: 1024×1 MiB

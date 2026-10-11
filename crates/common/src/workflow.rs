@@ -1038,6 +1038,43 @@ steps:
             .unwrap_err();
         assert!(e.contains("cycle detected"));
     }
+
+    #[test]
+    fn assembly_architect_prompt_carries_goal_adapter_and_contract() {
+        let p = assembly_architect_prompt("build a blog", "claude");
+        assert!(p.contains("build a blog"), "goal must travel");
+        assert!(p.contains("claude"), "default adapter must travel");
+        assert!(p.contains("depends_on"), "contract shape must be stated");
+        assert!(
+            p.contains("collect"),
+            "must reserve collection to the system"
+        );
+    }
+
+    #[test]
+    fn assembly_collector_prompt_is_nonempty_and_merge_scoped() {
+        let p = assembly_collector_prompt();
+        assert!(p.contains("merged"), "collector starts from merged tree");
+    }
+
+    #[test]
+    fn default_assembly_budget_bounds_rounds_and_wall() {
+        let b = default_assembly_budget();
+        assert_eq!(b.max_rounds, Some(50));
+        assert_eq!(b.max_wall_seconds, Some(4 * 3600));
+    }
+
+    #[test]
+    fn assembly_request_defaults_are_manual_and_minimal() {
+        let r: AssemblyRequest = serde_json::from_str(r#"{"goal":"x"}"#).unwrap();
+        assert_eq!(r.goal, "x");
+        assert!(!r.auto_approve_plan, "autopilot is opt-in");
+        assert!(r.adapter.is_none());
+        assert!(r.budget.is_none());
+        assert!(!r.github_push);
+        let back = serde_json::to_string(&r).unwrap();
+        assert!(back.contains("\"goal\":\"x\""));
+    }
 }
 
 /// One execution of a template.
@@ -1071,6 +1108,16 @@ pub struct WorkflowRun {
     pub github_issue: Option<i64>,
     #[serde(default)]
     pub github_create: bool,
+    /// One-button assembly (`POST /v1/assembly`): the run owns an ephemeral
+    /// architect template and gets a system-appended collector step on plan
+    /// approval. Manual runs carry false.
+    #[serde(default)]
+    pub assembly: bool,
+    /// Default adapter for expanded steps when a plan step omits one
+    /// (assembly runs; legacy runs carry None → activation falls back to
+    /// `"mock"` as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
 }
 
 /// A step instance inside a run.
@@ -1152,6 +1199,96 @@ pub struct CreateWorkflowRunRequest {
     pub github_issue: Option<i64>,
     #[serde(default)]
     pub github_create: bool,
+}
+
+/// Request body for `POST /v1/assembly` — the one-button entry: a goal plus
+/// assembly options. The server builds an ephemeral template (one expandable
+/// architect step), starts a run, and returns it; the usual workflow
+/// machinery (ticks, approvals unless opted out, collector, write-back)
+/// carries it from there.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AssemblyRequest {
+    /// The goal in free text (required, non-empty, capped like a prompt).
+    #[serde(default)]
+    pub goal: String,
+    /// Target repository for the step tasks (optional; none = plain-dir
+    /// assembly with scaffold init).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// Agent adapter for the architect and (by default) every expanded step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// Shared base_commit for every step (optional; Stage 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    /// Optional run context JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Skip the `PlanReady` human approval (default off).
+    #[serde(default)]
+    pub auto_approve_plan: bool,
+    /// Optional budget. When `auto_approve_plan` is set and no budget is
+    /// given, the server stamps a conservative default budget so an
+    /// unattended run cannot iterate forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<WorkflowBudget>,
+    /// Write-back target inherited by the auto-appended collector step.
+    #[serde(default)]
+    pub github_push: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    #[serde(default)]
+    pub github_create: bool,
+}
+
+/// Conservative default budget stamped onto auto-approved assembly runs that
+/// arrive without one: 50 step-rounds, 4h wall clock. Explicit budgets
+/// always win; manual (non-auto) assembly gets none.
+pub fn default_assembly_budget() -> WorkflowBudget {
+    WorkflowBudget {
+        max_messages: None,
+        max_rounds: Some(50),
+        max_bytes: None,
+        max_tokens: None,
+        max_cost_cents: None,
+        max_wall_seconds: Some(4 * 3600),
+        max_repeated_handoffs: None,
+    }
+}
+
+/// Compose the architect prompt for an assembly run: the operator's goal plus
+/// the machine-plan contract (`parse_plan_steps` shape). Pure and
+/// unit-tested; the E2E plan-stub speaks the same contract.
+pub fn assembly_architect_prompt(goal: &str, adapter: &str) -> String {
+    format!(
+        "Goal: {goal}\n\
+         \n\
+         You are the architect of an automated assembly run. Decompose the goal \
+         into worker steps and output ONE machine-readable plan and nothing else.\n\
+         \n\
+         Plan format (YAML array, one item per step):\n\
+         - id: unique step id ([a-z0-9-] characters, e.g. w1)\n\
+         - prompt: self-contained task for one worker (files to write, acceptance)\n\
+         - depends_on: [ids that must succeed first] (may be [])\n\
+         - role: worker (default) or verifier for a checking step\n\
+         - adapter: omit to use \"{adapter}\"\n\
+         \n\
+         Rules:\n\
+         - cover the whole goal; keep steps parallel where possible;\n\
+         - dependencies must be acyclic; every referenced id must exist;\n\
+         - do NOT add a final merge/collect step: the system appends collection automatically."
+    )
+}
+
+/// Prompt for the system-appended collector step: upstream outputs are
+/// already merged into its worktree by the node before the agent runs.
+pub fn assembly_collector_prompt() -> String {
+    "Assemble: upstream worker outputs are already merged into this worktree. \
+     Verify the tree is coherent and complete (every part present, no conflicts \
+     left over), fix anything incoherent, and finish cleanly. Do not drop any part."
+        .to_string()
 }
 
 /// `GET /v1/workflow-runs/{id}` response: the run plus its step instances.

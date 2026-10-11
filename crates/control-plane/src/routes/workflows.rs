@@ -3,16 +3,18 @@
 use std::sync::Arc;
 
 use agentgrid_common::{
-    CreateWorkflowRequest, CreateWorkflowRunRequest, ListResponse, WorkflowProjection, WorkflowRun,
-    WorkflowRunWithSteps, WorkflowSchedule, WorkflowScheduleCreate, WorkflowTemplate,
+    AssemblyRequest, CreateWorkflowRequest, CreateWorkflowRunRequest, ListResponse,
+    WorkflowProjection, WorkflowRun, WorkflowRunWithSteps, WorkflowSchedule,
+    WorkflowScheduleCreate, WorkflowTemplate,
 };
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
 
+use crate::auth::AuthedUser;
 use crate::routes::WorkflowRunsQuery;
 use crate::AppState;
 
@@ -128,6 +130,45 @@ pub async fn create_workflow_run(
             tracing::error!("create_workflow_run failed: {e}");
             StatusCode::BAD_REQUEST
         })
+}
+
+/// One-button assembly (`POST /v1/assembly`): goal + options in, ephemeral
+/// architect template + marked run out. Empty goals and malformed GitHub
+/// targets are 400 (like task create); oversized goals are 413. Admin-only
+/// by middleware (an unattended run spends agent budget and can push to
+/// GitHub — operators keep view + approve).
+pub async fn create_assembly_run(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthedUser>>,
+    Json(req): Json<AssemblyRequest>,
+) -> Result<(StatusCode, Json<WorkflowRun>), StatusCode> {
+    if req.goal.len() > state.limits.prompt {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    match state
+        .store
+        .create_assembly_run(&req, state.limits.prompt)
+        .await
+    {
+        Ok(run) => {
+            state.assignment_notify.notify_waiters();
+            let _ = state
+                .store
+                .audit(
+                    "user",
+                    auth.as_ref().map(|e| e.0.username.as_str()),
+                    "workflow.assembly_create",
+                    Some(&run.id),
+                    None,
+                )
+                .await;
+            Ok((StatusCode::CREATED, Json(run)))
+        }
+        Err(e) => {
+            tracing::error!("create_assembly_run failed: {e}");
+            Err(StatusCode::BAD_REQUEST)
+        }
+    }
 }
 
 /// Stage 13: create a scheduled trigger for a workflow template.

@@ -350,6 +350,13 @@ export interface WorkflowRun {
   context?: string | null;
   repository?: string | null;
   base_commit?: string | null;
+  auto_approve_plan?: boolean | null;
+  github_push?: boolean | null;
+  github_repo?: string | null;
+  github_issue?: number | null;
+  github_create?: boolean | null;
+  assembly?: boolean | null;
+  adapter?: string | null;
 }
 
 export interface StepProjection {
@@ -416,6 +423,10 @@ export function listWorkflowRuns(): Promise<WorkflowRun[]> {
 
 export function getWorkflowProjection(id: string) {
   return getJson<WorkflowProjection>(`/v1/workflow-runs/${id}/projection`);
+}
+
+export function createAssembly(body: unknown) {
+  return postJson<WorkflowRun>("/v1/assembly", body);
 }
 
 export function cancelWorkflowRun(id: string) {

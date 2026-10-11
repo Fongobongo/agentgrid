@@ -88,6 +88,9 @@ enum AgCommand {
     Server(ServerStartArgs),
     /// Define and run Agentgrid workflows (DAGs of agent steps).
     Workflow(workflow::WorkflowArgs),
+    /// One-button project assembly: goal in, architect-planned multi-host
+    /// build with collection and optional GitHub publish out.
+    Assemble(workflow::AssembleArgs),
     /// Full-screen TUI dashboard (read-only monitoring).
     Tui(TuiArgs),
     /// One-screen overview: server health, nodes, tasks and workflow runs.
@@ -588,6 +591,7 @@ async fn main() -> Result<()> {
         AgCommand::AdapterEnv(a) => registry::cmd_adapter_env(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
         AgCommand::Workflow(a) => workflow::cmd_workflow(&client, &base, a, cli.json).await,
+        AgCommand::Assemble(a) => workflow::cmd_assemble(&client, &base, a).await,
         AgCommand::Tui(a) => cmd_tui(&client, &base, a).await,
         AgCommand::Status => cmd_status(&client, &base, cli.json).await,
         AgCommand::Completions { shell } => {

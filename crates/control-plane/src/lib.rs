@@ -682,6 +682,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/workflows/{id}/runs",
             post(routes::workflows::create_workflow_run),
         )
+        // One-button assembly: goal + options in, ephemeral architect
+        // template + marked run out (admin-only by middleware).
+        .route("/v1/assembly", post(routes::workflows::create_assembly_run))
         .route(
             "/v1/workflows/{id}/schedules",
             post(routes::workflows::create_workflow_schedule)

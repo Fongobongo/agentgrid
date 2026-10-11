@@ -4,6 +4,7 @@ import Login from "./components/Login";
 import Dashboard from "./components/Dashboard";
 import Nodes from "./components/Nodes";
 import NewTask from "./components/NewTask";
+import Assembly from "./components/Assembly";
 import TaskDetails from "./components/TaskDetails";
 import Approvals from "./components/Approvals";
 import Audit from "./components/Audit";
@@ -52,6 +53,7 @@ function parseHash(): { name: string; id?: string; unknown?: boolean } {
     "repos",
     "proxies",
     "authoring",
+    "assemble",
     "new",
     "workflows",
   ];
@@ -102,6 +104,12 @@ const NAV_GROUPS: NavGroup[] = [
         label: "Authoring",
         route: { name: "authoring" },
         hash: "#/authoring",
+      },
+      {
+        label: "Assemble",
+        route: { name: "assemble" },
+        hash: "#/assemble",
+        accent: true,
       },
     ],
   },
@@ -372,6 +380,14 @@ export default function App() {
           {route.name === "authoring" && (
             <WorkflowsAuthoring
               onCreated={(id) => (window.location.hash = `#/workflow/${id}`)}
+            />
+          )}
+          {route.name === "assemble" && (
+            <Assembly
+              onCreated={(id) => (window.location.hash = `#/workflow/${id}`)}
+              onError={(e) =>
+                e instanceof ApiError && e.status === 401 ? logout() : undefined
+              }
             />
           )}
           {route.name === "agents" && <Agents />}

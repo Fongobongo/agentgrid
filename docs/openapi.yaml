@@ -717,6 +717,9 @@ paths:
   /v1/workflows/{id}/runs:
     post:
       summary: Start a workflow run from a definition
+  /v1/assembly:
+    post:
+      summary: One-button assembly — goal in, ephemeral architect template + marked run out (admin)
   /v1/workflows/{id}/schedules:
     get:
       summary: List schedules for a workflow

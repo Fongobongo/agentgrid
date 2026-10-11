@@ -310,6 +310,10 @@ jobs:
       # fallback). Process-based, no docker, no GitHub.
       - name: project assembly across hosts
         run: bash tests/e2e/run-assemble.sh
+      # One-button assembly: POST /v1/assembly with a goal → plan-stub
+      # architect → auto-approve → workers → system collector. No LLM.
+      - name: one-button assembly (goal in, merged project out)
+        run: bash tests/e2e/run-autoassembly.sh
       # Telegram gateway vs a mock Bot API: approvals listing + inline
       # keyboard + deny callback (process-based, no Docker, no real Telegram).
       - name: telegram gateway (mock Bot API)

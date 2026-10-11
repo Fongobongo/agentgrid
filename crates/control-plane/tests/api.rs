@@ -3361,6 +3361,97 @@ async fn workflow_create_list_show_run_and_steps() {
     assert_eq!(run_view.get("steps").unwrap().as_array().unwrap().len(), 3);
 }
 
+/// One-button assembly (`POST /v1/assembly`): goal in, marked run out;
+/// empty goals and bad github targets are 400, oversized goals 413.
+#[tokio::test]
+async fn assembly_create_run_and_reject_bad_input() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+
+    let body = json!({
+        "goal": "build a blog",
+        "repository": "demo",
+        "adapter": "mock",
+        "auto_approve_plan": true,
+    })
+    .to_string();
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/assembly", body, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let run: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(run.get("status").unwrap(), "pending");
+    assert_eq!(run.get("assembly").unwrap(), true);
+    assert_eq!(run.get("auto_approve_plan").unwrap(), true);
+    assert_eq!(run.get("adapter").unwrap(), "mock");
+    let rid = run.get("id").unwrap().as_str().unwrap().to_string();
+
+    // The ephemeral template holds one expandable architect step.
+    let tpl_id = run.get("template_id").unwrap().as_str().unwrap();
+    let resp = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/workflows/{tpl_id}"), &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let tpl: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let steps = tpl.get("steps").unwrap().as_array().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].get("role").unwrap(), "architect");
+    assert!(steps[0]
+        .get("prompt")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains("build a blog"));
+
+    // show run + steps: only the architect so far.
+    let resp = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/workflow-runs/{rid}"), &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Empty goal → 400.
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/assembly", r#"{"goal":"  "}"#.into(), &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Bad github target → 400.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/assembly",
+            r#"{"goal":"x","github_push":true,"github_repo":"nope"}"#.into(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Oversized goal → 413.
+    let big = "x".repeat(200 * 1024);
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/assembly",
+            serde_json::to_string(&json!({"goal": big})).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 #[tokio::test]
 async fn workflow_rejects_invalid_dag() {
     let state = AppState::open_temp().await.unwrap();

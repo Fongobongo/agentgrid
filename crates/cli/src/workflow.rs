@@ -123,6 +123,73 @@ struct WorkflowCancelArgs {
     id: String,
 }
 
+/// One-button assembly (`POST /v1/assembly`): a goal plus options. The
+/// server builds an ephemeral architect template and starts the run.
+#[derive(Args)]
+pub(crate) struct AssembleArgs {
+    /// The goal in free text.
+    goal: String,
+    /// Target repository for the step tasks (none = plain-dir assembly).
+    #[arg(long)]
+    repo: Option<String>,
+    /// Agent adapter for the architect and expanded steps (default mock).
+    #[arg(long, default_value = "mock")]
+    adapter: String,
+    /// Shared base commit for every step.
+    #[arg(long)]
+    base_commit: Option<String>,
+    /// Optional run context JSON.
+    #[arg(long)]
+    context: Option<String>,
+    /// Skip the PlanReady human approval (autopilot).
+    #[arg(long = "auto-approve")]
+    auto_approve: bool,
+    /// Push the assembled project to GitHub (needs --github-repo).
+    #[arg(long = "github-push")]
+    github_push: bool,
+    /// GitHub repository `owner/name` for the assembled project.
+    #[arg(long = "github-repo")]
+    github_repo: Option<String>,
+    /// GitHub issue number to report back on.
+    #[arg(long = "github-issue")]
+    github_issue: Option<i64>,
+    /// Create the remote repository via the API when missing (private).
+    #[arg(long = "github-create")]
+    github_create: bool,
+}
+
+pub(crate) async fn cmd_assemble(
+    client: &reqwest::Client,
+    base: &str,
+    a: AssembleArgs,
+) -> Result<()> {
+    let req = agentgrid_common::AssemblyRequest {
+        goal: a.goal,
+        repository: a.repo,
+        adapter: Some(a.adapter),
+        base_commit: a.base_commit,
+        context: a.context,
+        auto_approve_plan: a.auto_approve,
+        budget: None,
+        github_push: a.github_push,
+        github_repo: a.github_repo,
+        github_issue: a.github_issue,
+        github_create: a.github_create,
+    };
+    let resp = client
+        .post(format!("{base}/v1/assembly"))
+        .json(&req)
+        .send()
+        .await
+        .context("create assembly request failed")?;
+    err_if_fail(resp.status(), "create assembly")?;
+    let run: agentgrid_common::WorkflowRun =
+        resp.json().await.context("parse assembly response")?;
+    println!("assembly run {} started (status: {:?})", run.id, run.status);
+    println!("{}", run.id);
+    Ok(())
+}
+
 #[derive(Args)]
 struct WorkflowImportArgs {
     /// Skills directory to import (each child dir with a SKILL.md becomes one
