@@ -379,6 +379,17 @@ struct RunArgs {
     /// the task as ineligible instead of running it.
     #[arg(long = "security-profile")]
     security_profile: Option<String>,
+    /// Push the successful attempt's branch to GitHub (needs --github-repo).
+    #[arg(long = "github-push")]
+    github_push: bool,
+    /// GitHub repository `owner/name` for write-back.
+    #[arg(long = "github-repo")]
+    github_repo: Option<String>,
+    /// Create the remote repository via the API when it does not exist yet
+    /// (private; needs --github-push). A plain-dir worktree is `git init`-ed
+    /// first — project assembly from scratch.
+    #[arg(long = "github-create")]
+    github_create: bool,
 }
 
 #[derive(Args)]
@@ -788,6 +799,7 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -955,6 +967,7 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 github_repo: full_name,
                 github_issue: Some(number),
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1015,10 +1028,11 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 consensus_group_id: Some(group.clone()),
                 consensus_member: Some(member.clone()),
                 opencode_override: None,
-                github_push: false,
-                github_repo: None,
+                github_push: a.github_push,
+                github_repo: a.github_repo.clone(),
                 github_issue: None,
                 github_base_ref: None,
+                github_create: a.github_create,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1065,10 +1079,11 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         consensus_group_id: None,
         consensus_member: None,
         opencode_override,
-        github_push: false,
-        github_repo: None,
+        github_push: a.github_push,
+        github_repo: a.github_repo.clone(),
         github_issue: None,
         github_base_ref: None,
+        github_create: a.github_create,
         max_attempts: a.max_attempts,
         consensus_mode: None,
         review_of: None,

@@ -20,6 +20,18 @@ pub async fn create_task(
     if req.prompt.len() > state.limits.prompt {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
+    // Project assembly: malformed write-back targets 400 here — a bad
+    // owner/name or non-positive issue must not survive into a queued task
+    // that later "succeeds" with only a github_push_failed log.
+    if let Err(e) = agentgrid_common::validate_github_refs(
+        req.github_push,
+        req.github_repo.as_deref(),
+        req.github_issue,
+        req.github_create,
+    ) {
+        tracing::warn!("create_task rejected github refs: {e}");
+        return Err(StatusCode::BAD_REQUEST);
+    }
     match state.store.create_task(&req).await {
         Ok(view) => {
             state.assignment_notify.notify_waiters();
@@ -263,6 +275,7 @@ pub async fn rework_attempt(
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,

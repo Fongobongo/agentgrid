@@ -113,6 +113,33 @@ impl Store {
         repository: Option<&str>,
         base_commit: Option<&str>,
     ) -> Result<WorkflowRun> {
+        self.create_workflow_run_full(
+            template_id,
+            &agentgrid_common::CreateWorkflowRunRequest {
+                context: context.map(|s| s.to_string()),
+                repository: repository.map(|s| s.to_string()),
+                base_commit: base_commit.map(|s| s.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// Full version: project-assembly run options (auto-approve, GitHub
+    /// target) ride along. The routes handler passes the request body
+    /// straight through.
+    pub async fn create_workflow_run_full(
+        &self,
+        template_id: &str,
+        req: &agentgrid_common::CreateWorkflowRunRequest,
+    ) -> Result<WorkflowRun> {
+        agentgrid_common::validate_github_refs(
+            req.github_push,
+            req.github_repo.as_deref(),
+            req.github_issue,
+            req.github_create,
+        )
+        .map_err(|e| anyhow::anyhow!("invalid run github target: {e}"))?;
         let tpl = self
             .get_workflow_template(template_id)
             .await?
@@ -121,14 +148,19 @@ impl Store {
         let created_at = now_iso();
         let mut tx = self.write_txn().await?;
         sqlx::query(
-            "INSERT INTO workflow_runs (id, template_id, status, context, repository, base_commit, created_at, finished_at) \
-             VALUES (?, ?, 'pending', ?, ?, ?, ?, NULL)",
+            "INSERT INTO workflow_runs (id, template_id, status, context, repository, base_commit, auto_approve_plan, github_push, github_repo, github_issue, github_create, created_at, finished_at) \
+             VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
         )
         .bind(&run_id)
         .bind(template_id)
-        .bind(context)
-        .bind(repository)
-        .bind(base_commit)
+        .bind(req.context.as_deref())
+        .bind(req.repository.as_deref())
+        .bind(req.base_commit.as_deref())
+        .bind(req.auto_approve_plan)
+        .bind(req.github_push)
+        .bind(req.github_repo.as_deref())
+        .bind(req.github_issue)
+        .bind(req.github_create)
         .bind(&created_at)
         .execute(&mut *tx)
         .await?;
@@ -175,15 +207,20 @@ impl Store {
             status: WorkflowRunStatus::Pending,
             created_at,
             finished_at: None,
-            context: context.map(|s| s.to_string()),
-            repository: repository.map(|s| s.to_string()),
-            base_commit: base_commit.map(|s| s.to_string()),
+            context: req.context.clone(),
+            repository: req.repository.clone(),
+            base_commit: req.base_commit.clone(),
+            auto_approve_plan: req.auto_approve_plan,
+            github_push: req.github_push,
+            github_repo: req.github_repo.clone(),
+            github_issue: req.github_issue,
+            github_create: req.github_create,
         })
     }
 
     pub async fn get_workflow_run(&self, id: &str) -> Result<Option<WorkflowRun>> {
         let row = sqlx::query(
-            "SELECT id, template_id, status, context, repository, base_commit, created_at, finished_at \
+            "SELECT id, template_id, status, context, repository, base_commit, auto_approve_plan, github_push, github_repo, github_issue, github_create, created_at, finished_at \
              FROM workflow_runs WHERE id = ?",
         )
         .bind(id)
@@ -203,6 +240,13 @@ impl Store {
                 .ok()
                 .flatten()
                 .filter(|s| !s.is_empty()),
+            auto_approve_plan: r
+                .try_get::<bool, _>("auto_approve_plan")
+                .unwrap_or_default(),
+            github_push: r.try_get::<bool, _>("github_push").unwrap_or_default(),
+            github_repo: r.try_get::<Option<String>, _>("github_repo").ok().flatten(),
+            github_issue: r.try_get::<Option<i64>, _>("github_issue").ok().flatten(),
+            github_create: r.try_get::<bool, _>("github_create").unwrap_or_default(),
         }))
     }
 
@@ -216,7 +260,7 @@ impl Store {
     ) -> Result<Vec<WorkflowRun>> {
         let limit = page_limit(limit);
         let mut sql = String::from(
-            "SELECT id, template_id, status, context, repository, base_commit, created_at, finished_at \
+            "SELECT id, template_id, status, context, repository, base_commit, auto_approve_plan, github_push, github_repo, github_issue, github_create, created_at, finished_at \
              FROM workflow_runs WHERE 1=1",
         );
         if after.is_some() {
@@ -245,6 +289,13 @@ impl Store {
                     .ok()
                     .flatten()
                     .filter(|s| !s.is_empty()),
+                auto_approve_plan: r
+                    .try_get::<bool, _>("auto_approve_plan")
+                    .unwrap_or_default(),
+                github_push: r.try_get::<bool, _>("github_push").unwrap_or_default(),
+                github_repo: r.try_get::<Option<String>, _>("github_repo").ok().flatten(),
+                github_issue: r.try_get::<Option<i64>, _>("github_issue").ok().flatten(),
+                github_create: r.try_get::<bool, _>("github_create").unwrap_or_default(),
             })
             .collect())
     }
@@ -1401,10 +1452,40 @@ impl Store {
     /// Returns the ids of tasks created during this tick (so a caller can assign
     /// and drive them). Safe to call repeatedly; it only ever moves state forward.
     pub async fn tick_workflow_run(&self, run_id: &str) -> Result<Vec<String>> {
-        let run = match self.get_workflow_run(run_id).await? {
+        let mut run = match self.get_workflow_run(run_id).await? {
             Some(r) => r,
             None => return Ok(vec![]),
         };
+        // Project assembly: an opted-in run skips the PlanReady human pause —
+        // a parseable architect plan auto-expands on this tick. Fail-closed:
+        // an unparseable plan (or a concurrent status flip) keeps the run
+        // PlanReady and only warns; the next tick retries.
+        if run.status == WorkflowRunStatus::PlanReady && run.auto_approve_plan {
+            match self.approve_workflow_plan(run_id).await {
+                Ok(()) => {
+                    let _ = self
+                        .audit(
+                            "system",
+                            None,
+                            "workflow.plan_auto_approved",
+                            Some(run_id),
+                            None,
+                        )
+                        .await;
+                    run = match self.get_workflow_run(run_id).await? {
+                        Some(r) => r,
+                        None => return Ok(vec![]),
+                    };
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        run = %run_id,
+                        "auto-approve failed ({e}); run stays PlanReady"
+                    );
+                    return Ok(vec![]);
+                }
+            }
+        }
         if matches!(
             run.status,
             WorkflowRunStatus::Succeeded
@@ -1681,6 +1762,7 @@ impl Store {
                                             github_repo: None,
                                             github_issue: None,
                                             github_base_ref: None,
+                                            github_create: false,
                                             max_attempts: 1,
                                             consensus_mode: None,
                                             review_of: None,
@@ -1698,12 +1780,16 @@ impl Store {
                                         self.set_role_run_task(&step.id, &tv.id).await?;
                                         created.push(tv.id);
                                         // step stays `Running` pending the retry
-                                    } else if step.role == WorkflowRole::Integrator {
-                                        // Conflict policy (Stage 8): a failed
-                                        // integrator must not silently overwrite and
-                                        // must not fail the whole run. It blocks for
-                                        // human/repair resolution; the bounded retries
-                                        // above are the automated repair budget.
+                                    } else if step.role == WorkflowRole::Integrator
+                                        || step.role == WorkflowRole::Collector
+                                    {
+                                        // Conflict policy (Stage 8 + project
+                                        // assembly): a failed integrator or
+                                        // collector must not silently overwrite
+                                        // and must not fail the whole run. It
+                                        // blocks for human/repair resolution;
+                                        // the bounded retries above are the
+                                        // automated repair budget.
                                         self.set_step_status(&step.id, WorkflowStepStatus::Blocked)
                                             .await?;
                                         self.set_role_run_status_by_step(
@@ -1802,6 +1888,7 @@ impl Store {
                                                     github_repo: None,
                                                     github_issue: None,
                                                     github_base_ref: None,
+                                                    github_create: false,
                                                     max_attempts: 1,
                                                     consensus_mode: None,
                                                     review_of: None,
@@ -1942,10 +2029,24 @@ impl Store {
                             consensus_group_id: None,
                             consensus_member: None,
                             opencode_override: None,
-                            github_push: false,
-                            github_repo: None,
-                            github_issue: None,
+                            // Project assembly: collector steps inherit the
+                            // run's GitHub target (push the assembled
+                            // project, creating the remote first when asked);
+                            // every other role assembles nothing to publish.
+                            github_push: step.role == WorkflowRole::Collector && run.github_push,
+                            github_repo: if step.role == WorkflowRole::Collector {
+                                run.github_repo.clone()
+                            } else {
+                                None
+                            },
+                            github_issue: if step.role == WorkflowRole::Collector {
+                                run.github_issue
+                            } else {
+                                None
+                            },
                             github_base_ref: None,
+                            github_create: step.role == WorkflowRole::Collector
+                                && run.github_create,
                             max_attempts: 1,
                             consensus_mode: None,
                             review_of: None,

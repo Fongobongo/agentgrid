@@ -1379,6 +1379,50 @@ async fn github_writeback(
         return;
     };
 
+    // Project assembly: create the remote when asked and missing. `GET`
+    // first — a 404 creates (private, no auto-init), anything else ambiguous
+    // fails closed (no duplicate-attempt against a repo we cannot see).
+    // `repo_created` also drives the PR skip below: a fresh remote has no
+    // base branch to target.
+    let mut repo_created = false;
+    if assignment.github_create {
+        match crate::github::repo_exists(repo, token, cfg.proxies.current().as_deref()).await {
+            Ok(true) => {
+                log("github_repo_exists", format!("remote {repo} exists")).await;
+            }
+            Ok(false) => {
+                match crate::github::create_repository(
+                    repo,
+                    token,
+                    cfg.proxies.current().as_deref(),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        repo_created = true;
+                        log(
+                            "github_repo_created",
+                            format!("remote {repo} created (private)"),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        log("github_repo_create_failed", format!("create failed: {e}")).await;
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                log(
+                    "github_repo_create_failed",
+                    format!("remote lookup failed, refusing to create: {e}"),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+
     // Push first — a PR referencing a non-existent branch is pointless.
     match tokio::task::spawn_blocking({
         let repo_dir = repo_dir.to_path_buf();
@@ -1404,29 +1448,49 @@ async fn github_writeback(
         .github_base_ref
         .clone()
         .unwrap_or_else(|| assignment.default_branch.clone());
-    match crate::github::create_pull_request(
-        repo,
-        branch,
-        &base,
-        &assignment.task_id,
-        &assignment.attempt_id,
-        token,
-        cfg.proxies.current().as_deref(),
-    )
-    .await
-    {
-        Ok(url) => log("github_pr_created", format!("PR opened: {url}")).await,
-        Err(e) => {
-            log("github_pr_failed", format!("PR create failed: {e}")).await;
-            return;
+    // A just-created remote has exactly one branch (the pushed attempt
+    // branch) and no base to target — opening a PR would fail confusingly.
+    // Push is the deliverable; the operator opens the PR from the pushed
+    // branch. Still comment the linked issue so the report lands somewhere.
+    if repo_created && assignment.github_base_ref.is_none() {
+        log(
+            "github_pr_skipped",
+            format!(
+                "remote {repo} is fresh (no {base} branch yet); pushed {branch}, PR left to the operator"
+            ),
+        )
+        .await;
+    } else {
+        match crate::github::create_pull_request(
+            repo,
+            branch,
+            &base,
+            &assignment.task_id,
+            &assignment.attempt_id,
+            token,
+            cfg.proxies.current().as_deref(),
+        )
+        .await
+        {
+            Ok(url) => log("github_pr_created", format!("PR opened: {url}")).await,
+            Err(e) => {
+                log("github_pr_failed", format!("PR create failed: {e}")).await;
+                return;
+            }
         }
     }
 
     if let Some(issue) = assignment.github_issue {
-        let comment = format!(
-            "Resolved by agentgrid — see the linked PR (`agent/{}`).",
-            assignment.task_id
-        );
+        let comment = if repo_created {
+            format!(
+                "Resolved by agentgrid — assembled project pushed to `{repo}` branch `{branch}` (fresh remote, no PR yet)."
+            )
+        } else {
+            format!(
+                "Resolved by agentgrid — see the linked PR (`agent/{}`).",
+                assignment.task_id
+            )
+        };
         match crate::github::comment_issue(
             repo,
             issue,

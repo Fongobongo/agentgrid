@@ -1316,6 +1316,7 @@ mod workflow_tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
@@ -1374,6 +1375,7 @@ mod workflow_tests {
                 github_repo: Some("acme/demo".into()),
                 github_issue: Some(7),
                 github_base_ref: Some("develop".into()),
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1439,6 +1441,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1500,6 +1503,7 @@ mod workflow_tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
@@ -1645,6 +1649,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1709,6 +1714,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1851,6 +1857,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1972,6 +1979,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -2072,6 +2080,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -2265,6 +2274,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -2356,6 +2366,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -2864,6 +2875,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -2919,6 +2931,7 @@ mod workflow_tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -3000,6 +3013,7 @@ mod agent_tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
@@ -3170,6 +3184,7 @@ mod agent_tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
@@ -3396,6 +3411,127 @@ mod verifier_ro_tests {
             .expect("direct assign");
         assert_eq!(d.task_id, direct.id);
         assert_eq!(d.workflow_role, None);
+    }
+
+    #[tokio::test]
+    async fn auto_approve_plan_expands_without_human() {
+        // Project assembly: a run created with auto_approve_plan skips the
+        // PlanReady human pause — the next tick expands a parseable plan.
+        // A run without the flag stays PlanReady (manual approval path).
+        use agentgrid_common::{
+            CompleteAttemptRequest, CreateWorkflowRunRequest, WorkflowRunStatus,
+        };
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        async fn harness(auto: bool) -> (Store, String, String) {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("ag-auto-{nanos}-{auto}.db"));
+            let _ = std::fs::remove_file(&path);
+            let s = Store::open(path.to_str().unwrap()).await.unwrap();
+            let (token, _) = s.create_enrollment_token().await.unwrap();
+            let node = EnrollRequest {
+                token,
+                name: "n1".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 4,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            };
+            let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
+            let arch = WorkflowStep {
+                id: "arch".into(),
+                prompt: "plan it".into(),
+                depends_on: vec![],
+                role: WorkflowRole::Architect,
+                adapter: None,
+                requested_node_id: None,
+                base_commit: None,
+                retryable: None,
+                max_attempts: None,
+                expandable: Some(true),
+            };
+            let tpl = s
+                .create_workflow_template("auto-tpl", &[arch], &None)
+                .await
+                .unwrap();
+            let run = s
+                .create_workflow_run_full(
+                    &tpl.id,
+                    &CreateWorkflowRunRequest {
+                        auto_approve_plan: auto,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            // Drive the architect step to success with a machine plan.
+            let _ = s.tick_workflow_run(&run.id).await.unwrap();
+            let a = s.try_assign(&node_id).await.unwrap().expect("arch assign");
+            s.ack_attempt(&a.attempt_id).await.unwrap();
+            s.complete_attempt(
+                &a.attempt_id,
+                &CompleteAttemptRequest {
+                    exit_code: 0,
+                    commit_sha: None,
+                    error_code: None,
+                    resolved_base_sha: None,
+                    remote_head_at_start: None,
+                    remote_head_at_finish: None,
+                    acp_session_id: None,
+                    plan: Some("- id: w1\n  prompt: do one\n- id: w2\n  prompt: do two\n  depends_on: [w1]\n".into()),
+                    provenance: None,
+                    pending_artifacts: vec![],
+                    validation_rounds: 0,
+                },
+            )
+            .await
+            .unwrap();
+            (s, run.id, node_id)
+        }
+
+        // Without the flag: PlanReady and stuck there across ticks.
+        let (s, run_id, _) = harness(false).await;
+        let _ = s.tick_workflow_run(&run_id).await.unwrap();
+        let run = s.get_workflow_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::PlanReady);
+        let _ = s.tick_workflow_run(&run_id).await.unwrap();
+        let run = s.get_workflow_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(
+            run.status,
+            WorkflowRunStatus::PlanReady,
+            "manual path waits"
+        );
+
+        // With the flag: the pausing tick still pauses (same-tick approval
+        // would skip the audit trail), but the NEXT tick expands and resumes.
+        let (s, run_id, node_id) = harness(true).await;
+        let _ = s.tick_workflow_run(&run_id).await.unwrap();
+        let paused = s.get_workflow_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(paused.status, WorkflowRunStatus::PlanReady);
+        let _ = s.tick_workflow_run(&run_id).await.unwrap();
+        let run = s.get_workflow_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(
+            run.status,
+            WorkflowRunStatus::Running,
+            "auto-approve must resume, not pause"
+        );
+        let steps = s.get_workflow_run_steps(&run_id).await.unwrap();
+        assert!(
+            steps.iter().any(|x| x.step_id == "w1") && steps.iter().any(|x| x.step_id == "w2"),
+            "plan steps must be expanded"
+        );
+        // And the expanded worker actually assigns (its prompt carries the
+        // expanded plan content).
+        let w = s.try_assign(&node_id).await.unwrap().expect("w1 assign");
+        assert!(
+            w.prompt.contains("do one"),
+            "expanded step prompt: {}",
+            w.prompt
+        );
     }
 }
 

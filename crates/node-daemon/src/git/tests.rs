@@ -59,6 +59,7 @@ fn make_assignment(git_url: &str, default_branch: &str) -> Assignment {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         workflow_role: None,
     }
 }
@@ -647,6 +648,7 @@ fn parallel_prep_same_repo_does_not_race() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 workflow_role: None,
             };
             prepare_workspace(&repos, &ws_root, &a, &[], &[])
@@ -1435,5 +1437,78 @@ fn builtin_resolve_handles_whitespace_conflict_without_script() {
     let content = std::fs::read_to_string(dir.join("f.txt")).unwrap();
     assert_eq!(content, "line1\nfoo\t\n", "incoming side wins");
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- Project assembly: scaffold init on plain-dir tasks ----
+
+#[test]
+fn plain_dir_stays_plain_without_assembly_flags() {
+    // No github_create, no upstream: a plain-dir task must NOT fabricate a
+    // repo (pre-existing behaviour guard).
+    let dir = std::env::temp_dir().join(format!("ag-git-plain-{}", uuid::Uuid::new_v4()));
+    let mut a = make_assignment("", "");
+    a.attempt_id = format!("att-{}", uuid::Uuid::new_v4());
+    let w = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
+    assert!(!w.is_git);
+    assert!(!w.path.join(".git").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn scaffold_init_creates_standalone_repo_for_github_create() {
+    // github_create on a plain-dir task: the worktree becomes a standalone
+    // repo on the agent/ branch convention so finalize commits and
+    // write-back pushes normally.
+    let dir = std::env::temp_dir().join(format!("ag-git-scaffold-{}", uuid::Uuid::new_v4()));
+    let mut a = make_assignment("", "");
+    a.attempt_id = format!("att-{}", uuid::Uuid::new_v4());
+    a.task_id = format!("task-{}", uuid::Uuid::new_v4());
+    a.github_create = true;
+    let w = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
+    assert!(w.is_git, "scaffold must be git");
+    assert!(w.path.join(".git").is_dir());
+    assert_eq!(
+        w.branch.as_deref(),
+        Some(format!("agent/{}/1", a.task_id).as_str())
+    );
+    assert_eq!(w.default_branch, "main");
+    assert_eq!(w.repo_dir.as_deref(), Some(w.path.as_path()));
+    // Agent logs stay out of the future commit.
+    let exclude =
+        std::fs::read_to_string(w.path.join(".git").join("info").join("exclude")).unwrap();
+    assert!(exclude.contains("changes.patch"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn scaffold_applies_upstream_patches_without_shared_remote() {
+    // Collector on plain-dir: no mirror, no objects — every upstream SHA
+    // resolves to its patch-bundle artifact, applied with git apply.
+    let dir = std::env::temp_dir().join(format!("ag-git-collect-{}", uuid::Uuid::new_v4()));
+    let mut a = make_assignment("", "");
+    a.attempt_id = format!("att-{}", uuid::Uuid::new_v4());
+    a.workflow_role = Some("collector".into());
+    let patch =
+        b"diff --git a/part.txt b/part.txt\nnew file mode 100644\nindex 0000000..257cc56\n--- /dev/null\n+++ b/part.txt\n@@ -0,0 +1 @@\n+collected part\n";
+    let fake_sha = "2222222222222222222222222222222222222222".to_string();
+    let shas = vec![fake_sha.clone()];
+    let w = prepare_workspace(
+        &dir.join("repos"),
+        &dir.join("ws"),
+        &a,
+        &shas,
+        &[(fake_sha, patch.to_vec())],
+    )
+    .expect("collector patch apply lands the part");
+    assert!(w.is_git);
+    assert_eq!(
+        std::fs::read_to_string(w.path.join("part.txt")).unwrap(),
+        "collected part\n"
+    );
+    // And the assembled tree finalizes (commits) against the empty tree.
+    std::fs::write(w.path.join("extra.txt"), "extra").unwrap();
+    let sha = finalize_workspace(w, "t@x").expect("finalize scaffold");
+    assert!(sha.is_some(), "scaffold must produce a commit");
     std::fs::remove_dir_all(&dir).ok();
 }

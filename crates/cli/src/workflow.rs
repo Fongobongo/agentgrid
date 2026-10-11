@@ -61,6 +61,23 @@ struct WorkflowRunArgs {
     /// Optional run context JSON (overrides the template default).
     #[arg(long)]
     context: Option<String>,
+    /// Skip the PlanReady human approval: an expandable architect's plan
+    /// auto-expands on the next tick (project assembly autopilot).
+    #[arg(long = "auto-approve")]
+    auto_approve_plan: bool,
+    /// Push the assembled project to GitHub (collector steps; needs
+    /// --github-repo).
+    #[arg(long = "github-push")]
+    github_push: bool,
+    /// GitHub repository `owner/name` for the assembled project.
+    #[arg(long = "github-repo")]
+    github_repo: Option<String>,
+    /// GitHub issue number to report back on after write-back.
+    #[arg(long = "github-issue")]
+    github_issue: Option<i64>,
+    /// Create the remote repository via the API when missing (private).
+    #[arg(long = "github-create")]
+    github_create: bool,
 }
 
 #[derive(Args)]
@@ -395,6 +412,11 @@ async fn cmd_workflow_run(client: &reqwest::Client, base: &str, a: WorkflowRunAr
         context: a.context,
         repository: None,
         base_commit: None,
+        auto_approve_plan: a.auto_approve_plan,
+        github_push: a.github_push,
+        github_repo: a.github_repo,
+        github_issue: a.github_issue,
+        github_create: a.github_create,
     };
     let resp = client
         .post(format!("{base}/v1/workflows/{}/runs", a.template_id))
@@ -439,6 +461,11 @@ pub(crate) async fn cmd_run_workflow(
         context: None,
         repository: Some(repository),
         base_commit: None,
+        auto_approve_plan: false,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_create: false,
     };
     let resp = client
         .post(format!("{base}/v1/workflows/{}/runs", created.id))

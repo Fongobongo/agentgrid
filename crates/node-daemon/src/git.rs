@@ -668,12 +668,67 @@ pub fn prepare_workspace(
     let ws = workspace_root.join(&assignment.attempt_id);
     std::fs::create_dir_all(&ws)?;
     if assignment.git_url.is_empty() {
+        // Project assembly: a plain-dir worktree that must become a repo —
+        // either it publishes to a remote (`github_create`) or it merges
+        // upstream outputs (collector/integrator patch path needs commits to
+        // apply onto). `git init` a standalone repo on the branch convention
+        // so finalize commits and write-back pushes normally. Anything else
+        // stays a plain directory (no repo fabricated).
+        let needs_repo = assignment.github_create
+            || !upstream_commits.is_empty()
+            || !upstream_patches.is_empty();
+        if !needs_repo {
+            return Ok(Workspace {
+                path: ws,
+                repo_dir: None,
+                branch: None,
+                default_branch: String::new(),
+                is_git: false,
+                base_commit: None,
+            });
+        }
+        validate_token(&assignment.task_id)?;
+        let branch = format!("agent/{}/{}", assignment.task_id, assignment.number);
+        git(&ws, &["init", "-b", &branch])?;
+        git(&ws, &["config", "user.name", "agentgrid"])?;
+        git(&ws, &["config", "user.email", "agentgrid@agentgrid"])?;
+        // Same log-hygiene as linked worktrees: agent logs stay out of the
+        // commit and the patch.
+        let exclude = ws.join(".git").join("info").join("exclude");
+        if let Some(parent) = exclude.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut cur = std::fs::read_to_string(&exclude).unwrap_or_default();
+        for name in ["agent-raw-output.log", "validation.log", "changes.patch"] {
+            if !cur.contains(name) {
+                cur.push_str(&format!("{name}\n"));
+            }
+        }
+        let _ = std::fs::write(&exclude, cur);
+        let default_branch = if assignment.default_branch.is_empty() {
+            "main".to_string()
+        } else {
+            assignment.default_branch.clone()
+        };
+        // Upstream outputs land below (patch-apply path: no objects exist to
+        // cherry-pick in a fresh repo, so SHAs resolve to their patches).
+        apply_upstream(
+            ws.to_str().unwrap_or(""),
+            None,
+            upstream_commits,
+            upstream_patches,
+        )?;
+        let ws_path = ws.clone();
         return Ok(Workspace {
-            path: ws,
-            repo_dir: None,
-            branch: None,
-            default_branch: String::new(),
-            is_git: false,
+            path: ws_path.clone(),
+            // Standalone repo: diff/cleanup run in the worktree itself (no
+            // mirror). `cleanup_workspace` degrades safely: `worktree remove`
+            // warns + falls back to rm, `branch -D` runs inside the dir that
+            // is deleted right after.
+            repo_dir: Some(ws_path),
+            branch: Some(branch),
+            default_branch,
+            is_git: true,
             base_commit: None,
         });
     }
@@ -907,18 +962,42 @@ pub fn prepare_workspace(
     // partial state is committed (the worktree stays on the clean
     // `start_point`).
     if !upstream_commits.is_empty() {
-        let ws_path = ws.to_str().unwrap_or("");
+        apply_upstream(
+            ws.to_str().unwrap_or(""),
+            Some(&repo_dir),
+            upstream_commits,
+            upstream_patches,
+        )?;
+    }
+
+    /// Land upstream worker outputs into a worktree before the agent runs.
+    /// Shared by the linked-worktree path (integrator/verifier/collector on a
+    /// mirror) and the scaffold path (fresh `git init`, no mirror): each SHA is
+    /// cherry-picked when its object is reachable, else the worker's
+    /// `changes.patch` artifact is applied with `git apply --3way`. `repo_dir`
+    /// is the mirror to fetch from (`None` = standalone repo, fetch skipped —
+    /// every SHA falls through to its patch).
+    fn apply_upstream(
+        ws_path: &str,
+        repo_dir: Option<&std::path::Path>,
+        upstream_commits: &[String],
+        upstream_patches: &[(String, Vec<u8>)],
+    ) -> Result<()> {
         for sha in upstream_commits {
             validate_token(sha)?;
             // Best-effort: ensure the commit object is present in the local
             // mirror so cherry-pick can resolve it. Stage 8 / line 257:
             // without a shared Git remote the SHA may never arrive — fall
             // back to the worker's `changes.patch` artifact fetched from the
-            // control plane and applied with `git apply --3way`.
-            let _ = Command::new("git")
-                .args(["fetch", "origin", sha])
-                .current_dir(&repo_dir)
-                .status();
+            // control plane and applied with `git apply --3way`. Standalone
+            // (scaffold) repos have no mirror: skip the fetch, every SHA
+            // falls through to its patch.
+            if let Some(mirror) = repo_dir {
+                let _ = Command::new("git")
+                    .args(["fetch", "origin", sha])
+                    .current_dir(mirror)
+                    .status();
+            }
             let have_obj = Command::new("git")
                 .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
                 .current_dir(ws_path)
@@ -991,6 +1070,7 @@ pub fn prepare_workspace(
                 );
             }
         }
+        Ok(())
     }
     // Stage 2.2: keep agent-side logs and our own patch out of the commit / diff.
     // `.git/info/exclude` is per-worktree gitdir for linked worktrees, so this
@@ -1068,6 +1148,26 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
         git_out(&ws.path, &["rev-parse", "HEAD"])?
     };
     let diff_base = ws.base_commit.clone().unwrap_or(ws.default_branch.clone());
+    // Project assembly: a scaffolded repo has no base branch yet (fresh `git
+    // init`) — diff against the empty tree so `changes.patch` carries the
+    // whole initial content instead of failing the finalize.
+    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let diff_base = if Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{diff_base}^{{commit}}"),
+        ])
+        .current_dir(&ws.path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        diff_base
+    } else {
+        EMPTY_TREE.to_string()
+    };
     // Hardening P1 item 32: capture the binary diff as raw bytes so a
     // binary patch's non-UTF-8 hunk data is not corrupted by lossy conversion.
     let patch = git_out_bytes(repo_dir, &["diff", &diff_base, branch, "--binary"])?;

@@ -84,6 +84,22 @@
   honest follow-ups (need live hosts/repeats, not code): p50/p95 bench
   harness, weekly two-machine happy-path runs, Gates A/B/D, final DoD.
 
+- **Project assembly: text task → multi-host build → pushed repo.**
+  New `Collector` workflow role merges upstream worker outputs into one
+  commit (integrator mechanics + `git init` on plain-dir worktrees; failure
+  `Blocked`s like an integrator). Run-level GitHub target
+  (`github_push/repo/issue/create`) is inherited by collector steps;
+  `github_create` creates a missing remote (private, no auto-init; user vs
+  org endpoint by owner kind) after a `GET`-first check, and a fresh remote
+  pushes without a PR (no base yet) with an explanatory event. Runs can opt
+  out of the `PlanReady` human pause (`auto_approve_plan`, audited, still
+  fail-closed on unparseable plans). Malformed GitHub targets 400 at task
+  and run create. CLI: `ag run --github-push/--github-repo/--github-create`,
+  `ag workflows run --auto-approve --github-*`. Proof:
+  `tests/e2e/run-assemble.sh` (two workers on two nodes + collector merge;
+  CI), client unit tests against a dummy API, scaffold/finalize tests,
+  auto-approve and 400 tests. Details in ADR 0019.
+
 - **6.14 performance acceptance coverage.** 1 GiB of mock stdout
   streams through the node outbox with sublinear RAM growth
   (`spool_one_gib_stdout_without_linear_ram_growth`: 1024×1 MiB

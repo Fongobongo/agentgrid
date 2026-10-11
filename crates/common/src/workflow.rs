@@ -19,6 +19,13 @@ pub enum WorkflowRole {
     /// Checks the result against the acceptance criteria. (Future: runs the
     /// verification task and gates downstream steps on its outcome.)
     Verifier,
+    /// Project assembly: merges upstream worker outputs into one worktree
+    /// (cherry-pick when the objects are reachable, patch-bundle apply
+    /// otherwise — same mechanics as `Integrator`), working on plain-dir
+    /// tasks too (the node `git init`s the worktree first). A failing
+    /// collector blocks the run for human/repair resolution like an
+    /// integrator, never silently overwriting.
+    Collector,
 }
 
 /// Stage 13: a machine-readable plan emitted by an `expandable` architect
@@ -56,6 +63,7 @@ enum PlanRole {
     Reviewer,
     Integrator,
     Verifier,
+    Collector,
 }
 
 impl From<PlanRole> for WorkflowRole {
@@ -66,6 +74,7 @@ impl From<PlanRole> for WorkflowRole {
             PlanRole::Reviewer => WorkflowRole::Reviewer,
             PlanRole::Integrator => WorkflowRole::Integrator,
             PlanRole::Verifier => WorkflowRole::Verifier,
+            PlanRole::Collector => WorkflowRole::Collector,
         }
     }
 }
@@ -1051,6 +1060,17 @@ pub struct WorkflowRun {
     /// its repository `default_branch`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+    /// Project assembly run options (see `CreateWorkflowRunRequest`).
+    #[serde(default)]
+    pub auto_approve_plan: bool,
+    #[serde(default)]
+    pub github_push: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    #[serde(default)]
+    pub github_create: bool,
 }
 
 /// A step instance inside a run.
@@ -1115,6 +1135,23 @@ pub struct CreateWorkflowRunRequest {
     /// Shared base_commit for every step (optional; Stage 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+    /// Project assembly: skip the `PlanReady` human approval — an expandable
+    /// architect's plan auto-expands on the next tick. Default off (a human
+    /// approves). The plan still parses fail-closed; an unparseable plan
+    /// keeps the run `PlanReady` and only warns.
+    #[serde(default)]
+    pub auto_approve_plan: bool,
+    /// Project assembly: write-back target inherited by collector steps —
+    /// on success the collector pushes the assembled project to `github_repo`
+    /// (creating it first when `github_create` is set). Other roles ignore it.
+    #[serde(default)]
+    pub github_push: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    #[serde(default)]
+    pub github_create: bool,
 }
 
 /// `GET /v1/workflow-runs/{id}` response: the run plus its step instances.

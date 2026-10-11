@@ -305,6 +305,11 @@ jobs:
       # once a structured (ACP) node appears. Process-based, no docker.
       - name: secure profile gate (strict needs structured)
         run: bash tests/e2e/run-secure-profile.sh
+      # Project assembly: one workflow, two workers on two nodes, collector
+      # merges both parts into one commit (cherry-pick + patch-bundle
+      # fallback). Process-based, no docker, no GitHub.
+      - name: project assembly across hosts
+        run: bash tests/e2e/run-assemble.sh
       # Telegram gateway vs a mock Bot API: approvals listing + inline
       # keyboard + deny callback (process-based, no Docker, no real Telegram).
       - name: telegram gateway (mock Bot API)

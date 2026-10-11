@@ -223,6 +223,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -581,6 +582,7 @@ async fn validation_failure_must_not_report_success() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -709,6 +711,7 @@ async fn cancel_queued_marks_cancelled() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -1777,6 +1780,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1856,6 +1860,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1896,6 +1901,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -1929,6 +1935,7 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -2037,6 +2044,7 @@ async fn login_sets_cookie_and_cookie_auths() {
                         github_repo: None,
                         github_issue: None,
                         github_base_ref: None,
+                        github_create: false,
                         max_attempts: 1,
                         consensus_mode: None,
                         review_of: None,
@@ -2166,6 +2174,7 @@ async fn oversized_prompt_returns_413() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -2180,6 +2189,102 @@ async fn oversized_prompt_returns_413() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// Project assembly: malformed GitHub write-back targets 400 at create —
+/// a bad owner/name, push-without-repo, create-without-push, or
+/// non-positive issue must never become a queued task.
+#[tokio::test]
+async fn malformed_github_refs_return_400() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+    let base = CreateTaskRequest {
+        prompt: "x".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: None,
+        timeout_secs: None,
+        validation_command: None,
+        base_commit: None,
+        parent_acp_session_id: None,
+        security_profile: None,
+        network_mode: None,
+        group_id: None,
+        agent_id: None,
+        consensus_group_id: None,
+        consensus_member: None,
+        opencode_override: None,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_base_ref: None,
+        github_create: false,
+        max_attempts: 1,
+        consensus_mode: None,
+        review_of: None,
+    };
+    // Each case differs from the valid base in exactly one way.
+    let cases: Vec<(&str, CreateTaskRequest)> = vec![
+        ("bad owner/name", {
+            let mut r = base.clone();
+            r.github_push = true;
+            r.github_repo = Some("not a repo".into());
+            r
+        }),
+        ("three segments", {
+            let mut r = base.clone();
+            r.github_push = true;
+            r.github_repo = Some("a/b/c".into());
+            r
+        }),
+        ("push without repo", {
+            let mut r = base.clone();
+            r.github_push = true;
+            r
+        }),
+        ("create without push", {
+            let mut r = base.clone();
+            r.github_repo = Some("acme/demo".into());
+            r.github_create = true;
+            r
+        }),
+        ("non-positive issue", {
+            let mut r = base.clone();
+            r.github_push = true;
+            r.github_repo = Some("acme/demo".into());
+            r.github_issue = Some(0);
+            r
+        }),
+    ];
+    for (label, req) in cases {
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/tasks",
+                serde_json::to_string(&req).unwrap(),
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{label}");
+    }
+    // The valid shape still creates.
+    let mut ok = base.clone();
+    ok.github_push = true;
+    ok.github_repo = Some("acme/demo".into());
+    ok.github_create = true;
+    ok.github_issue = Some(7);
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&ok).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
 }
 
 /// Create a queued task with the given adapter (and optional pinned node).
@@ -2204,6 +2309,7 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -3077,6 +3183,7 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -4857,6 +4964,7 @@ async fn artifact_get_rejects_traversal_name() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -5031,6 +5139,11 @@ async fn cancel_workflow_run_handler_cancels() {
         context: None,
         repository: None,
         base_commit: None,
+        auto_approve_plan: false,
+        github_push: false,
+        github_repo: None,
+        github_issue: None,
+        github_create: false,
     };
     let rr = app
         .clone()
@@ -5835,6 +5948,7 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -7567,6 +7681,7 @@ async fn list_tasks_filters_by_status_repository_node() {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
@@ -8341,6 +8456,7 @@ async fn list_tasks_keyset_pagination() {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
@@ -8513,6 +8629,7 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
@@ -8705,6 +8822,7 @@ async fn approvals_keyset_pagination() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -8890,6 +9008,7 @@ async fn strict_profile_refuses_wrapper_adapter() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -9316,6 +9435,7 @@ async fn search_finds_task_by_prompt_word() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -9477,6 +9597,7 @@ async fn attempt_detail_and_tag_crud() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
@@ -9598,6 +9719,7 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
@@ -9752,6 +9874,7 @@ async fn agent_api_budget_stop_and_trail() {
         github_repo: None,
         github_issue: None,
         github_base_ref: None,
+        github_create: false,
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,

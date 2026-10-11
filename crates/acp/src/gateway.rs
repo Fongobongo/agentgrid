@@ -273,6 +273,7 @@ impl AcpAgent for GatewayAgent {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,

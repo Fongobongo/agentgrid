@@ -371,6 +371,14 @@ pub struct CreateTaskRequest {
     /// Base ref the PR targets (falls back to the repository default branch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_base_ref: Option<String>,
+    /// Project assembly: when true (with `github_push` + `github_repo`), the
+    /// node creates the remote repository via the GitHub API if it does not
+    /// exist yet (private, no auto-init), then pushes as usual. A plain-dir
+    /// worktree is `git init`-ed first so there is something to push. All
+    /// best-effort like the rest of write-back; a just-created remote skips
+    /// the PR (no base branch exists yet) with an explanatory event.
+    #[serde(default)]
+    pub github_create: bool,
     /// Competitor-gap feature (task-level auto-retry, hatchet-inspired):
     /// total attempts allowed for this task. `1` (default) = single attempt,
     /// no auto-retry. When an attempt FAILS (never on cancel) and fewer than
@@ -456,6 +464,9 @@ pub struct TaskView {
     pub github_issue: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_base_ref: Option<String>,
+    /// Project assembly: echoed from CreateTaskRequest (create-remote flag).
+    #[serde(default)]
+    pub github_create: bool,
     /// Competitor-gap feature (convergence metrics, loop-engineering): the
     /// attempt id this task was created from via `POST /v1/attempts/{id}/rework`.
     /// NULL for original tasks. Walking the chain gives the rework-iteration
@@ -727,6 +738,10 @@ pub struct Assignment {
     /// Base ref for the PR (falls back to `default_branch`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_base_ref: Option<String>,
+    /// Project assembly: create the remote repo via the API when missing,
+    /// `git init` a plain-dir worktree first (see `CreateTaskRequest`).
+    #[serde(default)]
+    pub github_create: bool,
     /// Stage 10: workflow role that owns this task (`architect`/`worker`/
     /// `reviewer`/`integrator`/`verifier`, snake_case), resolved from
     /// `role_runs` at assign time. `None` for direct (non-workflow) tasks.
@@ -1311,6 +1326,47 @@ pub fn validate_repo_requirements(r: &RepoRequirements) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate GitHub write-back refs at the trust boundary (task/run create):
+/// `owner/name` shape (same rules the node enforces before `git push`) and a
+/// positive issue number. `github_push` without a repo, or `github_create`
+/// without push+repo, is rejected — a malformed target must 400 here, not
+/// die later in a `github_push_failed` log on a `succeeded` task.
+pub fn validate_github_refs(
+    github_push: bool,
+    github_repo: Option<&str>,
+    github_issue: Option<i64>,
+    github_create: bool,
+) -> Result<(), String> {
+    let ok_part = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 128
+            && s.chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    match github_repo {
+        Some(repo) => {
+            let mut parts = repo.split('/');
+            let (owner, name) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            if parts.next().is_some() || !ok_part(owner) || !ok_part(name) {
+                return Err(format!("invalid github_repo (want owner/name): {repo:?}"));
+            }
+        }
+        None if github_push || github_create => {
+            return Err("github_push/github_create require github_repo".to_string());
+        }
+        None => {}
+    }
+    if let Some(n) = github_issue {
+        if n <= 0 {
+            return Err(format!("invalid github_issue: {n}"));
+        }
+    }
+    if github_create && !github_push {
+        return Err("github_create requires github_push".to_string());
+    }
+    Ok(())
+}
+
 /// A multi-turn chat conversation routed through the control plane to a coding
 /// agent on some node. Each user message becomes a task whose prompt is the
 /// composed conversation history, so any node picking it up sees full context.
@@ -1827,6 +1883,7 @@ mod tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
@@ -1901,6 +1958,7 @@ mod tests {
                 github_repo: None,
                 github_issue: None,
                 github_base_ref: None,
+                github_create: false,
                 workflow_role: None,
             }),
             assignments: vec![],

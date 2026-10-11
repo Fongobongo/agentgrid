@@ -641,6 +641,7 @@ mod tests {
             github_repo: None,
             github_issue: None,
             github_base_ref: None,
+            github_create: false,
             workflow_role: None,
         }
     }
