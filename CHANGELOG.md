@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-12
+
 ### Added
 
 - **Test-hygiene batch (flakes, hooks, E2E harness).** New shared
