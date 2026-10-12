@@ -20,8 +20,8 @@ BIN="$ROOT/target/debug"
 
 command -v docker >/dev/null 2>&1 || { echo "skip: docker not on PATH (zeroshot probe needs the runtime)"; exit 77; }
 
-BASE="${AGENTGRID_BASE:-http://127.0.0.1:7815}"
-PORT="${AGENTGRID_PORT:-7815}"
+BASE="${AGENTGRID_BASE:-http://127.0.0.1:7825}"
+PORT="${AGENTGRID_PORT:-7825}"
 USER="admin"
 PASS="changeme"
 E2E_JWT_SECRET="e2e-zeroshot-secret"

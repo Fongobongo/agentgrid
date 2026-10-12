@@ -21,8 +21,8 @@ BIN="$ROOT/target/debug"
 
 [ -x "$BIN/adapter-fake-acp" ] || { echo "build debug binaries first (adapter-fake-acp missing)"; exit 1; }
 
-BASE="${AGENTGRID_BASE:-http://127.0.0.1:7816}"
-PORT="${AGENTGRID_PORT:-7816}"
+BASE="${AGENTGRID_BASE:-http://127.0.0.1:7826}"
+PORT="${AGENTGRID_PORT:-7826}"
 USER="admin"
 PASS="changeme"
 E2E_JWT_SECRET="e2e-ctx-secret"
