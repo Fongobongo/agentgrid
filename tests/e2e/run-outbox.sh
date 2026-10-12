@@ -24,157 +24,40 @@ BIN="$ROOT/target/debug"
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7811}"
 PORT="${AGENTGRID_PORT:-7811}"
 USER="admin"
-# Hardening P0 #2: the bootstrap env backdoor was removed; source the shared
-# helper that reads the one-time setup token from the CP log.
-source "$ROOT/tests/e2e/lib-bootstrap.sh"
 PASS="changeme"
+E2E_JWT_SECRET="e2e-stable-secret"
+E2E_CONCURRENCY=2
 
 TMP="$(mktemp -d -t ag-e2e-outbox-XXXXXX)"
-CP_DB="$TMP/cp.db"
 NODE_DATA="$TMP/node"
 WORK="$TMP/work"
 REPOS="$TMP/repos"
 mkdir -p "$NODE_DATA" "$WORK" "$REPOS"
 
-CP_PID=""
-NODE_PID=""
-
-cleanup() {
-  set +e
-  [ -n "$NODE_PID" ] && kill -9 "$NODE_PID" 2>/dev/null
-  [ -n "$CP_PID" ] && kill "$CP_PID" 2>/dev/null
-  pkill -f "$BIN/agentgrid-control-plane" 2>/dev/null
-  pkill -f "$BIN/agentgrid-node-daemon" 2>/dev/null
-  sleep 0.3
-  # Keep the temp dir on failure for post-mortem if AG_E2E_KEEP=1.
-  [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
-}
-trap cleanup EXIT
-
-start_cp() {
-  AGENTGRID_LISTEN="127.0.0.1:$PORT" \
-  AGENTGRID_DB="$CP_DB" \
-  AGENTGRID_JWT_SECRET="e2e-stable-secret" \
-  AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
-  nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
-  CP_PID=$!
-}
-
-start_node() {
-  local tok="${1:-}"
-  local env_args=()
-  [ -n "$tok" ] && env_args+=(AGENTGRID_ENROLL_TOKEN="$tok")
-  env PATH="$BIN:$PATH" \
-    AGENTGRID_SERVER="$BASE" \
-    AGENTGRID_DATA_DIR="$NODE_DATA" \
-    AGENTGRID_NODE_NAME="e2e-node" \
-    AGENTGRID_WORKSPACE_ROOT="$WORK" \
-    AGENTGRID_REPOSITORY_ROOT="$REPOS" \
-    AGENTGRID_ADAPTERS="mock" \
-    AGENTGRID_MAX_CONCURRENCY="2" \
-    RUST_LOG="info" \
-    "${env_args[@]}" \
-    nohup "$BIN/agentgrid-node-daemon" >"$TMP/node.log" 2>&1 &
-  NODE_PID=$!
-}
-
-wait_ready() {
-  for _ in $(seq 1 40); do
-    curl -fsS "$BASE/health/ready" >/dev/null 2>&1 && return 0
-    sleep 0.5
-  done
-  return 1
-}
-
-# Stop the control plane fast: SIGTERM, then SIGKILL after a short grace so a
-# long-poll / graceful-shutdown does not stretch the outage window past the
-# ack/lease (the test simulates a hard network failure, not a polite drain).
-stop_cp() {
-  [ -n "$CP_PID" ] || return 0
-  kill "$CP_PID" 2>/dev/null || true
-  for _ in $(seq 1 10); do
-    kill -0 "$CP_PID" 2>/dev/null || { CP_PID=""; return 0; }
-    sleep 0.2
-  done
-  kill -9 "$CP_PID" 2>/dev/null || true
-  # Reap the zombie so `wait` later does not block.
-  wait "$CP_PID" 2>/dev/null || true
-  CP_PID=""
-}
-
-login() {
-  jwt=$(curl -fsS -X POST "$BASE/v1/auth/login" \
-    -H 'content-type: application/json' \
-    -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-  [ -n "$jwt" ] || { echo "login failed"; cat "$TMP/cp.log"; exit 1; }
-}
-
-mint_token() {
-  ENROLL_TOKEN=$(curl -fsS -X POST "$BASE/v1/nodes/enrollment-token" \
-    -H "authorization: Bearer $jwt" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-  [ -n "$ENROLL_TOKEN" ] || { echo "mint token failed"; exit 1; }
-}
-
-wait_node_online() {
-  local st="none"
-  for _ in $(seq 1 60); do
-    st=$(curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt" \
-      | python3 -c 'import sys,json;d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d;print(ns[0]["status"] if ns else "none")' 2>/dev/null) || st="none"
-    [ "$st" = "online" ] && return 0
-    sleep 0.5
-  done
-  echo "node never came online; status=$st"; cat "$TMP/node.log"; return 1
-}
-
-submit() {  # $1 = prompt; prints task id
-  local prompt_json
-  prompt_json=$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1")
-  curl -fsS -X POST "$BASE/v1/tasks" \
-    -H "authorization: Bearer $jwt" -H 'content-type: application/json' \
-    -d "{\"prompt\":$prompt_json,\"repository\":\"*\",\"adapter\":\"mock\",\"timeout_secs\":60}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'
-}
-
-wait_terminal() {  # $1 = task id, $2 = max seconds; sets STATUS
-  STATUS=""
-  for _ in $(seq 1 "$2"); do
-    STATUS=$(curl -fsS "$BASE/v1/tasks/$1" -H "authorization: Bearer $jwt" \
-      | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')
-    case "$STATUS" in
-      succeeded|failed|cancelled|timed_out|lost) return 0;;
-    esac
-    sleep 1
-  done
-  return 1
-}
-
-poll_status() {  # $1 = task id; sets STATUS (does not loop)
-  STATUS=$(curl -fsS "$BASE/v1/tasks/$1" -H "authorization: Bearer $jwt" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')
-}
+source "$ROOT/tests/e2e/lib-e2e.sh"
+trap e2e_cleanup EXIT
 
 echo ">> Scenario A: kill -9 node + completion durability"
 
 echo "  starting control plane"
-start_cp
-wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+e2e_check_bins
+e2e_start_cp
+e2e_wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
 bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
-login
+e2e_login
 echo "  minting enrollment token"
-mint_token
+e2e_mint_token
 echo "  starting node (enroll)"
-start_node "$ENROLL_TOKEN"
-wait_node_online || exit 1
+e2e_start_node node "e2e-node" "mock" "$WORK" "$REPOS" "$NODE_DATA"
+e2e_wait_nodes_online 1 || exit 1
 
 echo "  submitting task sleep:4 (short: record completion fast, keep CP-down <30s)"
-TID=$(submit "sleep:4")
+TID=$(e2e_submit "sleep:4" "mock" "*" 60)
 echo "  task $TID assigned; waiting 2s for it to start"
 sleep 2
 
 echo "  stopping CP (so completion send fails → outbox)"
-stop_cp
+e2e_stop_cp
 
 # Wait deterministically until the adapter finishes and the node records the
 # completion to the durable outbox (the send to the now-down CP fails, so the
@@ -191,20 +74,21 @@ done
 echo "  completion in outbox: $(cat "$NODE_DATA/outbox/completions.jsonl")"
 
 echo "  kill -9 node (completion is durable in completions.jsonl)"
-kill -9 "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null || true; NODE_PID=""
+e2e_kill_node
 
 echo "  restarting CP (same DB)"
-start_cp
-wait_ready || { echo "CP not ready after restart"; cat "$TMP/cp.log"; exit 1; }
+e2e_start_cp
+e2e_wait_ready || { echo "CP not ready after restart"; cat "$TMP/cp.log"; exit 1; }
 # Same JWT secret → existing token still valid; re-login to be safe.
-login
+e2e_login
 
 echo "  restarting node (saved credential; no token) → redelivers completion"
-start_node ""
-wait_node_online || exit 1
+unset ENROLL_TOKEN
+e2e_start_node node "e2e-node" "mock" "$WORK" "$REPOS" "$NODE_DATA"
+e2e_wait_nodes_online 1 || exit 1
 
 echo "  polling task for terminal status (timeout 40s)"
-if wait_terminal "$TID" 60; then
+if e2e_wait_terminal 60 "$TID"; then
   echo "  final status: $STATUS"
 else
   echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
@@ -215,21 +99,21 @@ echo "  A OK: completion survived kill -9 + CP outage"
 echo ">> Scenario B: network disconnect (node alive) + event continuity"
 
 echo "  submitting task spam+sleep+spam (200 events)"
-TID=$(submit $'spam:100\nsleep:3\nspam:100')
+TID=$(e2e_submit $'spam:100\nsleep:3\nspam:100' "mock" "*" 60)
 echo "  task $TID; waiting 1s for first 100 events to flush"
 sleep 1
 
 echo "  stopping CP for 4s (node spools second batch + completion)"
-stop_cp
+e2e_stop_cp
 sleep 4
 
 echo "  restarting CP (node alive → flush loop redelivers from outbox)"
-start_cp
-wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
-login
+e2e_start_cp
+e2e_wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+e2e_login
 
 echo "  polling task for terminal status (timeout 40s)"
-if wait_terminal "$TID" 60; then
+if e2e_wait_terminal 60 "$TID"; then
   echo "  final status: $STATUS"
 else
   echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
@@ -240,7 +124,7 @@ echo "  checking event continuity (expect 200 spam lines, contiguous sequences)"
 # Small grace: the node may finish draining the event tail just after the CP
 # marks the task `succeeded` (the completion can overtake the last flush).
 sleep 2
-EVS=$(curl -fsS "$BASE/v1/tasks/$TID/events?after_sequence=0" -H "authorization: Bearer $jwt")
+EVS=$(e2e_task_events "$TID")
 python3 <<PYEOF
 import json
 evs = json.loads('''$EVS''') if '''$EVS'''.strip() else []
@@ -266,24 +150,24 @@ echo ">> Scenario D: variable CP outage (network failure injection), no dup/gap"
 # expires before the CP comes back (total elapsed < lease).
 OUTAGE="${AG_E2E_OUTAGE_SECS:-10}"
 echo "  submitting task spam+spam+sleep (200 events, short)"
-TID=$(submit $'spam:100\nspam:100\nsleep:3')
+TID=$(e2e_submit $'spam:100\nspam:100\nsleep:3' "mock" "*" 60)
 echo "  task $TID; waiting 1s for the node to start it"
 sleep 1
 
 echo "  stopping CP for ${OUTAGE}s (node alive, spools)"
-stop_cp
+e2e_stop_cp
 sleep "$OUTAGE"
 
 echo "  restarting CP (node alive → flush loop redelivers)"
 T_D0=$(date +%s)
-start_cp
-wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+e2e_start_cp
+e2e_wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
 T_D1=$(date +%s)
 echo "  CP restart took $((T_D1 - T_D0))s"
-login
+e2e_login
 
 echo "  polling task for terminal status (timeout 60s)"
-if wait_terminal "$TID" 80; then
+if e2e_wait_terminal 80 "$TID"; then
   echo "  final status: $STATUS"
 else
   echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
@@ -292,7 +176,7 @@ fi
 
 echo "  checking event continuity (expect 200 spam, contiguous sequences)"
 sleep 2
-EVS=$(curl -fsS "$BASE/v1/tasks/$TID/events?after_sequence=0" -H "authorization: Bearer $jwt")
+EVS=$(e2e_task_events "$TID")
 python3 <<PYEOF
 import json
 evs = json.loads('''$EVS''') if '''$EVS'''.strip() else []
@@ -315,29 +199,23 @@ echo ">> Scenario C: kill node mid-running → lost → retry → succeeded"
 echo "  finding CP/node state"
 [ -n "$CP_PID" ] || { echo "  C FAILED: CP not running"; exit 1; }
 # Restart the node so a fresh long task is assigned cleanly.
-[ -n "$NODE_PID" ] && { kill -9 "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null || true; }
+e2e_kill_node
 unset ENROLL_TOKEN
-start_node ""
-wait_node_online || exit 1
+e2e_start_node node "e2e-node" "mock" "$WORK" "$REPOS" "$NODE_DATA"
+e2e_wait_nodes_online 1 || exit 1
 
 echo "  submitting task sleep:8 (long, will be killed)"
-TID=$(submit "sleep:8")
+TID=$(e2e_submit "sleep:8" "mock" "*" 60)
 echo "  task $TID; polling for running (timeout 15s)"
-reach=0
-for _ in $(seq 1 15); do
-  poll_status "$TID"
-  if [ "$STATUS" = "running" ]; then reach=1; break; fi
-  sleep 1
-done
-[ "$reach" = "1" ] || { echo "  C FAILED: never reached running before kill, got $STATUS"; exit 1; }
+e2e_wait_status running "$TID" 15 || { echo "  C FAILED: never reached running before kill, got $STATUS"; exit 1; }
 
 echo "  kill -9 node (attempt should go lost → task failed/node_lost)"
-kill -9 "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null || true; NODE_PID=""
+e2e_kill_node
 
 echo "  polling for failed/lost (maintenance marks node offline after ~30s; timeout 50s)"
 # Override wait_terminal's terminal set: we want failed-or-lost here.
 for _ in $(seq 1 50); do
-  poll_status "$TID"
+  e2e_poll_status "$TID"
   case "$STATUS" in failed|lost) break;; esac
   sleep 1
 done
@@ -354,11 +232,11 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/tasks/$TID/retry
 
 echo "  restarting node → fresh attempt should run to succeeded"
 unset ENROLL_TOKEN
-start_node ""
-wait_node_online || exit 1
+e2e_start_node node "e2e-node" "mock" "$WORK" "$REPOS" "$NODE_DATA"
+e2e_wait_nodes_online 1 || exit 1
 
 echo "  polling task for terminal status (timeout 40s)"
-if wait_terminal "$TID" 60; then
+if e2e_wait_terminal 60 "$TID"; then
   echo "  final status: $STATUS"
 else
   echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
@@ -370,22 +248,16 @@ echo ">> Scenario E: cancel mid-running → attempt cancelled (no leak)"
 
 # Earlier scenarios left a node running; restart it so the cancel test starts
 # from a clean beat (no stale attempts).
-[ -n "$NODE_PID" ] && { kill -9 "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null || true; }
+e2e_kill_node
 [ -n "$CP_PID" ] || { echo "  E FAILED: CP not running"; exit 1; }
 unset ENROLL_TOKEN
-start_node ""
-wait_node_online || exit 1
+e2e_start_node node "e2e-node" "mock" "$WORK" "$REPOS" "$NODE_DATA"
+e2e_wait_nodes_online 1 || exit 1
 
 echo "  submitting task sleep:30 (blocks one prompt turn)"
-TID=$(submit "sleep:30")
+TID=$(e2e_submit "sleep:30" "mock" "*" 120)
 echo "  task $TID; polling for running (timeout 15s)"
-reach=0
-for _ in $(seq 1 15); do
-  poll_status "$TID"
-  if [ "$STATUS" = "running" ]; then reach=1; break; fi
-  sleep 1
-done
-[ "$reach" = "1" ] || { echo "  E FAILED: never reached running before cancel, got $STATUS"; exit 1; }
+e2e_wait_status running "$TID" 15 || { echo "  E FAILED: never reached running before cancel, got $STATUS"; exit 1; }
 
 echo "  requesting cancellation via POST /v1/tasks/$TID/cancel"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/tasks/$TID/cancel" \
@@ -393,7 +265,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/tasks/$TID/cance
 [ "$code" = "200" ] || { echo "  E FAILED: cancel returned $code"; exit 1; }
 
 echo "  polling task for terminal status (timeout 30s); expect cancelled"
-if wait_terminal "$TID" 30; then :; else
+if e2e_wait_terminal 30 "$TID"; then :; else
   echo "  E FAILED: never reached terminal, got $STATUS"; cat "$TMP/node.log"; exit 1
 fi
 [ "$STATUS" = "cancelled" ] || { echo "  E FAILED: expected cancelled, got $STATUS"; cat "$TMP/node.log"; exit 1; }

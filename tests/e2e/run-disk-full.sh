@@ -24,158 +24,48 @@ BIN="$ROOT/target/debug"
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7813}"
 PORT="${AGENTGRID_PORT:-7813}"
 USER="admin"
-# Hardening P0 #2: the bootstrap env backdoor was removed; source the shared
-# helper that reads the one-time setup token from the CP log.
-source "$ROOT/tests/e2e/lib-bootstrap.sh"
 PASS="changeme"
+E2E_JWT_SECRET="e2e-stable-secret"
+E2E_CONCURRENCY=1
 SPOOL_BYTES="${AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES:-4096}"
 
 TMP="$(mktemp -d -t ag-e2e-diskfull-XXXXXX)"
-CP_DB="$TMP/cp.db"
 NODE_DATA="$TMP/node"
 WORK="$TMP/work"
 REPOS="$TMP/repos"
 mkdir -p "$NODE_DATA" "$WORK" "$REPOS"
 
-CP_PID=""
-NODE_PID=""
-
-cleanup() {
-  set +e
-  [ -n "$NODE_PID" ] && kill -9 "$NODE_PID" 2>/dev/null
-  [ -n "$CP_PID" ] && kill "$CP_PID" 2>/dev/null
-  pkill -f "$BIN/agentgrid-control-plane" 2>/dev/null
-  pkill -f "$BIN/agentgrid-node-daemon" 2>/dev/null
-  sleep 0.3
-  [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
-}
-trap cleanup EXIT
-
-start_cp() {
-  AGENTGRID_LISTEN="127.0.0.1:$PORT" \
-  AGENTGRID_DB="$CP_DB" \
-  AGENTGRID_JWT_SECRET="e2e-stable-secret" \
-  AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
-  nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
-  CP_PID=$!
-}
-
-start_node() {
-  local tok="${1:-}"
-  local env_args=()
-  [ -n "$tok" ] && env_args+=(AGENTGRID_ENROLL_TOKEN="$tok")
-  env PATH="$BIN:$PATH" \
-    AGENTGRID_SERVER="$BASE" \
-    AGENTGRID_DATA_DIR="$NODE_DATA" \
-    AGENTGRID_NODE_NAME="e2e-disk" \
-    AGENTGRID_WORKSPACE_ROOT="$WORK" \
-    AGENTGRID_REPOSITORY_ROOT="$REPOS" \
-    AGENTGRID_ADAPTERS="mock" \
-    AGENTGRID_MAX_CONCURRENCY="1" \
-    AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES="$SPOOL_BYTES" \
-    RUST_LOG="info" \
-    "${env_args[@]}" \
-    nohup "$BIN/agentgrid-node-daemon" >"$TMP/node.log" 2>&1 &
-  NODE_PID=$!
-}
-
-stop_cp() {
-  [ -n "$CP_PID" ] || return 0
-  kill "$CP_PID" 2>/dev/null || true
-  for _ in $(seq 1 10); do
-    kill -0 "$CP_PID" 2>/dev/null || { CP_PID=""; return 0; }
-    sleep 0.2
-  done
-  kill -9 "$CP_PID" 2>/dev/null || true
-  wait "$CP_PID" 2>/dev/null || true
-  CP_PID=""
-}
-
-wait_ready() {
-  for _ in $(seq 1 40); do
-    curl -fsS "$BASE/health/ready" >/dev/null 2>&1 && return 0
-    sleep 0.5
-  done
-  return 1
-}
-
-login() {
-  jwt=$(curl -fsS -X POST "$BASE/v1/auth/login" \
-    -H 'content-type: application/json' \
-    -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-  [ -n "$jwt" ] || { echo "login failed"; cat "$TMP/cp.log"; exit 1; }
-}
-
-mint_token() {
-  ENROLL_TOKEN=$(curl -fsS -X POST "$BASE/v1/nodes/enrollment-token" \
-    -H "authorization: Bearer $jwt" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-  [ -n "$ENROLL_TOKEN" ] || { echo "mint token failed"; exit 1; }
-}
-
-wait_node_online() {
-  for _ in $(seq 1 60); do
-    st=$(curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt" 2>/dev/null \
-      | python3 -c 'import sys,json;d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d;print(ns[0]["status"] if ns else "none")' 2>/dev/null) || st="none"
-    [ "$st" = "online" ] && return 0
-    sleep 0.5
-  done
-  echo "node never came online; status=$st"; cat "$TMP/node.log"; return 1
-}
-
-submit() {  # $1 = prompt; prints task id
-  local prompt_json
-  prompt_json=$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1")
-  curl -fsS -X POST "$BASE/v1/tasks" \
-    -H "authorization: Bearer $jwt" -H 'content-type: application/json' \
-    -d "{\"prompt\":$prompt_json,\"repository\":\"*\",\"adapter\":\"mock\",\"timeout_secs\":60}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'
-}
-
-poll_status() {
-  STATUS=$(curl -fsS "$BASE/v1/tasks/$1" -H "authorization: Bearer $jwt" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')
-}
-
-wait_terminal() {
-  STATUS=""
-  for _ in $(seq 1 "$1"); do
-    poll_status "$2"
-    case "$STATUS" in
-      succeeded|failed|cancelled|timed_out|lost) return 0;;
-    esac
-    sleep 1
-  done
-  return 1
-}
+source "$ROOT/tests/e2e/lib-e2e.sh"
+trap e2e_cleanup EXIT
 
 echo ">> node disk-full fail-closed (spool limit ${SPOOL_BYTES} bytes)"
-start_cp
-wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+e2e_check_bins
+e2e_start_cp
+e2e_wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
 bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
-login
-mint_token
-start_node "$ENROLL_TOKEN"
-wait_node_online || exit 1
+e2e_login
+e2e_mint_token
+e2e_start_node node "e2e-disk" "mock" "$WORK" "$REPOS" "$NODE_DATA" \
+  "AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES=$SPOOL_BYTES"
+e2e_wait_nodes_online 1 || exit 1
 
 echo ">> submitting chatty task (spam:5000 events → ~150 KiB > 4 KiB limit) while CP is up"
-TID=$(submit "spam:5000")
+TID=$(e2e_submit "spam:5000" "mock" "*" 60)
 echo "  task $TID; waiting 1s for assignment"
 sleep 1
 
 echo ">> stopping CP so the node can't flush → outbox grows toward the limit"
-stop_cp
+e2e_stop_cp
 echo "  CP down; node streams into the outbox; waiting 8s for spool_full latch (4 KiB limit ≈ 80 lines)"
 sleep 8
 
 echo ">> restarting CP (node redelivers the spool_full completion)"
-start_cp
-wait_ready || { echo "CP not ready after restart"; cat "$TMP/cp.log"; exit 1; }
-login
+e2e_start_cp
+e2e_wait_ready || { echo "CP not ready after restart"; cat "$TMP/cp.log"; exit 1; }
+e2e_login
 
 echo ">> polling task for terminal status (expect failed; timeout 30s)"
-if wait_terminal 30 "$TID"; then
+if e2e_wait_terminal 30 "$TID"; then
   echo "  final status: $STATUS"
 else
   echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
@@ -183,7 +73,7 @@ fi
 [ "$STATUS" = "failed" ] || { echo "  FAILED: expected failed (spool_full), got $STATUS"; cat "$TMP/node.log"; exit 1; }
 
 echo ">> asserting a spool_full error event was emitted"
-EVS=$(curl -fsS "$BASE/v1/tasks/$TID/events?after_sequence=0" -H "authorization: Bearer $jwt")
+EVS=$(e2e_task_events "$TID")
 python3 <<PYEOF
 import json
 evs = json.loads('''$EVS''') if '''$EVS'''.strip() else []

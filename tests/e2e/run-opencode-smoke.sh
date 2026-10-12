@@ -19,84 +19,37 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 BIN="${BIN:-$ROOT/target/debug}"
-HERE="$ROOT/tests/e2e"
 
 LISTEN_PORT="${AG_SMOKE_PORT:-7823}"
 BASE="http://127.0.0.1:${LISTEN_PORT}"
+PORT="$LISTEN_PORT"
 USER="admin"; PASS="changeme"
+E2E_JWT_SECRET="smoke-secret"
+E2E_CONCURRENCY=1
 
 TMP="$(mktemp -d -t ag-opencode-smoke-XXXXXX)"
-CP_DB="$TMP/cp.db"
-N1_DATA="$TMP/n1"; N1_WORK="$TMP/n1-work"; N1_REPOS="$TMP/n1-repos"
-N2_DATA="$TMP/n2"; N2_WORK="$TMP/n2-work"; N2_REPOS="$TMP/n2-repos"
-mkdir -p "$N1_DATA" "$N1_WORK" "$N1_REPOS" "$N2_DATA" "$N2_WORK" "$N2_REPOS" "$TMP/artifacts"
+mkdir -p "$TMP/artifacts"
 
-CP_PID=""; N1_PID=""; N2_PID=""
-cleanup() {
-  set +e
-  [ -n "$N2_PID" ] && kill "$N2_PID" 2>/dev/null
-  [ -n "$N1_PID" ] && kill "$N1_PID" 2>/dev/null
-  [ -n "$CP_PID" ] && kill "$CP_PID" 2>/dev/null
-  pkill -f "$BIN/agentgrid-control-plane" 2>/dev/null
-  pkill -f "$BIN/agentgrid-node-daemon" 2>/dev/null
-  [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
-}
-trap cleanup EXIT
+source "$ROOT/tests/e2e/lib-e2e.sh"
+trap e2e_cleanup EXIT
 
 echo ">> opencode multi-node smoke on :$LISTEN_PORT"
 [ -x "$BIN/agentgrid-control-plane" ] || { echo "  build first: cargo build --bin agentgrid-control-plane --bin agentgrid-node-daemon"; exit 1; }
 [ -x "$BIN/adapter-mock" ] || { echo "  adapter-mock missing"; exit 1; }
 
 # ── control plane ───────────────────────────────────────────────────────
-AGENTGRID_LISTEN="127.0.0.1:$LISTEN_PORT" \
-AGENTGRID_DB="$CP_DB" \
-AGENTGRID_JWT_SECRET="smoke-secret" \
-AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
-nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
-CP_PID=$!
+e2e_check_bins
+e2e_start_cp
+e2e_wait_ready || { echo "  CP not ready"; cat "$TMP/cp.log"; exit 1; }
 
 # ── auth ───────────────────────────────────────────────────────────────
-source "$ROOT/tests/e2e/lib-bootstrap.sh"
 bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
-login() {
-  curl -fsS -X POST "$BASE/v1/auth/login" \
-    -H 'content-type: application/json' \
-    -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'
-}
-jwt="$(login)"
-[ -n "$jwt" ] || { echo "  login failed"; cat "$TMP/cp.log"; exit 1; }
+e2e_login
 
 enroll_token() {
   curl -fsS -X POST "$BASE/v1/nodes/enrollment-token" \
     -H "authorization: Bearer $jwt" \
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'
-}
-
-start_node() {  # $1=name $2=data $3=work $4=repos $5=logfile $6=token $7=home
-  AGENTGRID_SERVER="$BASE" \
-  AGENTGRID_DATA_DIR="$2" \
-  AGENTGRID_NODE_NAME="$1" \
-  AGENTGRID_WORKSPACE_ROOT="$3" \
-  AGENTGRID_REPOSITORY_ROOT="$4" \
-  AGENTGRID_ADAPTERS="mock" \
-  AGENTGRID_MAX_CONCURRENCY="1" \
-  AGENTGRID_TRANSPORT="auto" \
-  AGENTGRID_CONFIG_PULL_INTERVAL_SECS="30" \
-  AGENTGRID_ALLOW_ROOT=1 \
-  AGENTGRID_ENROLL_TOKEN="$6" \
-  HOME="$7" \
-  env PATH="$BIN:$PATH" RUST_LOG="info" \
-    nohup "$BIN/agentgrid-node-daemon" >"$5" 2>&1 &
-  echo $!
-}
-
-wait_ready() {
-  for _ in $(seq 1 40); do
-    curl -fsS "$BASE/health/ready" >/dev/null 2>&1 && return 0
-    sleep 0.5
-  done
-  return 1
 }
 
 wait_node_online() {  # $1 = node name
@@ -112,14 +65,21 @@ print(ns.get('$1','none'))" 2>/dev/null || echo none)
   echo "  node $1 did not come online (last=$st)"; return 1
 }
 
-wait_ready || { echo "  CP not ready"; cat "$TMP/cp.log"; exit 1; }
-
 N1_HOME="$TMP/n1-home"; N2_HOME="$TMP/n2-home"
 mkdir -p "$N1_HOME/.config/opencode" "$N2_HOME/.config/opencode"
 
 echo "  starting two nodes"
-N1_PID=$(start_node "n1" "$N1_DATA" "$N1_WORK" "$N1_REPOS" "$TMP/n1.log" "$(enroll_token)" "$N1_HOME")
-N2_PID=$(start_node "n2" "$N2_DATA" "$N2_WORK" "$N2_REPOS" "$TMP/n2.log" "$(enroll_token)" "$N2_HOME")
+# Per-node HOME: opencode keeps a local sqlite db under XDG_DATA_HOME and
+# two daemons on one runner would collide on it. Transport auto, slow
+# interval pull (the smoke asserts on the pull path, not the WS push).
+e2e_start_node n1 "n1" "mock" "$TMP/n1-work" "$TMP/n1-repos" "$TMP/n1" \
+  "HOME=$N1_HOME" "AGENTGRID_TRANSPORT=auto" \
+  "AGENTGRID_CONFIG_PULL_INTERVAL_SECS=30" "AGENTGRID_ALLOW_ROOT=1" \
+  "AGENTGRID_ENROLL_TOKEN=$(enroll_token)"
+e2e_start_node n2 "n2" "mock" "$TMP/n2-work" "$TMP/n2-repos" "$TMP/n2" \
+  "HOME=$N2_HOME" "AGENTGRID_TRANSPORT=auto" \
+  "AGENTGRID_CONFIG_PULL_INTERVAL_SECS=30" "AGENTGRID_ALLOW_ROOT=1" \
+  "AGENTGRID_ENROLL_TOKEN=$(enroll_token)"
 wait_node_online "n1" || { cat "$TMP/n1.log"; exit 1; }
 wait_node_online "n2" || { cat "$TMP/n2.log"; exit 1; }
 
@@ -153,7 +113,7 @@ for _ in $(seq 1 60); do
     count=$(curl -fsS "$BASE/v1/nodes/$nid/opencode-audit" -H "authorization: Bearer $jwt" \
       | python3 -c 'import sys,json
 rows=json.load(sys.stdin)["items"]
-print(sum(1 for r in rows if (r.get("hash") or "") == "'"$PROFILE_HASH"'"))' 2>/dev/null || echo 0)
+print(sum(1 for r in rows if (r.get("hash") or "") == "'"${PROFILE_HASH}"'"))' 2>/dev/null || echo 0)
     [ "$count" -ge 1 ] && applies=$((applies+1))
   done
   [ "$applies" -eq 2 ] && break
