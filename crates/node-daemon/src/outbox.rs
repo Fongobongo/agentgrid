@@ -905,6 +905,13 @@ mod tests {
         d
     }
 
+    /// Spool-limit env (`AGENTGRID_OUTBOX_SPOOL_LIMIT_MB/BYTES`,
+    /// `AGENTGRID_OUTBOX_QUOTA_BYTES`, `AGENTGRID_COMPLETION_COMPACT_BYTES`)
+    /// is process-global and read on every push; serialize the tests that
+    /// mutate it so parallel runs cannot change each other's limits
+    /// mid-push (mirrors `sandbox::tests::ENV_LOCK`).
+    static SPOOL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn event_outbox_persists_and_acks() {
         let dir = tmpdir("ev");
@@ -987,6 +994,7 @@ mod tests {
     /// markers; compaction rewrites only at the size threshold.
     #[test]
     fn completion_outbox_ack_appends_marker_and_compacts_at_threshold() {
+        let _g = SPOOL_ENV_LOCK.lock().unwrap();
         let dir = tmpdir("comp370");
         let co = CompletionOutbox::open(&dir).unwrap();
         let req = CompleteAttemptRequest {
@@ -1100,6 +1108,7 @@ mod tests {
     /// of growing the file until the host disk fills.
     #[test]
     fn event_outbox_push_fails_when_spool_limit_reached() {
+        let _g = SPOOL_ENV_LOCK.lock().unwrap();
         let dir = tmpdir("spool");
         // Tiny limit: 1 event's line (~40 bytes) overshoots it on the next push.
         std::env::set_var("AGENTGRID_OUTBOX_SPOOL_LIMIT_MB", "0");
@@ -1148,6 +1157,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn spool_one_gib_stdout_without_linear_ram_growth() {
+        let _g = SPOOL_ENV_LOCK.lock().unwrap();
         let dir = tmpdir("spool-1gib");
         std::env::set_var("AGENTGRID_OUTBOX_SPOOL_LIMIT_BYTES", "0");
         std::env::set_var(
@@ -1198,6 +1208,7 @@ mod tests {
     /// events are blocked at the hard limit.
     #[test]
     fn event_outbox_terminal_reserved_capacity() {
+        let _g = SPOOL_ENV_LOCK.lock().unwrap();
         let dir = tmpdir("spool-terminal");
         std::env::remove_var("AGENTGRID_OUTBOX_SPOOL_LIMIT_MB");
         let ob = EventOutbox::open(&dir, "att-term").unwrap();

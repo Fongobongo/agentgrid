@@ -204,6 +204,18 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         ));
     }
 
+    // Cost tracking: fleet-wide LLM token/cost totals from adapter metric
+    // events (0 when no adapter reported usage yet — e.g. mock-only fleets).
+    let (tokens_total, cost_total) = state.store.total_tokens_cost().await.unwrap_or((0, 0));
+    s.push_str("# HELP agentgrid_llm_tokens_total Total LLM tokens reported by adapters.\n");
+    s.push_str("# TYPE agentgrid_llm_tokens_total counter\n");
+    s.push_str(&format!("agentgrid_llm_tokens_total {tokens_total}\n"));
+    s.push_str(
+        "# HELP agentgrid_llm_cost_cents_total Total LLM cost in cents reported by adapters.\n",
+    );
+    s.push_str("# TYPE agentgrid_llm_cost_cents_total counter\n");
+    s.push_str(&format!("agentgrid_llm_cost_cents_total {cost_total}\n"));
+
     s.push_str("# HELP agentgrid_node_free_disk_mb Free disk reported via heartbeat.\n");
     s.push_str("# TYPE agentgrid_node_free_disk_mb gauge\n");
     for n in &nodes {

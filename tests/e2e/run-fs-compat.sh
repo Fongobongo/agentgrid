@@ -22,7 +22,8 @@ BASE="${AGENTGRID_BASE:-http://127.0.0.1:7814}"
 PORT="${AGENTGRID_PORT:-7814}"
 USER="admin"
 PASS="changeme"
-source "$ROOT/tests/e2e/lib-bootstrap.sh"
+E2E_JWT_SECRET="e2e-fscompat-secret"
+E2E_CONCURRENCY=1
 
 if [ -n "${AG_FS_MOUNT:-}" ]; then
   [ -d "$AG_FS_MOUNT" ] || { echo "AG_FS_MOUNT=$AG_FS_MOUNT is not a directory"; exit 1; }
@@ -44,125 +45,35 @@ REPOS="$TMP/repos"
 ART="$TMP/artifacts"
 mkdir -p "$NODE_DATA" "$WORK" "$REPOS" "$ART"
 
-CP_PID=""
-NODE_PID=""
+source "$ROOT/tests/e2e/lib-e2e.sh"
 
-cleanup() {
-  set +e
-  [ -n "$NODE_PID" ] && kill -9 "$NODE_PID" 2>/dev/null
-  [ -n "$CP_PID" ] && kill "$CP_PID" 2>/dev/null
-  pkill -f "$BIN/agentgrid-control-plane" 2>/dev/null
-  pkill -f "$BIN/agentgrid-node-daemon" 2>/dev/null
-  sleep 0.3
-  [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
+cleanup_fscompat() {
+  e2e_cleanup
   [ "${FSROOT_CREATED:-0}" = "1" ] && [ "${AG_E2E_KEEP:-0}" != "1" ] && rm -rf "$FSROOT"
 }
-trap cleanup EXIT
-
-wait_ready() {
-  for _ in $(seq 1 40); do
-    curl -fsS "$BASE/health/ready" >/dev/null 2>&1 && return 0
-    sleep 0.5
-  done
-  return 1
-}
-
-login() {
-  jwt=$(curl -fsS -X POST "$BASE/v1/auth/login" \
-    -H 'content-type: application/json' \
-    -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-  [ -n "$jwt" ] || { echo "login failed"; cat "$TMP/cp.log"; exit 1; }
-}
-
-mint_token() {
-  ENROLL_TOKEN=$(curl -fsS -X POST "$BASE/v1/nodes/enrollment-token" \
-    -H "authorization: Bearer $jwt" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-  [ -n "$ENROLL_TOKEN" ] || { echo "mint token failed"; exit 1; }
-}
-
-start_cp() {
-  AGENTGRID_LISTEN="127.0.0.1:$PORT" \
-  AGENTGRID_DB="$CP_DB" \
-  AGENTGRID_JWT_SECRET="e2e-fscompat-secret" \
-  AGENTGRID_ARTIFACT_ROOT="$ART" \
-  nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
-  CP_PID=$!
-}
-
-start_node() {
-  env PATH="$BIN:$PATH" \
-    AGENTGRID_SERVER="$BASE" \
-    AGENTGRID_DATA_DIR="$NODE_DATA" \
-    AGENTGRID_NODE_NAME="e2e-fscompat" \
-    AGENTGRID_WORKSPACE_ROOT="$WORK" \
-    AGENTGRID_REPOSITORY_ROOT="$REPOS" \
-    AGENTGRID_ADAPTERS="mock" \
-    AGENTGRID_MAX_CONCURRENCY="1" \
-    RUST_LOG="info" \
-    AGENTGRID_ENROLL_TOKEN="$ENROLL_TOKEN" \
-    nohup "$BIN/agentgrid-node-daemon" >"$TMP/node.log" 2>&1 &
-  NODE_PID=$!
-}
-
-wait_node_online() {
-  for _ in $(seq 1 60); do
-    st=$(curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt" 2>/dev/null \
-      | python3 -c 'import sys,json;d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d;print(ns[0]["status"] if ns else "none")' 2>/dev/null) || st="none"
-    [ "$st" = "online" ] && return 0
-    sleep 0.5
-  done
-  echo "node never came online; status=$st"; cat "$TMP/node.log"; return 1
-}
-
-submit() {  # $1 = prompt; prints task id
-  local prompt_json
-  prompt_json=$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1")
-  curl -fsS -X POST "$BASE/v1/tasks" \
-    -H "authorization: Bearer $jwt" -H 'content-type: application/json' \
-    -d "{\"prompt\":$prompt_json,\"repository\":\"*\",\"adapter\":\"mock\",\"timeout_secs\":120}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'
-}
-
-poll_status() {
-  STATUS=$(curl -fsS "$BASE/v1/tasks/$1" -H "authorization: Bearer $jwt" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')
-}
-
-wait_terminal() {
-  STATUS=""
-  for _ in $(seq 1 "$1"); do
-    poll_status "$2"
-    case "$STATUS" in
-      succeeded|failed|cancelled|timed_out|lost) return 0;;
-    esac
-    sleep 1
-  done
-  return 1
-}
+trap cleanup_fscompat EXIT
 
 echo ">> starting CP with DB $CP_DB"
-start_cp
-wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+e2e_check_bins
+e2e_start_cp
+e2e_wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
 bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
-login
-mint_token
-start_node
-wait_node_online || exit 1
+e2e_login
+e2e_mint_token
+# Artifact root must be the fs-local one (lib defaults to $TMP/artifacts,
+# which already is — ART==$TMP/artifacts by construction here).
+e2e_start_node fscompat "e2e-fscompat" "mock" "$WORK" "$REPOS" "$NODE_DATA"
+e2e_wait_nodes_online 1 || exit 1
 
 echo ">> submitting mock task (spam:200 + write) on $FSTYPE"
-TID=$(submit $'spam:200\nwrite:hello.txt:fs-compat-ok')
+TID=$(e2e_submit $'spam:200\nwrite:hello.txt:fs-compat-ok' "mock" "*" 120)
 echo "  task $TID; waiting for terminal status (120s)"
-if wait_terminal 120 "$TID"; then
-  echo "  final status: $STATUS"
-else
-  echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/node.log"; exit 1
-fi
-[ "$STATUS" = "succeeded" ] || { echo "  FAILED: expected succeeded, got $STATUS"; cat "$TMP/node.log"; exit 1; }
+e2e_wait_terminal 120 "$TID" || { echo "  final status: $STATUS (timed out)"; cat "$TMP/cp.log"; cat "$TMP/fscompat.log"; exit 1; }
+echo "  final status: $STATUS"
+[ "$STATUS" = "succeeded" ] || { echo "  FAILED: expected succeeded, got $STATUS"; cat "$TMP/fscompat.log"; exit 1; }
 
 echo ">> asserting event stream is contiguous (no gap/dup on $FSTYPE)"
-EVS=$(curl -fsS "$BASE/v1/tasks/$TID/events?after_sequence=0" -H "authorization: Bearer $jwt")
+EVS=$(e2e_task_events "$TID")
 SEQ_OK=$(python3 -c '
 import json,sys
 evs = json.load(sys.stdin)

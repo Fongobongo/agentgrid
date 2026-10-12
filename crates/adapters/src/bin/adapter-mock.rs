@@ -8,6 +8,9 @@
 //!   oom:<mb>          - allocate <mb> of RAM and touch it (Stage 12 E2E:
 //!                       trips the sandbox --memory limit → the runtime
 //!                       OOM-kills the container → resource_limit error code)
+//!   usage:<tokens>[:<cents>] - emit a token/cost progress event (cost
+//!                       tracking E2E: proves adapter → node → CP → budget;
+//!                       tokens/cents are literal numbers, no LLM involved)
 //!   fork:<n>           - spawn n concurrent children and wait (Plan 6.11
 //!                       E2E: trips the sandbox TasksMax / --pids-limit →
 //!                       fork fails or the kernel kills the excess tasks)
@@ -161,6 +164,14 @@ fn main() {
                 emit("log", json!({ "text": format!("allocated {mb} MiB") }));
                 std::thread::sleep(Duration::from_secs(30));
             }
+        } else if let Some(rest) = line.strip_prefix("usage:") {
+            // Cost-tracking E2E: deterministic token/cost metric without an
+            // LLM. Same shape real adapters emit (progress {tokens,
+            // cost_cents} → Metric event → workflow_tokens_cost → budget).
+            let mut parts = rest.splitn(2, ':');
+            let tokens: u64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+            let cents: u64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+            emit("progress", json!({ "tokens": tokens, "cost_cents": cents }));
         } else {
             emit("log", json!({ "text": format!("note: {line}") }));
         }

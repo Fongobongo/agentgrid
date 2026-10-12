@@ -28,6 +28,13 @@ fn hermetic_git_config() {
     });
 }
 
+/// Process-global git knob env (`GIT_ALLOW_PROTOCOL`,
+/// `AGENTGRID_FETCH_COHORT_SECS`, `AGENTGRID_ALLOW_MISSING_UPSTREAM`,
+/// `AGENTGRID_PRE_MERGE_RESOLVE`) is mutated by several tests below;
+/// serialize them so parallel runs cannot flip each other's knobs mid-prepare
+/// (mirrors `sandbox::tests::ENV_LOCK`). std mutex: these tests are sync.
+static GIT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn make_assignment(git_url: &str, default_branch: &str) -> Assignment {
     hermetic_git_config();
     Assignment {
@@ -234,6 +241,7 @@ fn prepare_records_repo_attach_ready_and_invalid() {
 
 #[test]
 fn prepare_initializes_local_submodule() {
+    let _g = GIT_ENV_LOCK.lock().unwrap();
     // A repository with a (local, offline-capable) submodule prepares with
     // the submodule content present — not a hollow directory.
     hermetic_git_config();
@@ -733,6 +741,7 @@ fn fetch_cohort_leader_failure_unblocks_followers() {
 
 #[test]
 fn fetch_cohort_window_zero_disables_freshness() {
+    let _g = GIT_ENV_LOCK.lock().unwrap();
     // AGENTGRID_FETCH_COHORT_SECS is process-global, but the window only
     // affects keys WITH a recorded fetch; every other test uses unique
     // mirror paths with no timestamp, so they always join as Leader and
@@ -759,6 +768,7 @@ fn fetch_cohort_window_zero_disables_freshness() {
 /// worktree still materializes.
 #[test]
 fn fetch_cohort_concurrent_prepares_share_one_fetch() {
+    let _g = GIT_ENV_LOCK.lock().unwrap();
     hermetic_git_config();
     let dir = std::env::temp_dir().join(format!("ag-git-cohort-{}", uuid::Uuid::new_v4()));
     let origin = init_origin(&dir);
@@ -835,6 +845,7 @@ fn fetch_cohort_concurrent_prepares_share_one_fetch() {
 /// while window=0 restores the always-fetch behavior.
 #[test]
 fn fetch_cohort_fresh_window_skips_then_refetches() {
+    let _g = GIT_ENV_LOCK.lock().unwrap();
     hermetic_git_config();
     let dir = std::env::temp_dir().join(format!("ag-git-cohortw-{}", uuid::Uuid::new_v4()));
     let origin = init_origin(&dir);
@@ -1167,6 +1178,7 @@ fn quarantine_stale_workspace_moves_unsafe_entry() {
 /// relaxed policy with AGENTGRID_ALLOW_MISSING_UPSTREAM=1.
 #[test]
 fn prepare_workspace_fail_closed_on_missing_pinned_base() {
+    let _g = GIT_ENV_LOCK.lock().unwrap();
     let dir = std::env::temp_dir().join(format!("ag-fc-base-{}", uuid::Uuid::new_v4()));
     let origin = dir.join("origin.git");
     std::fs::create_dir_all(&origin).unwrap();
@@ -1267,6 +1279,7 @@ fn cross_process_flock_serializes_two_holders() {
 #[cfg(unix)]
 #[test]
 fn resolve_trivial_conflicts_resolves_both_add() {
+    let _g = GIT_ENV_LOCK.lock().unwrap();
     hermetic_git_config();
     let dir = std::env::temp_dir().join(format!("ag-pmr-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1397,6 +1410,7 @@ fn resolve_conflict_markers_non_trivial_and_malformed() {
 
 #[test]
 fn builtin_resolve_handles_whitespace_conflict_without_script() {
+    let _g = GIT_ENV_LOCK.lock().unwrap();
     hermetic_git_config();
     let dir = std::env::temp_dir().join(format!("ag-pmr-bi-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();

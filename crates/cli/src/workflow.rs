@@ -156,6 +156,10 @@ pub(crate) struct AssembleArgs {
     /// Create the remote repository via the API when missing (private).
     #[arg(long = "github-create")]
     github_create: bool,
+    /// Print the architect prompt + ephemeral template and exit without
+    /// contacting the server (validates the DAG locally).
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 }
 
 pub(crate) async fn cmd_assemble(
@@ -163,6 +167,42 @@ pub(crate) async fn cmd_assemble(
     base: &str,
     a: AssembleArgs,
 ) -> Result<()> {
+    if a.dry_run {
+        // No server round-trip: show exactly what the server would build
+        // (same prompt composer, same default-budget rule), DAG-validated.
+        if a.goal.trim().is_empty() {
+            anyhow::bail!("goal must not be empty");
+        }
+        let prompt = agentgrid_common::assembly_architect_prompt(&a.goal, &a.adapter);
+        let budget = if a.auto_approve {
+            Some(agentgrid_common::default_assembly_budget())
+        } else {
+            None
+        };
+        let tpl = WorkflowTemplate {
+            id: "dry-run".into(),
+            name: "assembly-dry-run".into(),
+            steps: vec![WorkflowStep {
+                id: "arch".into(),
+                prompt: prompt.clone(),
+                depends_on: vec![],
+                role: agentgrid_common::WorkflowRole::Architect,
+                adapter: Some(a.adapter.clone()),
+                requested_node_id: None,
+                base_commit: a.base_commit.clone(),
+                retryable: None,
+                max_attempts: None,
+                expandable: Some(true),
+            }],
+            budget,
+            created_at: String::new(),
+        };
+        tpl.validate_dag()
+            .map_err(|e| anyhow::anyhow!("dry-run template invalid: {e}"))?;
+        println!("{prompt}");
+        println!("{}", serde_json::to_string_pretty(&tpl)?);
+        return Ok(());
+    }
     let req = agentgrid_common::AssemblyRequest {
         goal: a.goal,
         repository: a.repo,
@@ -617,5 +657,40 @@ mod workflow_file_tests {
     fn resolve_workflow_path_missing_file_errors() {
         let err = resolve_workflow_path("/nonexistent/wf.yaml").unwrap_err();
         assert!(err.to_string().contains("does not exist"), "err: {err}");
+    }
+
+    fn assemble_args(goal: &str, dry_run: bool) -> AssembleArgs {
+        AssembleArgs {
+            goal: goal.into(),
+            repo: None,
+            adapter: "mock".into(),
+            base_commit: None,
+            context: None,
+            auto_approve: true,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_create: false,
+            dry_run,
+        }
+    }
+
+    /// `--dry-run` short-circuits before any HTTP: pointing it at a
+    /// closed port proves no server round-trip happens.
+    #[tokio::test]
+    async fn assemble_dry_run_needs_no_server() {
+        let client = reqwest::Client::new();
+        cmd_assemble(&client, "http://127.0.0.1:1", assemble_args("x", true))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn assemble_dry_run_rejects_empty_goal() {
+        let client = reqwest::Client::new();
+        let err = cmd_assemble(&client, "http://127.0.0.1:1", assemble_args("  ", true))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("empty"), "err: {err}");
     }
 }

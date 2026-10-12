@@ -68,16 +68,26 @@ mod tests {
 
     #[test]
     fn counters_accumulate_and_snapshot_sorts() {
-        note_attempt("ANTHROPIC_API_KEY");
-        note_attempt("ANTHROPIC_API_KEY");
-        note_rate_limited("ANTHROPIC_API_KEY");
-        note_attempt("OPENAI_API_KEY");
-        let snap = snapshot();
+        // The counter map is process-global (`USAGE`) and other tests record
+        // into it concurrently — isolate with unique keys and filter the
+        // snapshot to them, so exact counts never race a neighbor test.
+        let tag = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let a = format!("AG_TEST_A_{tag}");
+        let b = format!("AG_TEST_B_{tag}");
+        note_attempt(&a);
+        note_attempt(&a);
+        note_rate_limited(&a);
+        note_attempt(&b);
+        let snap: Vec<AccountUsage> = snapshot()
+            .into_iter()
+            .filter(|r| r.env.starts_with("AG_TEST_"))
+            .filter(|r| r.env.ends_with(&tag))
+            .collect();
         assert_eq!(snap.len(), 2);
-        assert_eq!(snap[0].env, "ANTHROPIC_API_KEY");
+        assert_eq!(snap[0].env, a);
         assert_eq!(snap[0].attempts, 2);
         assert_eq!(snap[0].rate_limited, 1);
-        assert_eq!(snap[1].env, "OPENAI_API_KEY");
+        assert_eq!(snap[1].env, b);
         assert_eq!(snap[1].attempts, 1);
     }
 }

@@ -1554,6 +1554,21 @@ impl Store {
         Ok((tokens.max(0) as u64, cost.max(0) as u64))
     }
 
+    /// Cost tracking (`GET /metrics`): fleet-wide token/cost totals summed
+    /// over every `metric` event adapters reported (same payload shape as
+    /// `workflow_tokens_cost`, no run filter). The `idx_events_type` index
+    /// keeps the full-table scan bounded; missing fields sum as 0.
+    pub async fn total_tokens_cost(&self) -> Result<(u64, u64)> {
+        let (tokens, cost): (i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(CAST(json_extract(payload, '$.tokens') AS INTEGER)), 0), \
+                    COALESCE(SUM(CAST(json_extract(payload, '$.cost_cents') AS INTEGER)), 0) \
+             FROM task_events WHERE type = 'metric'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((tokens.max(0) as u64, cost.max(0) as u64))
+    }
+
     /// Current status of a task, if it exists.
     /// Plan 534: the workflow run that owns `task_id`, if any. Service layer
     /// calls this after a task's attempt completes so the run's DAG can

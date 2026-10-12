@@ -6622,10 +6622,13 @@ async fn consumer_node_can_read_upstream_producer_artifact() {
 /// A symlink inside the root pointing outside the root is blocked (403).
 #[tokio::test]
 async fn static_fallback_rejects_traversal_and_caches_safe() {
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Tokio mutex (not std): the guard spans the `open_temp().await`, so
+    // there is no unlocked window where a parallel test could swap
+    // AGENTGRID_WEB_ROOT between set_var and the CP reading it. The old
+    // code dropped a std guard before the await to dodge
+    // `await_holding_lock` — and reopened exactly that race.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _g = ENV_LOCK.lock().await;
 
     let root = std::env::temp_dir().join(format!(
         "ag-web-{}-{}",
@@ -6650,16 +6653,13 @@ async fn static_fallback_rejects_traversal_and_caches_safe() {
 
     let prev = std::env::var("AGENTGRID_WEB_ROOT").ok();
     std::env::set_var("AGENTGRID_WEB_ROOT", root.to_str().unwrap());
-    drop(_g);
     let state = AppState::open_temp().await.unwrap();
     let app = build_router(state);
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(p) = prev {
         std::env::set_var("AGENTGRID_WEB_ROOT", p);
     } else {
         std::env::remove_var("AGENTGRID_WEB_ROOT");
     }
-    drop(_g);
 
     let token = test_token(&app).await;
 

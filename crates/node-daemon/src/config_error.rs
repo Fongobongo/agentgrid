@@ -79,12 +79,23 @@ pub fn note_attempt_succeeded() {
     CONSECUTIVE_CONFIG_ERRS.store(0, Ordering::Relaxed);
 }
 
+/// Test-only serialization for the process-global streak counter (and its
+/// threshold env): the threshold unit test asserts exact trip counts while
+/// full-attempt tests (`ws.rs`) drive the same counter through
+/// `run_attempt`. All three hold this lock; acquisition order is PATH-lock
+/// first, counter second wherever both are needed (no lock-order cycle).
+/// Tokio mutex: every holder is async (the unit test runs under a current-
+/// thread runtime for this reason) so the guard may legally span awaits.
+#[cfg(test)]
+pub(crate) static CONFIG_COUNTER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn threshold_trips_after_n_consecutive_config_errors() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn threshold_trips_after_n_consecutive_config_errors() {
+        let _counter = CONFIG_COUNTER_LOCK.lock().await;
         CONSECUTIVE_CONFIG_ERRS.store(0, Ordering::Relaxed);
         std::env::set_var("AGENTGRID_CONFIG_PULL_AFTER_ERRORS", "2");
         let bad = serde_json::json!({"error": "model_not_found something"});

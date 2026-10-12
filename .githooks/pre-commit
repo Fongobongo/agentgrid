@@ -8,7 +8,11 @@
 #
 # Scope: staged Rust files only. Full `cargo test --workspace` stays in CI
 # (too slow for a commit hook); clippy here is the best latency/coverage
-# trade-off for the fmt+lint class of CI failures.
+# trade-off for the fmt+lint class of CI failures. NOTE: clippy runs with
+# --all-targets, so test code (`#[cfg(test)]`, integration tests) is
+# type-checked too — a broken test target fails the hook same as lib code.
+# What no static gate catches is a *semantic* test edit (e.g. a flipped
+# assertion): that class stays on CI + review.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -16,23 +20,50 @@ cd "$(git rev-parse --show-toplevel)"
 # Collect staged .rs files (deleted files excluded).
 mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
 if [ "${#staged[@]}" -eq 0 ]; then
-  exit 0
-fi
-echo "pre-commit: ${#staged[@]} staged Rust file(s)"
+  echo "pre-commit: no staged Rust files, skipping fmt+clippy"
+else
+  echo "pre-commit: ${#staged[@]} staged Rust file(s)"
 
-# 1) Format check on the whole workspace — fmt is stable and instant.
-if ! cargo fmt --all --check; then
-  echo "pre-commit: cargo fmt --check failed. Run 'cargo fmt --all' and re-stage." >&2
-  exit 1
+  # 1) Format check on the whole workspace — fmt is stable and instant.
+  if ! cargo fmt --all --check; then
+    echo "pre-commit: cargo fmt --check failed. Run 'cargo fmt --all' and re-stage." >&2
+    exit 1
+  fi
+
+  # 2) Clippy. Running per-crate would need a crate→path mapping; instead run
+  #    workspace clippy with `-D warnings` exactly like CI (Swatinem cache makes
+  #    this a no-op rebuild after the first run).
+  echo "pre-commit: cargo clippy --all-targets -- -D warnings"
+  if ! cargo clippy --all-targets -- -D warnings; then
+    echo "pre-commit: clippy failed. Fix warnings above and re-stage." >&2
+    exit 1
+  fi
 fi
 
-# 2) Clippy. Running per-crate would need a crate→path mapping; instead run
-#    workspace clippy with `-D warnings` exactly like CI (Swatinem cache makes
-#    this a no-op rebuild after the first run).
-echo "pre-commit: cargo clippy --all-targets -- -D warnings"
-if ! cargo clippy --all-targets -- -D warnings; then
-  echo "pre-commit: clippy failed. Fix warnings above and re-stage." >&2
-  exit 1
+# 3) Bash syntax for staged shell scripts (e2e harness, deploy, hooks).
+#    Shell has no compiler gate in CI either, so a syntax slip in a script
+#    surfaces only when the job runs it — check here instead. Skipped when
+#    no bash exists on the box (plain Windows dev host); shellcheck runs
+#    only when installed (best-effort style layer, never a blocker).
+mapfile -t staged_sh < <(git diff --cached --name-only --diff-filter=ACMR -- '*.sh' '.githooks/*' || true)
+if [ "${#staged_sh[@]}" -gt 0 ]; then
+  if command -v bash >/dev/null 2>&1; then
+    for f in "${staged_sh[@]}"; do
+      [ -f "$f" ] || continue
+      if ! bash -n "$f"; then
+        echo "pre-commit: bash -n failed for $f. Fix the syntax and re-stage." >&2
+        exit 1
+      fi
+    done
+    echo "pre-commit: bash -n ok (${#staged_sh[@]} script(s))"
+  else
+    echo "pre-commit: no bash on PATH, skipping script syntax check" >&2
+  fi
+  if command -v shellcheck >/dev/null 2>&1; then
+    # Style-only: report, don't block (pre-existing scripts carry legacy
+    # warnings a staged one-liner should not be forced to fix).
+    shellcheck -S warning "${staged_sh[@]}" || true
+  fi
 fi
 
 echo "pre-commit: ok"

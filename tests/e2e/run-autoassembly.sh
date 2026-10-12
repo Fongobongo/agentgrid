@@ -20,10 +20,10 @@ BASE="${AGENTGRID_BASE:-http://127.0.0.1:7821}"
 PORT="${AGENTGRID_PORT:-7821}"
 USER="admin"
 PASS="changeme"
-source "$ROOT/tests/e2e/lib-bootstrap.sh"
+E2E_JWT_SECRET="e2e-autoasm-secret"
+E2E_CONCURRENCY=2
 
 TMP="$(mktemp -d -t ag-e2e-autoasm-XXXXXX)"
-CP_DB="$TMP/cp.db"
 mkdir -p "$TMP/n1" "$TMP/w1" "$TMP/r1" "$TMP/n2" "$TMP/w2" "$TMP/r2" "$TMP/stubbin"
 cp "$ROOT/tests/e2e/plan-stub.sh" "$TMP/stubbin/adapter-plan-stub"
 chmod +x "$TMP/stubbin/adapter-plan-stub"
@@ -32,91 +32,19 @@ chmod +x "$TMP/stubbin/adapter-plan-stub"
 git init -q -b main "$TMP/origin"
 git -C "$TMP/origin" -c user.name=t -c user.email=t@x commit -q --allow-empty -m init
 
-CP_PID=""
-N1_PID=""
-N2_PID=""
-
-cleanup() {
-  set +e
-  [ -n "$N2_PID" ] && kill -9 "$N2_PID" 2>/dev/null
-  [ -n "$N1_PID" ] && kill -9 "$N1_PID" 2>/dev/null
-  [ -n "$CP_PID" ] && kill "$CP_PID" 2>/dev/null
-  pkill -f "$BIN/agentgrid-control-plane" 2>/dev/null
-  pkill -f "$BIN/agentgrid-node-daemon" 2>/dev/null
-  sleep 0.3
-  [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
-}
-trap cleanup EXIT
-
-wait_ready() {
-  for _ in $(seq 1 40); do
-    curl -fsS "$BASE/health/ready" >/dev/null 2>&1 && return 0
-    sleep 0.5
-  done
-  return 1
-}
-
-login() {
-  jwt=$(curl -fsS -X POST "$BASE/v1/auth/login" \
-    -H 'content-type: application/json' \
-    -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-  [ -n "$jwt" ] || { echo "login failed"; cat "$TMP/cp.log"; exit 1; }
-}
-
-mint_token() {
-  ENROLL_TOKEN=$(curl -fsS -X POST "$BASE/v1/nodes/enrollment-token" \
-    -H "authorization: Bearer $jwt" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-  [ -n "$ENROLL_TOKEN" ] || { echo "mint token failed"; exit 1; }
-}
-
-start_cp() {
-  AGENTGRID_LISTEN="127.0.0.1:$PORT" \
-  AGENTGRID_DB="$CP_DB" \
-  AGENTGRID_JWT_SECRET="e2e-autoasm-secret" \
-  AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
-  nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
-  CP_PID=$!
-}
-
-# $1 = tag (n1/n2), $2 = adapters csv
-start_node() {
-  local n="$1" idx=1
-  [ "$n" = "n2" ] && idx=2
-  env PATH="$TMP/stubbin:$BIN:$PATH" \
-    AGENTGRID_SERVER="$BASE" \
-    AGENTGRID_DATA_DIR="$TMP/$n" \
-    AGENTGRID_NODE_NAME="e2e-autoasm-$n" \
-    AGENTGRID_WORKSPACE_ROOT="$TMP/w$idx" \
-    AGENTGRID_REPOSITORY_ROOT="$TMP/r$idx" \
-    AGENTGRID_ADAPTERS="$2" \
-    AGENTGRID_MAX_CONCURRENCY="2" \
-    RUST_LOG="info" \
-    AGENTGRID_ENROLL_TOKEN="$ENROLL_TOKEN" \
-    nohup "$BIN/agentgrid-node-daemon" >"$TMP/$n.log" 2>&1 &
-  if [ "$n" = "n1" ]; then N1_PID=$!; else N2_PID=$!; fi
-}
-
-wait_nodes_online() {
-  for _ in $(seq 1 60); do
-    n=$(curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt" 2>/dev/null \
-      | python3 -c 'import sys,json;d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d;print(sum(1 for x in ns if x.get("status")=="online"))' 2>/dev/null) || n=0
-    [ "$n" = "2" ] && return 0
-    sleep 0.5
-  done
-  echo "wanted 2 online nodes, have $n"; return 1
-}
+source "$ROOT/tests/e2e/lib-e2e.sh"
+trap e2e_cleanup EXIT
 
 echo ">> one-button assembly E2E (plan-stub architect, no LLM)"
-start_cp
-wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
+e2e_check_bins
+e2e_start_cp
+e2e_wait_ready || { echo "CP not ready"; cat "$TMP/cp.log"; exit 1; }
 bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
-login
-mint_token
-start_node n1 "mock,plan-stub"
-start_node n2 "mock"
-wait_nodes_online || exit 1
+e2e_login
+e2e_mint_token
+e2e_start_node n1 "e2e-autoasm-n1" "mock,plan-stub" "$TMP/w1" "$TMP/r1" "$TMP/n1" "PATH=$TMP/stubbin:$BIN:$PATH"
+e2e_start_node n2 "e2e-autoasm-n2" "mock" "$TMP/w2" "$TMP/r2" "$TMP/n2"
+e2e_wait_nodes_online 2 || exit 1
 
 echo ">> registering the shared local repo"
 curl -fsS -X POST "$BASE/v1/repositories" \

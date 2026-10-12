@@ -263,6 +263,11 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
 
+    /// Process-global `PATH` is mutated by both tests below (self-contained
+    /// mock adapter dirs); serialize them so parallel runs cannot steal each
+    /// other's fixture off PATH mid-attempt (mirrors `sandbox::tests::ENV_LOCK`).
+    static PATH_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new();
+
     async fn login(base: &str) -> String {
         reqwest::Client::new()
             .post(format!("{base}/v1/auth/login"))
@@ -400,6 +405,11 @@ mod tests {
     async fn ws_node_survives_cp_restart() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _path_guard = PATH_ENV_LOCK.lock().await;
+        // Full attempts below drive the process-global config-error streak
+        // counter; hold it so the threshold unit test keeps exact counts.
+        let _counter_guard = crate::config_error::CONFIG_COUNTER_LOCK.lock().await;
+
         // Self-contained `adapter-mock` (JSON-line protocol): the test used to
         // rely on cargo-test's target/debug landing in PATH (or on a sibling
         // test's fixture leaking through a process-global PATH mutation —
@@ -528,6 +538,9 @@ mod tests {
     #[cfg(unix)]
     async fn ws_attempt_survives_cp_kill_midflight() {
         use std::os::unix::fs::PermissionsExt;
+
+        let _path_guard = PATH_ENV_LOCK.lock().await;
+        let _counter_guard = crate::config_error::CONFIG_COUNTER_LOCK.lock().unwrap();
 
         let dir = std::env::temp_dir().join(format!(
             "ag-fi-{}-{}",

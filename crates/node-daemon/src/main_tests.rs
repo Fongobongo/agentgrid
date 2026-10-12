@@ -207,6 +207,22 @@ mod tests {
         Arc::new(outbox::EventOutbox::open(&dir, attempt_id).unwrap())
     }
 
+    /// Unique (workspace, credential, repos) dirs per test. The old fixed
+    /// `ag-acp-ws`-style temp paths survived panics (no cleanup on failure),
+    /// so a retry — or a parallel same-named test — loaded another run's
+    /// credential file. Uuid per call keeps every run hermetic.
+    /// (Unix-only callers: the ACP drive tests.)
+    #[cfg(unix)]
+    fn test_config_dirs(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let uniq = format!("{}-{}-{}", tag, std::process::id(), uuid::Uuid::new_v4());
+        let tmp = std::env::temp_dir();
+        (
+            tmp.join(format!("ag-{uniq}-ws")),
+            tmp.join(format!("ag-{uniq}-cred.json")),
+            tmp.join(format!("ag-{uniq}-repos")),
+        )
+    }
+
     /// Serialize the tests that set, or assert on output shaped by, the
     /// process-global knobs `read_stream`/`EventSink` read while running
     /// (`AGENTGRID_MAX_LINE_BYTES` default 1 MiB, `AGENTGRID_EVENT_BUF_BYTES`
@@ -222,6 +238,12 @@ mod tests {
     /// can legally span the awaited `read_stream` calls.
     static READ_STREAM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// The `drive_acp_session_*` tests (plus the skills-injection case below)
+    /// mutate process-global `PATH`/`HOME`/`AG_FAKE_*` for their fake agent;
+    /// serialize them against each other so parallel runs cannot steal or
+    /// clobber each other's fixture env mid-session.
+    #[cfg(unix)]
+    static ACPE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     #[tokio::test]
     async fn event_sink_drops_logs_over_cap_but_keeps_terminal_state() {
         // Stage 2.1: backpressure. A chatty agent's stdout/stderr are dropped
@@ -577,6 +599,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_runs_fake_agent_and_streams_events() {
+        let _env = ACPE_ENV_LOCK.lock().await;
+        let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp");
         // Make the test-only ACP agent discoverable on PATH. It is built into
         // the same target dir; locate it relative to CARGO_MANIFEST_DIR.
         let fake = fake_acp_bin();
@@ -588,7 +612,7 @@ mod tests {
         let cfg = Config {
             server: server.clone(),
             node_name: "test".into(),
-            workspace_root: std::env::temp_dir().join("ag-acp-ws"),
+            workspace_root: cfg_ws,
             max_concurrency: 2,
             agent_version: "0.1.0".into(),
             adapters: vec![AdapterSpec {
@@ -598,9 +622,9 @@ mod tests {
             repositories: vec!["*".into()],
             heartbeat_secs: 10,
             enroll_token: None,
-            credential_path: std::env::temp_dir().join("ag-acp-cred.json"),
+            credential_path: cfg_cred,
             env_file: None,
-            repository_root: std::env::temp_dir().join("ag-acp-repos"),
+            repository_root: cfg_repos,
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
             adapter_env: vec![],
@@ -704,6 +728,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_flags_rate_limit_then_rotates() {
+        let _env = ACPE_ENV_LOCK.lock().await;
+        let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-rl");
         let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
         let orig = std::env::var("PATH").unwrap_or_default();
@@ -719,7 +745,7 @@ mod tests {
         let mut cfg = Config {
             server: server.clone(),
             node_name: "test".into(),
-            workspace_root: std::env::temp_dir().join("ag-acp-ws-rl"),
+            workspace_root: cfg_ws,
             max_concurrency: 2,
             agent_version: "0.1.0".into(),
             adapters: vec![AdapterSpec {
@@ -729,9 +755,9 @@ mod tests {
             repositories: vec!["*".into()],
             heartbeat_secs: 10,
             enroll_token: None,
-            credential_path: std::env::temp_dir().join("ag-acp-cred-rl.json"),
+            credential_path: cfg_cred,
             env_file: None,
-            repository_root: std::env::temp_dir().join("ag-acp-repos-rl"),
+            repository_root: cfg_repos,
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
             github_token: None,
@@ -870,6 +896,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_hang_mid_frame_times_out() {
+        let _env = ACPE_ENV_LOCK.lock().await;
+        let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-hang");
         let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
         let orig = std::env::var("PATH").unwrap_or_default();
@@ -883,7 +911,7 @@ mod tests {
         let cfg = Config {
             server: server.clone(),
             node_name: "test".into(),
-            workspace_root: std::env::temp_dir().join("ag-acp-ws-hang"),
+            workspace_root: cfg_ws,
             max_concurrency: 2,
             agent_version: "0.1.0".into(),
             adapters: vec![AdapterSpec {
@@ -893,9 +921,9 @@ mod tests {
             repositories: vec!["*".into()],
             heartbeat_secs: 10,
             enroll_token: None,
-            credential_path: std::env::temp_dir().join("ag-acp-cred-hang.json"),
+            credential_path: cfg_cred,
             env_file: None,
-            repository_root: std::env::temp_dir().join("ag-acp-repos-hang"),
+            repository_root: cfg_repos,
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
             adapter_env: vec![("AG_FAKE_HANG".into(), "1".into())],
@@ -996,6 +1024,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_cancel_mid_prompt_turn() {
+        let _env = ACPE_ENV_LOCK.lock().await;
+        let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-cancel");
         let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
         let orig = std::env::var("PATH").unwrap_or_default();
@@ -1006,7 +1036,7 @@ mod tests {
         let cfg = Config {
             server: server.clone(),
             node_name: "test".into(),
-            workspace_root: std::env::temp_dir().join("ag-acp-ws-cancel"),
+            workspace_root: cfg_ws,
             max_concurrency: 2,
             agent_version: "0.1.0".into(),
             adapters: vec![AdapterSpec {
@@ -1016,9 +1046,9 @@ mod tests {
             repositories: vec!["*".into()],
             heartbeat_secs: 10,
             enroll_token: None,
-            credential_path: std::env::temp_dir().join("ag-acp-cred-cancel.json"),
+            credential_path: cfg_cred,
             env_file: None,
-            repository_root: std::env::temp_dir().join("ag-acp-repos-cancel"),
+            repository_root: cfg_repos,
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
             adapter_env: vec![("AG_FAKE_HANG".into(), "1".into())],
@@ -1175,7 +1205,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_injects_trusted_skills_block_into_prompt() {
+        let _env = ACPE_ENV_LOCK.lock().await;
         async fn one_case(trusted: bool, expect_block: bool) {
+            let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-skill");
             let tmp = std::env::temp_dir().join(format!("ag-skill-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&tmp).unwrap();
             std::env::set_var("HOME", &tmp);
@@ -1194,7 +1226,7 @@ mod tests {
             let cfg = Config {
                 server: server.clone(),
                 node_name: "test".into(),
-                workspace_root: std::env::temp_dir().join("ag-skill-ws"),
+                workspace_root: cfg_ws,
                 max_concurrency: 2,
                 agent_version: "0.1.0".into(),
                 adapters: vec![AdapterSpec {
@@ -1204,9 +1236,9 @@ mod tests {
                 repositories: vec!["*".into()],
                 heartbeat_secs: 10,
                 enroll_token: None,
-                credential_path: std::env::temp_dir().join("ag-skill-cred.json"),
+                credential_path: cfg_cred,
                 env_file: None,
-                repository_root: std::env::temp_dir().join("ag-skill-repos"),
+                repository_root: cfg_repos,
                 secrets: vec![],
                 sandbox: sandbox::SandboxKind::None,
                 // Hardening P1 item 27: the child no longer inherits the

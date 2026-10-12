@@ -310,6 +310,10 @@ jobs:
       # fallback). Process-based, no docker, no GitHub.
       - name: project assembly across hosts
         run: bash tests/e2e/run-assemble.sh
+      # Cost tracking: mock usage trips a token budget (Blocked + breach +
+      # /metrics counters). Process-based, no docker, no LLM.
+      - name: cost tracking (usage in, breach out)
+        run: bash tests/e2e/run-budget-tokens.sh
       # One-button assembly: POST /v1/assembly with a goal → plan-stub
       # architect → auto-approve → workers → system collector. No LLM.
       - name: one-button assembly (goal in, merged project out)

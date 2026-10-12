@@ -192,6 +192,12 @@ mod tests {
     use agentgrid_common::policy::AutonomyLevel;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// A few tests below mutate process-global env (`AGENTGRID_PROVENANCE_*`,
+    /// `AGENTGRID_AGENT_PROFILE_*`, `AGENTGRID_TEST_*_XYZ`); serialize them
+    /// so parallel runs cannot interleave half-set states (mirrors
+    /// `sandbox::tests::ENV_LOCK`).
+    static PROFILE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Accept anything on a port and answer 200 OK with `body`, so
     /// `fetch_agent_profile` has a live CP to query. Serves a full HTTP/1.1
     /// keep-alive connection: reqwest pools the connection, and a handler that
@@ -324,6 +330,7 @@ mod tests {
 
     #[test]
     fn provenance_from_env_builds_record() {
+        let _g = PROFILE_ENV_LOCK.lock().unwrap();
         let p = provenance_from_env();
         assert_eq!(p, None);
         std::env::set_var("AGENTGRID_PROVENANCE_ORIGINATOR", "entire");
@@ -370,6 +377,7 @@ mod tests {
 
     #[test]
     fn check_profile_secrets_fail_closed_on_required_unset() {
+        let _g = PROFILE_ENV_LOCK.lock().unwrap();
         // Use a unique env name unlikely to be set in the test process.
         let unset = "AGENTGRID_TEST_UNSET_SECRET_XYZ";
         std::env::remove_var(unset);
@@ -426,6 +434,7 @@ mod tests {
 
     #[test]
     fn agent_profile_reads_inline_and_none() {
+        let _g = PROFILE_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGENTGRID_AGENT_PROFILE_TESTAG", "be brief");
         assert_eq!(agent_profile("testag"), Some("be brief".into()));
         std::env::set_var("AGENTGRID_AGENT_PROFILE_TESTAG", "");

@@ -2537,6 +2537,76 @@ mod workflow_tests {
     }
 
     #[tokio::test]
+    async fn total_tokens_cost_sums_metric_events_fleet_wide() {
+        // Cost tracking (/metrics): fleet totals sum every metric event,
+        // not just workflow runs; events without the fields count as 0.
+        let s = temp_store().await;
+        assert_eq!(s.total_tokens_cost().await.unwrap(), (0, 0));
+        let task = s
+            .create_task(&CreateTaskRequest {
+                prompt: "direct".into(),
+                repository: "*".into(),
+                adapter: "mock".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n-cost".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 2,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        sqlx::query(
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
+             VALUES ('att-cost', ?, 1, ?, 'running', ?, ?, ?)",
+        )
+        .bind(&task.id)
+        .bind(&node_id)
+        .bind(now_iso())
+        .bind(now_iso())
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        s.ingest_events(
+            "att-cost",
+            &IngestEventsRequest {
+                events: vec![
+                    IncomingEvent {
+                        sequence: 1,
+                        r#type: EventType::Metric,
+                        payload: serde_json::json!({"tokens": 100, "cost_cents": 5}),
+                    },
+                    IncomingEvent {
+                        sequence: 2,
+                        r#type: EventType::Metric,
+                        payload: serde_json::json!({"text": "no usage fields"}),
+                    },
+                    IncomingEvent {
+                        sequence: 3,
+                        r#type: EventType::Stdout,
+                        payload: serde_json::json!({"text": "not a metric"}),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.total_tokens_cost().await.unwrap(), (100, 5));
+    }
+
+    #[tokio::test]
     async fn budget_bytes_enforced_from_message_payload_size() {
         // Stage 13: `max_bytes` counts orchestrator-emitted payload bytes, so a
         // handoff streak that pounds long payloads parks the run `Blocked`, and
