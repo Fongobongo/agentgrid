@@ -214,6 +214,8 @@ impl Store {
                         max_attempts: 1,
                         consensus_mode: None,
                         review_of: None,
+                        max_tokens: None,
+                        max_cost_cents: None,
                     };
                     if let Err(e) = store.create_agent_task(&a.id, &req).await {
                         tracing::warn!("agent {} heartbeat spawn failed: {e}", a.id);

@@ -22,9 +22,18 @@
   events); `GET /metrics` exposes `agentgrid_llm_tokens_total` and
   `agentgrid_llm_cost_cents_total` fleet counters. E2E
   `tests/e2e/run-budget-tokens.sh` (CI): a 1000-token mock run against a
-  500-token budget parks `Blocked` with a `max_tokens` breach. Per-task
-  (non-workflow) cost ceilings remain a follow-up — budgets still live on
-  workflow templates.
+  500-token budget parks `Blocked` with a `max_tokens` breach.
+
+- **Per-task cost ceilings.** `max_tokens` / `max_cost_cents` ride
+  `CreateTaskRequest` → task row → `Assignment`; the node accumulates
+  adapter-reported usage in the event sink (counted before backpressure
+  drops, so a trimmed metric still counts spend) and kills the attempt with
+  `error_code = "budget_exceeded"` on either ceiling — wrapper and ACP
+  paths alike, with a terminal error event carrying observed totals. Zero
+  is allowed (zero tolerance); unset is unbounded. CLI `ag run
+  --max-tokens/--max-cost-cents`, web form fields, `TaskView` echo. E2E
+  `tests/e2e/run-task-budget.sh` (CI): capped twin dies `budget_exceeded`,
+  identical uncapped twin succeeds.
 
 - **Misc batch.** `ag assemble --dry-run` prints the architect prompt plus
   the DAG-validated ephemeral template without contacting the server.

@@ -687,6 +687,8 @@ mod tests {
             github_base_ref: None,
             github_create: false,
             workflow_role: None,
+            max_tokens: None,
+            max_cost_cents: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -830,6 +832,8 @@ mod tests {
             github_base_ref: None,
             github_create: false,
             workflow_role: None,
+            max_tokens: None,
+            max_cost_cents: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -987,6 +991,8 @@ mod tests {
             github_base_ref: None,
             github_create: false,
             workflow_role: None,
+            max_tokens: None,
+            max_cost_cents: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1113,6 +1119,8 @@ mod tests {
             github_base_ref: None,
             github_create: false,
             workflow_role: None,
+            max_tokens: None,
+            max_cost_cents: None,
         };
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
@@ -1312,6 +1320,8 @@ mod tests {
                 github_base_ref: None,
                 github_create: false,
                 workflow_role: None,
+                max_tokens: None,
+                max_cost_cents: None,
             };
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),

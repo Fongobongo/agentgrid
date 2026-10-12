@@ -279,6 +279,8 @@ pub async fn rework_attempt(
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     match state.store.create_task(&req).await {
         Ok(view) => {

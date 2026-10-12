@@ -733,6 +733,16 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
             .ok()
             .flatten(),
         github_create: r.try_get::<bool, _>("github_create").unwrap_or_default(),
+        max_tokens: r
+            .try_get::<Option<i64>, _>("max_tokens")
+            .ok()
+            .flatten()
+            .map(|v| v.max(0) as u64),
+        max_cost_cents: r
+            .try_get::<Option<i64>, _>("max_cost_cents")
+            .ok()
+            .flatten()
+            .map(|v| v.max(0) as u64),
         // Competitor-gap feature (convergence metrics): the attempt this task
         // was reworked from, if any.
         rework_of: r.try_get::<Option<String>, _>("rework_of").ok().flatten(),

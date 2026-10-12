@@ -227,6 +227,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -586,6 +588,8 @@ async fn validation_failure_must_not_report_success() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -715,6 +719,8 @@ async fn cancel_queued_marks_cancelled() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -1784,6 +1790,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .unwrap(),
             None,
@@ -1864,6 +1872,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .unwrap(),
             None,
@@ -1905,6 +1915,8 @@ async fn user_auth_setup_login_and_protects_endpoints() {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .unwrap(),
             Some(&token),
@@ -1939,6 +1951,8 @@ async fn create_task_only(app: &Router, repo: &str, adapter: &str, node: Option<
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     // Tests bootstrap a `test`/`test` user via AppState::open_temp; task
     // creation is a user route and now requires a JWT (hardening P0 closed
@@ -2048,6 +2062,8 @@ async fn login_sets_cookie_and_cookie_auths() {
                         max_attempts: 1,
                         consensus_mode: None,
                         review_of: None,
+                        max_tokens: None,
+                        max_cost_cents: None,
                     })
                     .unwrap(),
                 ))
@@ -2178,6 +2194,8 @@ async fn oversized_prompt_returns_413() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -2223,6 +2241,8 @@ async fn malformed_github_refs_return_400() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     // Each case differs from the valid base in exactly one way.
     let cases: Vec<(&str, CreateTaskRequest)> = vec![
@@ -2313,6 +2333,8 @@ async fn create_task(app: &Router, adapter: &str, requested_node: Option<&str>) 
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -3187,6 +3209,8 @@ async fn approval_create_and_get_by_id_drives_permission_flow() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let created = app
         .clone()
@@ -5059,6 +5083,8 @@ async fn artifact_get_rejects_traversal_name() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -6043,6 +6069,8 @@ async fn setup_two_nodes(app: &Router, prompt: &str) -> (Assignment, String, Str
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -7776,6 +7804,8 @@ async fn list_tasks_filters_by_status_repository_node() {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         })
         .unwrap()
     };
@@ -8551,6 +8581,8 @@ async fn list_tasks_keyset_pagination() {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         })
         .unwrap()
     };
@@ -8724,6 +8756,8 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         })
         .unwrap();
         let r = app
@@ -8917,6 +8951,8 @@ async fn approvals_keyset_pagination() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let created = app
         .clone()
@@ -9103,6 +9139,8 @@ async fn strict_profile_refuses_wrapper_adapter() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -9530,6 +9568,8 @@ async fn search_finds_task_by_prompt_word() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -9692,6 +9732,8 @@ async fn attempt_detail_and_tag_crud() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()
@@ -9814,6 +9856,8 @@ async fn shared_context_api_two_tasks_same_group_share_notes() {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .unwrap(),
             &token,
@@ -9969,6 +10013,8 @@ async fn agent_api_budget_stop_and_trail() {
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     })
     .unwrap();
     let resp = app
@@ -11712,6 +11758,8 @@ async fn review_consensus_verdicts_gate_patch_review() {
                 consensus_member: Some(m.into()),
                 consensus_mode: Some("review".into()),
                 review_of: Some(target.id.clone()),
+                max_tokens: None,
+                max_cost_cents: None,
                 ..Default::default()
             })
             .await
@@ -11873,6 +11921,8 @@ async fn review_consensus_reject_keeps_human_gate() {
                 consensus_member: Some(m.into()),
                 consensus_mode: Some("review".into()),
                 review_of: Some(target.id.clone()),
+                max_tokens: None,
+                max_cost_cents: None,
                 ..Default::default()
             })
             .await

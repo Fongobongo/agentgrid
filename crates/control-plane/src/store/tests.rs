@@ -1320,6 +1320,8 @@ mod workflow_tests {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         };
         let _ = s.create_task(&task).await.unwrap();
         let before = s
@@ -1379,6 +1381,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -1445,6 +1449,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -1507,6 +1513,8 @@ mod workflow_tests {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         })
         .await
         .unwrap();
@@ -1653,6 +1661,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -1718,6 +1728,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -1861,6 +1873,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -1983,6 +1997,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -2084,6 +2100,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -2278,6 +2296,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -2370,6 +2390,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -2949,6 +2971,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -3005,6 +3029,8 @@ mod workflow_tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -3087,6 +3113,8 @@ mod agent_tests {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         };
         s.create_agent_task(&agent.id, &base).await.unwrap();
         let err = s.create_agent_task(&agent.id, &base).await.unwrap_err();
@@ -3258,6 +3286,8 @@ mod agent_tests {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         };
         let task = s.create_agent_task(&agent.id, &req).await.unwrap();
         assert_eq!(task.agent_id.as_deref(), Some(agent.id.as_str()));

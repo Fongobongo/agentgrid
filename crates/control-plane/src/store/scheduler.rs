@@ -36,6 +36,8 @@ struct AssignmentFields {
     github_issue: Option<i64>,
     github_base_ref: Option<String>,
     github_create: bool,
+    max_tokens: Option<i64>,
+    max_cost_cents: Option<i64>,
     workflow_role: Option<String>,
 }
 fn finish_assignment(
@@ -77,6 +79,8 @@ fn finish_assignment(
         github_issue: f.github_issue,
         github_base_ref: f.github_base_ref,
         github_create: f.github_create,
+        max_tokens: f.max_tokens.map(|v| v.max(0) as u64),
+        max_cost_cents: f.max_cost_cents.map(|v| v.max(0) as u64),
         workflow_role: f.workflow_role,
     }
 }
@@ -97,7 +101,7 @@ impl Store {
                     t.validation_command AS task_validation, t.base_commit, \
                     t.parent_acp_session_id, t.network_mode, t.group_id, \
                     t.consensus_group_id, t.consensus_member, t.opencode_override, \
-                    t.github_push, t.github_repo, t.github_issue, t.github_base_ref, t.github_create, \
+                    t.github_push, t.github_repo, t.github_issue, t.github_base_ref, t.github_create, t.max_tokens, t.max_cost_cents, \
                     r.git_url, r.default_branch, r.validation_command AS repo_validation \
              FROM attempts a \
              JOIN tasks t ON t.id = a.task_id \
@@ -173,6 +177,8 @@ impl Store {
                     github_issue: c.try_get("github_issue").ok().flatten(),
                     github_base_ref: c.try_get("github_base_ref").ok().flatten(),
                     github_create: c.try_get::<bool, _>("github_create").unwrap_or_default(),
+                    max_tokens: c.try_get::<Option<i64>, _>("max_tokens").ok().flatten(),
+                    max_cost_cents: c.try_get::<Option<i64>, _>("max_cost_cents").ok().flatten(),
                     workflow_role,
                 },
             ));
@@ -224,7 +230,7 @@ impl Store {
         }
         let mut tx = self.write_txn().await?;
         let cands = sqlx::query(
-            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create FROM tasks \
+            "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_tokens, max_cost_cents FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
              ORDER BY created_at ASC",
         )
@@ -698,6 +704,11 @@ impl Store {
                         github_issue: c.try_get("github_issue").ok().flatten(),
                         github_base_ref: c.try_get("github_base_ref").ok().flatten(),
                         github_create: c.try_get::<bool, _>("github_create").unwrap_or_default(),
+                        max_tokens: c.try_get::<Option<i64>, _>("max_tokens").ok().flatten(),
+                        max_cost_cents: c
+                            .try_get::<Option<i64>, _>("max_cost_cents")
+                            .ok()
+                            .flatten(),
                         // Stage 10: prefetched role_runs map — None for
                         // direct (non-workflow) tasks.
                         workflow_role,

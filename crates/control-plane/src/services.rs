@@ -658,6 +658,8 @@ mod tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();
@@ -737,6 +739,8 @@ mod tests {
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             })
             .await
             .unwrap();

@@ -32,6 +32,8 @@ export default function NewTask({
   const [networkMode, setNetworkMode] = useState("");
   const [securityProfile, setSecurityProfile] = useState("");
   const [maxAttempts, setMaxAttempts] = useState("");
+  const [maxTokens, setMaxTokens] = useState("");
+  const [maxCostCents, setMaxCostCents] = useState("");
   const [parentSessionId, setParentSessionId] = useState("");
   const [groupId, setGroupId] = useState("");
   const [agentId, setAgentId] = useState("");
@@ -71,6 +73,8 @@ export default function NewTask({
     network_mode: networkMode || undefined,
     security_profile: securityProfile.trim() || undefined,
     max_attempts: maxAttempts.trim() ? Number(maxAttempts) : 1,
+    max_tokens: maxTokens.trim() ? Number(maxTokens) : undefined,
+    max_cost_cents: maxCostCents.trim() ? Number(maxCostCents) : undefined,
     parent_acp_session_id: parentSessionId.trim() || undefined,
     group_id: groupId.trim() || undefined,
     agent_id: agentId.trim() || undefined,
@@ -249,6 +253,26 @@ export default function NewTask({
               value={maxAttempts}
               onChange={(e) => setMaxAttempts(e.target.value)}
               placeholder="1"
+            />
+          </label>
+          <label>
+            Max tokens <span className="muted">(kill with budget_exceeded over)</span>
+            <input
+              type="number"
+              min={0}
+              value={maxTokens}
+              onChange={(e) => setMaxTokens(e.target.value)}
+              placeholder="unbounded"
+            />
+          </label>
+          <label>
+            Max cost (cents) <span className="muted">(kill with budget_exceeded over)</span>
+            <input
+              type="number"
+              min={0}
+              value={maxCostCents}
+              onChange={(e) => setMaxCostCents(e.target.value)}
+              placeholder="unbounded"
             />
           </label>
           <label>

@@ -336,6 +336,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             outbox.clone(),
         );
         sink.requeue(pending).await;
+        // Per-task cost ceilings ride the sink: the ACP select loop kills
+        // the session when the accumulated adapter usage passes either one.
+        sink.set_budget(assignment.max_tokens, assignment.max_cost_cents);
         if matches!(
             ack_attempt(
                 &client,
@@ -756,6 +759,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         outbox.clone(),
     );
     sink.requeue(pending).await;
+    // Per-task cost ceilings ride the sink: the supervisor races the run
+    // against a budget poll and kills with `budget_exceeded` on breach.
+    sink.set_budget(assignment.max_tokens, assignment.max_cost_cents);
     let workdir = ws.path.clone();
     let validation_log = workdir.join("validation.log");
     let mut prompt = assignment.prompt.clone();

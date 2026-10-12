@@ -438,6 +438,22 @@ async fn drive_acp_session(
     );
     let pid = child.id().unwrap_or(0);
     let timeout = Duration::from_secs(assignment.timeout_secs.max(1));
+    // Per-task cost ceilings: poll the sink's accumulated adapter usage
+    // alongside cancel/timeout. Without a configured budget this pends
+    // forever (zero overhead); on breach the session dies like a cancel
+    // but reports `budget_exceeded` (failed, not cancelled).
+    let budget_hit = async {
+        if !sink.has_budget() {
+            std::future::pending::<()>().await;
+        }
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if sink.budget_breach().is_some() {
+                return;
+            }
+        }
+    };
+    tokio::pin!(budget_hit);
     let outcome = tokio::select! {
         res = &mut prompt => match res {
             Ok(_) => {
@@ -483,6 +499,28 @@ async fn drive_acp_session(
             )
             .await;
             AcpResult { success: false, error_code: Some("timeout".into()), session_id: Some(session_id.clone()), rate_limited: false }
+        }
+        _ = &mut budget_hit => {
+            let field = sink.budget_breach().unwrap_or("max_tokens");
+            sink.emit_budget_exceeded_error(field).await;
+            tracing::warn!(
+                attempt_id = %assignment.attempt_id,
+                field,
+                "per-task cost ceiling breached; killing ACP session"
+            );
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                acp.session_cancel(SessionCancelParams { session_id: session_id.clone() }),
+            )
+            .await;
+            terminate_group(pid);
+            sandbox::remove_sandbox_container(&assignment.attempt_id).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(12),
+                child.wait(),
+            )
+            .await;
+            AcpResult { success: false, error_code: Some("budget_exceeded".into()), session_id: Some(session_id.clone()), rate_limited: false }
         }
     };
     stream_task.abort();

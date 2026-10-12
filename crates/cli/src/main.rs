@@ -393,6 +393,13 @@ struct RunArgs {
     /// first — project assembly from scratch.
     #[arg(long = "github-create")]
     github_create: bool,
+    /// Per-task token ceiling: kill the attempt with `budget_exceeded` when
+    /// reported adapter usage passes it (autopilot safety).
+    #[arg(long = "max-tokens")]
+    max_tokens: Option<u64>,
+    /// Per-task cost ceiling in cents (same enforcement as --max-tokens).
+    #[arg(long = "max-cost-cents")]
+    max_cost_cents: Option<u64>,
 }
 
 #[derive(Args)]
@@ -807,6 +814,8 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -975,6 +984,8 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: None,
+                max_cost_cents: None,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1040,6 +1051,8 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 max_attempts: 1,
                 consensus_mode: None,
                 review_of: None,
+                max_tokens: a.max_tokens,
+                max_cost_cents: a.max_cost_cents,
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1091,6 +1104,8 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         max_attempts: a.max_attempts,
         consensus_mode: None,
         review_of: None,
+        max_tokens: a.max_tokens,
+        max_cost_cents: a.max_cost_cents,
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1727,6 +1742,8 @@ async fn cmd_review(client: &reqwest::Client, base: &str, a: ReviewArgs) -> Resu
             consensus_member: Some(member.clone()),
             consensus_mode: Some("review".into()),
             review_of: Some(a.task.clone()),
+            max_tokens: None,
+            max_cost_cents: None,
             ..Default::default()
         };
         let resp = client

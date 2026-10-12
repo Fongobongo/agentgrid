@@ -16,8 +16,8 @@ use crate::completion::{terminate_group, wait_bounded, BoundedExit};
 use crate::event_sink::{read_stream, EventSink};
 
 /// Outcome of a supervised adapter run: the process exit code plus why it was
-/// cut short (`timeout` / `cancelled` / `resource_limit:<reason>` / `None` =
-/// natural exit).
+/// cut short (`timeout` / `cancelled` / `resource_limit:<reason>` /
+/// `budget_exceeded` / `None` = natural exit).
 #[derive(Debug, Clone)]
 pub struct SupervisedRun {
     pub code: i32,
@@ -73,7 +73,26 @@ pub async fn supervise_adapter(
     ));
 
     let (code, kill_reason): (i32, Option<String>) = {
-        match wait_bounded(&mut child, timeout, attempt_id, cancel_client, cancel_url).await? {
+        // Per-task cost ceilings: race the bounded wait against a 1s budget
+        // poll. Without a configured budget the future pends forever (zero
+        // overhead, no behaviour change); on breach the run is killed like a
+        // cancel, but reported as `budget_exceeded` (failed, not cancelled).
+        let budget_hit = async {
+            if !sink.has_budget() {
+                std::future::pending::<()>().await;
+            }
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if sink.budget_breach().is_some() {
+                    return;
+                }
+            }
+        };
+        tokio::pin!(budget_hit);
+        tokio::select! {
+            exit = wait_bounded(&mut child, timeout, attempt_id, cancel_client, cancel_url) => {
+                match exit?
+                {
             BoundedExit::Exited(c) => {
                 // Stage 12 / ADR 0003: a sandboxed attempt may have been
                 // OOM-killed by the container runtime — the exit code alone
@@ -124,6 +143,31 @@ pub async fn supervise_adapter(
                 (
                     status.and_then(|s| s.code()).unwrap_or(-1),
                     Some("cancelled".to_string()),
+                )
+            }
+            }
+            },
+            _ = &mut budget_hit => {
+                // Per-task cost ceiling tripped mid-run: terminal error event
+                // first (so the trail shows why), then the same kill +
+                // bounded reap as a cancel. Reported as `budget_exceeded`
+                // (failed), never `cancelled`.
+                let field = sink.budget_breach().unwrap_or("max_tokens");
+                sink.emit_budget_exceeded_error(field).await;
+                tracing::warn!(
+                    attempt_id,
+                    field,
+                    "per-task cost ceiling breached; killing attempt"
+                );
+                terminate_group(pid);
+                crate::sandbox::remove_sandbox_container(attempt_id).await;
+                let status = tokio::time::timeout(std::time::Duration::from_secs(15), child.wait())
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
+                (
+                    status.and_then(|s| s.code()).unwrap_or(-1),
+                    Some("budget_exceeded".to_string()),
                 )
             }
         }

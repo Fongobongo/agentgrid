@@ -133,6 +133,8 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     let resp = app
         .clone()

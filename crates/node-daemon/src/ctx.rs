@@ -643,6 +643,8 @@ mod tests {
             github_base_ref: None,
             github_create: false,
             workflow_role: None,
+            max_tokens: None,
+            max_cost_cents: None,
         }
     }
 

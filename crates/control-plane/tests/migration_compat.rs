@@ -128,6 +128,8 @@ async fn migrations_serve_legacy_happy_path() {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         })
         .await
         .unwrap();
@@ -239,6 +241,8 @@ async fn foreign_keys_enforced_after_migration_0040() {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         })
         .await
         .unwrap();

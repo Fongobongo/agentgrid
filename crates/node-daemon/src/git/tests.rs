@@ -68,6 +68,8 @@ fn make_assignment(git_url: &str, default_branch: &str) -> Assignment {
         github_base_ref: None,
         github_create: false,
         workflow_role: None,
+        max_tokens: None,
+        max_cost_cents: None,
     }
 }
 
@@ -658,6 +660,8 @@ fn parallel_prep_same_repo_does_not_race() {
                 github_base_ref: None,
                 github_create: false,
                 workflow_role: None,
+                max_tokens: None,
+                max_cost_cents: None,
             };
             prepare_workspace(&repos, &ws_root, &a, &[], &[])
         }));

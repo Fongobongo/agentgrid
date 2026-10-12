@@ -314,6 +314,10 @@ jobs:
       # /metrics counters). Process-based, no docker, no LLM.
       - name: cost tracking (usage in, breach out)
         run: bash tests/e2e/run-budget-tokens.sh
+      # Per-task ceilings: a capped mock task dies budget_exceeded while an
+      # identical uncapped twin succeeds. Process-based, no docker, no LLM.
+      - name: per-task cost ceilings
+        run: bash tests/e2e/run-task-budget.sh
       # One-button assembly: POST /v1/assembly with a goal → plan-stub
       # architect → auto-approve → workers → system collector. No LLM.
       - name: one-button assembly (goal in, merged project out)

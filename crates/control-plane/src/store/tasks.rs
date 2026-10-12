@@ -32,8 +32,8 @@ impl Store {
         let now = now_iso();
         let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
         sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_attempts, consensus_mode, review_of) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&req.repository)
@@ -60,6 +60,8 @@ impl Store {
         .bind(req.max_attempts)
         .bind(req.consensus_mode.as_deref().unwrap_or("solve"))
         .bind(&req.review_of)
+        .bind(req.max_tokens.map(|v| v as i64))
+        .bind(req.max_cost_cents.map(|v| v as i64))
         .execute(&self.pool)
         .await?;
         Ok(TaskView {
@@ -91,6 +93,8 @@ impl Store {
             max_attempts: req.max_attempts,
             consensus_mode: req.consensus_mode.clone(),
             review_of: req.review_of.clone(),
+            max_tokens: req.max_tokens,
+            max_cost_cents: req.max_cost_cents,
         })
     }
 
@@ -176,7 +180,7 @@ impl Store {
         let mut sql = String::from(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, network_mode, group_id, agent_id, \
                     (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
-                    consensus_group_id, consensus_member, opencode_override, github_repo, github_issue, github_base_ref, github_create, rework_of, max_attempts, consensus_mode, review_of \
+                    consensus_group_id, consensus_member, opencode_override, github_repo, github_issue, github_base_ref, github_create, max_tokens, max_cost_cents, rework_of, max_attempts, consensus_mode, review_of \
              FROM tasks WHERE 1=1",
         );
         if after.is_some() {
@@ -230,7 +234,7 @@ impl Store {
                     tasks.base_commit, tasks.parent_acp_session_id, tasks.network_mode, tasks.group_id, tasks.agent_id, \
                     (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
                     tasks.consensus_group_id, tasks.consensus_member, tasks.opencode_override, \
-                    tasks.github_repo, tasks.github_issue, tasks.github_base_ref, tasks.github_create, tasks.rework_of, tasks.max_attempts, tasks.consensus_mode, tasks.review_of \
+                    tasks.github_repo, tasks.github_issue, tasks.github_base_ref, tasks.github_create, tasks.max_tokens, tasks.max_cost_cents, tasks.rework_of, tasks.max_attempts, tasks.consensus_mode, tasks.review_of \
              FROM tasks JOIN tasks_fts ON tasks_fts.rowid = tasks.rowid \
              WHERE tasks_fts MATCH ? \
              ORDER BY bm25(tasks_fts) LIMIT 50",
@@ -320,7 +324,7 @@ impl Store {
         let row = sqlx::query(
             "SELECT id, repository, prompt, adapter, status, created_at, finished_at, assigned_attempt_id, validation_command, error_code, requested_node_id, base_commit, parent_acp_session_id, network_mode, group_id, agent_id, \
                     (SELECT provenance FROM attempts WHERE task_id = tasks.id ORDER BY number DESC LIMIT 1) AS attempt_provenance, \
-                    consensus_group_id, consensus_member, opencode_override, github_repo, github_issue, github_base_ref, github_create, rework_of, max_attempts, consensus_mode, review_of \
+                    consensus_group_id, consensus_member, opencode_override, github_repo, github_issue, github_base_ref, github_create, max_tokens, max_cost_cents, rework_of, max_attempts, consensus_mode, review_of \
              FROM tasks WHERE id = ?",
         )
         .bind(id)
@@ -463,9 +467,9 @@ pub(crate) async fn insert_task_tx(
     let now = now_iso();
     let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
     sqlx::query(
-        "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, max_attempts, consensus_mode, review_of) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
     .bind(&id)
     .bind(&req.repository)
     .bind(&req.prompt)
@@ -488,10 +492,12 @@ pub(crate) async fn insert_task_tx(
     .bind(req.github_issue)
     .bind(&req.github_base_ref)
     .bind(req.max_attempts)
-    .bind(req.consensus_mode.as_deref().unwrap_or("solve"))
-    .bind(&req.review_of)
-    .execute(tx)
-    .await?;
+        .bind(req.consensus_mode.as_deref().unwrap_or("solve"))
+        .bind(&req.review_of)
+        .bind(req.max_tokens.map(|v| v as i64))
+        .bind(req.max_cost_cents.map(|v| v as i64))
+        .execute(tx)
+        .await?;
     Ok(TaskView {
         id,
         repository: req.repository.clone(),
@@ -521,5 +527,7 @@ pub(crate) async fn insert_task_tx(
         max_attempts: req.max_attempts,
         consensus_mode: req.consensus_mode.clone(),
         review_of: req.review_of.clone(),
+        max_tokens: req.max_tokens,
+        max_cost_cents: req.max_cost_cents,
     })
 }

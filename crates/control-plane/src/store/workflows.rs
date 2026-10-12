@@ -1914,6 +1914,8 @@ impl Store {
                                             max_attempts: 1,
                                             consensus_mode: None,
                                             review_of: None,
+                                            max_tokens: None,
+                                            max_cost_cents: None,
                                         };
                                         let tv = match self.create_task(&req).await {
                                             Ok(tv) => tv,
@@ -2040,6 +2042,8 @@ impl Store {
                                                     max_attempts: 1,
                                                     consensus_mode: None,
                                                     review_of: None,
+                                                    max_tokens: None,
+                                                    max_cost_cents: None,
                                                 };
                                                 match self.create_task(&req).await {
                                                     Ok(tv) => {
@@ -2198,6 +2202,8 @@ impl Store {
                             max_attempts: 1,
                             consensus_mode: None,
                             review_of: None,
+                            max_tokens: None,
+                            max_cost_cents: None,
                         };
                         // Claim the pending→running transition before creating
                         // the task: the background ticker and the

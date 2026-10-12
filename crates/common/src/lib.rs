@@ -332,6 +332,14 @@ pub struct CreateTaskRequest {
     /// review group judges. `None` for solve groups and independent tasks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_of: Option<String>,
+    /// Per-task cost ceilings (autopilot safety): the attempt is killed with
+    /// `error_code = "budget_exceeded"` when reported adapter usage passes
+    /// either ceiling. `None` = unbounded (budgets still live on workflow
+    /// templates). Zero is allowed and means zero tolerance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
     /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
     /// Node policy sets max allowed mode; task requests a mode <= node max.
     #[serde(default)]
@@ -478,6 +486,11 @@ pub struct TaskView {
     /// (echoed from CreateTaskRequest; 1 = no auto-retry).
     #[serde(default = "default_task_max_attempts")]
     pub max_attempts: u32,
+    /// Per-task cost ceilings, echoed from CreateTaskRequest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
 }
 
 /// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
@@ -751,6 +764,12 @@ pub struct Assignment {
     /// nodes/CPs ignore it safely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_role: Option<String>,
+    /// Per-task cost ceilings (see `CreateTaskRequest`); enforced by the
+    /// node mid-attempt. Optional + defaulted for N/N-1 safety.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1888,6 +1907,8 @@ mod tests {
             max_attempts: 1,
             consensus_mode: None,
             review_of: None,
+            max_tokens: None,
+            max_cost_cents: None,
         };
         assert_eq!(round_trip(&req), req);
         // Competitor-gap feature (task-level auto-retry): absent on the wire
@@ -1961,6 +1982,8 @@ mod tests {
                 github_base_ref: None,
                 github_create: false,
                 workflow_role: None,
+                max_tokens: None,
+                max_cost_cents: None,
             }),
             assignments: vec![],
             proxy_urls: vec![],

@@ -147,6 +147,8 @@ pub async fn append_conversation_message(
         max_attempts: 1,
         consensus_mode: None,
         review_of: None,
+        max_tokens: None,
+        max_cost_cents: None,
     };
     // Audit X-C6: persist the user turn FIRST, then create the task, then
     // link the two. The old order (create_task → append) meant a failed

@@ -56,6 +56,13 @@ pub struct EventSink {
     /// during this attempt; carried on the completion so an `expandable`
     /// architect step can pause its workflow run in `PlanReady`.
     plan: std::sync::Mutex<Option<String>>,
+    /// Per-task cost ceilings (autopilot safety): cumulative adapter-reported
+    /// usage. `set_budget` installs them at attempt start; `budget_breach`
+    /// reports the first breached ceiling. Strict `>`, mirroring
+    /// `WorkflowBudget::check`.
+    tokens_total: AtomicU64,
+    cost_total: AtomicU64,
+    budget: std::sync::Mutex<(Option<u64>, Option<u64>)>,
 }
 
 impl EventSink {
@@ -82,6 +89,9 @@ impl EventSink {
             dropped_bytes: AtomicU64::new(0),
             spool_full: AtomicBool::new(false),
             plan: std::sync::Mutex::new(None),
+            tokens_total: AtomicU64::new(0),
+            cost_total: AtomicU64::new(0),
+            budget: std::sync::Mutex::new((None, None)),
         })
     }
 
@@ -97,6 +107,40 @@ impl EventSink {
     /// completion can carry it to the control plane.
     pub fn take_plan(&self) -> Option<String> {
         self.plan.lock().ok().and_then(|mut g| g.take())
+    }
+
+    /// Per-task cost ceilings from the assignment (`None` = unbounded).
+    /// Installed once at attempt start, before any adapter output flows.
+    pub fn set_budget(&self, max_tokens: Option<u64>, max_cost_cents: Option<u64>) {
+        if let Ok(mut g) = self.budget.lock() {
+            *g = (max_tokens, max_cost_cents);
+        }
+    }
+
+    /// The first breached ceiling (`"max_tokens"` / `"max_cost_cents"`), or
+    /// `None` when unbounded or within budget. Lock-free read of the
+    /// accumulated totals against the installed ceilings.
+    pub fn budget_breach(&self) -> Option<&'static str> {
+        let (max_tokens, max_cost) = self.budget.lock().ok().map(|g| *g).unwrap_or((None, None));
+        if let Some(limit) = max_tokens {
+            if self.tokens_total.load(Ordering::Relaxed) > limit {
+                return Some("max_tokens");
+            }
+        }
+        if let Some(limit) = max_cost {
+            if self.cost_total.load(Ordering::Relaxed) > limit {
+                return Some("max_cost_cents");
+            }
+        }
+        None
+    }
+
+    pub fn has_budget(&self) -> bool {
+        self.budget
+            .lock()
+            .ok()
+            .map(|g| g.0.is_some() || g.1.is_some())
+            .unwrap_or(false)
     }
 
     /// Record that an event originated from the adapter output (not the
@@ -136,6 +180,23 @@ impl EventSink {
     }
 
     pub async fn push(&self, ty: EventType, payload: Value) {
+        // Per-task cost ceilings: accumulate adapter-reported usage FIRST,
+        // before the backpressure drop below — a dropped metric event is
+        // still real spend, and the ceiling must count it (fail-closed
+        // direction: count early, never under-count).
+        if ty == EventType::Metric {
+            let tokens = payload.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let cost = payload
+                .get("cost_cents")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if tokens > 0 {
+                self.tokens_total.fetch_add(tokens, Ordering::Relaxed);
+            }
+            if cost > 0 {
+                self.cost_total.fetch_add(cost, Ordering::Relaxed);
+            }
+        }
         // Stage 2.1 backpressure: ordinary log/usage events are dropped (with a
         // single `output_truncated` notice) once the RAM buffer exceeds the per-
         // attempt cap, so a chatty agent can't wedge the node. Terminal state
@@ -251,6 +312,31 @@ impl EventSink {
 
     pub fn spool_full(&self) -> bool {
         self.spool_full.load(Ordering::Relaxed)
+    }
+
+    /// Emit the terminal `budget_exceeded` error event when a per-task cost
+    /// ceiling trips. Best-effort like `emit_spool_full_error`; the
+    /// completion carries the same code (callers map the kill reason).
+    pub async fn emit_budget_exceeded_error(&self, field: &str) {
+        let seq = self.next.fetch_add(1, Ordering::SeqCst);
+        let ev = IncomingEvent {
+            sequence: seq,
+            r#type: EventType::Error,
+            payload: json!({
+                "error_code": "budget_exceeded",
+                "field": field,
+                "tokens_total": self.tokens_total.load(Ordering::Relaxed),
+                "cost_total": self.cost_total.load(Ordering::Relaxed),
+                "error": format!("per-task cost ceiling breached ({field}); attempt killed"),
+            }),
+        };
+        if let Err(e) = self.outbox.push(&ev) {
+            tracing::warn!(attempt_id = %self.attempt_id, "outbox push (budget) failed: {e}");
+        }
+        let approx_bytes = ev.payload.to_string().len() as u64;
+        self.buf_bytes.fetch_add(approx_bytes, Ordering::Relaxed);
+        self.buf.lock().await.push_back(ev);
+        self.notify.notify_one();
     }
 
     /// Flush the RAM buffer to the CP; on partial failure the unacked tail is
@@ -696,5 +782,49 @@ mod plan_capture_tests {
         .await;
         assert_eq!(sink.take_plan().as_deref(), Some("plan-b"));
         assert!(sink.take_plan().is_none(), "take is consuming");
+    }
+
+    #[tokio::test]
+    async fn budget_accumulates_metric_usage_and_trips_strictly_over() {
+        let sink = test_sink("plan-budget");
+        assert!(!sink.has_budget());
+        assert_eq!(sink.budget_breach(), None);
+        sink.set_budget(Some(100), Some(5));
+        assert!(sink.has_budget());
+        // Under the ceilings: no breach (strict `>`, equality passes).
+        sink.push(EventType::Metric, json!({ "tokens": 100, "cost_cents": 5 }))
+            .await;
+        assert_eq!(sink.budget_breach(), None);
+        // One token over trips max_tokens first.
+        sink.push(EventType::Metric, json!({ "tokens": 1, "cost_cents": 0 }))
+            .await;
+        assert_eq!(sink.budget_breach(), Some("max_tokens"));
+        // Cost ceiling trips independently.
+        let sink2 = test_sink("plan-budget-cost");
+        sink2.set_budget(None, Some(5));
+        sink2
+            .push(EventType::Metric, json!({ "tokens": 999, "cost_cents": 6 }))
+            .await;
+        assert_eq!(sink2.budget_breach(), Some("max_cost_cents"));
+        // Non-metric events never feed the totals.
+        let sink3 = test_sink("plan-budget-noise");
+        sink3.set_budget(Some(0), Some(0));
+        sink3.push(EventType::Stdout, json!({ "text": "hi" })).await;
+        assert_eq!(sink3.budget_breach(), None);
+        // The terminal error event carries the code + observed totals.
+        sink.emit_budget_exceeded_error("max_tokens").await;
+        let buf = sink.buffered_events().await;
+        let err = buf
+            .iter()
+            .find(|e| e.r#type == EventType::Error)
+            .expect("budget error event emitted");
+        assert_eq!(
+            err.payload.get("error_code").and_then(|v| v.as_str()),
+            Some("budget_exceeded")
+        );
+        assert_eq!(
+            err.payload.get("field").and_then(|v| v.as_str()),
+            Some("max_tokens")
+        );
     }
 }
