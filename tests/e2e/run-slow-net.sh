@@ -78,39 +78,55 @@ else
 fi
 [ "$STATUS" = "succeeded" ] || { echo "  FAILED: expected succeeded, got $STATUS"; cat "$TMP/cp.log"; cat "$TMP/slow.log"; exit 1; }
 
-echo "  checking event continuity (expect 200 spam lines, contiguous sequences)"
+echo "  checking event continuity (expect 200 spam lines, no loss/dups)"
 # Grace: completion can overtake the last flush, and under the throttle with
-# node concurrency=2 a straggler can lag behind the count threshold (event N+1
-# visible while N is still queued) — so poll until the sequences are
-# CONTIGUOUS, not just numerous. A true loss still fails below after the
-# timeout, with the gap printed.
+# node concurrency=2 a straggler can lag behind (event N+1 visible while N is
+# still queued) — so poll until the stream is whole, not just numerous.
+# A true loss still fails below after the timeout, with full diagnostics.
+#
+# Invariant (deliberately GLOBAL, not stdout-only): the task sequence space
+# is shared across event types — node-side events (e.g. child_peak_rss) and
+# the adapter's own result event legitimately interleave with stdout lines
+# (the CP even documents this outage class in store/attempts.rs). Asserting
+# contiguity over stdout seqs alone false-positives on every such interleave.
+# The true no-loss/no-dup invariant is: every sequence in [min..max] present
+# exactly once across ALL types, plus every spam line present by content.
 EV=""
 for _ in $(seq 1 90); do
   EV=$(curl -fsS "$BASE_REAL/v1/tasks/$TID/events" -H "authorization: Bearer $jwt" 2>/dev/null || true)
   ok=$(printf '%s' "$EV" | python3 -c 'import sys,json
 try:
   ev=json.load(sys.stdin)
-  seqs=sorted(e["sequence"] for e in ev if e.get("type")=="stdout")
-  print(1 if len(seqs)>=200 and seqs==list(range(seqs[0],seqs[-1]+1)) else 0)
+  seqs=sorted(e["sequence"] for e in ev)
+  texts=[(e.get("payload") or {}).get("text","") for e in ev if e.get("type")=="stdout"]
+  whole=len(seqs)>=200 and seqs==list(range(seqs[0],seqs[-1]+1))
+  spam=all(any(f"spam line {i}" in t for t in texts) for i in range(200))
+  print(1 if (whole and spam) else 0)
 except Exception:
   print(0)' 2>/dev/null)
   [ "${ok:-0}" = "1" ] && break
   sleep 1
 done
-n=$(printf '%s' "$EV" | python3 -c 'import sys,json
-try:
-  ev=json.load(sys.stdin)
-  print(len([e for e in ev if e.get("type")=="stdout"]))
-except Exception:
-  print(0)' 2>/dev/null)
-[ "${n:-0}" -ge 200 ] || { echo "  FAILED: only $n stdout events (expected 200)"; cat "$TMP/cp.log"; cat "$TMP/slow.log"; exit 1; }
 
 printf '%s' "$EV" | python3 -c 'import sys,json
+from collections import Counter
 ev=json.load(sys.stdin)
-seqs=sorted(e["sequence"] for e in ev if e.get("type")=="stdout")
-assert len(seqs)>=200, f"too few: {len(seqs)}"
-assert seqs==list(range(seqs[0],seqs[-1]+1)), f"non-contiguous: {seqs[:5]}..{seqs[-5:]}"
-print(f"  {len(seqs)} stdout events, contiguous {seqs[0]}..{seqs[-1]}")'
+seqs=sorted(e["sequence"] for e in ev)
+types=Counter(e.get("type") for e in ev)
+print(f"  event types: {dict(types)}")
+print(f"  seq range: {seqs[0] if seqs else None}..{seqs[-1] if seqs else None} over {len(seqs)} events")
+missing=[s for s in range(seqs[0],seqs[-1]+1) if s not in set(seqs)] if seqs else []
+dups=[s for s,c in Counter(seqs).items() if c>1]
+print(f"  missing seqs: {missing}")
+print(f"  dup seqs: {dups}")
+texts=[(e.get("payload") or {}).get("text","") for e in ev if e.get("type")=="stdout"]
+absent=[i for i in range(200) if not any(f"spam line {i}" in t for t in texts)]
+print(f"  missing spam lines: {absent[:10]}{\"...\" if len(absent)>10 else \"\"} (total {len(absent)})")
+assert len(seqs)>=200, f"too few events: {len(seqs)}"
+assert not missing, f"event loss: {missing}"
+assert not dups, f"event duplicates: {dups}"
+assert not absent, f"spam lines missing: {absent}"
+print(f"  {len(seqs)} events, sequences {seqs[0]}..{seqs[-1]} exact, all 200 spam lines present")'
 
 echo "  B OK: chatty task completed under slow network, no gaps/dups"
 echo ">> slow-net OK"
