@@ -43,6 +43,9 @@ bootstrap_first_user "$TMP/cp.log" "$BASE" "$USER" "$PASS"
 e2e_login
 e2e_mint_token
 e2e_start_node n1 "e2e-autoasm-n1" "mock,plan-stub" "$TMP/w1" "$TMP/r1" "$TMP/n1" "PATH=$TMP/stubbin:$BIN:$PATH"
+# Enrollment tokens are one-shot: n1 consumed the minted token, so n2 needs
+# a freshly minted one (same pattern as run-cp-restart.sh).
+e2e_mint_token
 e2e_start_node n2 "e2e-autoasm-n2" "mock" "$TMP/w2" "$TMP/r2" "$TMP/n2"
 e2e_wait_nodes_online 2 || exit 1
 

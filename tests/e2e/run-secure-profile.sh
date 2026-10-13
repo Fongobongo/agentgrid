@@ -61,8 +61,11 @@ curl -fsS "$BASE/v1/tasks/$TID/eligibility" -H "authorization: Bearer $jwt" \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);rs=[r for n in d.get("nodes",[]) for r in n.get("reasons",[])];assert any("structured" in r for r in rs),"no structured-interception reason: %r"%rs;print("  eligibility reason present:",[r for r in rs if "structured" in r][0])'
 
 echo ">> adding structured (ACP) node: the same task must assign and succeed"
+# Enrollment tokens are one-shot: n1 consumed the minted token, so a second
+# node needs a freshly minted one (same pattern as run-cp-restart.sh).
+e2e_mint_token
 e2e_start_node n2 "e2e-secure-structured" "fake-acp:acp" "$TMP/w2" "$TMP/r2" "$TMP/n2"
-e2e_wait_nodes_online 2 || exit 1
+e2e_wait_nodes_online 2 || { echo "--- nodes API:"; curl -s "$BASE/v1/nodes" -H "authorization: Bearer $jwt" || true; echo "--- n2 log:"; cat "$TMP/n2.log" || true; echo "--- cp log tail:"; tail -50 "$TMP/cp.log" || true; exit 1; }
 e2e_wait_terminal 120 "$TID" || { echo "  task never terminal: $STATUS"; cat "$TMP/n2.log"; exit 1; }
 [ "$STATUS" = "succeeded" ] || { echo "  FAILED: expected succeeded on structured node, got $STATUS"; cat "$TMP/n2.log"; exit 1; }
 echo "  strict task succeeded on the structured node"
