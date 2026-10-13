@@ -90,7 +90,13 @@ for _ in $(seq 1 150); do
   esac
   sleep 2
 done
-[ "$status" = "succeeded" ] || { echo "  FAILED: run $RID -> $status"; exit 1; }
+[ "$status" = "succeeded" ] || { echo "  FAILED: run $RID -> $status";
+  echo "--- run projection (per-step status):";
+  curl -fsS "$BASE/v1/workflow-runs/$RID/projection" -H "authorization: Bearer $jwt" 2>/dev/null \
+    | python3 -c 'import sys,json; [print("   ",s.get("step_id"),s.get("status"),s.get("task_id")) for s in json.load(sys.stdin)["steps"]]' || true;
+  echo "--- nodes:"; curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt" 2>/dev/null \
+    | python3 -c 'import sys,json;d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d;[print("   ",n.get("name"),n.get("status")) for n in ns]' || true;
+  echo "--- cp log tail:"; tail -30 "$TMP/cp.log" || true; exit 1; }
 echo "  run succeeded"
 
 echo ">> collector task must carry both parts in its patch"
