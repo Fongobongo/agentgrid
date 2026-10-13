@@ -8,7 +8,14 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
+# Issue #78: serde_yaml 0.9 is deprecated and pulls unmaintained
+# unsafe-libyaml (RUSTSEC-2024-0449). serde-saphyr is pure Rust
+# (#![forbid(unsafe)]), actively maintained, and keeps YAML 1.1 boolean
+# compatibility for bool fields — the only YAML consumer in the workspace
+# is workflow-manifest deserialization (no serialization needed, but the
+# default features are kept: trimming them saves nothing measurable and
+# non-default feature combos are less tested upstream).
+serde-saphyr = "1"
 sha2.workspace = true
 uuid.workspace = true
 chrono.workspace = true

@@ -28,15 +28,6 @@ yanked = "deny"
 # longer pulls `rsa` at all, so the rule was removed — re-add only if the
 # crate lands back in Cargo.lock.
 ignore = [
-    # RUSTSEC-2024-0449: unsafe-libyaml is unmaintained (archived 2024-03-25).
-    # Pulled transitively by serde_yaml 0.9 (itself deprecated) via
-    # agentgrid-common's workflow-manifest parsing. No maintained serde_yaml
-    # fork drops the unsafe-libyaml backend (serde_yaml_ng keeps it;
-    # serde_norway is equally stale), so a backend migration is a separate
-    # task — tracked as GitHub issue #78 (filed by audit-check). Scoped to
-    # this advisory ID only: any *new* unmaintained crate still fails.
-    # Drop this entry once serde_yaml is migrated away.
-    { id = "RUSTSEC-2024-0449", reason = "serde_yaml 0.9 tech debt, tracked in #78; no fixed upstream exists" },
     # RUSTSEC-2023-0071 (rsa Marvin Attack, no patch available). Pulled by
     # jsonwebtoken 11 via its `rust_crypto` backend (the only pure-Rust
     # backend; aws_lc_rs would need a C toolchain in the musl/static release

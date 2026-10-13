@@ -5,7 +5,7 @@
 //! YAML engine: the SKILL.md contract is small and we want zero new runtime deps.
 //!
 //! ponytail: flat-schema parser only; nested/complex YAML is downgraded to a
-//! warning in lenient mode and an error in strict mode. Swap for `serde_yaml`
+//! warning in lenient mode and an error in strict mode. Swap for `serde-saphyr`
 //! if real-world skills need nested structures.
 
 use std::collections::{BTreeMap, HashMap};

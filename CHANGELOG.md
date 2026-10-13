@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **Issue #78 fixed: unsafe-libyaml gone.** `serde_yaml` 0.9 (deprecated)
+  was the sole consumer of unmaintained `unsafe-libyaml` (RUSTSEC-2024-0449).
+  Workflow-manifest parsing in `agentgrid-common` now uses `serde-saphyr` 1.3
+  (pure Rust `#![forbid(unsafe)]`, fuzz-tested, actively maintained) — the
+  swap surface was three `from_str` call sites plus the `from_yaml` error
+  type; no `Value`/serialization usage existed. Parity: full workspace suite
+  green (98/98 common tests incl. YAML error-message assertions), the real
+  `.agentgrid/workflows/ci-fix.yaml` validates identically (4 steps), and
+  serde-saphyr keeps YAML 1.1 boolean compatibility for bool fields. The
+  RUSTSEC-2024-0449 ignore was removed from `deny.toml` (it would now trip
+  `unused-ignored-advisory`).
 - **Stale dependabot queue cleared (PR #69–77 superseded).** Nine September
   bump PRs were unmergable-stale and pinning the queue at 9/10 open:
   applied all of them directly, newer where available — `uuid` 1.26.0→1.28.0,

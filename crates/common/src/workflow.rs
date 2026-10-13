@@ -84,8 +84,9 @@ impl From<PlanRole> for WorkflowRole {
 /// named error string, or the steps on success. Both YAML and JSON arrays are
 /// accepted at the same API field — YAML dovetails with the existing
 /// workflow-template language.
-/// ponytail: splitting `serde_yaml` out for the architect's free-form plan is
-/// speculative; reuse the canonical YAML deserializer via serde for both forms.
+/// ponytail: splitting the YAML deserializer out for the architect's free-form
+/// plan is speculative; reuse the canonical YAML deserializer via serde for
+/// both forms.
 pub fn parse_plan_steps(plan: &str) -> Result<Vec<WorkflowStep>, String> {
     if plan.trim().is_empty() {
         return Err("plan is empty".into());
@@ -93,7 +94,7 @@ pub fn parse_plan_steps(plan: &str) -> Result<Vec<WorkflowStep>, String> {
     let parsed: Vec<PlanStep> = if plan.trim_start().starts_with('[') {
         serde_json::from_str(plan).map_err(|e| format!("json parse: {e}"))?
     } else {
-        serde_yaml::from_str(plan).map_err(|e| format!("yaml parse: {e}"))?
+        serde_saphyr::from_str(plan).map_err(|e| format!("yaml parse: {e}"))?
     };
     if parsed.is_empty() {
         return Err("plan declares no steps".into());
@@ -496,8 +497,8 @@ pub struct WorkflowTemplate {
 impl WorkflowTemplate {
     /// Parse a template from YAML (Stage 8 convenience; the control plane also
     /// accepts YAML bodies on `POST /v1/workflows`).
-    pub fn from_yaml(s: &str) -> Result<Self, serde_yaml::Error> {
-        serde_yaml::from_str(s)
+    pub fn from_yaml(s: &str) -> Result<Self, serde_saphyr::Error> {
+        serde_saphyr::from_str(s)
     }
 
     /// Plan 1.9 (#17): read a workflow from a `.agentgrid/workflows/*.yaml` file
@@ -511,7 +512,7 @@ impl WorkflowTemplate {
     ) -> Result<Self, String> {
         let body = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
         let mut tmpl: WorkflowTemplate =
-            serde_yaml::from_str(&body).map_err(|e| format!("yaml parse {path}: {e}"))?;
+            serde_saphyr::from_str(&body).map_err(|e| format!("yaml parse {path}: {e}"))?;
         if tmpl.id.is_empty() {
             tmpl.id = "__from_yaml__".into();
         }
@@ -690,8 +691,8 @@ steps:
         assert!(err.contains("cycle"), "err: {err}");
         std::fs::remove_file(&p).ok();
 
-        // serde_yaml rejects a missing `prompt` at parse time before the schema
-        // check runs — the error must still name `prompt`.
+        // The deserializer rejects a missing `prompt` at parse time before the
+        // schema check runs — the error must still name `prompt`.
         let p = write_tmp("noprompt", "name: ci\nsteps:\n  - id: a\n");
         let err = WorkflowTemplate::read_workflow_yaml(&p, None).unwrap_err();
         assert!(err.contains("prompt"), "err: {err}");
