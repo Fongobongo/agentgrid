@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-13
+
 ### Fixed
 
 - **CI resurrected after a month of silent death.** Since 2026-09-14 every
