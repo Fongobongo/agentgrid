@@ -42,7 +42,12 @@ futures-core = "0.3"
 futures-util = "0.3"
 argon2 = "0.6"
 password-hash = { version = "0.6", features = ["getrandom", "phc"] }
-jsonwebtoken = "9"
+# jsonwebtoken 11 has no default crypto backend (ring is gone): exactly one of
+# `rust_crypto` / `aws_lc_rs` must be enabled or every encode/decode panics
+# at runtime ("Could not automatically determine the process-level
+# CryptoProvider"). rust_crypto = pure Rust, no C toolchain — the only sane
+# choice for the musl/static release builds (aws_lc_rs needs cmake + C++).
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 rand = "0.10"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # Stage 11.5 TUI: full-screen dashboards (ratatui + crossterm backend).

@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **Stale dependabot queue cleared (PR #69–77 superseded).** Nine September
+  bump PRs were unmergable-stale and pinning the queue at 9/10 open:
+  applied all of them directly, newer where available — `uuid` 1.26.0→1.28.0,
+  `clap` 4.6.6→4.6.7, `async-compression` 0.4.47→0.4.50, `rand` 0.10.2→0.10.3,
+  `clap_complete` 4.6.9→4.6.11, `opentelemetry`/`opentelemetry_sdk`/
+  `opentelemetry-prometheus` 0.32.x→0.33.1 (one coordinated commit, not three
+  separate PRs), `jsonwebtoken` 9.3.1→11.1.0. The jsonwebtoken major is NOT
+  drop-in: v11 needs an explicit crypto backend — enabled `rust_crypto`
+  (pure Rust; `aws_lc_rs` would need a C toolchain in the musl/static
+  release builds). It pulls the `rsa` crate (RUSTSEC-2023-0071, unpatched):
+  scoped ignore in `deny.toml` + `supply-chain.yml` — our JWT usage is
+  HMAC-only (HS256, `from_secret`, default `Validation`), so the RSA timing
+  path is unreachable; re-evaluate if RSA is ever configured. Full workspace
+  suite green, including the `agent_session` JWT round-trip that caught the
+  missing backend.
 - **Supply-chain gate green again.** `cargo audit` failed on six live
   RustSec advisories in `Cargo.lock` (five `quinn-proto` 0.11.16
   RUSTSEC-2026-0338…0342 via reqwest/http3, one `rustls` 0.23.44

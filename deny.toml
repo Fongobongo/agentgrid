@@ -37,6 +37,17 @@ ignore = [
     # this advisory ID only: any *new* unmaintained crate still fails.
     # Drop this entry once serde_yaml is migrated away.
     { id = "RUSTSEC-2024-0449", reason = "serde_yaml 0.9 tech debt, tracked in #78; no fixed upstream exists" },
+    # RUSTSEC-2023-0071 (rsa Marvin Attack, no patch available). Pulled by
+    # jsonwebtoken 11 via its `rust_crypto` backend (the only pure-Rust
+    # backend; aws_lc_rs would need a C toolchain in the musl/static release
+    # builds). Our JWT usage is HMAC-only: Header::default() (HS256),
+    # EncodingKey/DecodingKey::from_secret, Validation::default() — no RSA
+    # keys are configured and no RSA code path is reachable, so the timing
+    # side channel does not apply (advisory workaround: avoid RSA where
+    # attackers observe timing; we do no RSA at all). Mirrored in
+    # supply-chain.yml (audit-check ignore). Re-evaluate the day an RSA
+    # algorithm is configured anywhere.
+    { id = "RUSTSEC-2023-0071", reason = "HMAC-only HS256 usage; rsa linked but unreachable" },
 ]
 
 [licenses]
