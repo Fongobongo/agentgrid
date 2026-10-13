@@ -32,6 +32,14 @@
     zeroshot stub (like every adapter binary) prints `zeroshot 0.1.0-stub`
     → node reported degraded and zeroshot E2E never started. `probe_decision`
     now matches the first digit-led token, fail-closed otherwise.
+  - zeroshot kill/export ran `env_clear`-only, so the stub's state markers
+    landed in the /tmp default instead of the E2E state dir: both now forward
+    the attempt's operator env (the run path already did — an executor needing
+    cluster credentials for kill/export was broken the same way), and the E2E
+    passes its stub state via `AGENTGRID_ADAPTER_ENV`.
+  - enrollment tokens are one-shot, but secure/assemble/autoassembly E2E
+    started two nodes on one minted token — the second node could never
+    enroll. Fresh `e2e_mint_token` per node (the run-cp-restart.sh pattern).
 - **Issue #78 fixed: unsafe-libyaml gone.** `serde_yaml` 0.9 (deprecated)
   was the sole consumer of unmaintained `unsafe-libyaml` (RUSTSEC-2024-0449).
   Workflow-manifest parsing in `agentgrid-common` now uses `serde-saphyr` 1.3
