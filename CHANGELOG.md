@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **CI resurrected after a month of silent death.** Since 2026-09-14 every
+  CI run failed instantly with zero jobs: `ci.yml` had become unparseable
+  (unquoted step `name:` values containing a colon — `smoke: binaries…`,
+  three sites from the docker/tier1/arm64 commit), so GitHub created no jobs
+  at all and no rust/web/e2e validation ran on any push. Fixed by quoting
+  the names (found via `actionlint`, which now also runs as its own
+  `.github/workflows/lint-workflows.yml` gate — a separate file, so it still
+  fails loudly even if `ci.yml` itself breaks again).
 - **Issue #78 fixed: unsafe-libyaml gone.** `serde_yaml` 0.9 (deprecated)
   was the sole consumer of unmaintained `unsafe-libyaml` (RUSTSEC-2024-0449).
   Workflow-manifest parsing in `agentgrid-common` now uses `serde-saphyr` 1.3

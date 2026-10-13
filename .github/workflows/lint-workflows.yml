@@ -1,0 +1,34 @@
+name: Lint workflows
+
+# Guard against the Sept-2026 outage class: a single YAML syntax error in
+# ci.yml (an unquoted step `name:` containing a colon) made the whole CI file
+# unparseable, so GitHub created zero jobs and every CI run failed silently
+# for a month. This workflow lives in its OWN file, so it still runs (and
+# fails loudly with the exact error) even when ci.yml itself is broken.
+on:
+  push:
+    branches: [master]
+    paths: [".github/workflows/**"]
+  pull_request:
+    paths: [".github/workflows/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: download pinned actionlint
+        id: get_actionlint
+        # Official download script, pinned to the v1.7.12 tag AND an explicit
+        # tool version — no moving parts (neither `main` nor `latest`).
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+        shell: bash
+      - name: lint all workflow files
+        run: ${{ steps.get_actionlint.outputs.executable }}
+        shell: bash
