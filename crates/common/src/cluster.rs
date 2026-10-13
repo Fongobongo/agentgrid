@@ -77,18 +77,30 @@ pub fn probe_decision(
         (true, _) => (false, Some("container runtime not found".into())),
         (false, true) => (false, Some("executor binary not found".into())),
         (false, false) => match executor_version {
-            Some(v)
-                if crate::version::version_matches_req(v, required_prefix)
-                    || v.starts_with(required_prefix) =>
-            {
-                (true, None)
+            // `--version` output is free-form: real binaries print either a
+            // bare version ("0.1.0") or a name-prefixed one ("zeroshot
+            // 0.1.0-stub", like every adapter-mock "adapter-mock x.y.z").
+            // Match against the first whitespace-separated token that looks
+            // like a version (starts with an ASCII digit); fall back to the
+            // whole trimmed line so garbage still fails closed below.
+            Some(v) => {
+                let bare = v
+                    .split_whitespace()
+                    .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .unwrap_or(v.trim());
+                if crate::version::version_matches_req(bare, required_prefix)
+                    || bare.starts_with(required_prefix)
+                {
+                    (true, None)
+                } else {
+                    (
+                        false,
+                        Some(format!(
+                            "executor {v} does not match pinned prefix {required_prefix}"
+                        )),
+                    )
+                }
             }
-            Some(v) => (
-                false,
-                Some(format!(
-                    "executor {v} does not match pinned prefix {required_prefix}"
-                )),
-            ),
             None => (false, Some("executor version unknown".into())),
         },
     };
@@ -148,5 +160,22 @@ mod tests {
         // Legacy pins keep working through the prefix fallback.
         assert!(probe_decision(true, Some("0.9.1"), "0.", true).available);
         assert!(!probe_decision(true, Some("1.0.0"), "0.", true).available);
+    }
+
+    /// Stage 10 E2E: `--version` output is free-form — the zeroshot stub
+    /// prints "zeroshot 0.1.0-stub" (name-prefixed, like adapter-mock).
+    /// The pin must match the version token, not string position 0, while
+    /// garbage without any version-like token still fails closed.
+    #[test]
+    fn probe_accepts_name_prefixed_version() {
+        assert!(probe_decision(true, Some("zeroshot 0.1.0-stub"), "0.", true).available);
+        assert!(probe_decision(true, Some("adapter-mock 0.5.0"), "0.", true).available);
+        assert!(probe_decision(true, Some("0.1.0"), "0.", true).available);
+        assert!(!probe_decision(true, Some("zeroshot 1.0.0"), "0.", true).available);
+        assert!(!probe_decision(true, Some("no version here"), "0.", true).available);
+        assert!(!probe_decision(true, Some(""), "0.", true).available);
+        // Requirement form works on the extracted token too.
+        assert!(probe_decision(true, Some("zeroshot 0.5.9"), "^0.5", true).available);
+        assert!(!probe_decision(true, Some("zeroshot 0.6.0"), "^0.5", true).available);
     }
 }
