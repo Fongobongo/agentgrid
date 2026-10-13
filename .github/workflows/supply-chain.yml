@@ -28,13 +28,11 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # RUSTSEC-2024-0437 (protobuf 2.28 recursion crash): pulled by the
-          # `prometheus` crate for metric encoding only — no untrusted
-          # protobuf is parsed anywhere in the workspace. Mirrored in
-          # deny.toml; drop both when prometheus moves off protobuf 2.x.
-          # (RUSTSEC-2023-0071 dropped 2026-08-30: sqlx 0.9 no longer pulls rsa.)
-          # Comma-separated (the action expands each into its own --ignore).
-          ignore: RUSTSEC-2024-0437
+          # No active ignores: RUSTSEC-2024-0437 (protobuf 2.28) was dropped
+          # 2026-10-13 once prometheus moved to protobuf 3.x, and
+          # RUSTSEC-2023-0071 was dropped 2026-08-30 (sqlx 0.9 has no rsa).
+          # Re-add an `ignore:` (comma-separated) only with a justification
+          # comment + a mirror entry in deny.toml.
 
   cargo-deny:
     name: cargo deny
