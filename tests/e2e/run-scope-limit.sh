@@ -42,6 +42,31 @@ systemctl --user is-system-running >/dev/null 2>&1 \
   || { echo ">> skip: no reachable systemd user manager (try loginctl enable-linger \$USER)"; exit 0; }
 [ -f /sys/fs/cgroup/cgroup.controllers ] || { echo ">> skip: cgroups v2 not mounted"; exit 0; }
 
+# Enforcement canary (two steps): a reachable user manager does NOT imply
+# working scopes or enforceable limits (current GH runners answer
+# is-system-running but lack cgroup delegation into the user slice, so scope
+# creation misbehaves and MemoryMax is silently unenforced — scenario A would
+# then fail testing the HOST, not our code).
+#  1. A trivial scope must start at all.
+#  2. A 32M scope must OOM-kill a 128M allocation (rc!=0,quick); a clean
+#     exit (rc==0) means the allocation survived → limits unenforced → skip.
+echo ">> canary 1/2: trivial transient scope must start"
+timeout 30 systemd-run --user --scope -q --wait true 2>/dev/null \
+  || { echo ">> skip: transient scopes do not start on this host (no delegation?) — need a real systemd host"; exit 0; }
+echo ">> canary 2/2: 128M alloc in a 32M scope must die"
+if timeout 60 systemd-run --user --scope -q -p MemoryMax=32M --wait \
+  python3 -c "b = bytearray(128 * 1024 * 1024); import time; time.sleep(5)" 2>/dev/null; then
+  echo ">> skip: MemoryMax unenforced on this host (128M survived a 32M scope) — need cgroup delegation"
+  exit 0
+else
+  rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo ">> skip: scope canary timed out (user manager wedged?)"
+    exit 0
+  fi
+  echo ">> canary OOM-killed as expected (rc=$rc) — limits are enforced"
+fi
+
 # The mock adapter + `sleep` must resolve; the wrapper path spawns
 # `adapter-mock` from PATH.
 [ -x "$BIN/adapter-mock" ] || { echo ">> skip: adapter-mock not built (cargo build -p agentgrid-adapters)"; exit 0; }
