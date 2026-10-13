@@ -11,7 +11,27 @@
   at all and no rust/web/e2e validation ran on any push. Fixed by quoting
   the names (found via `actionlint`, which now also runs as its own
   `.github/workflows/lint-workflows.yml` gate — a separate file, so it still
-  fails loudly even if `ci.yml` itself breaks again).
+  fails loudly even if `ci.yml` itself breaks again). The first live runs
+  then surfaced a month of untested rot, fixed in the same pass:
+  - `ws.rs` unix-test locks (`const_new()` arity + missing `.await`) — never
+    compiled on the Windows dev host (`#[cfg(all(test, unix))]`), caught by
+    Linux CI on day one;
+  - `run_bounded` never piped stdio: the external CTX indexer's stdout went
+    to our own log and every `build()` parsed empty output (EOF) — the
+    `{"body":"hi"}` was literally visible in the CI log;
+  - slow-net E2E asserted contiguity over stdout-only seqs, but the task
+    sequence space is shared across event types (adapter `result` at seq 202
+    is legal interleaving, as `store/attempts.rs` already documents) — the
+    check now asserts the true invariant (global exact range + all 200 spam
+    lines by content) with full diagnostics;
+  - scope-limit gate probed user-manager *reachability*, but current runners
+    answer while lacking cgroup delegation (limits unenforced) — a two-step
+    enforcement canary (trivial scope starts + 128M dies in a 32M scope)
+    skips honestly now;
+  - cluster probe demanded the version at string position 0, but the
+    zeroshot stub (like every adapter binary) prints `zeroshot 0.1.0-stub`
+    → node reported degraded and zeroshot E2E never started. `probe_decision`
+    now matches the first digit-led token, fail-closed otherwise.
 - **Issue #78 fixed: unsafe-libyaml gone.** `serde_yaml` 0.9 (deprecated)
   was the sole consumer of unmaintained `unsafe-libyaml` (RUSTSEC-2024-0449).
   Workflow-manifest parsing in `agentgrid-common` now uses `serde-saphyr` 1.3
