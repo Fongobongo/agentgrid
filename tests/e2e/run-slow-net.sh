@@ -79,17 +79,22 @@ fi
 [ "$STATUS" = "succeeded" ] || { echo "  FAILED: expected succeeded, got $STATUS"; cat "$TMP/cp.log"; cat "$TMP/slow.log"; exit 1; }
 
 echo "  checking event continuity (expect 200 spam lines, contiguous sequences)"
-# Grace: completion can overtake the last flush; poll events until stable.
+# Grace: completion can overtake the last flush, and under the throttle with
+# node concurrency=2 a straggler can lag behind the count threshold (event N+1
+# visible while N is still queued) — so poll until the sequences are
+# CONTIGUOUS, not just numerous. A true loss still fails below after the
+# timeout, with the gap printed.
 EV=""
-for _ in $(seq 1 30); do
+for _ in $(seq 1 90); do
   EV=$(curl -fsS "$BASE_REAL/v1/tasks/$TID/events" -H "authorization: Bearer $jwt" 2>/dev/null || true)
-  n=$(printf '%s' "$EV" | python3 -c 'import sys,json
+  ok=$(printf '%s' "$EV" | python3 -c 'import sys,json
 try:
   ev=json.load(sys.stdin)
-  print(len([e for e in ev if e.get("type")=="stdout"]))
+  seqs=sorted(e["sequence"] for e in ev if e.get("type")=="stdout")
+  print(1 if len(seqs)>=200 and seqs==list(range(seqs[0],seqs[-1]+1)) else 0)
 except Exception:
   print(0)' 2>/dev/null)
-  [ "${n:-0}" -ge 200 ] && break
+  [ "${ok:-0}" = "1" ] && break
   sleep 1
 done
 n=$(printf '%s' "$EV" | python3 -c 'import sys,json
