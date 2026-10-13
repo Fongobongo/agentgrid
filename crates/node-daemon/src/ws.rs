@@ -266,7 +266,7 @@ mod tests {
     /// Process-global `PATH` is mutated by both tests below (self-contained
     /// mock adapter dirs); serialize them so parallel runs cannot steal each
     /// other's fixture off PATH mid-attempt (mirrors `sandbox::tests::ENV_LOCK`).
-    static PATH_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new();
+    static PATH_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn login(base: &str) -> String {
         reqwest::Client::new()
@@ -540,7 +540,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _path_guard = PATH_ENV_LOCK.lock().await;
-        let _counter_guard = crate::config_error::CONFIG_COUNTER_LOCK.lock().unwrap();
+        let _counter_guard = crate::config_error::CONFIG_COUNTER_LOCK.lock().await;
 
         let dir = std::env::temp_dir().join(format!(
             "ag-fi-{}-{}",
