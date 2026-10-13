@@ -60,7 +60,7 @@ e2e_mint_token
 e2e_start_node zs "e2e-zeroshot" "zeroshot" "$TMP/work" "$TMP/repos" "$TMP/node" \
   "PATH=$TMP/stubbin:$BIN:$PATH" \
   "AGENTGRID_ZEROSHOT_BIN=$ZEROSHOT_BIN"
-e2e_wait_nodes_online 1 || exit 1
+e2e_wait_nodes_online 1 || { echo "--- nodes API:"; curl -s "$BASE/v1/nodes" -H "authorization: Bearer $jwt" || true; echo "--- node log:"; cat "$TMP/zs.log" || true; echo "--- cp log tail:"; tail -50 "$TMP/cp.log" || true; exit 1; }
 
 echo ">> happy path: cluster run streams events, exports results"
 T1=$(submit_zs "zeroshot e2e hello")
