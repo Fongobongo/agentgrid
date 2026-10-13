@@ -121,7 +121,7 @@ print(f"  missing seqs: {missing}")
 print(f"  dup seqs: {dups}")
 texts=[(e.get("payload") or {}).get("text","") for e in ev if e.get("type")=="stdout"]
 absent=[i for i in range(200) if not any(f"spam line {i}" in t for t in texts)]
-print(f"  missing spam lines: {absent[:10]}{\"...\" if len(absent)>10 else \"\"} (total {len(absent)})")
+print("  missing spam lines total:", len(absent), "first:", absent[:10])
 assert len(seqs)>=200, f"too few events: {len(seqs)}"
 assert not missing, f"event loss: {missing}"
 assert not dups, f"event duplicates: {dups}"
