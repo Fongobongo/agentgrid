@@ -161,6 +161,14 @@ fn run_bounded(
     mut cmd: std::process::Command,
     timeout_secs: u64,
 ) -> Result<std::process::Output, String> {
+    // wait_with_output does NOT pipe stdio by itself: without explicit
+    // pipes the child inherits our stdout/stderr, its output lands in our
+    // log, and `out.stdout` comes back empty (surfaced downstream as
+    // "unparseable output: EOF"). Pipe explicitly; stdin is nulled so a
+    // chatty indexer can never block reading our stdin.
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
     let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
