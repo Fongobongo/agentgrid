@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Supply-chain gate green again.** `cargo audit` failed on six live
+  RustSec advisories in `Cargo.lock` (five `quinn-proto` 0.11.16
+  RUSTSEC-2026-0338…0342 via reqwest/http3, one `rustls` 0.23.44
+  RUSTSEC-2026-0285): bumped to `quinn-proto` 0.11.18 / `quinn` 0.11.12 /
+  `rustls` 0.23.45. `cargo deny` failed on `unsafe-libyaml` unmaintained
+  (cargo-deny 0.20 errors on in-scope unmaintained by default — the old
+  "only warned" comment described a previous default): scoped ignore for
+  RUSTSEC-2024-0449 only (serde_yaml 0.9 tech debt, tracked in issue #78 —
+  no maintained fork drops the backend), so any *new* unmaintained crate
+  still fails. Dropped the stale RUSTSEC-2024-0437 ignore from `deny.toml`
+  and `supply-chain.yml` (prometheus is on protobuf 3.7.2 now).
+- **Release workflow unbroken.** GitHub now auto-fails jobs using the
+  deprecated `actions/cache` v4.0.0 pin ("Set up job" failure on all three
+  v0.5.0 build jobs): bumped to v4.3.0. The v0.5.0 node-image build also
+  raced the shared cargo-registry cache mount between the amd64/arm64 legs
+  (`.cargo-ok` "File exists" under QEMU): both cache mounts are now
+  `sharing=locked` in `Dockerfile.node-daemon`.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added
