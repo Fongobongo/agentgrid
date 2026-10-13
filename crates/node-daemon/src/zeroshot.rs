@@ -119,13 +119,18 @@ pub fn cluster_created_payload(attempt_id: &str, role_side: Option<&str>) -> ser
 /// ADR 0002 cancel-total: kill the attempt's cluster after a cut-short or
 /// failed run. Bounded (15s), best-effort, idempotent — any outcome only
 /// warns; the attempt's terminal state is already decided by the run exit.
-pub async fn kill_cluster(bin: &str, attempt_id: &str) {
+/// `extra_env` is the attempt's operator-configured env (same allowlist the
+/// run path forwards): the executor may need it for kill (cluster API
+/// credentials live in operator env, not in argv). Daemon-inherited secrets
+/// outside the allowlist stay cleared.
+pub async fn kill_cluster(bin: &str, attempt_id: &str, extra_env: &[(String, String)]) {
     let res = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio::process::Command::new(bin)
             .arg("kill")
             .arg(attempt_id)
             .env_clear()
+            .envs(extra_env.iter().map(|(k, v)| (k, v)))
             .output(),
     )
     .await;
@@ -152,8 +157,15 @@ pub async fn kill_cluster(bin: &str, attempt_id: &str) {
 /// Materialize the cluster's result files into the worktree before finalize.
 /// Bounded (60s), best-effort — export failure warns but never fails the
 /// attempt (events already delivered the outcome; finalize still diffs
-/// whatever the worktree holds).
-pub async fn export_results(bin: &str, attempt_id: &str, workdir: &Path) {
+/// whatever the worktree holds). `extra_env` mirrors the run path (see
+/// `kill_cluster`): an exporter talking to the cluster API needs the same
+/// operator env the run saw.
+pub async fn export_results(
+    bin: &str,
+    attempt_id: &str,
+    workdir: &Path,
+    extra_env: &[(String, String)],
+) {
     let res = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         tokio::process::Command::new(bin)
@@ -162,6 +174,7 @@ pub async fn export_results(bin: &str, attempt_id: &str, workdir: &Path) {
             .arg("--dir")
             .arg(workdir)
             .env_clear()
+            .envs(extra_env.iter().map(|(k, v)| (k, v)))
             .output(),
     )
     .await;

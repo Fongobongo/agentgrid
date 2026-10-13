@@ -856,6 +856,12 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // Hardening P0/P1 item 5: never let the agent run unsafe-unattended in an
     // unsandboxed environment unless the operator explicitly opted in.
     let env_remove = sandbox::unsafe_env_guard(cfg.sandbox);
+    // Last round's full spawn env, for post-loop host-side calls (zeroshot
+    // export runs after the validation loop ends). The initializer only
+    // satisfies definite-assignment: every path to a read overwrites it in
+    // the loop first (as the unused_assignments lint itself verifies).
+    #[allow(unused_assignments)]
+    let mut last_spawn_env: Vec<(String, String)> = Vec::new();
     let mut validation_passed = loop {
         // Hardening P1 item 27: forward profile-declared secrets explicitly —
         // ProcessBackend env_clears the child, so daemon-env secrets must be
@@ -906,6 +912,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 spawn_env.push(("OPENCODE_CONFIG_CONTENT".to_string(), merged));
             }
         }
+        // Snapshot for post-loop host-side calls (zeroshot export): same env
+        // the run saw, including per-round proxy failover.
+        last_spawn_env = spawn_env.clone();
         // Audit X-N3b: Stage 11.2 routes the wrapper-binary spawn through the
         // configured sandbox; the prefix is rebuilt per round because the
         // container env above can change between rounds (proxy failover).
@@ -983,7 +992,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // keeps it: a validation-feedback round re-attaches by the same --id.
         if is_zeroshot && (kill_reason.is_some() || code != 0) {
             if let Some(host) = zs_host_bin.as_deref() {
-                crate::zeroshot::kill_cluster(host, &assignment.attempt_id).await;
+                // spawn_env moved into the SpawnRequest above; last_spawn_env
+                // is this round's identical snapshot.
+                crate::zeroshot::kill_cluster(host, &assignment.attempt_id, &last_spawn_env).await;
             }
         }
         // Stage 2.1 / audit X-N6: record the terminal completion BEFORE the
@@ -1162,7 +1173,13 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // best-effort, never fails the attempt.
     if is_zeroshot && last_kill_reason.is_none() {
         if let Some(host) = zs_host_bin.as_deref() {
-            crate::zeroshot::export_results(host, &assignment.attempt_id, &workdir).await;
+            crate::zeroshot::export_results(
+                host,
+                &assignment.attempt_id,
+                &workdir,
+                &last_spawn_env,
+            )
+            .await;
         }
     }
     // Stage 2.3: keep the per-attempt repo_dir/branch so the worktree and its
