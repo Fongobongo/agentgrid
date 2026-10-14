@@ -82,6 +82,8 @@ jobs:
           find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -executable -print0 \
             | xargs -0 du -h
           # Fail if any binary exceeds 60 MiB (catches regression bloat).
+          # shellcheck disable=SC2016: the single quotes are load-bearing —
+          # $() and {} must expand in the INNER sh -c, not in this shell.
           find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -executable -print0 \
             | xargs -0 -I{} sh -c 'test "$(stat -c%s "{}")" -le 62914560'
 
@@ -286,7 +288,7 @@ jobs:
           AGENTGRID_ARTIFACT_ROOT=/tmp/ag-sanity/artifacts \
             ./agentgrid-control-plane > cp.log 2>&1 &
           CP_PID=$!
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:7900/health/ready && break
             sleep 1
           done

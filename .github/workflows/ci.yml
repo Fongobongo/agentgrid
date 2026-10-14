@@ -121,7 +121,7 @@ jobs:
             -e AGENTGRID_DB=/tmp/cp.db \
             ag-cp:ci)
           trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:7890/health/ready && break
             sleep 1
           done
@@ -171,7 +171,7 @@ jobs:
           docker run -d --name ag-tier1 -v "$PWD/target/x86_64-unknown-linux-musl/release:/bins:ro" \
             -p 127.0.0.1:7891:7800 "$distro" \
             sh -c "AGENTGRID_LISTEN=0.0.0.0:7800 AGENTGRID_DB=/tmp/cp.db /bins/agentgrid-control-plane"
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:7891/health/ready && break
             sleep 1
           done
