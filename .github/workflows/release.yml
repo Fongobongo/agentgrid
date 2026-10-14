@@ -82,8 +82,9 @@ jobs:
           find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -executable -print0 \
             | xargs -0 du -h
           # Fail if any binary exceeds 60 MiB (catches regression bloat).
-          # shellcheck disable=SC2016: the single quotes are load-bearing —
-          # $() and {} must expand in the INNER sh -c, not in this shell.
+          # The single quotes below are load-bearing: $() and {} must expand
+          # in the INNER sh -c, not in this shell.
+          # shellcheck disable=SC2016
           find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -executable -print0 \
             | xargs -0 -I{} sh -c 'test "$(stat -c%s "{}")" -le 62914560'
 
