@@ -18,7 +18,9 @@ exclude = ["fuzz"]
 version = "0.5.1"
 edition = "2021"
 license = "MIT"
-rust-version = "1.85"
+# Real floor of the current Cargo.lock (sqlx 0.9 needs 1.94). Enforced by
+# the MSRV job in ci.yml — bump both together, never silently.
+rust-version = "1.94"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

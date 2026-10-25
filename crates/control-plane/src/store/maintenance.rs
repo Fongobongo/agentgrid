@@ -76,7 +76,7 @@ impl Store {
                     tracing::warn!("maintenance tick failed: {e}");
                 }
                 tick = tick.wrapping_add(1);
-                if tick % 4 == 0 {
+                if tick.is_multiple_of(4) {
                     let _ = store.wal_checkpoint().await;
                 }
                 // Plan 0.2 item 4.2: automatic backup + rotation. A failed

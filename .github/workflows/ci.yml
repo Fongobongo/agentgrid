@@ -66,12 +66,29 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # No explicit `toolchain:` — rust-toolchain.toml pins the version so
+      # every job compiles what the devs compile.
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          toolchain: stable
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: test pure crates
         run: cargo test -p agentgrid-common -p agentgrid-skills
+
+  msrv:
+    # Keep the workspace `rust-version` honest: the lockfile's real floor
+    # (sqlx 0.9 → 1.94) must keep compiling. Bump the version here and in
+    # Cargo.toml together, never silently.
+    name: MSRV cargo check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # Explicit toolchain overrides rust-toolchain.toml (which pins the
+      # dev/CI version above MSRV).
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - run: cargo check --workspace --all-targets
 
   web:
     name: web build / lint

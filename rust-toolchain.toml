@@ -1,0 +1,8 @@
+# Pinned so every machine — dev host, CI, release build — compiles the
+# workspace with the same compiler. The dtolnay/rust-toolchain CI jobs omit
+# an explicit `toolchain:` input (nightly jobs excepted) so this file wins.
+# Bump deliberately: the workspace `rust-version` (Cargo.toml) and the MSRV
+# CI job must move with it.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
