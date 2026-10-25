@@ -104,6 +104,17 @@
 
 ### Changed
 
+- **The 12k-line `tests/api.rs` monolith is now a module directory.** Same
+  single integration-test binary (`tests/api/main.rs`), same 158 tests,
+  byte-identical bodies — only the layout changed. The shared
+  request/auth/enroll helpers (including seven late-defined ones that
+  lived mid-file between tests) moved to `helpers.rs`, which re-exports
+  everything a module needs via `use crate::helpers::*;`; the tests are
+  grouped into domain modules (`artifacts`, `auth_approvals`, `events`,
+  `lifecycle`, `misc`, `nodes`, `profiles`, `repos`, `scheduler`,
+  `security`, `workflows`). Faithfulness was verified by an exact line
+  partition (11 864 body lines, nothing duplicated or dropped) and a
+  green 158/158 run.
 - **PR validation workflow supply-chain parity.** `pr-validation.yaml`
   pinned its actions by tag (`trivy-action@master` worst of all) while
   every other workflow pins SHAs; all actions there are now commit-SHA
