@@ -86,10 +86,10 @@ async fn run_session(
     tracing::info!("ws control channel connected to {}", cfg.server);
     let mut hb = tokio::time::interval(Duration::from_secs(WS_HEARTBEAT_INTERVAL_SECS));
     hb.tick().await; // consume the immediate first tick
-    // Last inbound frame (ping/pong/data). Checked below per iteration: the
-    // timeout cannot live inside select! — every heartbeat tick would rebuild
-    // the future and silently reset the deadline, so the read-idle would
-    // never fire (the first version of this fix had exactly that bug).
+                     // Last inbound frame (ping/pong/data). Checked below per iteration: the
+                     // timeout cannot live inside select! — every heartbeat tick would rebuild
+                     // the future and silently reset the deadline, so the read-idle would
+                     // never fire (the first version of this fix had exactly that bug).
     let mut last_read = tokio::time::Instant::now();
     loop {
         if last_read.elapsed() >= Duration::from_secs(WS_READ_IDLE_SECS) {
@@ -98,9 +98,7 @@ async fn run_session(
             // sock.next() would otherwise never resolve and Cancel/
             // ConfigUpdate would stall until the OS noticed. Fail the
             // session; the reconnect loop takes it from here.
-            anyhow::bail!(
-                "ws read-idle timeout ({WS_READ_IDLE_SECS}s) — half-open connection?"
-            );
+            anyhow::bail!("ws read-idle timeout ({WS_READ_IDLE_SECS}s) — half-open connection?");
         }
         tokio::select! {
             _ = hb.tick() => {
