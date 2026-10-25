@@ -345,49 +345,49 @@ async fn drive_acp_session(
     // rate-limit marker; read at outcome time to decide account rotation.
     let rate_limited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let rate_limited2 = rate_limited.clone();
+    // The agent's session_prompt response travels the same stdout as its
+    // session/update notifications and is parsed AFTER them, so when the
+    // `prompt` future below resolves, this task may not have consumed the
+    // already-queued trailing updates yet. An unconditional abort here (the
+    // old teardown) silently dropped those events on every successful
+    // session — visible as a lost final update under scheduling pressure
+    // (the nightly stress job's exit 101). Cooperative shutdown: signal,
+    // drain everything already queued, exit; the abort below stays as the
+    // belt.
+    let stream_stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let stream_stop2 = stream_stop.clone();
     let stream_task = tokio::spawn(async move {
-        while let Some(msg) = notif.recv().await {
-            match msg {
-                Message::Notification { params, .. } => {
-                    let upd = params.get("update").unwrap_or(&params);
-                    let env = map_session_update(&sid, upd);
-                    // Plan 1.8 (#15): sniff provider rate-limit errors in the
-                    // event stream (type=error payload with 429 / rate limit /
-                    // too many requests / overloaded / quota) — the ACP
-                    // session may survive them, but the attempt must rotate.
-                    if env.kind == EventKind::Error {
-                        let text = env.payload.to_string();
-                        let l = text.to_ascii_lowercase();
-                        if l.contains("429")
-                            || l.contains("rate limit")
-                            || l.contains("too many requests")
-                            || l.contains("overloaded")
-                            || l.contains("quota")
-                        {
-                            rate_limited2.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
+        loop {
+            let msg = tokio::select! {
+                biased;
+                m = notif.recv() => match m {
+                    Some(m) => m,
+                    None => break,
+                },
+                _ = stream_stop2.notified() => {
+                    while let Ok(m) = notif.try_recv() {
+                        handle_agent_message(
+                            m, &sink2, &client2, &server2, &task_id, &attempt_id, &sid,
+                            autonomy, &acp2, &rate_limited2,
+                        )
+                        .await;
                     }
-                    sink2.push(env.kind.to_event_type(), env.payload).await;
-                    sink2.note_adapter_event();
+                    break;
                 }
-                Message::Request { id, method, params }
-                    if method == "session/request_permission" =>
-                {
-                    let allow = request_permission(
-                        &client2,
-                        &server2,
-                        &task_id,
-                        &attempt_id,
-                        &sid,
-                        &params,
-                        autonomy,
-                        &sink2,
-                    )
-                    .await;
-                    let _ = acp2.respond(id, allow).await;
-                }
-                _ => {}
-            }
+            };
+            handle_agent_message(
+                msg,
+                &sink2,
+                &client2,
+                &server2,
+                &task_id,
+                &attempt_id,
+                &sid,
+                autonomy,
+                &acp2,
+                &rate_limited2,
+            )
+            .await;
         }
     });
 
@@ -523,7 +523,11 @@ async fn drive_acp_session(
             AcpResult { success: false, error_code: Some("budget_exceeded".into()), session_id: Some(session_id.clone()), rate_limited: false }
         }
     };
-    stream_task.abort();
+    // Let the stream task drain its queued trailing updates (bounded — a
+    // permission answer stuck in flight cannot hold the teardown hostage;
+    // the abort is the belt, not the mechanism).
+    stream_stop.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(2), stream_task).await;
     flusher.abort();
     // Plan 6.3 (#534): report the ACP agent subprocess peak RSS, mirroring
     // the wrapper path (daemon RSS is already in the heartbeat).
@@ -537,6 +541,61 @@ async fn drive_acp_session(
             .await;
     }
     Ok(outcome)
+}
+
+/// One ACP agent stream message: session/updates are mapped into the event
+/// sink (and counted as adapter-originated), permission requests are
+/// answered in place. Split out of the stream loop so the cooperative
+/// shutdown drain can process queued messages without duplicating this
+/// body.
+#[allow(clippy::too_many_arguments)]
+async fn handle_agent_message<R, W>(
+    msg: Message,
+    sink: &Arc<EventSink>,
+    client: &reqwest::Client,
+    server: &str,
+    task_id: &str,
+    attempt_id: &str,
+    sid: &str,
+    autonomy: AutonomyLevel,
+    acp: &agentgrid_acp::AcpClient<R, W>,
+    rate_limited: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    match msg {
+        Message::Notification { params, .. } => {
+            let upd = params.get("update").unwrap_or(&params);
+            let env = map_session_update(sid, upd);
+            // Plan 1.8 (#15): sniff provider rate-limit errors in the event
+            // stream (type=error payload with 429 / rate limit / too many
+            // requests / overloaded / quota) — the ACP session may survive
+            // them, but the attempt must rotate.
+            if env.kind == EventKind::Error {
+                let text = env.payload.to_string();
+                let l = text.to_ascii_lowercase();
+                if l.contains("429")
+                    || l.contains("rate limit")
+                    || l.contains("too many requests")
+                    || l.contains("overloaded")
+                    || l.contains("quota")
+                {
+                    rate_limited.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            sink.push(env.kind.to_event_type(), env.payload).await;
+            sink.note_adapter_event();
+        }
+        Message::Request { id, method, params } if method == "session/request_permission" => {
+            let allow = request_permission(
+                client, server, task_id, attempt_id, sid, &params, autonomy, sink,
+            )
+            .await;
+            let _ = acp.respond(id, allow).await;
+        }
+        _ => {}
+    }
 }
 
 /// Stage 5/9.1: answer `session/request_permission`. First the builtin

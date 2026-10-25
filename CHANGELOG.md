@@ -30,11 +30,18 @@
     a documented ignore (same HMAC-only unreachability analysis as the
     existing RUSTSEC-2023-0071 rsa entry), mirrored in deny.toml and
     supply-chain.yml.
-  - still open: the nightly `race/concurrency stress` job exits 101 on
-    Linux; it does not reproduce at 16-way parallelism with
-    AGENTGRID_RACE_ITERS=100 on the Windows dev host (full workspace
-    pass), and its log needs a signed-in viewer — needs a Linux-side
-    look.
+  - the same push surfaced the nightly `race/concurrency stress` job's
+    exit 101 (red since the gates landed): `drive_acp_session` aborted
+    its notification-stream task the moment the `session_prompt` RPC
+    resolved — but the response is parsed AFTER any trailing
+    session/update lines on the same stdout, so updates still queued in
+    the stream task were silently dropped on every successful session
+    (the fake-agent test asserts exactly this and is unix-only, which is
+    why the Windows dev host never saw it). The teardown is now
+    cooperative: signal → drain everything already queued → bounded
+    2 s join, with the abort demoted to a belt. Message handling moved
+    into `handle_agent_message` so the drain path cannot drift from the
+    live loop.
 
 - **Security: eval-case probe no longer executes agent-writable YAML.**
   `probe_evals` used to re-read and `sh -c` every `*.yaml` under the
