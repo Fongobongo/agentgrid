@@ -298,8 +298,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // starts so the agent sees the obligation list when reading the worktree
     // (the verifier reads, not writes), and so the post-agent probe can just
     // shell-probe every `*.yaml` under the dir.
+    let mut pinned_eval_cases: Vec<evals::EvalCase> = Vec::new();
     if !assignment.eval_cases.is_empty() && !assignment.read_only {
-        let materialized = evals::materialize_eval_cases(
+        pinned_eval_cases = evals::materialize_eval_cases(
             &ws.path,
             &assignment.task_id,
             &assignment.eval_cases,
@@ -312,11 +313,11 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             tracing::warn!(attempt_id = %assignment.attempt_id, "eval-case materialize failed: {e}");
             Vec::new()
         });
-        if !materialized.is_empty() {
+        if !pinned_eval_cases.is_empty() {
             tracing::info!(
                 attempt_id = %assignment.attempt_id,
-                n = materialized.len(),
-                "materialised eval suite into worktree"
+                n = pinned_eval_cases.len(),
+                "materialised eval suite into worktree (commands hash-pinned in daemon memory)"
             );
         }
     }
@@ -484,7 +485,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // ACP-loop validation so a passing fix must also re-prove every
         // accumulated eval case.
         if exit_code == 0 && !assignment.eval_cases.is_empty() {
-            match evals::probe_evals(&workdir, evals::EVAL_TIMEOUT).await {
+            match evals::probe_evals(&workdir, &pinned_eval_cases, evals::EVAL_TIMEOUT).await {
                 Ok(o) if o.ok => {}
                 Ok(o) => {
                     sink.push(
@@ -1129,7 +1130,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // we report exit=1 with error_code `eval_failed` so the CP marks the
     // task failed (and the retry loop has the eval log in events).
     if validation_passed && !assignment.eval_cases.is_empty() {
-        match evals::probe_evals(&workdir, evals::EVAL_TIMEOUT).await {
+        match evals::probe_evals(&workdir, &pinned_eval_cases, evals::EVAL_TIMEOUT).await {
             Ok(o) if o.ok => {}
             Ok(o) => {
                 sink.push(
