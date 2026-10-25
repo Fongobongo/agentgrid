@@ -96,6 +96,10 @@ done
     | python3 -c 'import sys,json; [print("   ",s.get("step_id"),s.get("status"),s.get("task_id")) for s in json.load(sys.stdin)["steps"]]' || true;
   echo "--- nodes:"; curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt" 2>/dev/null \
     | python3 -c 'import sys,json;d=json.load(sys.stdin);ns=d.get("items",d) if isinstance(d,dict) else d;[print("   ",n.get("name"),n.get("status")) for n in ns]' || true;
+  echo "--- node logs (tail 60 each — the collector hang needs node-side evidence):";
+  for f in "$TMP"/n1.log "$TMP"/n2.log; do
+    [ -f "$f" ] || continue; echo "=== $f ==="; tail -60 "$f" || true
+  done
   echo "--- cp log tail:"; tail -30 "$TMP/cp.log" || true; exit 1; }
 echo "  run succeeded"
 
