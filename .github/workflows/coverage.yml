@@ -19,8 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          components: llvm-tools-preview
+      # llvm-tools must land on the pinned toolchain (rust-toolchain.toml,
+      # profile=minimal), not the action's default — same trap that broke
+      # ci.yml's fmt step.
+      - name: add llvm-tools to the pinned toolchain
+        run: |
+          tc=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
+          rustup component add llvm-tools-preview --toolchain "$tc"
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked

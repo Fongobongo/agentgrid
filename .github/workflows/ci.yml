@@ -22,8 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          components: rustfmt, clippy
+      # rust-toolchain.toml pins 1.99.1 with profile=minimal: rustup
+      # auto-installs it WITHOUT rustfmt/clippy, and the action's
+      # `components:` input would target its default toolchain instead of
+      # the pin — `cargo fmt` then dies with "cargo-fmt is not installed".
+      # Add the components to exactly the pinned toolchain.
+      - name: add fmt/clippy to the pinned toolchain
+        run: |
+          tc=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
+          rustup component add rustfmt clippy --toolchain "$tc"
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
       - name: format check
         run: cargo fmt --all --check
@@ -219,6 +226,10 @@ jobs:
             -p agentgrid-control-plane -p agentgrid-cli \
             -p agentgrid-node-daemon -p agentgrid-adapters
       - name: clean-host smoke (debian:12-slim, git+ca-certs+curl only)
+        # `sh` on debian:12-slim is dash, which rejects `set -o pipefail`
+        # (and run-clean-host.sh needs bash anyway): the container died at
+        # its first line with exit 2 on every nightly run since the job
+        # landed. Bootstrap bash first, then exec the script with it.
         run: |
           set -euo pipefail
           docker pull debian:12-slim
@@ -226,12 +237,12 @@ jobs:
             -v "$PWD/target/x86_64-unknown-linux-musl/release:/bins:ro" \
             -v "$PWD/tests/e2e:/e2e:ro" \
             --add-host cp-local:127.0.0.1 \
-            debian:12-slim sh -c "
-              set -euo pipefail
+            debian:12-slim sh -c '
+              set -eu
               apt-get update -qq
-              apt-get install -y -qq git ca-certificates curl
-              AG_CLEAN_BIN=/bins sh /e2e/run-clean-host.sh
-            "
+              apt-get install -y -qq bash git ca-certificates curl
+              AG_CLEAN_BIN=/bins bash /e2e/run-clean-host.sh
+            '
 
   arm64-musl-smoke:
     # Plan 6.13/6.14 item: the aarch64-musl binary is published but never

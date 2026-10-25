@@ -4,6 +4,38 @@
 
 ### Fixed
 
+- **Nightly CI gates were dead on arrival — three separate causes.**
+  Every scheduled run since the gates landed (~Oct 15) was red:
+  - `tier1 clean host` died at its first line with exit 2: the
+    debian:12-slim container ran `sh` (dash), which rejects
+    `set -o pipefail` — and `run-clean-host.sh` needs bash anyway.
+    The step now bootstraps bash and execs the script with it.
+  - the main `fmt / clippy / test / build` job (and, on any PR,
+    `pr-validation`'s fmt/clippy jobs and `coverage`'s llvm-tools)
+    would die with "cargo-fmt is not installed": rust-toolchain.toml
+    pins the toolchain with profile=minimal, rustup auto-installs it
+    without extra components, and the dtolnay action's `components:`
+    input targets its default toolchain instead of the pin. Those
+    steps now `rustup component add` against the exact pinned version
+    (parsed from rust-toolchain.toml). This is what broke CI #868 on
+    the previous push.
+  - `cargo deny` / `cargo audit` flagged 9 fresh RustSEC advisories
+    against the lockfile: rustls 0.23.45 (4), rustls-webpki 0.103.15,
+    webpki-roots 1.0.8, tokio 1.52.4, ctutils 0.4.2 — all patched by
+    `cargo update` (rustls 0.23.46, webpki 0.103.16, webpki-roots
+    1.0.11, tokio 1.54.1, ctutils 0.4.5; MSRV 1.94 still checks clean,
+    full workspace suite green). RUSTSEC-2026-0387 (crypto-bigint 0.5.5
+    constant-time) has no in-tree fix — the patched 0.7.x needs
+    elliptic-curve >=0.14, which jsonwebtoken 11 pins away — so it is
+    a documented ignore (same HMAC-only unreachability analysis as the
+    existing RUSTSEC-2023-0071 rsa entry), mirrored in deny.toml and
+    supply-chain.yml.
+  - still open: the nightly `race/concurrency stress` job exits 101 on
+    Linux; it does not reproduce at 16-way parallelism with
+    AGENTGRID_RACE_ITERS=100 on the Windows dev host (full workspace
+    pass), and its log needs a signed-in viewer — needs a Linux-side
+    look.
+
 - **Security: eval-case probe no longer executes agent-writable YAML.**
   `probe_evals` used to re-read and `sh -c` every `*.yaml` under the
   attempt worktree's `.agentgrid/evals/` *after* the agent ran — but the

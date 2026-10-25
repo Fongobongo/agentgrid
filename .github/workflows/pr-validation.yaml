@@ -22,8 +22,13 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          components: rustfmt
+      # Components must land on the pinned toolchain (rust-toolchain.toml,
+      # profile=minimal) — the action's `components:` input targets its
+      # default toolchain, leaving `cargo fmt` uninstalled on the pin.
+      - name: Add rustfmt to the pinned toolchain
+        run: |
+          tc=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
+          rustup component add rustfmt --toolchain "$tc"
 
       - name: Check formatting
         run: cargo fmt --check
@@ -42,8 +47,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-        with:
-          components: clippy
+      - name: Add clippy to the pinned toolchain
+        run: |
+          tc=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
+          rustup component add clippy --toolchain "$tc"
 
       - name: Run clippy
         run: |
