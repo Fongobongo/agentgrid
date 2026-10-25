@@ -86,7 +86,22 @@ async fn run_session(
     tracing::info!("ws control channel connected to {}", cfg.server);
     let mut hb = tokio::time::interval(Duration::from_secs(WS_HEARTBEAT_INTERVAL_SECS));
     hb.tick().await; // consume the immediate first tick
+    // Last inbound frame (ping/pong/data). Checked below per iteration: the
+    // timeout cannot live inside select! — every heartbeat tick would rebuild
+    // the future and silently reset the deadline, so the read-idle would
+    // never fire (the first version of this fix had exactly that bug).
+    let mut last_read = tokio::time::Instant::now();
     loop {
+        if last_read.elapsed() >= Duration::from_secs(WS_READ_IDLE_SECS) {
+            // The CP pings every ~15 s, so 3× our heartbeat interval of
+            // inbound silence means a half-open TCP (NAT drop, partition):
+            // sock.next() would otherwise never resolve and Cancel/
+            // ConfigUpdate would stall until the OS noticed. Fail the
+            // session; the reconnect loop takes it from here.
+            anyhow::bail!(
+                "ws read-idle timeout ({WS_READ_IDLE_SECS}s) — half-open connection?"
+            );
+        }
         tokio::select! {
             _ = hb.tick() => {
                 let msg = NodeWsMsg::Heartbeat { free_slots: sem.available_permits() as u32 };
@@ -100,26 +115,9 @@ async fn run_session(
                 .await
                 .map_err(|_| anyhow::anyhow!("ws heartbeat send timed out"))??;
             }
-            msg = tokio::time::timeout(
-                Duration::from_secs(WS_READ_IDLE_SECS),
-                sock.next(),
-            ) => {
-                let msg = match msg {
-                    Ok(m) => m,
-                    Err(_) => {
-                        // The CP pings every ~15 s, so 3× our heartbeat
-                        // interval of inbound silence (no ping, pong, data)
-                        // means a half-open TCP (NAT drop, partition):
-                        // sock.next() would otherwise never resolve and
-                        // Cancel/ConfigUpdate would stall until the OS
-                        // noticed. Fail the session; the reconnect loop
-                        // takes it from here.
-                        anyhow::bail!(
-                            "ws read-idle timeout ({WS_READ_IDLE_SECS}s) — half-open connection?"
-                        );
-                    }
-                };
+            msg = sock.next() => {
                 let Some(msg) = msg else { return Ok(()) };
+                last_read = tokio::time::Instant::now();
                 match msg? {
                     Message::Text(t) => handle_msg(&t, cfg, client, sem, &mut sock, cred).await?,
                     Message::Ping(p) => sock.send(Message::Pong(p)).await?,
