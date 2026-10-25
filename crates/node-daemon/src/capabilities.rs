@@ -219,7 +219,9 @@ mod tests {
     async fn probe_cluster_adapter_reports_missing() {
         let p = probe_cluster_adapter("sh", "definitely-no-such-runtime-xyz").await;
         assert!(!p.found);
-        assert!(p.version.is_none());
+        // No version assert here: `version` is diagnostic and hosts whose
+        // `sh --version` succeeds (Git Bash's bash-backed sh) legitimately
+        // report it while unavailable — only `found` is the verdict.
 
         let p = probe_cluster_adapter("definitely-no-such-executor-xyz", "sh").await;
         assert!(!p.found);

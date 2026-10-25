@@ -10,22 +10,9 @@ use crate::config::Config;
 use crate::outbox;
 use crate::polling::{send_with_retry, upload_if_exists};
 
-/// Redeliver one durable completion record by attempt id (no-op when none is
-/// pending). Shared by startup recovery and by `dispatch_batch` (audit ND-4):
-/// an assignment arriving for an attempt whose completion is still
-/// undelivered must redeliver that completion, never re-run the agent —
-/// otherwise a CP outage longer than the retry budget (or a non-retryable
-/// 4xx) turns the redelivery into a full duplicate execution.
-pub async fn redeliver_completion(cfg: &Config, client: &Client, attempt_id: &str) {
-    let Some(c) = cfg
-        .completion_outbox
-        .pending()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|c| c.attempt_id == attempt_id)
-    else {
-        return;
-    };
+/// Deliver one durable completion record: POST it with the recorded fencing
+/// token, ack on success or definitive 4xx rejection.
+async fn deliver_completion(cfg: &Config, client: &Client, c: outbox::CompletionLine) {
     let req = c.to_request();
     tracing::info!(attempt_id = %c.attempt_id, "redelivering durable completion");
     let url = format!("{}/v1/node/attempts/{}/complete", cfg.server, c.attempt_id);
@@ -55,6 +42,25 @@ pub async fn redeliver_completion(cfg: &Config, client: &Client, attempt_id: &st
     }
 }
 
+/// Redeliver one durable completion record by attempt id (no-op when none is
+/// pending). Used by `dispatch_batch` (audit ND-4): an assignment arriving
+/// for an attempt whose completion is still undelivered must redeliver that
+/// completion, never re-run the agent — otherwise a CP outage longer than
+/// the retry budget (or a non-retryable 4xx) turns the redelivery into a
+/// full duplicate execution.
+pub async fn redeliver_completion(cfg: &Config, client: &Client, attempt_id: &str) {
+    let Some(c) = cfg
+        .completion_outbox
+        .pending()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|c| c.attempt_id == attempt_id)
+    else {
+        return;
+    };
+    deliver_completion(cfg, client, c).await;
+}
+
 /// Stage 2.1 + Hardening P1 item 11: run crash-recovery once at daemon startup.
 ///
 /// 1. Redeliver any completion records a prior (killed) run recorded but never
@@ -68,9 +74,11 @@ pub async fn startup_recovery(cfg: &Config, client: &Client) {
     // Stage 2.1: redeliver any completion records a prior (killed) run recorded
     // but never got a CP ack for. Runs with the node-credentialed client so the
     // /v1/node/attempts/{id}/complete route authenticates. complete_attempt is
-    // idempotent on terminal attempts, so this is safe.
+    // idempotent on terminal attempts, so this is safe. One pass over the
+    // spool: each pending() call re-reads and re-parses the whole file, so
+    // redelivering per record used to make startup O(n²) over a long backlog.
     for c in cfg.completion_outbox.pending().unwrap_or_default() {
-        redeliver_completion(cfg, client, &c.attempt_id).await;
+        deliver_completion(cfg, client, c).await;
     }
 
     // Hardening P1 item 11: recover orphaned artifact spool entries from

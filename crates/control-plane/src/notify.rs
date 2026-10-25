@@ -36,18 +36,29 @@ fn chat_text(note: &TaskNotification) -> String {
         "awaiting_review" => "👀 task awaiting review",
         other => other,
     };
-    let id = if note.task_id.len() > 8 {
-        &note.task_id[..8]
-    } else {
-        &note.task_id
-    };
+    // Char-boundary-safe short id: a byte slice of a non-ASCII id would
+    // panic, and the id is server-provided.
+    let id: String = note.task_id.chars().take(8).collect();
     format!("{label} {id} — /show {id}")
 }
 
 /// Best-effort POST to the configured webhook. Errors are logged and
 /// swallowed — notifications must never block terminal task state changes.
 pub async fn notify_task(url: &str, note: &TaskNotification) {
-    let client = reqwest::Client::new();
+    // reqwest defaults to NO timeout: a black-holed webhook target parked
+    // every spawned notification task (and its connection) forever — one per
+    // terminal task event. 10 s connect + 15 s total is ample for a push.
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(target = %url, "notify_task client build failed: {e}");
+            return;
+        }
+    };
     // Telegram Bot API endpoints get the native sendMessage shape; every
     // other URL keeps the generic JSON document (ntfy & friends).
     let result = if is_telegram_send_message(url) {

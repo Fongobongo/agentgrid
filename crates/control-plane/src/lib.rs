@@ -353,7 +353,12 @@ impl Drop for AppState {
     /// while the pool is still open on Linux; the inode vanishes on close.
     fn drop(&mut self) {
         let prefix = std::env::temp_dir().join("ag-test-");
-        if self.db_path.starts_with(prefix.to_str().unwrap()) {
+        // String-prefix compare (Path::starts_with matches whole components
+        // and would not match "ag-test-<uuid>" against "ag-test-");
+        // to_string_lossy so a non-UTF-8 temp path cannot panic in Drop —
+        // worst case that one test db is left behind for the OS temp sweep.
+        let prefix = prefix.to_string_lossy();
+        if self.db_path.starts_with(prefix.as_ref()) {
             for suffix in ["", "-wal", "-shm"] {
                 let _ = std::fs::remove_file(format!("{}{}", self.db_path, suffix));
             }

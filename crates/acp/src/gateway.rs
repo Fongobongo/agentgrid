@@ -22,11 +22,19 @@ use crate::server::{notify_update, AcpAgent, AcpCtx};
 struct SessionMeta {
     agent: String,
     task_id: Option<String>,
+    /// Last touch (new/prompt); a client that disconnects without
+    /// `session_cancel` still gets its entry reaped once this goes stale.
+    last_used: std::time::Instant,
 }
 
 /// Approval ids stay in `asked` at most this long; decided approvals never
 /// reappear as pending, so the TTL is only a memory bound.
 const ASKED_TTL: Duration = Duration::from_secs(3600);
+
+/// Sessions unused for this long are reaped: entries were only removed on
+/// `session_cancel`, so clients that opened sessions and vanished leaked a
+/// `SessionMeta` each for the process lifetime.
+const SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
 
 /// ACP agent that bridges external ACP clients to the Agentgrid control plane.
 pub struct GatewayAgent {
@@ -42,7 +50,20 @@ pub struct GatewayAgent {
 impl GatewayAgent {
     pub fn new(server: String, token: Option<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            // reqwest defaults to NO timeout: a hung CP POST used to park
+            // the 1 s-poll session_prompt loop and the permission relay
+            // forever. Bound every request; the callers' retry loops handle
+            // the resulting errors.
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|e| {
+                    tracing::error!(
+                        "acp gateway client build failed ({e}); falling back to defaults"
+                    );
+                    reqwest::Client::new()
+                }),
             server,
             token,
             sessions: Mutex::new(HashMap::new()),
@@ -231,11 +252,14 @@ impl AcpAgent for GatewayAgent {
 
     async fn session_new(&self, p: SessionNewParams) -> Result<Value, RpcError> {
         let sid = format!("ag-{}", uuid::Uuid::new_v4());
-        self.sessions.lock().unwrap().insert(
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.retain(|_, m| m.last_used.elapsed() < SESSION_TTL);
+        sessions.insert(
             sid.clone(),
             SessionMeta {
                 agent: p.agent,
                 task_id: None,
+                last_used: std::time::Instant::now(),
             },
         );
         Ok(serde_json::json!({ "session_id": sid }))
@@ -283,6 +307,7 @@ impl AcpAgent for GatewayAgent {
         let task_id = self.create_task(&req).await?;
         if let Some(m) = self.sessions.lock().unwrap().get_mut(&p.session_id) {
             m.task_id = Some(task_id.clone());
+            m.last_used = std::time::Instant::now();
         }
         let mut after: Option<u64> = None;
         loop {

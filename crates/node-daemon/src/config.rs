@@ -277,7 +277,13 @@ pub fn config_from_env() -> Config {
             let dir = PathBuf::from(&data_dir).join("outbox");
             CompletionOutbox::open(&dir).unwrap_or_else(|e| {
                 tracing::warn!("completion outbox open failed: {e}; events may be lost on kill");
-                CompletionOutbox::open(&std::env::temp_dir()).unwrap()
+                // Neither the data dir nor the system temp dir is writable:
+                // crash durability is impossible and every other disk-writing
+                // daemon subsystem is about to fail the same way. Fail fast
+                // with the real cause instead of a bare unwrap backtrace.
+                CompletionOutbox::open(&std::env::temp_dir()).expect(
+                    "completion outbox unusable: neither the data dir nor the system temp dir opened",
+                )
             })
         }),
         autonomy: parse_autonomy(std::env::var("AGENTGRID_AUTONOMY").ok()),

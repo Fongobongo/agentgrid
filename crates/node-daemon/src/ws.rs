@@ -25,6 +25,13 @@ use crate::polling::{dispatch_batch, poll_loop_inner};
 const MAX_CONSECUTIVE_WS_FAILURES: usize = 3;
 /// Slot heartbeat interval on the WS channel (the HTTP heartbeat still runs).
 const WS_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+/// Bound on a single heartbeat write — a full send buffer must fail the
+/// session, not park it.
+const WS_SEND_TIMEOUT_SECS: u64 = 15;
+/// No inbound frame (the CP pings every ~15 s) for this long ⇒ half-open
+/// connection; 3× the heartbeat interval leaves ample headroom for a busy
+/// but healthy link.
+const WS_READ_IDLE_SECS: u64 = 90;
 
 type WsStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -83,9 +90,35 @@ async fn run_session(
         tokio::select! {
             _ = hb.tick() => {
                 let msg = NodeWsMsg::Heartbeat { free_slots: sem.available_permits() as u32 };
-                sock.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
+                // A half-open peer with a full TCP send buffer used to park
+                // this send (and the whole session) forever; bound it so the
+                // reconnect loop can heal the session instead.
+                tokio::time::timeout(
+                    Duration::from_secs(WS_SEND_TIMEOUT_SECS),
+                    sock.send(Message::Text(serde_json::to_string(&msg)?.into())),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("ws heartbeat send timed out"))??;
             }
-            msg = sock.next() => {
+            msg = tokio::time::timeout(
+                Duration::from_secs(WS_READ_IDLE_SECS),
+                sock.next(),
+            ) => {
+                let msg = match msg {
+                    Ok(m) => m,
+                    Err(_) => {
+                        // The CP pings every ~15 s, so 3× our heartbeat
+                        // interval of inbound silence (no ping, pong, data)
+                        // means a half-open TCP (NAT drop, partition):
+                        // sock.next() would otherwise never resolve and
+                        // Cancel/ConfigUpdate would stall until the OS
+                        // noticed. Fail the session; the reconnect loop
+                        // takes it from here.
+                        anyhow::bail!(
+                            "ws read-idle timeout ({WS_READ_IDLE_SECS}s) — half-open connection?"
+                        );
+                    }
+                };
                 let Some(msg) = msg else { return Ok(()) };
                 match msg? {
                     Message::Text(t) => handle_msg(&t, cfg, client, sem, &mut sock, cred).await?,

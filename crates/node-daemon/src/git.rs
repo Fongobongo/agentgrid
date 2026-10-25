@@ -562,8 +562,17 @@ fn validate_local_source(git_url: &str, default_branch: &str) -> Result<()> {
         return Ok(());
     }
     // It exists locally: it must be a git repository...
+    // GIT_CEILING_DIRECTORIES pins discovery to the validated path itself:
+    // without it, git's parent-directory walk happily resolves a repo far
+    // above (e.g. a dotfiles repo in $HOME) and a plain directory passes
+    // validation, failing later inside clone with a baffling error.
+    let ceiling = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| path.to_path_buf());
     let git_dir = Command::new("git")
         .args(["rev-parse", "--git-dir"])
+        .env("GIT_CEILING_DIRECTORIES", &ceiling)
         .current_dir(path)
         .output();
     match git_dir {
@@ -579,6 +588,7 @@ fn validate_local_source(git_url: &str, default_branch: &str) -> Result<()> {
             "--quiet",
             &format!("refs/heads/{default_branch}"),
         ])
+        .env("GIT_CEILING_DIRECTORIES", &ceiling)
         .current_dir(path)
         .status()
         .map(|s| s.success())

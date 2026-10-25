@@ -164,6 +164,23 @@ struct ControlPlane {
     token: String,
 }
 
+/// Percent-encode a URL path segment. Ids used to be `format!`-ed into
+/// paths raw, so a crafted chat-supplied id (`../`, `%2e%2e`) could be
+/// normalized by WHATWG URL parsing into an endpoint retarget under the
+/// gateway's admin JWT.
+fn enc(seg: &str) -> String {
+    let mut out = String::with_capacity(seg.len());
+    for b in seg.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 impl ControlPlane {
     fn new(
         client: Arc<reqwest::Client>,
@@ -196,7 +213,7 @@ impl ControlPlane {
         Ok(fmt_tasks(&v))
     }
     async fn show(&self, id: &str) -> Result<String> {
-        let r = self.get(&format!("/v1/tasks/{id}")).send().await?;
+        let r = self.get(&format!("/v1/tasks/{}", enc(id))).send().await?;
         if !r.status().is_success() {
             return Ok(format!("task {id} not found ({})", r.status()));
         }
@@ -249,7 +266,10 @@ impl ControlPlane {
         Ok(format!("task {id} created ({st})"))
     }
     async fn cancel(&self, id: &str) -> Result<String> {
-        let r = self.post(&format!("/v1/tasks/{id}/cancel")).send().await?;
+        let r = self
+            .post(&format!("/v1/tasks/{}/cancel", enc(id)))
+            .send()
+            .await?;
         Ok(format!("cancel {id}: {}", r.status()))
     }
     /// One-button assembly: goal in, architect-planned multi-host build out.
@@ -287,7 +307,7 @@ impl ControlPlane {
         let deadline = std::time::Instant::now() + Duration::from_secs(1800);
         loop {
             let run = self
-                .get(&format!("/v1/workflow-runs/{run_id}"))
+                .get(&format!("/v1/workflow-runs/{}", enc(run_id)))
                 .send()
                 .await?
                 .json::<serde_json::Value>()
@@ -301,7 +321,7 @@ impl ControlPlane {
                 .unwrap_or("");
             if matches!(st, "succeeded" | "failed" | "cancelled" | "blocked") {
                 let proj = self
-                    .get(&format!("/v1/workflow-runs/{run_id}/projection"))
+                    .get(&format!("/v1/workflow-runs/{}/projection", enc(run_id)))
                     .send()
                     .await?
                     .json::<serde_json::Value>()
@@ -316,7 +336,10 @@ impl ControlPlane {
         }
     }
     async fn logs(&self, id: &str) -> Result<String> {
-        let r = self.get(&format!("/v1/tasks/{id}/events")).send().await?;
+        let r = self
+            .get(&format!("/v1/tasks/{}/events", enc(id)))
+            .send()
+            .await?;
         let v: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Array(vec![]));
         let arr = v.as_array().cloned().unwrap_or_default();
         if arr.is_empty() {
@@ -353,9 +376,9 @@ impl ControlPlane {
     /// carries a reason so the audit trail attributes the decision.
     async fn answer_approval(&self, id: &str, decision: &str) -> Result<String> {
         let path = if decision == "allow" {
-            format!("/v1/approvals/{id}/allow")
+            format!("/v1/approvals/{}/allow", enc(id))
         } else {
-            format!("/v1/approvals/{id}/deny")
+            format!("/v1/approvals/{}/deny", enc(id))
         };
         let body = if decision == "allow" {
             serde_json::json!({})
@@ -384,7 +407,7 @@ impl ControlPlane {
 
     async fn append_message(&self, conv_id: &str, content: &str) -> Result<String> {
         let r = self
-            .post(&format!("/v1/conversations/{conv_id}/messages"))
+            .post(&format!("/v1/conversations/{}/messages", enc(conv_id)))
             .json(&serde_json::json!({"content": content}))
             .send()
             .await?;
@@ -410,7 +433,7 @@ impl ControlPlane {
         let mut last_seq: i64 = 0;
         loop {
             let status = self
-                .get(&format!("/v1/tasks/{task_id}"))
+                .get(&format!("/v1/tasks/{}", enc(task_id)))
                 .send()
                 .await?
                 .json::<serde_json::Value>()
@@ -423,7 +446,8 @@ impl ControlPlane {
                 .unwrap_or("");
             let events = self
                 .get(&format!(
-                    "/v1/tasks/{task_id}/events?after_sequence={last_seq}"
+                    "/v1/tasks/{}/events?after_sequence={last_seq}",
+                    enc(task_id)
                 ))
                 .send()
                 .await?
@@ -680,7 +704,9 @@ fn fmt_approvals(v: &serde_json::Value) -> String {
         let perm = a.get("permission").and_then(|v| v.as_str()).unwrap_or("?");
         let scope = a.get("scope").and_then(|v| v.as_str()).unwrap_or("?");
         let task = a.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
-        let task8 = &task[..task.len().min(8)];
+        // Char-boundary-safe: a byte slice of a non-ASCII (server-provided)
+        // id panics the formatting task.
+        let task8: String = task.chars().take(8).collect();
         out.push_str(&format!(
             "{id}\n  perm: {perm}\n  scope: {scope}\n  task: {task8}\n"
         ));

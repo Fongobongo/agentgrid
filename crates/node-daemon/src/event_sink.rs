@@ -179,6 +179,42 @@ impl EventSink {
         self.adapter_events.load(Ordering::SeqCst)
     }
 
+    /// Every EventOutbox file operation (append + interval fsync, ack's full
+    /// rewrite, pending's re-read) runs on the blocking pool. They used to
+    /// execute inline on the Tokio worker — the one spot the project's own
+    /// spawn_blocking discipline (heartbeat scans, all git work) was missed —
+    /// so a struggling disk stalled every concurrent flush, the WS control
+    /// channel and unrelated attempts behind one fsync.
+    async fn outbox_push(&self, ev: &IncomingEvent) -> std::result::Result<(), outbox::PushError> {
+        let outbox = self.outbox.clone();
+        let ev = ev.clone();
+        match tokio::task::spawn_blocking(move || outbox.push(&ev)).await {
+            Ok(r) => r,
+            Err(join) => Err(outbox::PushError::Other(anyhow::anyhow!(
+                "outbox push blocking task failed: {join}"
+            ))),
+        }
+    }
+
+    async fn outbox_ack(&self, seqs: &[u64]) -> anyhow::Result<()> {
+        let outbox = self.outbox.clone();
+        let seqs = seqs.to_vec();
+        match tokio::task::spawn_blocking(move || outbox.ack(&seqs)).await {
+            Ok(r) => r,
+            Err(join) => Err(anyhow::anyhow!("outbox ack blocking task failed: {join}")),
+        }
+    }
+
+    async fn outbox_pending(&self) -> anyhow::Result<std::collections::VecDeque<IncomingEvent>> {
+        let outbox = self.outbox.clone();
+        match tokio::task::spawn_blocking(move || outbox.pending()).await {
+            Ok(r) => r,
+            Err(join) => Err(anyhow::anyhow!(
+                "outbox pending blocking task failed: {join}"
+            )),
+        }
+    }
+
     pub async fn push(&self, ty: EventType, payload: Value) {
         // Per-task cost ceilings: accumulate adapter-reported usage FIRST,
         // before the backpressure drop below — a dropped metric event is
@@ -239,7 +275,7 @@ impl EventSink {
         // the on-disk outbox hit its ceiling, so further events can't be made
         // durable. Latch `spool_full` (once) and emit a terminal `error` event
         // so the operator sees why the attempt is being failed.
-        if let Err(e) = self.outbox.push(&ev) {
+        if let Err(e) = self.outbox_push(&ev).await {
             if matches!(e, outbox::PushError::SpoolFull) {
                 if !self.spool_full.swap(true, Ordering::SeqCst) {
                     tracing::error!(
@@ -275,7 +311,7 @@ impl EventSink {
                 "dropped_bytes": dropped_bytes,
             }),
         };
-        if let Err(e) = self.outbox.push(&ev) {
+        if let Err(e) = self.outbox_push(&ev).await {
             tracing::warn!(attempt_id = %self.attempt_id, "outbox push (truncation) failed: {e}");
         }
         // Account bytes like `push` so the ack-path fetch_sub stays balanced.
@@ -300,7 +336,7 @@ impl EventSink {
                 "error": "event outbox spool full; attempt failed to avoid data loss"
             }),
         };
-        if let Err(e) = self.outbox.push(&ev) {
+        if let Err(e) = self.outbox_push(&ev).await {
             tracing::warn!(attempt_id = %self.attempt_id, "outbox push (spool-full) failed: {e}");
         }
         // Account bytes like `push` so the ack-path fetch_sub stays balanced.
@@ -330,7 +366,7 @@ impl EventSink {
                 "error": format!("per-task cost ceiling breached ({field}); attempt killed"),
             }),
         };
-        if let Err(e) = self.outbox.push(&ev) {
+        if let Err(e) = self.outbox_push(&ev).await {
             tracing::warn!(attempt_id = %self.attempt_id, "outbox push (budget) failed: {e}");
         }
         let approx_bytes = ev.payload.to_string().len() as u64;
@@ -406,7 +442,7 @@ impl EventSink {
         match send_with_retry(post, max_attempts).await {
             Ok(s) if s.is_success() => {
                 self.buf_bytes.fetch_sub(freed, Ordering::Relaxed);
-                if let Err(e) = self.outbox.ack(&seqs) {
+                if let Err(e) = self.outbox_ack(&seqs).await {
                     tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
                 }
                 (true, batch)
@@ -495,7 +531,7 @@ impl EventSink {
                 );
                 return;
             }
-            let pending = match self.outbox.pending() {
+            let pending = match self.outbox_pending().await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(attempt_id = %self.attempt_id, "outbox read failed: {e}");
@@ -522,7 +558,7 @@ impl EventSink {
                 // this pass could not deliver.
                 match send_with_retry(post, 2).await {
                     Ok(s) if s.is_success() => {
-                        if let Err(e) = self.outbox.ack(&seqs) {
+                        if let Err(e) = self.outbox_ack(&seqs).await {
                             tracing::warn!(attempt_id = %self.attempt_id, "outbox ack failed: {e}");
                         }
                     }
@@ -635,13 +671,15 @@ async fn emit_line_masked(
 ) {
     if let Some(f) = raw {
         let mut g = f.lock().await;
-        let _ = g.write_all(line).await;
-        let _ = g
-            .write_all(
-                b"
-",
-            )
-            .await;
+        // Disk-full (or any I/O error) used to silently truncate the raw
+        // mirror: the CP-visible event stream is unaffected, but whoever
+        // debugs from the worktree never learned the tail was missing.
+        let mut buf = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line);
+        buf.push(b'\n');
+        if let Err(e) = g.write_all(&buf).await {
+            tracing::warn!("raw output mirror write failed: {e}");
+        }
     }
     // Stage 3.1: accept the versioned envelope first; fall back to the
     // legacy `{type, payload}` adapter event; anything else is a raw log.
