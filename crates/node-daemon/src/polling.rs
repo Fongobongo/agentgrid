@@ -318,8 +318,39 @@ pub async fn dispatch_batch(
         let client2 = client.clone();
         let guard = InFlightGuard(a.attempt_id.clone());
         tokio::spawn(async move {
-            if let Err(e) = crate::attempt_runner::run_attempt(cfg2, client2, a).await {
+            // Kept for the failure report below: run_attempt consumes the
+            // assignment.
+            let aid = a.attempt_id.clone();
+            let fence = a.fencing_token.clone();
+            if let Err(e) =
+                crate::attempt_runner::run_attempt(cfg2.clone(), client2.clone(), a).await
+            {
                 tracing::error!("attempt error: {e}");
+                // The attempt died before it started (workspace prep, mirror
+                // clone, upstream landing…): without a terminal completion
+                // the CP keeps it "running" until its own lease/timeout
+                // sweep — the assemble collector hung here for five
+                // minutes. Report the failure terminal; the durable outbox
+                // covers a CP outage at this exact moment.
+                crate::completion::report_complete(
+                    &client2,
+                    &cfg2.server,
+                    &aid,
+                    1,
+                    None,
+                    Some("infrastructure_failed".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                    0,
+                    &cfg2.completion_outbox,
+                    &fence,
+                )
+                .await;
             }
             drop(guard);
             drop(permit);

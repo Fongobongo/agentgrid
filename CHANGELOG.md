@@ -4,6 +4,30 @@
 
 ### Fixed
 
+- **Assemble/integrator collector could never run on the second node (the
+  e2e failure-injection job's remaining red).** `apply_upstream`'s
+  cross-host fallback lands a worker's `changes.patch` with
+  `git apply --3way`, which implies `--index` — the landed patch sat
+  STAGED but uncommitted, and the NEXT upstream's cherry-pick refuses on
+  a dirty index. Whenever a remote patch preceded a local commit (the
+  collector landing on the worker-2 node: fetch worker-1's SHA →
+  "not our ref" → patch fallback → cherry-pick worker-2 → refused), the
+  collector failed deterministically; it only ever passed when
+  scheduling happened to put the local commit first. Each landed patch
+  is now committed as its own commit, keeping the tree clean for the
+  rest of the sequence. Found via the node-log dump added to
+  run-assemble.sh (pre-existing flake, surfaced by scheduling luck).
+- **An attempt that dies before it starts no longer hangs "running"
+  forever.** `dispatch_batch` only logged run_attempt's early errors
+  (workspace prep, mirror clone, upstream landing): the CP kept the
+  attempt running until its own sweep — the same collector sat five
+  minutes in "running". A failed terminal completion
+  (`infrastructure_failed`) is now reported, with the durable outbox
+  covering a CP outage at that moment.
+- **ws read-idle actually fires now**: the first version put the
+  timeout inside `select!`, where every 30 s heartbeat tick rebuilt the
+  future and reset the 90 s deadline — a no-op. Now the last inbound
+  frame timestamp is tracked and checked per loop iteration.
 - **Nightly CI gates were dead on arrival — three separate causes.**
   Every scheduled run since the gates landed (~Oct 15) was red:
   - `tier1 clean host` died at its first line with exit 2: the

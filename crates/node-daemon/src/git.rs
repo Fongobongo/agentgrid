@@ -1067,16 +1067,38 @@ pub fn prepare_workspace(
                 stdin.write_all(&patch.1)?;
             }
             let out = ap.wait_with_output()?;
-            if !out.status.success() {
-                // Plan 1.2 (#11): same deterministic pass as cherry-pick.
-                if resolve_trivial_conflicts(ws_path)? {
-                    continue;
-                }
+            let landed = out.status.success() || resolve_trivial_conflicts(ws_path)?;
+            if !landed {
                 anyhow::bail!(
                     "integrator `git apply` of upstream changes.patch ({sha}) \
                      conflicted: {}; merged branches need manual resolution or \
                      non-conflicting workers",
                     String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            // `git apply --3way` implies `--index`: the landed patch sits
+            // STAGED but uncommitted, and the NEXT upstream's cherry-pick
+            // refuses on a dirty index ("Your index contains uncommitted
+            // changes"). Whenever a cross-host patch precedes a local
+            // commit — exactly the collector-on-the-other-node assemble
+            // layout — every later upstream failed. Land each patch as its
+            // own commit so the tree is clean for whatever comes next.
+            let commit = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=agentgrid",
+                    "-c",
+                    "user.email=agentgrid@agentgrid",
+                    "commit",
+                    "-m",
+                    &format!("agentgrid: upstream {sha} via changes.patch"),
+                ])
+                .current_dir(ws_path)
+                .output()?;
+            if !commit.status.success() {
+                anyhow::bail!(
+                    "integrator commit of upstream patch {sha} failed: {}",
+                    String::from_utf8_lossy(&commit.stderr)
                 );
             }
         }
