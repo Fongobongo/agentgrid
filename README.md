@@ -209,6 +209,12 @@ Requires Rust (edition 2021), git, and a C toolchain. SQLite is bundled and TLS
 is rustls-only — no system OpenSSL/SQLite. Linux only (x86_64 tier 1,
 aarch64 tier 2).
 
+The compiler is pinned by `rust-toolchain.toml` (rustup auto-installs it on
+first `cargo` invocation), so every machine — dev host, CI, release build —
+compiles with the same toolchain. The workspace `rust-version` (the MSRV,
+enforced by the `msrv` CI job) is the floor of the current `Cargo.lock`;
+bump both together.
+
     cargo build --release
     cargo test --workspace
 
@@ -232,9 +238,9 @@ inputs:
 
 What IS reproducible: the **SHA256SUMS** published with each GitHub Release are
 computed on the exact artifacts uploaded, so consumers can verify integrity of
-what they download (not that a rebuild matches). For bit-identical rebuilds a
-future pass would pin `rust-toolchain.toml`, add `remap-path-prefix`, and
-reproduce the web bundle in a pinned container image.
+what they download (not that a rebuild matches). The compiler itself is pinned
+(`rust-toolchain.toml`); for bit-identical rebuilds a future pass would add
+`remap-path-prefix` and reproduce the web bundle in a pinned container image.
 
 ## Windows
 

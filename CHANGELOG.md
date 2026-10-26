@@ -167,6 +167,22 @@
 
 ### Changed
 
+- **Dependabot queue cleared (PR #83–#100 superseded).** All fourteen
+  open bump PRs applied directly (the v0.5.1 convention — the queue had
+  been dead weight while CI was down): cargo — async-compression 0.4.51,
+  libc 0.2.191, tokio-rustls 0.26.6, tokio-util 0.7.20, sha2 0.11.1,
+  thiserror 2.0.21, proptest 1.12.0, rust-embed 8.13.0, serde_json
+  1.0.154; CI actions pinned to the new SHAs — upload-artifact (five
+  sites), codeql-action init/analyze (plus pr-validation's upload-sarif
+  for uniformity), docker/setup-qemu v4.4.0, actions/download-artifact.
+  Verified: MSRV 1.94 check, clippy `-D warnings`, full workspace suite
+  all green.
+- **Docs:** the README build section documents the pinned toolchain and
+  the enforced MSRV (the reproducibility note no longer lists the
+  toolchain pin as future work); the threat model gains **T27** (the
+  eval-case tamper model) and a 0.5.2 additions section covering the
+  eval hash-pinning, ACP trailing-notification drain and terminal
+  early-failure completions.
 - **The 12k-line `tests/api.rs` monolith is now a module directory.** Same
   single integration-test binary (`tests/api/main.rs`), same 158 tests,
   byte-identical bodies — only the layout changed. The shared

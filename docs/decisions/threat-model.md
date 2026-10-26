@@ -68,6 +68,7 @@ External ACP clients can drive the grid as an ACP agent (Stage 6) since 0.2.
 | T24 | Unattended adapter defaults to a dangerous permission bypass (`--dangerously-skip-permissions` / `--auto`) so an unguarded agent auto-runs destructive tools | Claude `--dangerously-skip-permissions` and opencode `--auto` are now gated behind a single operator opt-in `AGENTGRID_UNSAFE_UNATTENDED=1` (default off); the adapter loudly warns on stderr when on, and never adds the dangerous flag otherwise (0.4.1) | sandbox=none × unsafe gating, structured permission interception (`permission_interception` capability), strict-profile refusal of wrapper adapters, provenance record and UI badge follow-up |
 | T18 | Predictable weak bootstrap credentials in deploy defaults | production `docker-compose.yml` has no `admin/changeme`/`dev-insecure-secret`; `deploy/compose/up.sh` generates a random JWT secret + admin password and completes bootstrap via the setup token; `install-control-plane.sh` no longer bakes `admin/changeme` into the systemd unit (0.4.1) | demo compose keeps insecure static defaults for local hacking only (documented) |
 | T15 | A node mutates or reads another node's attempt (cross-node isolation breach) | every `/v1/node/attempts/*` mutation (events, complete, ack, cancel-poll, session, artifact upload) and the node-scoped artifact read enforce authenticated-node ownership of the target attempt; a foreign attempt yields `403` (or `404` to hide existence); upstream artifact reads are restricted to the consumer node whose workflow step depends on the producer task (`can_node_read_upstream_artifact`); revoked nodes fail at `require_node_auth` (0.4.1) | every node mutation also checks a per-attempt fencing token (`X-AgentGrid-Fencing-Token`); a stale token from a superseded attempt/lease yields `409` so a restarted node cannot mutate an attempt the scheduler already re-assigned (0.4.2, implemented) |
+| T27 | Agent drops or rewrites a case file under the attempt worktree's `.agentgrid/evals/` so the daemon's post-run eval probe executes attacker-chosen shell (`sh -c`) in the daemon's own context, outside every adapter permission gate — no approved tool call needed | the probe executes only the commands captured in daemon memory at materialisation time (CP-stamped artifacts fetched over the authenticated node API); each pinned file is re-read solely to verify its SHA-256 — a modified or deleted pinned case fails the suite (fail-closed); unlisted YAML files are logged and never parsed or executed; on an unsandboxed node the eval child gets a clean environment (PATH/HOME) instead of the daemon's inherited env (0.5.2) | — |
 
 ## Operational safety invariants
 
@@ -138,3 +139,21 @@ External ACP clients can drive the grid as an ACP agent (Stage 6) since 0.2.
   resource limits + effective network `none` all hold; a bridge/unrestricted
   node reports false rather than claiming isolation it does not apply.
   (P1 960)
+
+## 0.5.2 additions
+
+- **Eval-case tamper model (T27):** `.agentgrid/evals/` lives inside the
+  agent's worktree, so everything on disk there is untrusted after the agent
+  runs. The probe never parses worktree YAML: commands are pinned in daemon
+  memory at materialisation, files are re-read only for a SHA-256 comparison
+  (mismatch/deletion fails the suite), unlisted YAML is ignored with a warn,
+  and an unsandboxed eval child runs with a clean environment.
+- **ACP event completeness:** the agent's `session_prompt` response is parsed
+  after any trailing `session/update` notifications on the same stdout, so
+  the daemon's teardown drains already-queued notifications (signal → drain →
+  bounded join) instead of aborting the stream task — the final updates of a
+  successful session are no longer lost to a scheduling race.
+- **No hung "running" attempts on early node-side failure:** an attempt that
+  dies before it starts (workspace prep, mirror clone, upstream landing)
+  reports a terminal `infrastructure_failed` completion instead of leaving
+  the CP waiting on its lease/timeout sweep.
