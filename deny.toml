@@ -24,33 +24,10 @@ yanked = "deny"
 # the ignore was dropped 2026-10-13 (mirrored in supply-chain.yml) — re-add
 # only if protobuf 2.x lands back in Cargo.lock.
 #
-# RUSTSEC-2023-0071 (rsa Marvin Attack) used to be ignored here: sqlx 0.9 no
-# longer pulls `rsa` at all, so the rule was removed — re-add only if the
-# crate lands back in Cargo.lock.
-ignore = [
-    # RUSTSEC-2023-0071 (rsa Marvin Attack, no patch available). Pulled by
-    # jsonwebtoken 11 via its `rust_crypto` backend (the only pure-Rust
-    # backend; aws_lc_rs would need a C toolchain in the musl/static release
-    # builds). Our JWT usage is HMAC-only: Header::default() (HS256),
-    # EncodingKey/DecodingKey::from_secret, Validation::default() — no RSA
-    # keys are configured and no RSA code path is reachable, so the timing
-    # side channel does not apply (advisory workaround: avoid RSA where
-    # attackers observe timing; we do no RSA at all). Mirrored in
-    # supply-chain.yml (audit-check ignore). Re-evaluate the day an RSA
-    # algorithm is configured anywhere.
-    { id = "RUSTSEC-2023-0071", reason = "HMAC-only HS256 usage; rsa linked but unreachable" },
-    # RUSTSEC-2026-0387 (crypto-bigint 0.5.5 constant-time variability).
-    # Pulled by elliptic-curve 0.13.8 (p256/p384/ecdsa) under jsonwebtoken
-    # 11's rust_crypto backend — the same linkage as the rsa entry above,
-    # with the same reachability analysis: our JWT usage is HMAC-only
-    # (HS256, from_secret, Validation::default), so no elliptic-curve
-    # operation (and no crypto-bigint secret arithmetic) ever runs. Fix
-    # requires crypto-bigint >=0.7.6, which needs elliptic-curve >=0.14 —
-    # not publishable in-tree while jsonwebtoken pins 0.13. Re-evaluate
-    # when the backend's elliptic-curve moves. Mirrored in
-    # supply-chain.yml (audit-check ignore).
-    { id = "RUSTSEC-2026-0387", reason = "HMAC-only HS256 usage; elliptic-curve (crypto-bigint) linked but unreachable; fix needs elliptic-curve >=0.14 under jsonwebtoken" },
-]
+# JWT now uses AWS-LC: both crypto-bigint (RUSTSEC-2026-0387) and rsa
+# (RUSTSEC-2023-0071) are absent from the locked default/all-features graphs.
+# No reachability exceptions: a reintroduced vulnerable dependency must fail.
+ignore = []
 
 [licenses]
 # Allow common OSS licenses; unknown / restriction surface here.

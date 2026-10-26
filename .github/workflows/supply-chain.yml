@@ -28,21 +28,9 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # RUSTSEC-2023-0071 (rsa Marvin, unpatched): linked via
-          # jsonwebtoken 11 / rust_crypto, but our JWT usage is HMAC-only
-          # (HS256) so the RSA timing path is unreachable — see deny.toml
-          # for the full justification. Mirrored there; re-evaluate if an
-          # RSA algorithm is ever configured.
-          # (RUSTSEC-2024-0437 dropped 2026-10-13: prometheus is on
-          # protobuf 3.x. RUSTSEC-2023-0071's rsa entry below is the
-          # jsonwebtoken-11 one, not the old sqlx one.)
-          # RUSTSEC-2026-0387 (crypto-bigint 0.5.5 constant-time): same
-          # jsonwebtoken/rust_crypto linkage and HMAC-only unreachability
-          # analysis as RUSTSEC-2023-0071 — see deny.toml for the full
-          # justification. Fix needs elliptic-curve >=0.14 (crypto-bigint
-          # >=0.7.6), which jsonwebtoken 11 does not allow yet.
-          # Comma-separated (the action expands each into its own --ignore).
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0387
+          # No advisory ignores: the AWS-LC JWT backend removes crypto-bigint
+          # (RUSTSEC-2026-0387) and rsa (RUSTSEC-2023-0071), including with
+          # workspace --all-features. Reintroductions must fail the audit.
 
   cargo-deny:
     name: cargo deny
