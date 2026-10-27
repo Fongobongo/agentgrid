@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lost assignment wake-ups in the CP.** `notify_waiters` stores no permit,
+  and a `Notified` future is only registered once polled: a notify landing
+  while `pump_once` (WS) or the poll assign (long-poll) was awaiting DB work
+  was dropped, so the node waited for the 1 s pump tick / rest of the poll
+  timeout. Both waiters now call `Notified::enable()` right after pinning.
+  Surfaced as a flaky >200 ms push in `ws_assignment_pushed_under_200ms`.
+- **WS load harness nodes never heartbeated**, so the CP's 30 s offline
+  sweep declared all 100 nodes dead mid-run and failed their in-flight
+  attempts (`node_lost`): the remote 100/1000 run froze at 852/1000 while a
+  ~42 s local run escaped. The harness now sends an HTTP heartbeat every
+  10 s, and prints a `LOAD-STALL` dump (task statuses, online nodes, leased
+  slots) before the drain deadline. Rerun recorded in
+  `docs/load-baseline-3.1.md`.
+- **Two-host E2E cleanup never ran on the remote**: `pkill -f` matched the
+  cleanup ssh command's own argv and killed the shell before `rm`, leaving
+  the node-daemon and workdir behind.
+
 ## [0.5.3] - 2026-10-27
 
 ### Fixed
