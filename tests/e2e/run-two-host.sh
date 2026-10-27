@@ -32,8 +32,10 @@ cleanup() {
   set +e
   [ -n "${CPPID:-}" ] && kill "$CPPID" 2>/dev/null
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null; done
+  # Bracket keeps pkill's pattern from matching this ssh command's own
+  # argv (which killed the shell before rm ran and left node + workdir).
   ssh "${SSH_OPTS[@]}" -i "$AG_REMOTE_KEY" -p "$AG_REMOTE_PORT" "$AG_REMOTE_USER@$AG_REMOTE_HOST" \
-      "pkill -f agentgrid-node-daemon; rm -rf $RWORK" 2>/dev/null
+      "pkill -f '[a]gentgrid-node-daemon'; rm -rf $RWORK" 2>/dev/null
   rm -rf "$TMP"
 }
 trap cleanup EXIT
