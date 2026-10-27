@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-27
+
+### Fixed
+
+- **Nightly WS attempt tests flaked under (`RUST_TEST_THREADS=16`) stress.**
+  The ACPE tests prepend their fixture dir to process-global `PATH` while a
+  ws test may be spawning `adapter-mock`; when the clobbered `PATH` resolved
+  the real cargo-built binary instead, it exited instantly — the ws test
+  either missed the "running" window or saw <10 events. Both suites now take
+  one crate-wide `TEST_ENV_LOCK` around every child-env mutation.
+- **`AGENTGRID_EVENT_BUF_BYTES` / `AGENTGRID_MAX_LINE_BYTES` are captured per
+  sink at construction** instead of re-read from process env per event/stream.
+  A test lowering the cap could previously truncate a concurrently running
+  attempt's output (and its secrets); tests now override caps via setters.
+
 ## [0.5.2] - 2026-10-27
 
 ### Fixed
