@@ -15,7 +15,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 license = "MIT"
 # Real floor of the current Cargo.lock (sqlx 0.9 needs 1.94). Enforced by

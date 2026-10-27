@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-27
+
 ### Fixed
 
 - **Assemble/integrator collector could never run on the second node (the
