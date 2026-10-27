@@ -223,34 +223,11 @@ mod tests {
         )
     }
 
-    /// Serialize the tests that set, or assert on output shaped by, the
-    /// process-global knobs `read_stream`/`EventSink` read while running
-    /// (`AGENTGRID_MAX_LINE_BYTES` default 1 MiB, `AGENTGRID_EVENT_BUF_BYTES`
-    /// default 4 MiB): `read_stream_caps_oversized_line` sets a 16-byte line
-    /// cap and a concurrently starting reader truncates its lines — "hello"
-    /// never reaches the raw mirror (`read_stream_mirrors_raw_output` flake)
-    /// or a secret is cut before masking so `***` never appears
-    /// (`validation_command_masks_secrets_in_output_and_log`); likewise
-    /// `event_sink_drops_logs_over_cap...` sets a 64-byte buffer cap that a
-    /// concurrent sink then drops events under. Mirrors
-    /// `sandbox::tests::ENV_LOCK`, which killed the same class of flake for
-    /// the AGENTGRID_SANDBOX_* knobs. A tokio (not std) mutex so the guard
-    /// can legally span the awaited `read_stream` calls.
-    static READ_STREAM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// The `drive_acp_session_*` tests (plus the skills-injection case below)
-    /// mutate process-global `PATH`/`HOME`/`AG_FAKE_*` for their fake agent;
-    /// serialize them against each other so parallel runs cannot steal or
-    /// clobber each other's fixture env mid-session.
-    #[cfg(unix)]
-    static ACPE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     #[tokio::test]
     async fn event_sink_drops_logs_over_cap_but_keeps_terminal_state() {
         // Stage 2.1: backpressure. A chatty agent's stdout/stderr are dropped
         // once the RAM buffer exceeds the cap; status/result/error are never
         // dropped, and exactly one `output_truncated` notice is emitted.
-        let _g = READ_STREAM_ENV_LOCK.lock().await;
-        std::env::set_var("AGENTGRID_EVENT_BUF_BYTES", "64");
         let sink = EventSink::new(
             "a1".into(),
             reqwest::Client::new(),
@@ -258,6 +235,7 @@ mod tests {
             String::new(),
             test_outbox("a1"),
         );
+        sink.set_buf_cap_bytes(64);
         // Each line ~ 100 bytes; 64-byte cap overflows after the first.
         for _ in 0..50 {
             sink.push(EventType::Stdout, serde_json::json!({ "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }))
@@ -274,7 +252,6 @@ mod tests {
             .count();
         assert!(has_result, "terminal-state event must survive truncation");
         assert_eq!(truncation_notices, 1, "exactly one output_truncated notice");
-        std::env::remove_var("AGENTGRID_EVENT_BUF_BYTES");
     }
 
     // The two validation-command tests and the five drive_acp_session tests
@@ -319,7 +296,6 @@ mod tests {
     async fn validation_command_masks_secrets_in_output_and_log() {
         // Audit 22.1.1: a secret that appears in validation stdout must be
         // masked in BOTH the streamed events and the validation.log artifact.
-        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("ag-valmsk-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let sink = EventSink::new(
@@ -429,7 +405,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_stream_mirrors_raw_output() {
-        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("ag-raw-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
         let raw_path = std::path::Path::new(&dir).join("raw.log");
@@ -471,7 +446,6 @@ mod tests {
         // must not silently drop its final partial output. The partial tail is
         // flushed as a final raw line so the crashed adapter's last half-event
         // is preserved (best-effort) instead of lost.
-        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("ag-part-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
         let raw_path = std::path::Path::new(&dir).join("raw.log");
@@ -599,7 +573,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_runs_fake_agent_and_streams_events() {
-        let _env = ACPE_ENV_LOCK.lock().await;
+        let _env = crate::TEST_ENV_LOCK.lock().await;
         let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp");
         // Make the test-only ACP agent discoverable on PATH. It is built into
         // the same target dir; locate it relative to CARGO_MANIFEST_DIR.
@@ -730,7 +704,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_flags_rate_limit_then_rotates() {
-        let _env = ACPE_ENV_LOCK.lock().await;
+        let _env = crate::TEST_ENV_LOCK.lock().await;
         let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-rl");
         let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
@@ -900,7 +874,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_hang_mid_frame_times_out() {
-        let _env = ACPE_ENV_LOCK.lock().await;
+        let _env = crate::TEST_ENV_LOCK.lock().await;
         let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-hang");
         let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
@@ -1030,7 +1004,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_cancel_mid_prompt_turn() {
-        let _env = ACPE_ENV_LOCK.lock().await;
+        let _env = crate::TEST_ENV_LOCK.lock().await;
         let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-cancel");
         let fake = fake_acp_bin();
         let bin_dir = fake.parent().unwrap();
@@ -1213,7 +1187,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn drive_acp_session_injects_trusted_skills_block_into_prompt() {
-        let _env = ACPE_ENV_LOCK.lock().await;
+        let _env = crate::TEST_ENV_LOCK.lock().await;
         async fn one_case(trusted: bool, expect_block: bool) {
             let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-skill");
             let tmp = std::env::temp_dir().join(format!("ag-skill-{}", uuid::Uuid::new_v4()));
@@ -1375,8 +1349,6 @@ mod tests {
     /// at the line cap instead of growing `acc` without bound; the pipe keeps draining.
     #[tokio::test]
     async fn read_stream_caps_oversized_line() {
-        let _g = READ_STREAM_ENV_LOCK.lock().await;
-        std::env::set_var("AGENTGRID_MAX_LINE_BYTES", "16");
         let sink = EventSink::new(
             "a-cap".into(),
             reqwest::Client::new(),
@@ -1384,6 +1356,7 @@ mod tests {
             String::new(),
             test_outbox("a-cap"),
         );
+        sink.set_line_cap_bytes(16);
         // 100 bytes, no newline — must be split into multiple flushed lines.
         let input: Vec<u8> = vec![b'x'; 100];
         read_stream(
@@ -1395,7 +1368,6 @@ mod tests {
             Arc::new(crate::command_guard::CommandGuard::new(vec![], vec![])),
         )
         .await;
-        std::env::remove_var("AGENTGRID_MAX_LINE_BYTES");
         let buf = sink.buffered_events().await;
         // At least a few stdout lines were emitted despite no newline.
         let n = buf.iter().filter(|e| e.r#type == EventType::Stdout).count();
@@ -1408,7 +1380,6 @@ mod tests {
     /// produces events instead of crashing the reader.
     #[tokio::test]
     async fn read_stream_handles_invalid_utf8() {
-        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let sink = EventSink::new(
             "a-utf8".into(),
             reqwest::Client::new(),
@@ -1444,7 +1415,6 @@ mod tests {
     /// the redactor: fix the path, do not weaken the test.
     #[tokio::test]
     async fn read_stream_never_leaks_secrets_regulator() {
-        let _g = READ_STREAM_ENV_LOCK.lock().await;
         let secret = "sk-live-abc123XYZ".to_string();
         let sink = EventSink::new(
             "a-secrets".into(),

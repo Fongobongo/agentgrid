@@ -1009,6 +1009,14 @@ async fn amain() -> Result<()> {
     polling::run_transport(cfg, cred).await
 }
 
+/// Serializes every test that mutates process-global env used to locate or
+/// configure spawned children (`PATH` for adapter binaries, `HOME`,
+/// `AG_FAKE_*`). Per-module locks were not enough: the ACPE tests prepending
+/// their fixture dir to `PATH` could drop the ws tests' `adapter-mock` off
+/// `PATH` mid-spawn (nightly stress 40475001835 / 40075910072).
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 #[path = "main_tests.rs"]
 mod main_tests;

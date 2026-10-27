@@ -20,6 +20,13 @@ use crate::secret_redactor::StreamingRedactor;
 
 /// Shared, bounded-ish event buffer that flushes to the control plane in
 /// batches (every 200ms or when 50 events accumulate).
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 pub struct EventSink {
     buf: Mutex<VecDeque<IncomingEvent>>,
     next: AtomicU64,
@@ -39,6 +46,13 @@ pub struct EventSink {
     outbox: Arc<outbox::EventOutbox>,
     /// Stage 2.1: approximate RAM bytes pending in `buf` (backpressure).
     buf_bytes: AtomicU64,
+    /// Stage 2.1: per-attempt RAM buffer cap and `read_stream` line cap,
+    /// captured from `AGENTGRID_EVENT_BUF_BYTES` / `AGENTGRID_MAX_LINE_BYTES`
+    /// at construction. Held on the sink instead of re-read from the process
+    /// env per event: env is process-global, so a test lowering it used to
+    /// make an unrelated, concurrently starting attempt drop its events.
+    buf_cap_bytes: AtomicU64,
+    line_cap_bytes: AtomicU64,
     /// Stage 2.1: latched once an `output_truncated` notice has been emitted,
     // so a chatty agent produces one truncation notice, not one per dropped line.
     truncated_warned: AtomicBool,
@@ -84,6 +98,8 @@ impl EventSink {
             server,
             outbox,
             buf_bytes: AtomicU64::new(0),
+            buf_cap_bytes: AtomicU64::new(env_u64("AGENTGRID_EVENT_BUF_BYTES", 4 * 1024 * 1024)),
+            line_cap_bytes: AtomicU64::new(env_u64("AGENTGRID_MAX_LINE_BYTES", 1024 * 1024)),
             truncated_warned: AtomicBool::new(false),
             dropped_count: AtomicU64::new(0),
             dropped_bytes: AtomicU64::new(0),
@@ -93,6 +109,20 @@ impl EventSink {
             cost_total: AtomicU64::new(0),
             budget: std::sync::Mutex::new((None, None)),
         })
+    }
+
+    /// Override the RAM buffer cap; the operator knob is
+    /// `AGENTGRID_EVENT_BUF_BYTES`, read at construction.
+    #[cfg(test)]
+    pub fn set_buf_cap_bytes(&self, cap: u64) {
+        self.buf_cap_bytes.store(cap, Ordering::Relaxed);
+    }
+
+    /// Override the `read_stream` line cap; the operator knob is
+    /// `AGENTGRID_MAX_LINE_BYTES`, read at construction.
+    #[cfg(test)]
+    pub fn set_line_cap_bytes(&self, cap: u64) {
+        self.line_cap_bytes.store(cap, Ordering::Relaxed);
     }
 
     /// Stage 13 plan approval: remember the latest `plan` event text emitted
@@ -242,10 +272,7 @@ impl EventSink {
             EventType::Stdout | EventType::Stderr | EventType::Metric
         );
         if droppable {
-            let cap = std::env::var("AGENTGRID_EVENT_BUF_BYTES")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(4 * 1024 * 1024);
+            let cap = self.buf_cap_bytes.load(Ordering::Relaxed);
             let cur = self.buf_bytes.load(Ordering::Relaxed);
             if cur >= cap {
                 // Hardening P1 item 34: track dropped events/bytes for
@@ -629,10 +656,7 @@ pub async fn read_stream<R: AsyncRead + Unpin>(
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(6);
-    let line_cap: usize = std::env::var("AGENTGRID_MAX_LINE_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1024 * 1024);
+    let line_cap = sink.line_cap_bytes.load(Ordering::Relaxed) as usize;
     let mut redactor = StreamingRedactor::new(secrets, min_len, line_cap);
 
     loop {
