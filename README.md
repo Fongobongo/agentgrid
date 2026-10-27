@@ -5,7 +5,7 @@ node daemons, each running an LLM agent adapter (Claude Code / Codex / OpenCode)
 in an isolated git worktree. SQLite WAL on local disk, single active
 control-plane instance.
 
-> Status: v0.3.9 — see [CHANGELOG.md](CHANGELOG.md).
+> Status: v0.5.3 — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Why this instead of k8s Jobs + cron + a queue?
 
