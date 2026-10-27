@@ -132,6 +132,38 @@ build), т.е. замер — **верхняя оценка** RSS голого C
 96 МБ, при этом сам CP — заведомо ниже (клиенты + reqwest + harness
 сидят в том же процессе).
 
+### Rerun: 2026-10-27 (v0.5.3)
+
+Повторная кассета 100/1000 на том же хосте (idle до старта, load avg 0.17).
+Первый ws-прогон завис на `852/1000` и не двигался до 600 s дедлайна.
+Причина — в стенде, не в CP: harness-узлы WS не слали HTTP-heartbeat,
+поэтому `mark_offline_nodes` через 30 s объявлял их offline и валил
+in-flight attempts (`node_lost`). Poll-вариант проходил, потому что
+`/v1/node/poll` сам трогает heartbeat. Фикс: heartbeat-цикл (10 s) в
+`ws_loop`; на дедлайне харнесс теперь печатает `LOAD-STALL` с разбивкой
+задач по статусам и счётчиками слотов узлов.
+
+```
+poll 100/1000:
+LOAD-RESULT nodes=100 tasks=1000 completed=1000 wall_s=56.6
+            assign_p50_ms=34038 assign_p99_ms=43627 assign_max_ms=43646
+            tasks_read_p50_ms=180 tasks_read_p99_ms=726
+            write_txns=3708 write_lock_failures=0
+            poll_requests=500 poll_avg_ms=3150.37 ws_pushes=0
+
+ws 100/1000:
+LOAD-RESULT nodes=100 tasks=1000 completed=1000 wall_s=53.7
+            assign_p50_ms=27971 assign_p99_ms=40412 assign_max_ms=40599
+            tasks_read_p50_ms=175 tasks_read_p99_ms=402
+            write_txns=4721 write_lock_failures=0
+            poll_requests=0 poll_avg_ms=0.00 ws_pushes=500
+```
+
+Wall вырос с ~42 s (2026-08-28) до ~54–57 s: debug build на 2 vCPU,
+насыщенном самим стендом (load avg ~3.6 во время прогона), а не регрессия
+write path — `write_lock_failures=0` и reads p99 ≤ 726 ms держатся, WS
+по-прежнему не хуже poll.
+
 ## Достигнутые цели 0.3 (обновлено 2026-08-28)
 
 | цель из шапки 0.3                              | цель     | замер                                              | статус     |

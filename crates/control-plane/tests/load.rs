@@ -228,11 +228,37 @@ async fn poll_loop(
 /// next pump pass re-assigns any in-flight attempts of this node; without
 /// reconnect a dropped push stalled the run at `completed < tasks_n`
 /// (observed 946/1000 on the remote load host at 100 nodes).
+/// A real node daemon heartbeats over HTTP independently of the WS control
+/// channel. The load harness used to skip that, so any run longer than the
+/// CP's 30 s offline sweep had every node declared dead mid-run and its
+/// in-flight attempts failed as `node_lost` (remote 100/1000 ws froze at
+/// ~852/1000 while a 42 s local run escaped by finishing first).
+async fn heartbeat_loop(sp: Arc<Spinup>, credential: String) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+    loop {
+        tick.tick().await;
+        let _ = sp
+            .http
+            .post(format!("{}/v1/node/heartbeat", sp.base))
+            .header("authorization", format!("Bearer {credential}"))
+            .json(&json!({
+                "status": "online",
+                "name": "load",
+                "adapters": ["mock"],
+                "repositories": ["*"],
+                "max_concurrency": 2,
+            }))
+            .send()
+            .await;
+    }
+}
+
 async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usize) {
     let ws_url = format!(
         "ws://{}/v1/node/ws",
         sp.base.strip_prefix("http://").unwrap_or(&sp.base)
     );
+    let hb = tokio::spawn(heartbeat_loop(sp.clone(), node.credential.clone()));
     while sp.completed.load(std::sync::atomic::Ordering::Relaxed) < completed_threshold {
         // (Re)connect + Hello + free-slots heartbeat. A failed upgrade or a
         // dropped mid-run socket falls through to the backoff + retry below.
@@ -327,6 +353,54 @@ async fn ws_loop(node: EnrollResponse, sp: Arc<Spinup>, completed_threshold: usi
         // Small backoff before reconnect so a CP-side refusal cannot hot-loop.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+    hb.abort();
+}
+
+/// Printed once before the drain-deadline panic: where the remaining work
+/// actually sits (task statuses, online nodes, leased slots). A bare
+/// "N/M completed" cannot tell a queue that stopped being scheduled apart
+/// from pushes that never reached a node.
+async fn dump_stall(sp: &Spinup) {
+    let auth = format!("Bearer {}", sp.token);
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    if let Ok(r) = sp
+        .http
+        .get(format!("{}/v1/tasks?limit=1000", sp.base))
+        .header("authorization", &auth)
+        .send()
+        .await
+    {
+        if let Ok(v) = r.json::<serde_json::Value>().await {
+            for t in v["items"].as_array().into_iter().flatten() {
+                *counts
+                    .entry(t["status"].as_str().unwrap_or("?").to_string())
+                    .or_default() += 1;
+            }
+        }
+    }
+    let (mut online, mut used, mut cap) = (0u64, 0u64, 0u64);
+    if let Ok(r) = sp
+        .http
+        .get(format!("{}/v1/nodes?limit=1000", sp.base))
+        .header("authorization", &auth)
+        .send()
+        .await
+    {
+        if let Ok(v) = r.json::<serde_json::Value>().await {
+            for n in v["items"].as_array().into_iter().flatten() {
+                if n["status"].as_str() == Some("online") {
+                    online += 1;
+                }
+                used += n["active_attempts"].as_u64().unwrap_or(0);
+                cap += n["max_concurrency"].as_u64().unwrap_or(0);
+            }
+        }
+    }
+    println!(
+        "LOAD-STALL completed={} task_statuses={counts:?} nodes_online={online}/{} slots={used}/{cap}",
+        sp.completed.load(std::sync::atomic::Ordering::Relaxed),
+        sp.nodes.len()
+    );
 }
 
 /// Deadline-wait + percents + assertion, then print LOAD-RESULT.
@@ -338,11 +412,13 @@ async fn finalize_load(
     let tasks_n = sp.tasks_n;
     let deadline = Instant::now() + std::time::Duration::from_secs(600);
     while sp.completed.load(std::sync::atomic::Ordering::Relaxed) < tasks_n {
-        assert!(
-            Instant::now() < deadline,
-            "load did not drain: {}/{tasks_n} completed",
-            sp.completed.load(std::sync::atomic::Ordering::Relaxed)
-        );
+        if Instant::now() >= deadline {
+            dump_stall(&sp).await;
+            panic!(
+                "load did not drain: {}/{tasks_n} completed",
+                sp.completed.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     for h in handles.drain(..) {
