@@ -335,9 +335,14 @@ pub fn start_pump(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
             // Build the waiter BEFORE running the pass so a notify landing
-            // mid-pass re-runs the loop (same race-closure as poll).
+            // mid-pass re-runs the loop. `enable()` registers this waiter
+            // immediately: `notify_waiters` does NOT store a permit, so an
+            // unpolled `Notified` misses a wake-up that lands while the pass
+            // is running (the pump then sat on the 1 s safety tick — seen as
+            // a flaky >200 ms push in ws_assignment_pushed_under_200ms).
             let notified = state.assignment_notify.notified();
             tokio::pin!(notified);
+            notified.as_mut().enable();
             pump_once(&state).await;
             tokio::select! {
                 _ = &mut notified => {}

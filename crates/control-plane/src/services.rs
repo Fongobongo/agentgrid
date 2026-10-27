@@ -225,12 +225,14 @@ impl SchedulerService {
 
         let deadline = Instant::now() + poll_timeout();
         loop {
-            // Construct the waiter before checking for work: Notify's permit
-            // captures a notify that lands between try_assign returning None
-            // and the select below (otherwise the node idled a full poll
-            // timeout despite work being assigned).
+            // Construct the waiter before checking for work, and `enable()`
+            // it right away: `notify_waiters` stores no permit, so an
+            // unpolled `Notified` misses a notify that lands during the
+            // assign attempt (the node then idled the rest of its poll
+            // timeout despite work being queued).
             let notified = self.assignment_notify.notified();
             tokio::pin!(notified);
+            notified.as_mut().enable();
             let cap = max_batch.max(1).min(req.max_concurrency as usize);
             match self.store.try_assign_batch(&req.node_id, cap).await {
                 Ok(batch) if !batch.is_empty() => return Ok((degraded, batch)),
