@@ -4,6 +4,35 @@
 
 ### Added
 
+- **HA chaos is a CI gate.** `.github/workflows/ha-chaos.yml` builds the
+  cluster binaries and runs the process-based scenarios (`run-ha-3host.sh`,
+  `run-ha-2pluswitness.sh`, `run-ha-partition.sh`, `run-ha-incremental.sh`)
+  as a 4-way matrix on ubuntu-latest: on every push touching
+  `crates/control-plane/src/ha/`, `crates/edge/`, `crates/node-daemon/src/`
+  or `tests/e2e/run-ha-*.sh`, nightly at 04:00, and on PRs labelled
+  `ha-chaos`. Per-scenario logs are uploaded even on success
+  (`AG_E2E_KEEP=1`). Until now the only tests that kill a leader and assert
+  "exactly one leader / no acknowledged write lost" ran by hand.
+- **HA observability: metrics, dashboard row, alert rules.** `/metrics` now
+  emits `agentgrid_cp_term`, `agentgrid_cp_applied_seq`,
+  `agentgrid_cp_snapshot_seq`, `agentgrid_cp_snapshot_age_seconds`,
+  `agentgrid_cp_has_leader`, `agentgrid_cp_leader_contact_age_seconds`,
+  `agentgrid_cp_need_full_snapshot`,
+  `agentgrid_cp_changeset_batches_applied_total` and
+  `agentgrid_cp_changeset_apply_failures_total` (HA mode only, so single-mode
+  output is unchanged). `deploy/grafana/agentgrid.json` gained an
+  "HA cluster (ADR 0021)" row, and `docs/monitoring.md` documents the metrics
+  plus six alert rules (leaderless, dual leaders, replication stalled,
+  snapshot stale, changeset failures, edge leaderless).
+- **`AGENTGRID_HA_CHANGESET_RETENTION`** (default 256, `0` disables): the
+  leader now prunes object-storage changeset batches that its newest snapshot
+  already contains. See "Fixed" below for why the bucket could not stay
+  bounded before.
+- **Edge forwarder unit tests.** `crates/edge` had 423 lines and zero tests;
+  it now covers leader discovery across upstreams, leaderless `503` +
+  `Retry-After`, the single-retry budget after `503 not_leader`, hop-by-hop
+  header stripping and the `/metrics` counters.
+
 - **Control-plane HA phase 6: stable endpoint, deploy, ADR, chaos.** Stateless
   edge forwarder `crates/edge` (binary `agentgrid-cp-edge`) discovers the
   leader via `GET /v1/ha/status`, forwards HTTP/SSE/downloads unchanged,
@@ -64,6 +93,28 @@
 
 ### Fixed
 
+- **`Supply chain` was red on every HA push — gitleaks fixtures.** The
+  allowlist entries are commit-scoped fingerprints, so each new commit that
+  touched a fixture line (`tests/e2e/run-ha-2pluswitness.sh:22`, the
+  `cluster_token` literals in `crates/control-plane/src/ha/tests.rs`) tripped
+  the scanner again: three consecutive pushes failed on the same
+  `generic-api-key` finding. The fixtures now carry inline
+  `# gitleaks:allow` comments (and the three duplicated `cluster_token`
+  literals collapse into one `TEST_CLUSTER_TOKEN` const), which survives
+  edits. `.gitleaksignore` documents the rule and keeps the fingerprints for
+  commits already in history.
+- **A standby's S3 changeset poll grew with the cluster's write history.**
+  `apply_s3_pending` listed the whole `changesets/` prefix every 2 s and then
+  skipped what it had already applied: at one batch per second that is tens of
+  thousands of keys per day, re-listed 43 000 times a day. The LIST now uses
+  `start-after` at the locally applied sequence, and the leader prunes batches
+  covered by its newest snapshot (`AGENTGRID_HA_CHANGESET_RETENTION`), so both
+  the bucket and the poll stay bounded.
+- **The control plane could not be type-checked off unix.** `store/ha.rs` used
+  `std::os::unix::ffi::OsStrExt` to build the SQLite C string, so
+  `cargo check -p agentgrid-control-plane` failed on Windows/macOS dev hosts
+  (`could not find unix in os`). It now uses `OsStr::as_encoded_bytes`, which
+  is portable; found while running the HA test suite on the Windows host.
 - **Lost assignment wake-ups in the CP.** `notify_waiters` stores no permit,
   and a `Notified` future is only registered once polled: a notify landing
   while `pump_once` (WS) or the poll assign (long-poll) was awaiting DB work

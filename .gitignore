@@ -70,3 +70,6 @@ cp-test.db*
 __pycache__/
 *.pyc
 /fongobongo_stars_v2.json
+
+# Local assistant workspace state (session notes, memory)
+/.workbuddy-ai/
