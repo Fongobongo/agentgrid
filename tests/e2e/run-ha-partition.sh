@@ -199,7 +199,13 @@ echo ">> task completes via edge during partition"
 task=$(create_task "partition smoke") || true
 [ -n "$task" ] || { echo "FAIL: task create during partition" >&2; exit 1; }
 ok=0
-for _ in $(seq 1 120); do
+# SIGSTOP keeps the node's TCP socket open, so the daemon only notices the dead
+# session after its 90s read-idle timeout (`WS_READ_IDLE_SECS`) — the CP pings
+# every ~15s and the partition silences them. Re-registration plus the task run
+# then needs a few more seconds, so the budget has to cover that; a hard kill
+# (3host) closes the socket and recovers immediately, which is why that
+# scenario keeps a shorter wait.
+for _ in $(seq 1 360); do
   st=$(curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
     | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("status","?"))

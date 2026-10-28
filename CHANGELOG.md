@@ -95,6 +95,13 @@
 
 ### Fixed
 
+- **The edge's WebSocket bridge had the same unbounded wait as HTTP.** A frozen
+  leader accepts the TCP connection and never answers the upgrade, so
+  `connect_async` parked the node's reconnect attempt forever: the node never
+  re-registered and no task was ever assigned (`run-ha-partition.sh`: task
+  created, then "did not succeed"). The upgrade is now bounded by the same
+  `AGENTGRID_EDGE_UPSTREAM_TIMEOUT_SECS`, and a failed bridge drops the cached
+  leader so the retry rediscovers instead of re-hanging.
 - **A leader that lost a same-term race was muted forever, and the cluster
   could end up with no electable candidate.** `demote()` unconditionally set
   `need_full_snapshot` (and zeroed `applied_seq`) on the theory that a demoted

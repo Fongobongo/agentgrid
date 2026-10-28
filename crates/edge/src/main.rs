@@ -405,14 +405,23 @@ async fn node_ws(ws: WebSocketUpgrade, State(edge): State<Arc<Edge>>, req: Reque
         .ws_bridges_total
         .fetch_add(1, Ordering::Relaxed);
     let headers = req.headers().clone();
+    let timeout = edge2.upstream_timeout;
     ws.on_upgrade(move |socket| async move {
-        if let Err(e) = bridge_ws(socket, &url, &headers).await {
+        if let Err(e) = bridge_ws(socket, &url, &headers, timeout).await {
+            // The cached leader is the likeliest reason the upgrade failed;
+            // drop it so this node's retry rediscovers instead of re-hanging.
+            edge2.invalidate().await;
             tracing::warn!(error = %e, %url, "edge websocket bridge ended");
         }
     })
 }
 
-async fn bridge_ws(client: WebSocket, url: &str, headers: &HeaderMap) -> anyhow::Result<()> {
+async fn bridge_ws(
+    client: WebSocket,
+    url: &str,
+    headers: &HeaderMap,
+    timeout: Duration,
+) -> anyhow::Result<()> {
     let mut upstream_req = url.into_client_request()?;
     for (name, value) in headers {
         if is_hop_by_hop(name)
@@ -427,7 +436,17 @@ async fn bridge_ws(client: WebSocket, url: &str, headers: &HeaderMap) -> anyhow:
             .headers_mut()
             .insert(name.clone(), value.clone());
     }
-    let (upstream, _) = tokio_tungstenite::connect_async(upstream_req).await?;
+    // Bound the upgrade. A frozen leader accepts the TCP connection and never
+    // answers the handshake, so an unbounded `connect_async` parks the node's
+    // reconnect attempt forever: the node never re-registers and no task is
+    // ever assigned. Timing out closes the client socket, and the node retries
+    // through the edge, which rediscovers the new leader.
+    let (upstream, _) =
+        tokio::time::timeout(timeout, tokio_tungstenite::connect_async(upstream_req))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("upstream websocket upgrade timed out after {timeout:?}")
+            })??;
     let (mut client_tx, mut client_rx) = client.split();
     let (mut up_tx, mut up_rx) = upstream.split();
     loop {
