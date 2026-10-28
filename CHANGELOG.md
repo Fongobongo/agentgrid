@@ -31,7 +31,9 @@
 - **Edge forwarder unit tests.** `crates/edge` had 423 lines and zero tests;
   it now covers leader discovery across upstreams, leaderless `503` +
   `Retry-After`, the single-retry budget after `503 not_leader`, hop-by-hop
-  header stripping and the `/metrics` counters.
+  header stripping, the `/metrics` counters, and — against an upstream that
+  accepts the connection and never answers — a bounded timeout that fails
+  over instead of hanging.
 
 - **Control-plane HA phase 6: stable endpoint, deploy, ADR, chaos.** Stateless
   edge forwarder `crates/edge` (binary `agentgrid-cp-edge`) discovers the
@@ -93,6 +95,24 @@
 
 ### Fixed
 
+- **The edge could hang forever on a leader that stopped answering.** The
+  proxy bounded only the TCP connect (`connect_timeout(5s)`); a leader that
+  accepted the connection and then went silent — `SIGSTOP`, partition, a
+  wedged process — pinned the client request indefinitely instead of failing
+  over, so the "stable endpoint" was stable in the worst possible way. The
+  wait for the response *head* is now bounded by
+  `AGENTGRID_EDGE_UPSTREAM_TIMEOUT_SECS` (default 10s) and takes the existing
+  retry path; SSE and artifact downloads are unaffected because `send()`
+  resolves at the headers and the body keeps streaming. New
+  `agentgrid_edge_upstream_timeouts_total`. Found by the new chaos gate, which
+  hung for 25 minutes instead of failing.
+- **The HA chaos scripts had never actually run.** They submitted tasks as
+  `{"goal": ...}`, but `CreateTaskRequest` requires `prompt` and a
+  non-nullable `repository`, so every scenario died on a `422` at the first
+  `POST /v1/tasks` (`3host`, `2pluswitness`, `partition`). Payloads now match
+  the schema, and every `curl` in those scripts carries `--max-time` — an
+  unbounded `curl` against a `SIGSTOP`ped process is what turned one assertion
+  failure into a hung job.
 - **`Supply chain` was red on every HA push — gitleaks fixtures.** The
   allowlist entries are commit-scoped fingerprints, so each new commit that
   touched a fixture line (`tests/e2e/run-ha-2pluswitness.sh:22`, the

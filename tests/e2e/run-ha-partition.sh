@@ -80,11 +80,12 @@ start_edge() {
   env AGENTGRID_EDGE_LISTEN="127.0.0.1:${PORT[edge]}" \
       AGENTGRID_EDGE_UPSTREAMS="http://127.0.0.1:${PORT[cp-a]},http://127.0.0.1:${PORT[cp-b]},http://127.0.0.1:${PORT[cp-c]}" \
       AGENTGRID_HA_CLUSTER_TOKEN="$TOKEN" \
+      AGENTGRID_EDGE_UPSTREAM_TIMEOUT_SECS=2 \
       "$EDGE_BIN" >"$TMP/edge.log" 2>&1 &
   PID[edge]=$!
 }
 
-ha_status() { curl -fsS -H "x-agentgrid-ha-token: $TOKEN" "http://127.0.0.1:$1/v1/ha/status"; }
+ha_status() { curl -fsS --max-time 2 -H "x-agentgrid-ha-token: $TOKEN" "http://127.0.0.1:$1/v1/ha/status"; }
 field() { python3 -c 'import json,sys
 try: print(json.loads(sys.argv[1]).get(sys.argv[2], ""))
 except Exception: print("")' "$1" "$2"; }
@@ -129,10 +130,10 @@ EDGE_BASE="http://127.0.0.1:${PORT[edge]}"
 echo ">> bootstrap admin (via edge)"
 setup_token=$(awk '/agentgrid setup token/{getline; print; exit}' "$TMP/$leader.log")
 [ -n "$setup_token" ] || { echo "FAIL: setup token not found" >&2; exit 1; }
-curl -fsS -H 'content-type: application/json' -o /dev/null \
+curl -fsS --max-time 15 --connect-timeout 5 -H 'content-type: application/json' -o /dev/null \
   -d "{\"username\":\"$USER\",\"password\":\"$PASS\",\"setup_token\":\"$setup_token\"}" \
   "$EDGE_BASE/v1/auth/setup"
-jwt=$(curl -fsS -H 'content-type: application/json' \
+jwt=$(curl -fsS --max-time 15 --connect-timeout 5 -H 'content-type: application/json' \
   -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
   "$EDGE_BASE/v1/auth/login" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
@@ -148,15 +149,15 @@ echo "  new leader during partition=$new_leader"
 [ "$new_leader" != "$leader" ] || { echo "FAIL: old leader still leading during partition" >&2; exit 1; }
 
 echo ">> task completes via edge during partition"
-task=$(curl -fsS -X POST -H "authorization: Bearer $jwt" \
+task=$(curl -fsS --max-time 15 --connect-timeout 5 -X POST -H "authorization: Bearer $jwt" \
   -H 'content-type: application/json' \
-  -d '{"goal":"partition smoke","adapter":"mock","repository":null}' \
+  -d '{"prompt":"partition smoke","repository":"*","adapter":"mock","timeout_secs":60}' \
   "$EDGE_BASE/v1/tasks" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))')
 [ -n "$task" ] || { echo "FAIL: task create during partition" >&2; exit 1; }
 ok=0
 for _ in $(seq 1 120); do
-  st=$(curl -fsS -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
+  st=$(curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
     | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("status","?"))
 except Exception: print("?")' 2>/dev/null || echo "?")

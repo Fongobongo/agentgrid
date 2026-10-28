@@ -82,11 +82,12 @@ start_edge() {
   env AGENTGRID_EDGE_LISTEN="127.0.0.1:${PORT[edge]}" \
       AGENTGRID_EDGE_UPSTREAMS="http://127.0.0.1:${PORT[cp-a]},http://127.0.0.1:${PORT[cp-b]},http://127.0.0.1:${PORT[cp-c]}" \
       AGENTGRID_HA_CLUSTER_TOKEN="$TOKEN" \
+      AGENTGRID_EDGE_UPSTREAM_TIMEOUT_SECS=2 \
       "$EDGE_BIN" >"$TMP/edge.log" 2>&1 &
   PID[edge]=$!
 }
 
-ha_status() { curl -fsS -H "x-agentgrid-ha-token: $TOKEN" "http://127.0.0.1:$1/v1/ha/status"; }
+ha_status() { curl -fsS --max-time 2 -H "x-agentgrid-ha-token: $TOKEN" "http://127.0.0.1:$1/v1/ha/status"; }
 field() { python3 -c 'import json,sys
 try: print(json.loads(sys.argv[1]).get(sys.argv[2], ""))
 except Exception: print("")' "$1" "$2"; }
@@ -120,7 +121,7 @@ wait_leader() {  # [timeout_secs]
 }
 
 edge_ready() {
-  curl -fsS "http://127.0.0.1:${PORT[edge]}/health/live" >/dev/null 2>&1
+  curl -fsS --max-time 15 --connect-timeout 5 "http://127.0.0.1:${PORT[edge]}/health/live" >/dev/null 2>&1
 }
 
 echo ">> HA 3host chaos: starting 3 data nodes + edge"
@@ -135,14 +136,14 @@ echo ">> bootstrap admin + mint enrollment token (via edge)"
 EDGE_BASE="http://127.0.0.1:${PORT[edge]}"
 setup_token=$(awk '/agentgrid setup token/{getline; print; exit}' "$TMP/$leader.log")
 [ -n "$setup_token" ] || { echo "FAIL: setup token not found" >&2; exit 1; }
-curl -fsS -H 'content-type: application/json' -o /dev/null \
+curl -fsS --max-time 15 --connect-timeout 5 -H 'content-type: application/json' -o /dev/null \
   -d "{\"username\":\"$USER\",\"password\":\"$PASS\",\"setup_token\":\"$setup_token\"}" \
   "$EDGE_BASE/v1/auth/setup"
-jwt=$(curl -fsS -H 'content-type: application/json' \
+jwt=$(curl -fsS --max-time 15 --connect-timeout 5 -H 'content-type: application/json' \
   -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
   "$EDGE_BASE/v1/auth/login" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-enroll=$(curl -fsS -X POST -H "authorization: Bearer $jwt" \
+enroll=$(curl -fsS --max-time 15 --connect-timeout 5 -X POST -H "authorization: Bearer $jwt" \
   "$EDGE_BASE/v1/nodes/enrollment-token" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 
@@ -165,7 +166,7 @@ env PATH="$ADAPTER_BIN:$PATH" \
 NODE_PID=$!
 
 node_online() {  # $1 = base url
-  curl -fsS -H "authorization: Bearer $jwt" "$1/v1/nodes" 2>/dev/null \
+  curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$1/v1/nodes" 2>/dev/null \
     | python3 -c 'import sys,json
 try:
  d=json.load(sys.stdin); ns=d.get("items",d) if isinstance(d,dict) else d
@@ -181,9 +182,9 @@ done
 echo "  node online via edge"
 
 echo ">> submit task via edge (leader=$leader)"
-task=$(curl -fsS -X POST -H "authorization: Bearer $jwt" \
+task=$(curl -fsS --max-time 15 --connect-timeout 5 -X POST -H "authorization: Bearer $jwt" \
   -H 'content-type: application/json' \
-  -d '{"goal":"chaos 3host smoke","adapter":"mock","repository":null}' \
+  -d '{"prompt":"chaos 3host smoke","repository":"*","adapter":"mock","timeout_secs":60}' \
   "$EDGE_BASE/v1/tasks" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))')
 [ -n "$task" ] || { echo "FAIL: task create failed" >&2; exit 1; }
@@ -192,7 +193,7 @@ echo "  task=$task"
 echo ">> wait for task success (via edge)"
 ok=0
 for _ in $(seq 1 120); do
-  st=$(curl -fsS -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
+  st=$(curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
     | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("status","?"))
 except Exception: print("?")' 2>/dev/null || echo "?")
@@ -213,22 +214,22 @@ echo "  new leader=$new_leader"
 [ "$new_leader" != "$leader" ] || echo "  note: same id re-elected"
 
 echo ">> edge forwards to new leader: task status via edge"
-st=$(curl -fsS -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
+st=$(curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
   | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("status","?"))
 except Exception: print("?")' 2>/dev/null || echo "?")
 [ "$st" = "succeeded" ] || { echo "FAIL: edge task status=$st" >&2; exit 1; }
 
 echo ">> new task after failover via edge"
-task2=$(curl -fsS -X POST -H "authorization: Bearer $jwt" \
+task2=$(curl -fsS --max-time 15 --connect-timeout 5 -X POST -H "authorization: Bearer $jwt" \
   -H 'content-type: application/json' \
-  -d '{"goal":"post-failover","adapter":"mock","repository":null}' \
+  -d '{"prompt":"post-failover","repository":"*","adapter":"mock","timeout_secs":60}' \
   "$EDGE_BASE/v1/tasks" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))')
 [ -n "$task2" ] || { echo "FAIL: post-failover task create failed" >&2; exit 1; }
 ok=0
 for _ in $(seq 1 120); do
-  st=$(curl -fsS -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task2" 2>/dev/null \
+  st=$(curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task2" 2>/dev/null \
     | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("status","?"))
 except Exception: print("?")' 2>/dev/null || echo "?")
