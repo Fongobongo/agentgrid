@@ -127,18 +127,42 @@ mod tests {
                 };
                 let last = last_c.clone();
                 tokio::spawn(async move {
-                    let mut buf = vec![0u8; 8192];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    // body = everything after the blank line
-                    let req = &buf[..n];
-                    let body = if let Some(idx) = find_body_start(req) {
-                        req[idx..].to_vec()
-                    } else {
-                        vec![]
+                    // Head first, then exactly `Content-Length` bytes: one
+                    // `read` returns whatever arrived first, and under load the
+                    // body lands in a second segment, which used to be recorded
+                    // as an empty body (a JSON parse error in the caller).
+                    let mut raw = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let split = loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break None,
+                            Ok(n) => {
+                                raw.extend_from_slice(&chunk[..n]);
+                                if let Some(idx) = find_body_start(&raw) {
+                                    break Some(idx);
+                                }
+                            }
+                        }
                     };
-                    if let Ok(mut g) = last.try_lock() {
-                        *g = Some(body);
-                    }
+                    let body = match split {
+                        Some(split) => {
+                            let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+                            let want: usize = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse().ok())
+                                .unwrap_or(0);
+                            while raw.len() < split + want {
+                                match sock.read(&mut chunk).await {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => raw.extend_from_slice(&chunk[..n]),
+                                }
+                            }
+                            raw[split..].to_vec()
+                        }
+                        None => Vec::new(),
+                    };
+                    *last.lock().await = Some(body);
                     sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                         .await
                         .ok();
@@ -154,7 +178,9 @@ mod tests {
     }
 
     async fn posted_body(last: &std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>) -> String {
-        for _ in 0..50 {
+        // Same 5 s budget as `services::tests::wait_for_body`: the POST is
+        // fire-and-forget, so a busy full-suite run must not be a failure.
+        for _ in 0..500 {
             if let Some(b) = last.lock().await.as_ref() {
                 return String::from_utf8_lossy(b).to_string();
             }

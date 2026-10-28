@@ -137,6 +137,26 @@ Nodes follow on their own schedule, which is what an operator actually notices:
   registers the node from it, so a node does not wait for its next heartbeat to
   become eligible after a failover.
 
+## What a demotion costs the node that was leading
+
+A leader that steps down may have admitted writes no data quorum acknowledged.
+In `async`/`sync` mode those are still in the replicator's rewind buffer, so the
+demotion inverts them and replays the undo in one transaction: the replica is a
+valid prefix of the cluster history again within milliseconds, at the
+acknowledged watermark, and stays electable. `agentgrid_cp_rewinds_total` counts
+these.
+
+The full-snapshot path is still the fallback, and it is the only path in
+`RPO=snapshot` mode (where no changeset is ever shipped, so nothing can be
+undone). It costs a database download plus a restore, and `need_full_snapshot`
+keeps the replica out of elections until it completes —
+`agentgrid_cp_rewind_fallbacks_total` counts it. If the cluster has no leader
+left to serve that snapshot, the replica rebuilds from the snapshot it was last
+built from (`ha-base.db`) after 30 s instead of waiting forever; it comes back
+at that older sequence, so a log line saying `no leader to restore from; rebuilt
+this replica from its local base snapshot` means "this host lost whatever it
+applied after that snapshot".
+
 ## Chaos (tests/e2e)
 
 - `run-ha-3host.sh` — 3 data hosts + edge; kill -9 leader; assert failover,

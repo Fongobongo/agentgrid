@@ -82,6 +82,34 @@ fn rt_s3(node_id: &str, endpoint: &str, rpo: RpoMode) -> Arc<HaRuntime> {
     HaRuntime::new(c).expect("runtime")
 }
 
+/// Peer transport, incremental async replication, no object store: `publish`
+/// keeps the changeset in the rewind buffer and the push to the (unresolvable)
+/// peers fails, which is exactly the state a demoted leader has to repair.
+#[cfg(feature = "ha-incremental")]
+fn rt_async(node_id: &str) -> Arc<HaRuntime> {
+    let mut c = HaConfig::single();
+    c.mode = HaMode::Ha;
+    c.role = NodeRole::Data;
+    c.node_id = node_id.to_string();
+    c.cluster_id = "prod".into();
+    c.cluster_token = TEST_CLUSTER_TOKEN.into();
+    c.advertise_url = format!("http://{node_id}:7800");
+    c.allow_plaintext = true;
+    c.data_replicas = 3;
+    c.rpo_mode = RpoMode::Async;
+    c.peers = vec![
+        super::config::HaPeer {
+            id: "cp-b".into(),
+            url: "http://127.0.0.1:1".into(),
+        },
+        super::config::HaPeer {
+            id: "cp-c".into(),
+            url: "http://127.0.0.1:2".into(),
+        },
+    ];
+    HaRuntime::new(c).expect("runtime")
+}
+
 fn vote_req(term: u64, candidate: &str, applied: u64) -> VoteRequest {
     VoteRequest {
         cluster_id: "prod".into(),
@@ -357,6 +385,25 @@ async fn snapshot_round_trips_through_object_storage() {
     // Nothing newer: a second poll is a no-op, not a restore.
     assert!(!snapshot::apply_from_s3(&dst_rt, &dst).await.unwrap());
 
+    // The snapshot this replica was built from is kept, which is what lets a
+    // condemned node rebuild itself when there is no leader left to ask.
+    assert!(
+        snapshot::base_snapshot_path(&dst).exists(),
+        "the installed snapshot should be kept as the base"
+    );
+    dst.create_user("bob", "secret123", agentgrid_common::ROLE_ADMIN)
+        .await
+        .unwrap();
+    dst_rt.shared.set_need_full_snapshot();
+    assert!(snapshot::restore_local_base(&dst_rt, &dst).await.unwrap());
+    assert!(!dst_rt.shared.need_full_snapshot());
+    assert_eq!(
+        dst.user_count().await.unwrap(),
+        1,
+        "the write that came after the base is gone, and the replica can be elected"
+    );
+    assert_eq!(dst.ha_repl_seq().await.unwrap(), manifest.seq);
+
     dst.pool.close().await;
     src.pool.close().await;
     cleanup(&src_path);
@@ -620,4 +667,124 @@ async fn writes_record_changesets_and_bump_seq() {
 
     src.pool.close().await;
     cleanup(&src_path);
+}
+
+#[cfg(feature = "ha-incremental")]
+#[tokio::test]
+async fn a_demoted_leader_undoes_its_unreplicated_tail() {
+    use super::incremental::Replicator;
+
+    let runtime = rt_async("cp-a");
+    let (mut store, path) = open_store("rewind").await;
+    // Incremental modes do not bump the sequence at promotion, so the cluster
+    // position the leader inherits is whatever it already applied.
+    let base = store.promote_epoch(1, 1, "cp-a", false).await.unwrap();
+    runtime
+        .gate
+        .promote_for(1, std::time::Duration::from_secs(60));
+    runtime.shared.set_applied_seq(base);
+    runtime.shared.advance_last_replicated_seq(base);
+    let repl = Replicator::new(runtime.clone(), &store.pool).await.unwrap();
+    store.attach_replicator(repl.clone());
+
+    // Neither write can reach a peer, so both exist only on this host.
+    store
+        .create_user("alice", "secret123", agentgrid_common::ROLE_ADMIN)
+        .await
+        .unwrap();
+    store
+        .create_user("bob", "secret123", agentgrid_common::ROLE_ADMIN)
+        .await
+        .unwrap();
+    assert_eq!(store.user_count().await.unwrap(), 2);
+    let local = store.ha_repl_seq().await.unwrap();
+    assert_eq!(local, base + 2);
+    assert_eq!(
+        runtime.shared.last_replicated_seq(),
+        base,
+        "nothing was acknowledged by a data quorum"
+    );
+
+    let rewound = repl
+        .rewind_to(&store, runtime.shared.last_replicated_seq())
+        .await
+        .expect("the tail is still in the rewind buffer");
+    assert_eq!(rewound, base);
+    assert_eq!(store.ha_repl_seq().await.unwrap(), base);
+    assert_eq!(
+        store.user_count().await.unwrap(),
+        0,
+        "the writes no data quorum saw are gone, so this copy is a valid prefix again"
+    );
+
+    store.pool.close().await;
+    cleanup(&path);
+}
+
+#[cfg(feature = "ha-incremental")]
+#[tokio::test]
+async fn a_rewind_to_the_current_position_changes_nothing() {
+    use super::incremental::Replicator;
+
+    let runtime = rt_async("cp-a");
+    let (mut store, path) = open_store("rewind-noop").await;
+    let base = store.promote_epoch(1, 1, "cp-a", false).await.unwrap();
+    runtime
+        .gate
+        .promote_for(1, std::time::Duration::from_secs(60));
+    runtime.shared.set_applied_seq(base);
+    runtime.shared.advance_last_replicated_seq(base);
+    let repl = Replicator::new(runtime.clone(), &store.pool).await.unwrap();
+    store.attach_replicator(repl.clone());
+
+    store
+        .create_user("alice", "secret123", agentgrid_common::ROLE_ADMIN)
+        .await
+        .unwrap();
+    let local = store.ha_repl_seq().await.unwrap();
+    // A quorum ack trims the buffer: the write is durable elsewhere, so it must
+    // not be undone even if a demotion asks for the current position.
+    runtime.shared.advance_last_replicated_seq(local);
+
+    assert_eq!(repl.rewind_to(&store, local).await.unwrap(), local);
+    assert_eq!(store.user_count().await.unwrap(), 1);
+
+    store.pool.close().await;
+    cleanup(&path);
+}
+
+#[cfg(feature = "ha-incremental")]
+#[tokio::test]
+async fn a_rewind_below_an_evicted_changeset_is_refused() {
+    use super::incremental::Replicator;
+
+    let runtime = rt_async("cp-a");
+    let (mut store, path) = open_store("rewind-evicted").await;
+    let base = store.promote_epoch(1, 1, "cp-a", false).await.unwrap();
+    runtime
+        .gate
+        .promote_for(1, std::time::Duration::from_secs(60));
+    runtime.shared.set_applied_seq(base);
+    runtime.shared.advance_last_replicated_seq(base);
+    let repl = Replicator::new(runtime.clone(), &store.pool).await.unwrap();
+    store.attach_replicator(repl.clone());
+
+    // Push far more changesets than the buffer keeps, so the earliest ones are
+    // evicted and a full rewind to the base is no longer possible.
+    for seq in 1..=600u64 {
+        repl.publish(seq, vec![0u8; 8]).await.unwrap();
+    }
+    store
+        .create_user("alice", "secret123", agentgrid_common::ROLE_ADMIN)
+        .await
+        .unwrap();
+    assert!(store.ha_repl_seq().await.unwrap() > base);
+    let err = repl.rewind_to(&store, base).await.unwrap_err().to_string();
+    assert!(
+        err.contains("evicted"),
+        "expected an eviction refusal, got: {err}"
+    );
+
+    store.pool.close().await;
+    cleanup(&path);
 }

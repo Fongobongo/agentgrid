@@ -27,6 +27,12 @@ use crate::AppState;
 /// Standby poll cadence for leader status / new snapshots.
 const APPLY_TICK: Duration = Duration::from_secs(2);
 
+/// How long a condemned replica waits for a leader before rebuilding from its
+/// own base snapshot. Long enough that a failover in progress (leader found in
+/// seconds) wins the race, short enough that a cluster with no leader left does
+/// not sit dead until an operator arrives.
+const BASE_FALLBACK_DELAY: Duration = Duration::from_secs(30);
+
 fn voters_of(rt: &HaRuntime) -> VoterSet {
     VoterSet::new(rt.config.data_replicas, rt.config.witnesses_count)
 }
@@ -299,9 +305,11 @@ pub async fn demote(state: &Arc<AppState>, reason: &str) {
     rt.gate.demote();
     rt.shared.clear_leader();
     // A demoted leader may have committed writes the rest of the cluster never
-    // saw. Its local copy is therefore untrusted: restore the new leader's
-    // snapshot before campaigning again, and report a zero replication position
-    // so it can still vote for a fresh candidate.
+    // saw. Its local copy is untrusted until those writes are gone: either
+    // undone (they are still in the replicator's rewind buffer, which makes the
+    // node a valid prefix of the cluster history again and keeps it electable)
+    // or, failing that, by restoring the new leader's snapshot and reporting a
+    // zero replication position so it can still vote for a fresh candidate.
     //
     // Only when it actually admitted writes, though. A node that wins an
     // election and loses a same-term race milliseconds later has served
@@ -309,8 +317,40 @@ pub async fn demote(state: &Arc<AppState>, reason: &str) {
     // campaign, which in a 3-host cluster where the third host is frozen left
     // no electable candidate at all.
     if rt.gate.admitted_writes() > 0 {
-        rt.shared.set_need_full_snapshot();
-        rt.shared.set_applied_seq(0);
+        // Bounded: this runs inside `handle_vote` too, and a vote that arrives
+        // while a sync write is still waiting for its quorum acknowledgement
+        // must not stall the election behind the write gate. Falling back to
+        // the snapshot path is always correct, just more expensive.
+        let budget = rt.config.election_timeout.min(Duration::from_secs(5));
+        match tokio::time::timeout(budget, discard_unreplicated_writes(state)).await {
+            Ok(Ok(seq)) => {
+                incremental::note_rewind(true);
+                tracing::warn!(
+                    seq,
+                    admitted = rt.gate.admitted_writes(),
+                    "demoted; undid the writes no data quorum acknowledged"
+                );
+            }
+            Ok(Err(e)) => {
+                incremental::note_rewind(false);
+                tracing::warn!(
+                    "demoted with un-replicated writes that cannot be undone ({e}); \
+                     this replica needs a snapshot before it may campaign"
+                );
+                rt.shared.set_need_full_snapshot();
+                rt.shared.set_applied_seq(0);
+            }
+            Err(_) => {
+                incremental::note_rewind(false);
+                tracing::warn!(
+                    budget_ms = budget.as_millis(),
+                    "demoted; undoing the un-replicated writes did not finish in time, \
+                     falling back to a snapshot"
+                );
+                rt.shared.set_need_full_snapshot();
+                rt.shared.set_applied_seq(0);
+            }
+        }
     } else {
         tracing::info!(
             term = rt.shared.term(),
@@ -325,6 +365,25 @@ pub async fn demote(state: &Arc<AppState>, reason: &str) {
         )
         .await;
     tracing::warn!(reason, epoch = rt.gate.epoch(), "HA leader demoted");
+}
+
+/// Undo the writes this leadership admitted but no data quorum acknowledged.
+///
+/// They were never shipped anywhere else, so they are not cluster history — they
+/// are a local accident that a full snapshot restore would also erase, at the
+/// cost of downloading the whole database and of leaving this replica
+/// unelectable until it lands. Inverting the changesets is the same repair
+/// without either cost. Returns the sequence the database was rewound to.
+async fn discard_unreplicated_writes(state: &Arc<AppState>) -> Result<u64> {
+    let rt = &state.ha;
+    let Some(repl) = state.store.replicator() else {
+        anyhow::bail!("this build has no incremental replicator to undo changesets with");
+    };
+    let seq = repl
+        .rewind_to(&state.store, rt.shared.last_replicated_seq())
+        .await?;
+    rt.shared.set_applied_seq(seq);
+    Ok(seq)
 }
 
 async fn election_loop(state: Arc<AppState>) {
@@ -582,6 +641,11 @@ async fn promote(state: &Arc<AppState>, term: u64) -> Result<()> {
         .set_leader(&rt.config.node_id, &rt.config.advertise_url);
     rt.shared.touch_leader();
     rt.shared.set_applied_seq(seq);
+    // Everything local right now is what won the election, so a data quorum has
+    // it. That is the floor a future demotion may rewind to: without it the
+    // watermark would still be 0 from process start and no rewind could ever
+    // reach below the cluster's history.
+    rt.shared.advance_last_replicated_seq(seq);
     rt.shared.set_error(None);
     if let Err(e) = state.store.reconcile_on_startup().await {
         tracing::warn!("post-promotion reconcile failed: {e}");
@@ -727,6 +791,9 @@ async fn apply_loop(state: Arc<AppState>) {
     let rt = &state.ha;
     let mut tick = tokio::time::interval(APPLY_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_rebase = Instant::now()
+        .checked_sub(BASE_FALLBACK_DELAY)
+        .unwrap_or_else(Instant::now);
     loop {
         tick.tick().await;
         if rt.is_leader() {
@@ -747,6 +814,23 @@ async fn apply_loop(state: Arc<AppState>) {
             if let Err(e) = snapshot::apply_from_s3(rt, &state.store).await {
                 tracing::warn!("object-storage snapshot apply failed: {e}");
                 rt.shared.set_error(Some(format!("apply: {e}")));
+            }
+        }
+        // A condemned replica waits for the new leader's snapshot — but if no
+        // leader has confirmed its role for a while there is nobody to wait
+        // for, and the flag also keeps this node out of every election. Rebuild
+        // from the snapshot this replica was last built from instead of waiting
+        // forever. At most once per window: a base that cannot be restored
+        // (schema drift) must not retry every tick.
+        let silent_for = mono_ms().saturating_sub(rt.shared.last_contact_ms());
+        if rt.shared.need_full_snapshot()
+            && silent_for > BASE_FALLBACK_DELAY.as_millis() as u64
+            && last_rebase.elapsed() >= BASE_FALLBACK_DELAY
+        {
+            last_rebase = Instant::now();
+            if let Err(e) = snapshot::restore_local_base(rt, &state.store).await {
+                tracing::warn!("local base snapshot restore failed: {e}");
+                rt.shared.set_error(Some(format!("rebase: {e}")));
             }
         }
         let Some(leader) = rt.shared.leader() else {

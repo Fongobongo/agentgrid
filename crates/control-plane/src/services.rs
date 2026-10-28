@@ -510,16 +510,46 @@ mod tests {
                 };
                 let last = last_c.clone();
                 tokio::spawn(async move {
-                    let mut buf = vec![0u8; 8192];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    let body = if let Some(i) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") {
-                        buf[i + 4..n].to_vec()
-                    } else {
-                        vec![]
+                    // Read the head first, then exactly `Content-Length` bytes.
+                    // A single `read` returns whatever arrived first, and under
+                    // a full-suite run the body routinely lands in a second
+                    // segment: the old code stored an empty body, so
+                    // `wait_for_body` returned "" and the caller parsed it as
+                    // JSON ("EOF while parsing a value"). That is why this
+                    // failed one run in three under load and never in
+                    // isolation.
+                    let mut raw = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let split = loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break None,
+                            Ok(n) => {
+                                raw.extend_from_slice(&chunk[..n]);
+                                if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    break Some(i + 4);
+                                }
+                            }
+                        }
                     };
-                    if let Ok(mut g) = last.try_lock() {
-                        *g = Some(body);
-                    }
+                    let body = match split {
+                        Some(split) => {
+                            let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+                            let want: usize = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse().ok())
+                                .unwrap_or(0);
+                            while raw.len() < split + want {
+                                match sock.read(&mut chunk).await {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => raw.extend_from_slice(&chunk[..n]),
+                                }
+                            }
+                            raw[split..].to_vec()
+                        }
+                        None => Vec::new(),
+                    };
+                    *last.lock().await = Some(body);
                     sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                         .await
                         .ok();
@@ -529,8 +559,14 @@ mod tests {
         (url, last)
     }
 
+    /// Wait for the mock webhook to receive a POST.
+    ///
+    /// Generous on purpose: the POST is fire-and-forget on a background task, so
+    /// a busy full-suite run can take a moment to get here. The real reason this
+    /// test used to flake was the mock's short read (see `mock_webhook`), not
+    /// this budget.
     async fn wait_for_body(last: &std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>) -> String {
-        for _ in 0..50 {
+        for _ in 0..500 {
             if let Some(b) = last.lock().await.as_ref() {
                 return String::from_utf8_lossy(b).to_string();
             }

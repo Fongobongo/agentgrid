@@ -59,6 +59,16 @@ unchanged.
 - Witness never stores data or acks writes; object storage never votes.
 - No NFS/CIFS/network-attached DB or artifacts (still).
 - Sync-mode writes need a data quorum; a witness vote alone is insufficient.
+- A demoted leader's divergent tail is *undone*, not discarded: in
+  `async`/`sync` mode the replicator keeps every changeset until a data quorum
+  acknowledges it, so a demotion can invert the un-acknowledged ones and replay
+  the undo in one transaction, returning the replica to the acknowledged
+  watermark. This is the cheap path; the snapshot restore it replaces is the
+  fallback (and the only path in `RPO=snapshot` mode, where nothing is shipped
+  and therefore nothing can be undone). A condemned replica that cannot find a
+  leader at all rebuilds from the snapshot it was last built from
+  (`ha-base.db`), because `need_full_snapshot` would otherwise keep it out of
+  every election and leave the cluster with no candidate.
 - S3 changeset listing starts after the standby's applied sequence, and the
   leader prunes batches already contained in its newest snapshot
   (`AGENTGRID_HA_CHANGESET_RETENTION`, default 256, `0` disables). A standby

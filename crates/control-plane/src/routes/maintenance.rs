@@ -426,6 +426,15 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         s.push_str(&format!(
             "agentgrid_cp_changeset_apply_failures_total {failures}\n"
         ));
+        let (rewinds, rewind_fallbacks) = crate::ha::incremental::rewind_stats();
+        s.push_str("# HELP agentgrid_cp_rewinds_total Demotions repaired by undoing the un-replicated tail.\n");
+        s.push_str("# TYPE agentgrid_cp_rewinds_total counter\n");
+        s.push_str(&format!("agentgrid_cp_rewinds_total {rewinds}\n"));
+        s.push_str("# HELP agentgrid_cp_rewind_fallbacks_total Demotions that had to restore a full snapshot instead.\n");
+        s.push_str("# TYPE agentgrid_cp_rewind_fallbacks_total counter\n");
+        s.push_str(&format!(
+            "agentgrid_cp_rewind_fallbacks_total {rewind_fallbacks}\n"
+        ));
     }
 
     let (poll_requests, poll_ms) = crate::routes::events::poll_stats();

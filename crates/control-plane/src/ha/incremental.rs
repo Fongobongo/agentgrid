@@ -14,6 +14,7 @@
 //! `.cargo/config.toml`); the pre-generated `libsqlite3-sys` bindings expose
 //! the API, so no bindgen/libclang toolchain is required.
 
+use std::collections::VecDeque;
 use std::ffi::{c_int, c_void, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +35,11 @@ use super::transport::{self, ChangesetAck};
 /// `/metrics` can show a standby that stopped making progress.
 static BATCHES_APPLIED: AtomicU64 = AtomicU64::new(0);
 static APPLY_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// Demotions repaired by undoing the divergent tail, and demotions that fell
+/// back to a snapshot. The ratio is the answer to "is failover costing us a
+/// database download?".
+static REWINDS: AtomicU64 = AtomicU64::new(0);
+static REWIND_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 /// `(batches applied, apply failures)` since process start.
 pub fn changeset_stats() -> (u64, u64) {
@@ -41,6 +47,22 @@ pub fn changeset_stats() -> (u64, u64) {
         BATCHES_APPLIED.load(Ordering::Relaxed),
         APPLY_FAILURES.load(Ordering::Relaxed),
     )
+}
+
+/// `(rewinds, fallbacks to a snapshot)` since process start.
+pub fn rewind_stats() -> (u64, u64) {
+    (
+        REWINDS.load(Ordering::Relaxed),
+        REWIND_FAILURES.load(Ordering::Relaxed),
+    )
+}
+
+pub(crate) fn note_rewind(rewound: bool) {
+    if rewound {
+        REWINDS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        REWIND_FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn note_batches(n: usize) {
@@ -58,6 +80,60 @@ use crate::store::{ApplyOutcome, Store};
 const ASYNC_BATCH_WINDOW: Duration = Duration::from_millis(1000);
 const MAX_BATCH_JOBS: usize = 256;
 const JOB_QUEUE: usize = 1024;
+
+/// A demoted leader undoes its own un-replicated tail instead of restoring a
+/// whole snapshot, which needs the changesets it shipped to still be around.
+/// Only those above the last data-quorum acknowledgement matter, so in steady
+/// state the buffer holds one entry in sync mode and one async batch window in
+/// async mode. The caps are two orders of magnitude above that and exist to
+/// bound a pathological case, not to be reached.
+const REWIND_MAX_ENTRIES: usize = 512;
+const REWIND_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Changesets this node committed while leader, newest last, minus everything
+/// the cluster already acknowledged.
+#[derive(Default)]
+struct RewindBuffer {
+    entries: VecDeque<(u64, Arc<Vec<u8>>)>,
+    bytes: usize,
+    /// Lowest sequence dropped to stay under the caps. A rewind target below
+    /// it is unreachable, because that changeset is gone.
+    floor: Option<u64>,
+}
+
+impl RewindBuffer {
+    fn push(&mut self, seq: u64, bytes: Arc<Vec<u8>>) {
+        self.bytes += bytes.len();
+        self.entries.push_back((seq, bytes));
+        while self.entries.len() > REWIND_MAX_ENTRIES || self.bytes > REWIND_MAX_BYTES {
+            let Some((seq, dropped)) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes -= dropped.len();
+            self.floor = Some(seq);
+        }
+    }
+
+    /// Forget what a data quorum already holds.
+    fn trim(&mut self, replicated: u64) {
+        while let Some((seq, _)) = self.entries.front() {
+            if *seq > replicated {
+                break;
+            }
+            let Some((_, dropped)) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes -= dropped.len();
+        }
+    }
+
+    fn can_rewind_to(&self, target: u64) -> bool {
+        match self.floor {
+            Some(floor) => target >= floor,
+            None => true,
+        }
+    }
+}
 
 /// A `sqlite3_session` owned by one write transaction.
 pub struct Session {
@@ -180,6 +256,32 @@ pub unsafe fn apply_raw(db: *mut libsqlite3_sys::sqlite3, bytes: &[u8]) -> Resul
     Ok(ctx.conflicts)
 }
 
+/// Reverse a changeset: `INSERT` becomes `DELETE`, `DELETE` becomes `INSERT`,
+/// and `UPDATE` keeps its primary key with the old/new images swapped. Applying
+/// the result to the database the forward changeset produced restores the rows
+/// exactly as they were before it.
+pub fn invert_changeset(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut n: c_int = 0;
+    let mut ptr: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `bytes` is a well-formed changeset; `n`/`ptr` are out pointers.
+    let rc = unsafe {
+        libsqlite3_sys::sqlite3changeset_invert(
+            bytes.len() as c_int,
+            bytes.as_ptr() as *const c_void,
+            &mut n,
+            &mut ptr,
+        )
+    };
+    if rc != libsqlite3_sys::SQLITE_OK || ptr.is_null() {
+        bail!("sqlite3changeset_invert failed (rc={rc})");
+    }
+    // SAFETY: SQLite allocated `n` readable bytes at `ptr`.
+    let out = unsafe { std::slice::from_raw_parts(ptr as *const u8, n as usize) }.to_vec();
+    // SAFETY: freed exactly once, after the copy.
+    unsafe { libsqlite3_sys::sqlite3_free(ptr) };
+    Ok(out)
+}
+
 /// Fail at startup, not on the first write, when SQLite lacks the session
 /// extension (the C flags live in `.cargo/config.toml`).
 async fn probe_session_support(pool: &SqlitePool) -> Result<()> {
@@ -192,7 +294,7 @@ async fn probe_session_support(pool: &SqlitePool) -> Result<()> {
 
 struct Job {
     seq: u64,
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
     ack: Option<oneshot::Sender<Result<(), String>>>,
 }
 
@@ -205,6 +307,9 @@ pub struct Replicator {
     tx: mpsc::Sender<Job>,
     rx: Mutex<Option<mpsc::Receiver<Job>>>,
     last_remote_ack_ms: AtomicU64,
+    /// Un-replicated changesets, kept so a demotion can undo them instead of
+    /// restoring a snapshot (see [`Replicator::rewind_to`]).
+    rewind: Mutex<RewindBuffer>,
 }
 
 impl Replicator {
@@ -231,6 +336,7 @@ impl Replicator {
             tx,
             rx: Mutex::new(Some(rx)),
             last_remote_ack_ms: AtomicU64::new(mono_ms()),
+            rewind: Mutex::new(RewindBuffer::default()),
         }))
     }
 
@@ -272,6 +378,15 @@ impl Replicator {
     /// Publish one committed changeset. In `sync` mode this waits for a data
     /// quorum acknowledgement; in `async` mode it returns after enqueueing.
     pub async fn publish(&self, seq: u64, bytes: Vec<u8>) -> Result<()> {
+        if self.rt.config.rpo_mode == RpoMode::Snapshot {
+            return Ok(());
+        }
+        // Keep the changeset until a data quorum has it: if this node is
+        // demoted before then, the write exists nowhere else and has to be
+        // undone locally (`rewind_to`). `Arc` so the worker and the buffer
+        // share one copy instead of duplicating every write.
+        let bytes = Arc::new(bytes);
+        self.lock_rewind().push(seq, bytes.clone());
         match self.rt.config.rpo_mode {
             RpoMode::Snapshot => Ok(()),
             RpoMode::Async => {
@@ -323,10 +438,86 @@ impl Replicator {
         VoterSet::new(self.rt.config.data_replicas, self.rt.config.witnesses_count).data_majority()
     }
 
+    fn lock_rewind(&self) -> std::sync::MutexGuard<'_, RewindBuffer> {
+        self.rewind.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A data quorum holds `seq`: it can no longer be lost, so it no longer has
+    /// to be undoable. Both the watermark and the trim happen under the buffer
+    /// lock, so a concurrent `rewind_to` never sees a watermark whose
+    /// changesets are already gone.
+    fn note_replicated(&self, seq: u64) {
+        let mut buf = self.lock_rewind();
+        buf.trim(seq);
+        self.rt.shared.advance_last_replicated_seq(seq);
+    }
+
+    /// Undo this node's own un-replicated writes, so its database is a valid
+    /// prefix of the cluster history again.
+    ///
+    /// This is the cheap alternative to restoring a snapshot after a demotion.
+    /// The leader is the only writer, so the divergent suffix is exactly the
+    /// changesets above the last data-quorum acknowledgement — the ones the
+    /// rewind buffer still holds. They are inverted and replayed newest-first in
+    /// one transaction: when it commits, `repl_seq` is `target` again and the
+    /// rows are what they were before this leadership admitted them, which
+    /// makes the node immediately replicable *and* electable instead of
+    /// condemned until a snapshot lands.
+    ///
+    /// Returns the sequence it rewound to. Any doubt — a changeset evicted from
+    /// the buffer, a gap, a conflicting apply, a position that moved under us —
+    /// is an error, and the caller falls back to the full snapshot.
+    pub async fn rewind_to(&self, store: &Store, hint: u64) -> Result<u64> {
+        let local = store.ha_repl_seq().await?;
+        let (target, inverted) = {
+            let buf = self.lock_rewind();
+            // Re-read the watermark under the lock: a quorum acknowledgement
+            // that landed while this demotion was in flight moved it up, and
+            // its changeset is gone from the buffer by now.
+            let target = hint.max(self.rt.shared.last_replicated_seq());
+            if local <= target {
+                return Ok(local);
+            }
+            if !buf.can_rewind_to(target) {
+                bail!(
+                    "changeset {} was evicted from the rewind buffer",
+                    buf.floor.unwrap_or(target)
+                );
+            }
+            let mut inverted = Vec::new();
+            let mut expect = local;
+            for (seq, bytes) in buf.entries.iter().rev() {
+                if *seq <= target {
+                    break;
+                }
+                if *seq != expect {
+                    bail!("changeset {expect} is not retained");
+                }
+                inverted.extend_from_slice(&invert_changeset(bytes)?);
+                expect -= 1;
+            }
+            if expect != target {
+                bail!("changeset {expect} is not retained");
+            }
+            (target, inverted)
+        };
+        store.apply_rewind(local, target, &inverted).await?;
+        tracing::info!(
+            from = local,
+            to = target,
+            undone = local - target,
+            "undid un-replicated writes from the demoted leadership"
+        );
+        Ok(target)
+    }
+
     async fn run_sync(self: Arc<Self>, mut rx: mpsc::Receiver<Job>) {
         while let Some(job) = rx.recv().await {
             let outcome = match self.push_batch(job.seq, job.seq, &job.bytes).await {
-                Ok(acks) if acks >= self.data_majority() => Ok(()),
+                Ok(acks) if acks >= self.data_majority() => {
+                    self.note_replicated(job.seq);
+                    Ok(())
+                }
                 Ok(acks) => {
                     tracing::warn!(
                         seq = job.seq,
@@ -392,19 +583,23 @@ impl Replicator {
     async fn flush_async(&self, first_seq: u64, last_seq: u64, bytes: &[u8], lag: Duration) {
         let acks = self.push_batch(first_seq, last_seq, bytes).await;
         match acks {
-            Ok(acks) if acks > 1 => {
-                self.last_remote_ack_ms.store(mono_ms(), Ordering::Release);
-            }
-            Ok(_) => {
-                let behind =
-                    mono_ms().saturating_sub(self.last_remote_ack_ms.load(Ordering::Acquire));
-                if behind > lag.as_millis() as u64 {
-                    tracing::warn!(
-                        seq = last_seq,
-                        behind_ms = behind,
-                        "no data replica acknowledged within the async lag budget"
-                    );
-                    self.rt.shared.set_replication_lost();
+            Ok(acks) => {
+                if acks >= self.data_majority() {
+                    self.note_replicated(last_seq);
+                }
+                if acks > 1 {
+                    self.last_remote_ack_ms.store(mono_ms(), Ordering::Release);
+                } else {
+                    let behind =
+                        mono_ms().saturating_sub(self.last_remote_ack_ms.load(Ordering::Acquire));
+                    if behind > lag.as_millis() as u64 {
+                        tracing::warn!(
+                            seq = last_seq,
+                            behind_ms = behind,
+                            "no data replica acknowledged within the async lag budget"
+                        );
+                        self.rt.shared.set_replication_lost();
+                    }
                 }
             }
             Err(e) => tracing::debug!(seq = last_seq, "async replication push failed: {e}"),

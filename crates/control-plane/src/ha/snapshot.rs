@@ -20,6 +20,14 @@ use crate::store::Store;
 /// Snapshots kept on disk (current + one fallback for a slow standby).
 const KEEP_SNAPSHOTS: usize = 2;
 
+/// The snapshot this replica was last built from. Kept after the restore so a
+/// condemned node can rebuild itself without a live leader.
+const BASE_SNAPSHOT_FILE: &str = "ha-base.db";
+
+pub fn base_snapshot_path(store: &Store) -> PathBuf {
+    store.data_dir().join(BASE_SNAPSHOT_FILE)
+}
+
 pub fn snapshot_id(epoch: u64, seq: u64) -> String {
     format!("ha-snap-{epoch}-{seq}")
 }
@@ -348,7 +356,21 @@ async fn install_snapshot(
         store.restore_snapshot(incoming.to_path_buf()).await?;
         true
     };
-    let _ = tokio::fs::remove_file(incoming).await;
+    if applied {
+        // Keep the snapshot this replica was built from: `restore_local_base`
+        // rebuilds from it when a condemned node has no leader left to fetch a
+        // snapshot from. Windows `rename` refuses an existing destination, so
+        // the old base goes first; the window where no base exists is a
+        // debugging convenience, not a correctness one.
+        let base = base_snapshot_path(store);
+        let _ = tokio::fs::remove_file(&base).await;
+        if let Err(e) = tokio::fs::rename(incoming, &base).await {
+            tracing::debug!(base = %base.display(), "could not keep the base snapshot: {e}");
+            let _ = tokio::fs::remove_file(incoming).await;
+        }
+    } else {
+        let _ = tokio::fs::remove_file(incoming).await;
+    }
     rt.shared.set_applied_seq(manifest.seq);
     rt.shared.set_snapshot(
         Some(manifest.snapshot_id.clone()),
@@ -363,4 +385,42 @@ async fn install_snapshot(
         "applied HA snapshot"
     );
     Ok(applied)
+}
+
+/// Rebuild this replica from the last snapshot it installed, with no leader.
+///
+/// A demoted leader is normally repaired by the new leader's snapshot. When the
+/// cluster has no leader left — the only data node demoted, or every other
+/// replica is gone — that source does not exist, and `need_full_snapshot` also
+/// blocks this node from campaigning, so the cluster waits forever on a
+/// snapshot nobody can serve. The base file is trustworthy by construction (it
+/// was hash- and schema-checked before this replica was built from it), so
+/// falling back to it is strictly better than a replica that can never be
+/// elected: at worst it is behind, which the data voters then decide about.
+pub async fn restore_local_base(rt: &HaRuntime, store: &Store) -> Result<bool> {
+    let path = base_snapshot_path(store);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let check = Store::verify_snapshot_file(&path).await?;
+    let local_schema = store.schema_version().await?;
+    if check.schema_version != local_schema {
+        anyhow::bail!(
+            "base snapshot schema {} != local {local_schema}",
+            check.schema_version
+        );
+    }
+    let Ok(_snapshot) = rt.shared.snapshot_lock.try_lock() else {
+        return Ok(false);
+    };
+    let _apply = rt.shared.apply_lock.lock().await;
+    store.restore_snapshot(path).await?;
+    rt.shared.set_applied_seq(check.repl_seq);
+    rt.gate.set_epoch(store.ha_epoch().await?);
+    rt.shared.clear_need_full_snapshot();
+    tracing::warn!(
+        seq = check.repl_seq,
+        "no leader to restore from; rebuilt this replica from its local base snapshot"
+    );
+    Ok(true)
 }

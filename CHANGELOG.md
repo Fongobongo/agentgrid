@@ -93,6 +93,34 @@
   leader keeps the acknowledged task).
 
 
+### Changed
+
+- **A demoted leader undoes its own un-replicated writes instead of restoring a
+  snapshot.** The old rule was "it may hold writes nobody else saw, so condemn
+  the database and restore the new leader's snapshot". That is correct but
+  expensive: the replica downloads the whole database (seconds here, minutes at
+  production sizes) and, because `need_full_snapshot` also blocks campaigning,
+  stays unelectable until it lands. In `async`/`sync` modes the divergent suffix
+  is exactly what the leader shipped but no data quorum acknowledged, and the
+  replicator still holds those changesets — so a demotion now inverts them
+  (`sqlite3changeset_invert`) and replays the undo newest-first in one
+  transaction. When it commits, `repl_seq` is back at the acknowledged
+  watermark, the rows are what they were before the leadership admitted them,
+  and the node is immediately a valid replica *and* electable. Anything that
+  makes the undo doubtful — an evicted changeset, a gap, a conflicting apply, a
+  position that moved under it, or the time budget — falls back to the old
+  snapshot path, which is unchanged. No tuning knob is needed: the buffer only
+  holds the un-acknowledged tail (one changeset in `sync`, one async batch
+  window in `async`) and is capped at 512 entries / 8 MiB regardless.
+- **A condemned replica can rebuild itself when no leader is left.** If the only
+  data node demoted, or every other replica is gone, there is no snapshot source
+  *and* `need_full_snapshot` keeps the survivor out of every election — the
+  cluster sat dead until an operator intervened. The snapshot a replica was last
+  built from is now kept as `ha-base.db` and, after 30 s with no leader,
+  restored in place. The node comes back as a valid replica at that sequence; if
+  that leaves it behind, the data voters refuse it a vote, which is their call
+  to make, not a reason to stay unelectable forever.
+
 ### Fixed
 
 - **Failover recovery went from ~133 s to ~50 s.** Three separate waits stacked

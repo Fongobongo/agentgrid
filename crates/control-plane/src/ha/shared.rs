@@ -31,6 +31,10 @@ pub struct HaShared {
     snapshot_seq: AtomicU64,
     snapshot_created_unix: AtomicI64,
     last_error: Mutex<Option<String>>,
+    /// Highest replication sequence a data quorum acknowledged while this node
+    /// was leader. It is the rewind target after a demotion: everything above
+    /// it may exist only here, so it is exactly what has to be undone.
+    last_replicated_seq: AtomicU64,
     /// This node demoted after being leader: its local database may hold
     /// writes the rest of the cluster never acknowledged. It must restore the
     /// leader's snapshot before it may campaign again.
@@ -63,6 +67,7 @@ impl Default for HaShared {
             snapshot_seq: AtomicU64::new(0),
             snapshot_created_unix: AtomicI64::new(0),
             last_error: Mutex::new(None),
+            last_replicated_seq: AtomicU64::new(0),
             need_full_snapshot: AtomicBool::new(false),
             snapshot_request: AtomicBool::new(false),
             replication_lost: AtomicBool::new(false),
@@ -146,6 +151,16 @@ impl HaShared {
         self.applied_seq.store(seq, Ordering::Release);
     }
 
+    /// Monotonic: a late batch acknowledgement must never move the watermark
+    /// back below changesets a demotion already has to undo.
+    pub fn advance_last_replicated_seq(&self, seq: u64) {
+        self.last_replicated_seq.fetch_max(seq, Ordering::AcqRel);
+    }
+
+    pub fn last_replicated_seq(&self) -> u64 {
+        self.last_replicated_seq.load(Ordering::Acquire)
+    }
+
     pub fn snapshot_id(&self) -> Option<String> {
         lock(&self.snapshot_id).clone()
     }
@@ -168,7 +183,6 @@ impl HaShared {
     pub fn set_need_full_snapshot(&self) {
         self.need_full_snapshot.store(true, Ordering::Release);
     }
-
     pub fn need_full_snapshot(&self) -> bool {
         self.need_full_snapshot.load(Ordering::Acquire)
     }

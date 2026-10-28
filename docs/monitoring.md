@@ -58,6 +58,7 @@ unaffected.
 | `agentgrid_cp_has_leader` / `agentgrid_cp_leader_contact_age_seconds` | gauge | — | Whether a leader is known, and how long since it last confirmed. |
 | `agentgrid_cp_need_full_snapshot` | gauge | — | `1` while the replica is waiting for a snapshot instead of applying changesets. |
 | `agentgrid_cp_changeset_batches_applied_total` / `agentgrid_cp_changeset_apply_failures_total` | counter | — | Incremental replication progress, and rejections/gaps. |
+| `agentgrid_cp_rewinds_total` / `agentgrid_cp_rewind_fallbacks_total` | counter | — | Demotions repaired by undoing the un-replicated tail, versus demotions that had to restore a full snapshot. |
 
 The edge forwarder (`agentgrid-cp-edge`) exposes its own counters on
 `/metrics`: `agentgrid_edge_requests_total`,

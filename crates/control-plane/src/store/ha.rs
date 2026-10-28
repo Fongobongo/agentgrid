@@ -30,6 +30,9 @@ pub enum ApplyOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotCheck {
     pub schema_version: i64,
+    /// Replication sequence the snapshot contains; 0 for files written before
+    /// this column was read back.
+    pub repl_seq: u64,
 }
 
 impl Store {
@@ -158,8 +161,16 @@ impl Store {
         let schema_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(&mut conn)
             .await?;
+        let repl_seq: i64 =
+            sqlx::query_scalar("SELECT repl_seq FROM ha_cluster_state WHERE id = 1")
+                .fetch_optional(&mut conn)
+                .await?
+                .unwrap_or(0);
         conn.close().await.ok();
-        Ok(SnapshotCheck { schema_version })
+        Ok(SnapshotCheck {
+            schema_version,
+            repl_seq: repl_seq.max(0) as u64,
+        })
     }
 
     /// `VACUUM INTO` a snapshot and return the replication sequence it
@@ -265,6 +276,54 @@ impl Store {
             .execute(&mut *conn)
             .await?;
         Ok(ApplyOutcome::Applied { seq: last_seq })
+    }
+
+    /// Undo this leader's own un-replicated writes in one transaction.
+    ///
+    /// `inverted` holds the changesets above `target_seq`, reversed and already
+    /// inverted, so replaying them walks the database back to `target_seq`.
+    /// `from_seq` is the position the caller built that batch against; if the
+    /// database moved (an in-flight commit that was still holding the write
+    /// gate), the batch is stale and this refuses instead of undoing the wrong
+    /// rows.
+    pub async fn apply_rewind(
+        &self,
+        from_seq: u64,
+        target_seq: u64,
+        inverted: &[u8],
+    ) -> Result<()> {
+        let _permit = WRITE_GATE
+            .acquire()
+            .await
+            .expect("write gate semaphore closed");
+        let local = self.ha_repl_seq().await?;
+        if local != from_seq {
+            anyhow::bail!(
+                "replication position moved from {from_seq} to {local} during the rewind"
+            );
+        }
+        let mut conn = self.pool.acquire().await?;
+        let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("PRAGMA defer_foreign_keys=ON")
+            .execute(&mut *tx)
+            .await?;
+        let undone = {
+            let mut handle = tx.lock_handle().await?;
+            let db = handle.as_raw_handle().as_ptr();
+            // SAFETY: `db` is a live handle and the lock is held for the call.
+            unsafe { incremental::apply_raw(db, inverted) }
+        };
+        if let Err(e) = undone {
+            tx.rollback().await?;
+            anyhow::bail!("undoing the divergent changesets failed: {e}");
+        }
+        sqlx::query("UPDATE ha_cluster_state SET repl_seq = ?, updated_at = ? WHERE id = 1")
+            .bind(target_seq as i64)
+            .bind(super::now_iso())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Apply `snapshot` into the live database file via the SQLite backup API.
