@@ -116,6 +116,37 @@
       "targets": [
         { "expr": "rate(agentgrid_node_outbox_corruption_total[5m])", "legendFormat": "{{node}} corrupt" },
         { "expr": "rate(agentgrid_artifact_cleanup_failures_total[5m])", "legendFormat": "cleanup failures" }
+      ] },
+    { "type": "row", "title": "HA cluster (ADR 0021)", "gridPos": { "x": 0, "y": 58, "w": 24, "h": 1 }, "panels": [] },
+    { "type": "timeseries", "title": "HA role & term", "gridPos": { "x": 0, "y": 59, "w": 12, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "agentgrid_cp_role{role=\"leader\"}", "legendFormat": "leader" },
+        { "expr": "agentgrid_cp_role{role=\"standby\"}", "legendFormat": "standby" },
+        { "expr": "agentgrid_cp_role{role=\"witness\"}", "legendFormat": "witness" },
+        { "expr": "agentgrid_cp_term", "legendFormat": "term" }
+      ] },
+    { "type": "timeseries", "title": "HA replication progress", "gridPos": { "x": 12, "y": 59, "w": 12, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "agentgrid_cp_applied_seq", "legendFormat": "applied seq" },
+        { "expr": "agentgrid_cp_snapshot_seq", "legendFormat": "snapshot seq" },
+        { "expr": "agentgrid_cp_snapshot_age_seconds", "legendFormat": "snapshot age (s)" }
+      ] },
+    { "type": "timeseries", "title": "HA liveness", "gridPos": { "x": 0, "y": 67, "w": 12, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "agentgrid_cp_has_leader", "legendFormat": "leader known" },
+        { "expr": "agentgrid_cp_leader_contact_age_seconds", "legendFormat": "leader contact age (s)" },
+        { "expr": "agentgrid_cp_need_full_snapshot", "legendFormat": "waiting for snapshot" },
+        { "expr": "agentgrid_ha_lease_remaining_seconds", "legendFormat": "lease remaining (s)" }
+      ] },
+    { "type": "timeseries", "title": "HA changeset apply & fencing (rate 5m)", "gridPos": { "x": 12, "y": 67, "w": 12, "h": 8 },
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        { "expr": "rate(agentgrid_cp_changeset_batches_applied_total[5m])", "legendFormat": "batches applied" },
+        { "expr": "rate(agentgrid_cp_changeset_apply_failures_total[5m])", "legendFormat": "apply failures" },
+        { "expr": "rate(agentgrid_ha_fenced_writes_total[5m])", "legendFormat": "fenced writes" }
       ] }
   ]
 }

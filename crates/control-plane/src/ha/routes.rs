@@ -186,6 +186,7 @@ async fn changeset(
         Ok(ApplyOutcome::Applied { seq }) => {
             rt.shared.set_applied_seq(seq);
             rt.shared.touch_leader();
+            super::incremental::note_batches(1);
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(ApplyOutcome::Duplicate) => {
@@ -198,9 +199,13 @@ async fn changeset(
         Ok(ApplyOutcome::Rejected {
             applied_seq,
             reason,
-        }) => reject(applied_seq, &reason),
+        }) => {
+            super::incremental::note_apply_failure();
+            reject(applied_seq, &reason)
+        }
         Err(e) => {
             tracing::warn!("changeset apply failed: {e}");
+            super::incremental::note_apply_failure();
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

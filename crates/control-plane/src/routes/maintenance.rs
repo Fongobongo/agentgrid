@@ -353,6 +353,79 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
             "agentgrid_ha_fenced_writes_total {}\n",
             state.ha.gate.fenced_writes()
         ));
+
+        // Replication progress and liveness. A standby that stops advancing
+        // `applied_seq`, or a cluster with no leader contact, is invisible
+        // without these — the alert rules in docs/monitoring.md rely on them.
+        let shared = &state.ha.shared;
+        s.push_str("# HELP agentgrid_cp_term Current HA election term.\n");
+        s.push_str("# TYPE agentgrid_cp_term gauge\n");
+        s.push_str(&format!("agentgrid_cp_term {}\n", shared.term()));
+        s.push_str(
+            "# HELP agentgrid_cp_applied_seq Highest replication sequence applied locally.\n",
+        );
+        s.push_str("# TYPE agentgrid_cp_applied_seq gauge\n");
+        s.push_str(&format!(
+            "agentgrid_cp_applied_seq {}\n",
+            shared.applied_seq()
+        ));
+        s.push_str(
+            "# HELP agentgrid_cp_snapshot_seq Sequence contained in the newest local snapshot.\n",
+        );
+        s.push_str("# TYPE agentgrid_cp_snapshot_seq gauge\n");
+        s.push_str(&format!(
+            "agentgrid_cp_snapshot_seq {}\n",
+            shared.snapshot_seq()
+        ));
+        s.push_str("# HELP agentgrid_cp_snapshot_age_seconds Age of the newest local snapshot (0 when none).\n");
+        s.push_str("# TYPE agentgrid_cp_snapshot_age_seconds gauge\n");
+        let snap_age = {
+            let created = shared.snapshot_created_unix();
+            if created > 0 {
+                (chrono::Utc::now().timestamp() - created).max(0)
+            } else {
+                0
+            }
+        };
+        s.push_str(&format!("agentgrid_cp_snapshot_age_seconds {snap_age}\n"));
+        s.push_str(
+            "# HELP agentgrid_cp_has_leader Whether a leader is currently known (1) or not (0).\n",
+        );
+        s.push_str("# TYPE agentgrid_cp_has_leader gauge\n");
+        s.push_str(&format!(
+            "agentgrid_cp_has_leader {}\n",
+            u8::from(shared.leader().is_some())
+        ));
+        if shared.leader().is_some() {
+            let contact = shared.last_contact_ms();
+            let age = if contact == 0 {
+                0.0
+            } else {
+                (crate::ha::role::mono_ms().saturating_sub(contact) as f64) / 1000.0
+            };
+            s.push_str("# HELP agentgrid_cp_leader_contact_age_seconds Seconds since the leader last confirmed its role.\n");
+            s.push_str("# TYPE agentgrid_cp_leader_contact_age_seconds gauge\n");
+            s.push_str(&format!(
+                "agentgrid_cp_leader_contact_age_seconds {age:.3}\n"
+            ));
+        }
+        s.push_str("# HELP agentgrid_cp_need_full_snapshot Replica is waiting for a full snapshot instead of applying changesets.\n");
+        s.push_str("# TYPE agentgrid_cp_need_full_snapshot gauge\n");
+        s.push_str(&format!(
+            "agentgrid_cp_need_full_snapshot {}\n",
+            u8::from(shared.need_full_snapshot())
+        ));
+        let (batches, failures) = crate::ha::incremental::changeset_stats();
+        s.push_str("# HELP agentgrid_cp_changeset_batches_applied_total Changeset batches applied on this host.\n");
+        s.push_str("# TYPE agentgrid_cp_changeset_batches_applied_total counter\n");
+        s.push_str(&format!(
+            "agentgrid_cp_changeset_batches_applied_total {batches}\n"
+        ));
+        s.push_str("# HELP agentgrid_cp_changeset_apply_failures_total Changeset batches rejected or missing a predecessor.\n");
+        s.push_str("# TYPE agentgrid_cp_changeset_apply_failures_total counter\n");
+        s.push_str(&format!(
+            "agentgrid_cp_changeset_apply_failures_total {failures}\n"
+        ));
     }
 
     let (poll_requests, poll_ms) = crate::routes::events::poll_stats();
