@@ -291,8 +291,10 @@ impl Store {
 }
 
 fn cstr(path: &Path) -> Result<CString> {
-    use std::os::unix::ffi::OsStrExt;
-    CString::new(path.as_os_str().as_bytes()).context("path contains NUL")
+    // `as_encoded_bytes` is the portable accessor (unix: raw bytes, Windows:
+    // WTF-8); `std::os::unix::ffi` made this module unix-only, so the crate
+    // could not even be type-checked on the Windows/macOS dev hosts.
+    CString::new(path.as_os_str().as_encoded_bytes()).context("path contains NUL")
 }
 
 struct RawDb(*mut libsqlite3_sys::sqlite3);
