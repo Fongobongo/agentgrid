@@ -19,3 +19,6 @@ e0279261e4583268854cd5ab0df4adccb4ae72a6:crates/node-daemon/src/main.rs:generic-
 # signing key for local test processes on 127.0.0.1, never real credentials.
 01ea75a12a6ae8b7cf342bb3c7cd7c0bb7a26949:crates/control-plane/src/ha/tests.rs:generic-api-key:18
 01ea75a12a6ae8b7cf342bb3c7cd7c0bb7a26949:tests/e2e/run-ha-manual.sh:generic-api-key:19
+# HA failover e2e fixtures (commit 8bb124d): throwaway cluster token and JWT
+# signing key for local test processes on 127.0.0.1, never real credentials.
+8bb124dd66ac6f0e0668d75fba03f0fc8cc46819:tests/e2e/run-ha-failover.sh:generic-api-key:22
