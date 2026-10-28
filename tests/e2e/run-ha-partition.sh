@@ -86,6 +86,27 @@ start_edge() {
 }
 
 ha_status() { curl -fsS --max-time 2 -H "x-agentgrid-ha-token: $TOKEN" "http://127.0.0.1:$1/v1/ha/status"; }
+
+# Create a task through the edge and print its id. The edge documents
+# `503 + Retry-After` for a leaderless moment, so a client is expected to
+# retry: a failover leaves a short window where no host has claimed
+# leadership yet, and a leader that just won may still be arming its write
+# gate. Anything other than 200/201/503 is a real failure.
+create_task() {  # $1 = prompt
+  local prompt="$1" code out="$TMP/task-create.json"
+  for _ in $(seq 1 20); do
+    code=$(curl -sS --max-time 15 --connect-timeout 5 -o "$out" -w '%{http_code}' -X POST \
+      -H "authorization: Bearer $jwt" -H 'content-type: application/json' \
+      -d "{\"prompt\":\"$prompt\",\"repository\":\"*\",\"adapter\":\"mock\",\"timeout_secs\":60}" \
+      "$EDGE_BASE/v1/tasks" 2>/dev/null || true)
+    case "${code:-000}" in
+      200|201) python3 -c 'import sys,json;print(json.load(open(sys.argv[1])).get("id",""))' "$out"; return 0 ;;
+      503|000) echo "  task create got ${code:-000}; retrying (leaderless window)" >&2; sleep 1 ;;
+      *) echo "  task create failed: http=${code:-000}" >&2; return 1 ;;
+    esac
+  done
+  return 1
+}
 field() { python3 -c 'import json,sys
 try: print(json.loads(sys.argv[1]).get(sys.argv[2], ""))
 except Exception: print("")' "$1" "$2"; }
@@ -149,11 +170,7 @@ echo "  new leader during partition=$new_leader"
 [ "$new_leader" != "$leader" ] || { echo "FAIL: old leader still leading during partition" >&2; exit 1; }
 
 echo ">> task completes via edge during partition"
-task=$(curl -fsS --max-time 15 --connect-timeout 5 -X POST -H "authorization: Bearer $jwt" \
-  -H 'content-type: application/json' \
-  -d '{"prompt":"partition smoke","repository":"*","adapter":"mock","timeout_secs":60}' \
-  "$EDGE_BASE/v1/tasks" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))')
+task=$(create_task "partition smoke") || true
 [ -n "$task" ] || { echo "FAIL: task create during partition" >&2; exit 1; }
 ok=0
 for _ in $(seq 1 120); do
