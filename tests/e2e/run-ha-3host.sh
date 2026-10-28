@@ -243,12 +243,16 @@ echo ">> edge forwards to the new leader after the kill"
 # the edge reached *a* leader: a 404 is the new leader answering, a connect
 # error or a 5xx is the edge failing over badly. "No acknowledged write is
 # lost" is asserted by run-ha-incremental.sh, which runs with sync replication.
-code=$(curl -sS --max-time 15 --connect-timeout 5 -o /dev/null -w '%{http_code}' \
-  -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null || true)
+code=$(curl -sS --max-time 15 --connect-timeout 5 -D "$TMP/probe.hdr" -o "$TMP/probe.json" \
+  -w '%{http_code}' -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null || true)
 case "${code:-000}" in
   200) echo "  pre-kill task present on the new leader" ;;
   404) echo "  pre-kill task fell outside the snapshot RPO window (expected)" ;;
-  *)   echo "FAIL: edge did not reach a leader after failover (http=${code:-000})" >&2; exit 1 ;;
+  *)   echo "FAIL: edge did not reach a leader after failover (http=${code:-000})" >&2
+       echo "  body: $(head -c 200 "$TMP/probe.json" 2>/dev/null)" >&2
+       echo "  role header: $(grep -i '^x-agentgrid-role' "$TMP/probe.hdr" 2>/dev/null || echo none)" >&2
+       echo "  retry-after: $(grep -i '^retry-after' "$TMP/probe.hdr" 2>/dev/null || echo none)" >&2
+       exit 1 ;;
 esac
 
 echo ">> new task after failover via edge"

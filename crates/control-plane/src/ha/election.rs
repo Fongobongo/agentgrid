@@ -451,35 +451,68 @@ async fn leader_loop(state: Arc<AppState>) {
         let voters = voters_of(rt);
         let mut acks = 1usize;
         let mut data_acks = 1usize;
-        for peer in &rt.config.peers {
-            match transport::heartbeat(rt, &peer.url, &req).await {
-                Ok(resp) => {
-                    if resp.term > rt.shared.term() {
-                        rt.shared.set_term_and_vote(resp.term, None).ok();
-                        demote(&state, "peer reported a newer term").await;
-                        break;
-                    }
-                    if resp.ok {
-                        acks += 1;
-                        data_acks += 1;
+        // Fan out concurrently and stop collecting at the next tick. Sending
+        // sequentially meant a frozen peer (accepts the connection, never
+        // answers) delayed every *later* heartbeat by a full transport timeout,
+        // so a healthy follower saw no heartbeat for ~2s against a 600ms
+        // election timeout: it campaigned, terms churned and leadership
+        // flapped — while the edge was answering 503 in the gaps. Ordering must
+        // never depend on which peer happens to be dead.
+        let mut pending = FuturesUnordered::new();
+        let targets: Vec<(bool, String, String)> = rt
+            .config
+            .peers
+            .iter()
+            .map(|p| (true, p.id.clone(), p.url.clone()))
+            .chain(
+                rt.config
+                    .witnesses
+                    .iter()
+                    .map(|w| (false, w.id.clone(), w.url.clone())),
+            )
+            .collect();
+        for (is_data, id, url) in targets {
+            let req = req.clone();
+            pending.push(async move {
+                let out = transport::heartbeat(rt, &url, &req).await;
+                (is_data, id, out)
+            });
+        }
+        let deadline = tokio::time::sleep(tick);
+        tokio::pin!(deadline);
+        let mut stepped_down = false;
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                next = pending.next() => {
+                    let Some((is_data, id, result)) = next else { break };
+                    match result {
+                        Ok(resp) => {
+                            if resp.term > rt.shared.term() {
+                                rt.shared.set_term_and_vote(resp.term, None).ok();
+                                let reason = if is_data {
+                                    "peer reported a newer term"
+                                } else {
+                                    "witness reported a newer term"
+                                };
+                                demote(&state, reason).await;
+                                stepped_down = true;
+                                break;
+                            }
+                            if resp.ok {
+                                acks += 1;
+                                if is_data {
+                                    data_acks += 1;
+                                }
+                            }
+                        }
+                        Err(e) => tracing::debug!(peer = %id, "heartbeat failed: {e}"),
                     }
                 }
-                Err(e) => tracing::debug!(peer = %peer.id, "heartbeat failed: {e}"),
             }
         }
-        if rt.is_leader() {
-            for w in &rt.config.witnesses {
-                match transport::heartbeat(rt, &w.url, &req).await {
-                    Ok(resp) if resp.ok => acks += 1,
-                    Ok(resp) if resp.term > rt.shared.term() => {
-                        rt.shared.set_term_and_vote(resp.term, None).ok();
-                        demote(&state, "witness reported a newer term").await;
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::debug!(witness = %w.id, "heartbeat failed: {e}"),
-                }
-            }
+        if stepped_down {
+            continue;
         }
         if !rt.is_leader() {
             continue;

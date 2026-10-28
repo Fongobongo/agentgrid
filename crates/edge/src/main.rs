@@ -146,17 +146,25 @@ impl Edge {
                 .send()
                 .await;
             let Ok(resp) = result else {
+                tracing::debug!(upstream = %base, "discovery: no answer");
                 continue;
             };
             if !resp.status().is_success() {
+                tracing::debug!(
+                    upstream = %base,
+                    status = resp.status().as_u16(),
+                    "discovery: non-success status"
+                );
                 continue;
             }
             let Ok(status) = resp.json::<HaStatus>().await else {
+                tracing::debug!(upstream = %base, "discovery: unparsable status body");
                 continue;
             };
             if status.role == "leader" {
                 return Some(base.trim_end_matches('/').to_string());
             }
+            tracing::debug!(upstream = %base, role = %status.role, "discovery: not the leader");
         }
         None
     }
@@ -295,6 +303,10 @@ async fn proxy(State(edge): State<Arc<Edge>>, req: Request) -> Response {
             edge.metrics
                 .leaderless_total
                 .fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                upstreams = ?edge.upstreams,
+                "no control-plane reports itself leader; answering 503"
+            );
             return no_leader();
         };
         let url = format!("{base}{path}");

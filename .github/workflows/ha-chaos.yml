@@ -71,7 +71,9 @@ jobs:
         # per-process logs survive for the artifact upload below.
         env:
           AG_E2E_KEEP: "1"
-          RUST_LOG: info
+          # The edge's leaderless/discovery path is the thing these scenarios
+          # exist to exercise, and it only logs at debug.
+          RUST_LOG: info,agentgrid_cp_edge=debug
         run: |
           set -o pipefail
           bash "tests/e2e/run-ha-${{ matrix.scenario }}.sh" 2>&1 | tee "/tmp/ha-${{ matrix.scenario }}.log"

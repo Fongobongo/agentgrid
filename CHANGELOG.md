@@ -95,6 +95,18 @@
 
 ### Fixed
 
+- **A frozen peer made leadership flap, not just elections slow.** The lease
+  loop sent heartbeats **sequentially** with a `max(election_timeout*3, 2s)`
+  transport timeout, on a tick of `election_timeout/3` (200 ms in the chaos
+  config). One unreachable peer therefore delayed every *later* heartbeat by a
+  full timeout, so a healthy follower saw no heartbeat for ~2s against a 600 ms
+  election timeout: it campaigned, terms churned, and the edge answered `503`
+  in the gaps (observed as two hosts both logging `promoted to HA leader` 3s
+  apart, and as 20 consecutive `503`s during `run-ha-partition.sh`).
+  Heartbeats now fan out concurrently and collection stops at the next tick, so
+  a dead peer costs nothing and every live peer is reached immediately.
+  Witnesses are in the same fan-out (they count toward the quorum but never
+  toward `data_acks`).
 - **Failover after a frozen host took minutes, not seconds.** `run-ha-partition.sh`
   SIGSTOPs the leader, and the two survivors then needed ~9 minutes and 79
   election terms to settle on a leader. Votes were collected **sequentially**
