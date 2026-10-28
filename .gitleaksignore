@@ -15,3 +15,7 @@ e0279261e4583268854cd5ab0df4adccb4ae72a6:crates/node-daemon/src/main.rs:generic-
 # (sk-LEAK-12345, sk-live-abc123XYZ), never real credentials.
 373899ae3fcfa7c9fb3d8689008fdc8129c38924:crates/node-daemon/src/main_tests.rs:generic-api-key:288
 373899ae3fcfa7c9fb3d8689008fdc8129c38924:crates/node-daemon/src/main_tests.rs:generic-api-key:1358
+# HA unit/e2e fixtures (commit 01ea75a): throwaway cluster token and JWT
+# signing key for local test processes on 127.0.0.1, never real credentials.
+01ea75a12a6ae8b7cf342bb3c7cd7c0bb7a26949:crates/control-plane/src/ha/tests.rs:generic-api-key:18
+01ea75a12a6ae8b7cf342bb3c7cd7c0bb7a26949:tests/e2e/run-ha-manual.sh:generic-api-key:19
