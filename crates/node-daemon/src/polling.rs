@@ -150,7 +150,7 @@ pub async fn poll_loop_inner(
             protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
         };
         let resp = client
-            .post(format!("{}/v1/node/poll", cfg.server))
+            .post(format!("{}/v1/node/poll", cfg.base()))
             .header("x-agentgrid-max-batch", cfg.max_concurrency.to_string())
             .json(&poll_req)
             .send()
@@ -203,15 +203,41 @@ pub async fn poll_loop_inner(
                 dispatch_batch(&cfg, &client, &sem, batch).await?;
             }
             Ok(r) => {
+                let status = r.status();
+                let hint = r
+                    .headers()
+                    .get("x-agentgrid-leader")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let followed = cfg.endpoints.follow_hint(hint.as_deref());
+                if !followed && status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                    cfg.endpoints.advance();
+                }
+                if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                    // Standby: failover is in progress, retry quickly against
+                    // the hinted leader instead of backing off for seconds.
+                    tracing::warn!(
+                        "poll: control plane is not the leader; retrying at {}",
+                        cfg.base()
+                    );
+                    fail_streak = 0;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    continue;
+                }
                 let wait = backoff(fail_streak);
                 fail_streak = fail_streak.saturating_add(1);
-                tracing::warn!("poll returned status {}; retrying in {wait:?}", r.status());
+                tracing::warn!("poll returned status {status}; retrying in {wait:?}");
                 tokio::time::sleep(wait).await;
             }
             Err(e) => {
                 let wait = backoff(fail_streak);
                 fail_streak = fail_streak.saturating_add(1);
                 tracing::warn!("poll failed: {e}; retrying in {wait:?}");
+                // HA: rotate to the next configured control-plane replica.
+                if (e.is_connect() || e.is_timeout()) && cfg.endpoints.urls().len() > 1 {
+                    let next = cfg.endpoints.advance();
+                    tracing::warn!("poll: rotating control-plane endpoint to {next}");
+                }
                 // Proxy failover: a connect/timeout error may be the egress
                 // proxy dying (the CP being down produces the same symptom;
                 // marking a healthy-direct pool empty is a no-op). Rotate to
@@ -334,7 +360,7 @@ pub async fn dispatch_batch(
                 // covers a CP outage at this exact moment.
                 crate::completion::report_complete(
                     &client2,
-                    &cfg2.server,
+                    &cfg2.base(),
                     &aid,
                     1,
                     None,

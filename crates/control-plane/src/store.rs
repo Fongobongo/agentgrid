@@ -35,7 +35,7 @@ mod maintenance;
 // floor + round-trip without touching the store internals) and the opened
 // streaming-artifact handle the download handlers consume.
 pub use artifacts::compress_if_worthwhile_pub;
-pub use artifacts::OpenArtifact;
+pub use artifacts::{ArtifactBlob, OpenArtifact};
 mod nodes;
 pub(crate) mod opencode_profiles;
 mod profiles;

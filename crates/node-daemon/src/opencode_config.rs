@@ -66,7 +66,7 @@ async fn reconcile_pinned_skills(
     cred: &crate::config::SavedCredential,
     pinned: &[String],
 ) -> Vec<String> {
-    let url = format!("{}/v1/node/skills-trust", cfg.server);
+    let url = format!("{}/v1/node/skills-trust", cfg.base());
     let rows: Vec<agentgrid_common::SkillTrustView> =
         match client.get(&url).bearer_auth(&cred.credential).send().await {
             Ok(r) if r.status().is_success() => match r.json().await {
@@ -99,7 +99,7 @@ pub async fn pull_and_apply(
     trigger: &str,
     _pushed_hash: Option<&str>,
 ) -> Result<()> {
-    let url = format!("{}/v1/node/opencode-config/active", cfg.server);
+    let url = format!("{}/v1/node/opencode-config/active", cfg.base());
     let resp = client
         .get(&url)
         .bearer_auth(&cred.credential)
@@ -143,7 +143,7 @@ pub async fn pull_and_apply(
     );
     set_applied_hash(new_hash.clone());
     // Audit trail — best-effort; apply happened even if POST failed.
-    let audit_url = format!("{}/v1/node/opencode-config/audit", cfg.server);
+    let audit_url = format!("{}/v1/node/opencode-config/audit", cfg.base());
     let body = serde_json::json!({
         "profile_id": active.profile_id,
         "hash": new_hash,

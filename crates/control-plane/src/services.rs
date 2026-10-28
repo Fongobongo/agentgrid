@@ -372,7 +372,7 @@ impl ArtifactService {
                 return Err(ArtifactError::InsufficientStorage);
             }
         }
-        state
+        let resp = state
             .store
             .save_artifact_bytes(attempt_id, name, bytes, media_type, sha256)
             .await
@@ -382,7 +382,11 @@ impl ArtifactService {
                 }
                 crate::store::StoreArtifactError::InvalidAttemptId => ArtifactError::BadName,
                 _ => ArtifactError::Internal,
-            })
+            })?;
+        // HA: copy the stored bytes to the data peers before acknowledging, so
+        // a snapshot-promoted leader can still serve this artifact.
+        crate::ha::artifacts::push_eager(state, attempt_id, name).await;
+        Ok(resp)
     }
 }
 

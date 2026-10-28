@@ -35,14 +35,33 @@ const TERMINAL = new Set(["succeeded", "failed", "cancelled", "blocked"]);
 
 export class Agentgrid {
   private token: string;
+  private bases: string[];
   constructor(
-    private base: string,
+    base: string | string[],
     token?: string,
   ) {
+    this.bases = (Array.isArray(base) ? base : [base]).map((b) =>
+      b.replace(/\/+$/, ""),
+    );
     const env: Record<string, string | undefined> =
       (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ??
       {};
     this.token = token ?? env.AGENTGRID_TOKEN ?? "";
+  }
+
+  private get base(): string {
+    return this.bases[0];
+  }
+
+  /** Move a hinted/ordered replica to the front of the list. */
+  private prefer(hint: string | null): void {
+    if (!hint) return;
+    const url = hint.replace(/\/+$/, "");
+    const i = this.bases.indexOf(url);
+    if (i > 0) {
+      this.bases.splice(i, 1);
+      this.bases.unshift(url);
+    }
   }
 
   private async req(
@@ -53,16 +72,34 @@ export class Agentgrid {
     const headers: Record<string, string> = {};
     if (this.token) headers["authorization"] = `Bearer ${this.token}`;
     if (body !== undefined) headers["content-type"] = "application/json";
-    const resp = await fetch(`${this.base}${path}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    if (!resp.ok) {
-      throw new Error(`agentgrid ${method} ${path} -> ${resp.status} ${await resp.text()}`);
+    let lastError: unknown = new Error(`agentgrid ${method} ${path}: no control-plane URL`);
+    // Snapshot the order: following a leader hint reorders `bases` for later
+    // calls, but this pass must still try each replica exactly once.
+    const order = this.bases.slice();
+    for (let i = 0; i < order.length; i++) {
+      let resp: Response;
+      try {
+        resp = await fetch(`${order[i]}${path}`, {
+          method,
+          headers,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+      } catch (e) {
+        lastError = e;
+        continue;
+      }
+      if (resp.status === 503 && i + 1 < order.length) {
+        this.prefer(resp.headers.get("x-agentgrid-leader"));
+        lastError = new Error(`agentgrid ${method} ${path} -> 503 (not leader)`);
+        continue;
+      }
+      if (!resp.ok) {
+        throw new Error(`agentgrid ${method} ${path} -> ${resp.status} ${await resp.text()}`);
+      }
+      if (resp.status === 204) return undefined;
+      return resp.json();
     }
-    if (resp.status === 204) return undefined;
-    return resp.json();
+    throw lastError;
   }
 
   /** Login and return the JWT (same as `ag login`). */
@@ -130,10 +167,23 @@ export class Agentgrid {
   async artifact(id: string, name: string): Promise<string> {
     const headers: Record<string, string> = {};
     if (this.token) headers["authorization"] = `Bearer ${this.token}`;
-    const resp = await fetch(`${this.base}/v1/tasks/${id}/artifacts/${encodeURIComponent(name)}`, {
-      headers,
-    });
-    if (!resp.ok) throw new Error(`agentgrid artifact ${name} -> ${resp.status}`);
-    return resp.text();
+    for (const base of this.bases.slice()) {
+      let resp: Response;
+      try {
+        resp = await fetch(
+          `${base}/v1/tasks/${id}/artifacts/${encodeURIComponent(name)}`,
+          { headers },
+        );
+      } catch {
+        continue;
+      }
+      if (resp.status === 503) {
+        this.prefer(resp.headers.get("x-agentgrid-leader"));
+        continue;
+      }
+      if (!resp.ok) throw new Error(`agentgrid artifact ${name} -> ${resp.status}`);
+      return resp.text();
+    }
+    throw new Error(`agentgrid artifact ${name}: no reachable control plane`);
   }
 }

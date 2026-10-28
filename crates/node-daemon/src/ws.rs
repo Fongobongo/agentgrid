@@ -17,6 +17,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::MaybeTlsStream;
 
+#[cfg(test)]
+use crate::config::Endpoints;
 use crate::config::{Config, SavedCredential};
 use crate::polling::{dispatch_batch, poll_loop_inner};
 
@@ -49,18 +51,35 @@ fn ws_url(server: &str) -> String {
 /// The handshake is time-bounded (10 s connect, 15 s overall): an accepting-
 /// but-silent CP used to park the WS session setup forever.
 async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream> {
-    let url = format!("{}/v1/node/ws", ws_url(&cfg.server));
+    let url = format!("{}/v1/node/ws", ws_url(&cfg.base()));
     let mut req = url.into_client_request()?;
     req.headers_mut().insert(
         "authorization",
         format!("Bearer {}", cred.credential).parse()?,
     );
-    let (mut sock, _resp) = tokio::time::timeout(
+    let connected = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio_tungstenite::connect_async(req),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("ws handshake timed out"))??;
+    .map_err(|_| anyhow::anyhow!("ws handshake timed out"))?;
+    let (mut sock, _resp) = match connected {
+        Ok(ok) => ok,
+        Err(e) => {
+            // A standby answers 503 with the leader hint; follow it (only for
+            // configured replicas) so the next attempt goes to the leader.
+            if let tokio_tungstenite::tungstenite::Error::Http(resp) = &e {
+                let hint = resp
+                    .headers()
+                    .get("x-agentgrid-leader")
+                    .and_then(|v| v.to_str().ok());
+                if cfg.endpoints.follow_hint(hint) {
+                    tracing::info!("ws: following leader hint to {}", cfg.base());
+                }
+            }
+            return Err(e.into());
+        }
+    };
     let hello = NodeWsMsg::Hello {
         node_id: cred.node_id.clone(),
         name: cfg.node_name.clone(),
@@ -75,6 +94,14 @@ async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream> 
     Ok(sock)
 }
 
+/// Why a connected session ended. `Demoted` means the CP lost its leader
+/// lease and closed every WS with 4004: reconnect immediately, not after
+/// backoff, and try the next configured replica.
+enum SessionEnd {
+    Closed,
+    Demoted,
+}
+
 /// Run one connected session until the socket closes or errors.
 async fn run_session(
     mut sock: WsStream,
@@ -82,8 +109,8 @@ async fn run_session(
     client: &Client,
     sem: &Arc<Semaphore>,
     cred: &SavedCredential,
-) -> Result<()> {
-    tracing::info!("ws control channel connected to {}", cfg.server);
+) -> Result<SessionEnd> {
+    tracing::info!("ws control channel connected to {}", cfg.base());
     let mut hb = tokio::time::interval(Duration::from_secs(WS_HEARTBEAT_INTERVAL_SECS));
     hb.tick().await; // consume the immediate first tick
                      // Last inbound frame (ping/pong/data). Checked below per iteration: the
@@ -114,14 +141,22 @@ async fn run_session(
                 .map_err(|_| anyhow::anyhow!("ws heartbeat send timed out"))??;
             }
             msg = sock.next() => {
-                let Some(msg) = msg else { return Ok(()) };
+                let Some(msg) = msg else { return Ok(SessionEnd::Closed) };
                 last_read = tokio::time::Instant::now();
                 match msg? {
                     Message::Text(t) => handle_msg(&t, cfg, client, sem, &mut sock, cred).await?,
                     Message::Ping(p) => sock.send(Message::Pong(p)).await?,
                     Message::Close(cf) => {
                         tracing::info!("ws closed by control plane: {cf:?}");
-                        return Ok(());
+                        let demoted = cf
+                            .as_ref()
+                            .map(|c| u16::from(c.code) == agentgrid_common::ws::WS_CLOSE_DEMOTED)
+                            .unwrap_or(false);
+                        return Ok(if demoted {
+                            SessionEnd::Demoted
+                        } else {
+                            SessionEnd::Closed
+                        });
                     }
                     _ => {}
                 }
@@ -218,11 +253,26 @@ pub async fn ws_loop<F: Fn() -> Client>(
         match connect_once(&cfg, &cred).await {
             Ok(sock) => {
                 backoff = Duration::from_secs(1);
-                if let Err(e) = run_session(sock, &cfg, &client, &sem, &cred).await {
-                    tracing::warn!("ws session ended: {e}");
+                match run_session(sock, &cfg, &client, &sem, &cred).await {
+                    Ok(SessionEnd::Demoted) => {
+                        // Leader lost its lease: reconnect at once and try the
+                        // next replica; failover is in progress.
+                        cfg.endpoints.advance();
+                        tracing::info!("ws: demoted, reconnecting to {}", cfg.base());
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    Ok(SessionEnd::Closed) => {}
+                    Err(e) => tracing::warn!("ws session ended: {e}"),
                 }
             }
-            Err(e) => tracing::warn!("ws connect failed: {e}"),
+            Err(e) => {
+                tracing::warn!("ws connect failed: {e}");
+                if cfg.endpoints.urls().len() > 1 {
+                    let next = cfg.endpoints.advance();
+                    tracing::warn!("ws: rotating control-plane endpoint to {next}");
+                }
+            }
         }
         tracing::info!("ws reconnect in {backoff:?}");
         tokio::time::sleep(backoff).await;
@@ -247,15 +297,28 @@ pub async fn auto_loop<F: Fn() -> Client + Clone>(
             Ok(sock) => {
                 consecutive_failures = 0;
                 backoff = Duration::from_secs(1);
-                if let Err(e) = run_session(sock, &cfg, &client, &sem, &cred).await {
-                    tracing::warn!("ws session ended: {e}");
+                match run_session(sock, &cfg, &client, &sem, &cred).await {
+                    Ok(SessionEnd::Demoted) => {
+                        cfg.endpoints.advance();
+                        tracing::info!("ws: demoted, reconnecting to {}", cfg.base());
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Ok(SessionEnd::Closed) => {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("ws session ended: {e}");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
                 }
-                // Reconnect promptly after a mid-session drop.
-                tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(e) => {
                 consecutive_failures += 1;
                 tracing::warn!("ws connect failed ({consecutive_failures}): {e}");
+                if cfg.endpoints.urls().len() > 1 {
+                    let next = cfg.endpoints.advance();
+                    tracing::warn!("ws: rotating control-plane endpoint to {next}");
+                }
                 if consecutive_failures >= MAX_CONSECUTIVE_WS_FAILURES {
                     tracing::info!("falling back to poll transport for {backoff:?}");
                     poll_loop_inner(
@@ -358,6 +421,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         Config {
             server: server.to_string(),
+            endpoints: Endpoints::new(vec![server.to_string()]),
             node_name: "ws-reconnect-node".into(),
             workspace_root: dir.join("ws"),
             max_concurrency: 1,

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
@@ -13,7 +13,7 @@ use tokio_util::io::ReaderStream;
 
 use super::protocol::{
     HeartbeatRequest, HeartbeatResponse, PromoteResponse, VoteRequest, VoteResponse,
-    HA_TOKEN_HEADER,
+    ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER, HA_TOKEN_HEADER,
 };
 use super::role::HaRuntime;
 use super::{election, snapshot};
@@ -29,6 +29,7 @@ pub fn data_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ha/snapshot", post(snapshot_now))
         .route("/v1/ha/snapshot/{id}", get(snapshot_download))
         .route("/v1/ha/snapshot/{id}/manifest", get(snapshot_manifest))
+        .route("/v1/ha/artifact", get(artifact_get).put(artifact_put))
         .layer(axum::middleware::from_fn_with_state(state, data_token))
 }
 
@@ -153,6 +154,72 @@ async fn snapshot_download(State(state): State<Arc<AppState>>, Path(id): Path<St
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn artifact_headers(headers: &HeaderMap) -> Option<(String, String)> {
+    let attempt = headers.get(ARTIFACT_ATTEMPT_HEADER)?.to_str().ok()?;
+    let name = headers.get(ARTIFACT_NAME_HEADER)?.to_str().ok()?;
+    if !crate::store::is_safe_opaque_id(attempt) || !crate::store::is_safe_artifact_name(name) {
+        return None;
+    }
+    Some((attempt.to_string(), name.to_string()))
+}
+
+/// Peer artifact read: raw stored bytes (`.zst` frame included) for the
+/// on-demand pull path after promotion or for a replica that joined late.
+async fn artifact_get(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let Some((attempt, stored_name)) = artifact_headers(&headers) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match state
+        .store
+        .artifact_blob_bytes(&attempt, &stored_name)
+        .await
+    {
+        Ok(Some(bytes)) => Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(ARTIFACT_SHA_HEADER, agentgrid_common::sha256_hex(&bytes))
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::warn!("HA artifact read failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Peer artifact push: the leader eagerly copies each upload to the data
+/// replicas. Metadata arrives with the database snapshot; only bytes move here.
+async fn artifact_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some((attempt, stored_name)) = artifact_headers(&headers) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(sha) = headers
+        .get(ARTIFACT_SHA_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if agentgrid_common::sha256_hex(&body) != sha.trim().to_ascii_lowercase() {
+        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+    }
+    match state
+        .store
+        .write_artifact_blob(&attempt, &stored_name, &body, &sha)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::warn!("HA artifact write failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 fn error_500(e: anyhow::Error) -> Response {

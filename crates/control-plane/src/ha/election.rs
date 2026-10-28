@@ -197,6 +197,12 @@ pub async fn manual_promote(state: &Arc<AppState>) -> Result<()> {
         .set_term_and_vote(term, Some(&rt.config.node_id))?;
     if let Some(leader) = rt.shared.leader() {
         if let Err(e) = catch_up(state, &leader).await {
+            if transport::status(rt, &leader.url).await.is_ok() {
+                anyhow::bail!(
+                    "leader {} is reachable but catch-up failed; refusing stale promotion: {e}",
+                    leader.id
+                );
+            }
             tracing::warn!("manual promotion catch-up failed: {e}");
         }
     }
@@ -253,10 +259,16 @@ async fn election_loop(state: Arc<AppState>) {
 async fn election_round(state: &Arc<AppState>) -> Result<()> {
     let rt = &state.ha;
     // A candidate must carry the freshest data it can get before asking for
-    // votes; a data voter will refuse a lagging candidate anyway.
+    // votes; a data voter will refuse a lagging candidate anyway. If the old
+    // leader still answers but catch-up failed, do NOT campaign: a reachable
+    // leader means no failover is due, and promoting with an older snapshot
+    // would roll back acknowledged writes for no reason.
     if let Some(leader) = rt.shared.leader() {
         if let Err(e) = catch_up(state, &leader).await {
-            tracing::debug!("pre-election catch-up failed: {e}");
+            if transport::status(rt, &leader.url).await.is_ok() {
+                anyhow::bail!("leader {} reachable but catch-up failed: {e}", leader.id);
+            }
+            tracing::debug!("pre-election catch-up failed (leader unreachable): {e}");
         }
     }
     let term = rt.shared.term() + 1;
@@ -272,9 +284,11 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
     let voters = voters_of(rt);
     let mut votes = 1usize;
     let mut data_votes = 1usize;
+    let mut max_seq = rt.shared.applied_seq();
     for peer in &rt.config.peers {
         match transport::vote(rt, &peer.url, &req).await {
             Ok(resp) => {
+                max_seq = max_seq.max(resp.applied_seq);
                 if resp.term > rt.shared.term() {
                     rt.shared.set_term_and_vote(resp.term, None)?;
                     return Ok(());
@@ -290,6 +304,7 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
     for w in &rt.config.witnesses {
         match transport::vote(rt, &w.url, &req).await {
             Ok(resp) => {
+                max_seq = max_seq.max(resp.applied_seq);
                 if resp.term > rt.shared.term() {
                     rt.shared.set_term_and_vote(resp.term, None)?;
                     return Ok(());
@@ -300,6 +315,15 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
             }
             Err(e) => tracing::debug!(peer = %w.id, "witness vote request failed: {e}"),
         }
+    }
+    if max_seq > rt.shared.applied_seq() {
+        tracing::warn!(
+            term,
+            local_seq = rt.shared.applied_seq(),
+            max_seq,
+            "not promoting: a voter is ahead of this replica"
+        );
+        return Ok(());
     }
     if voters.election_won(votes, data_votes, rt.config.rpo_mode) {
         tracing::info!(term, votes, data_votes, "won HA election");
@@ -465,7 +489,14 @@ async fn catch_up(state: &Arc<AppState>, leader: &LeaderInfo) -> Result<()> {
     }
     rt.shared.set_leader(&status.node_id, &leader.url);
     rt.shared.touch_leader();
-    snapshot::apply_from(rt, &state.store, &status).await?;
+    // A snapshot download/restore that outlives the apply budget would let a
+    // promotion respond while far behind; bound it and stay a standby.
+    tokio::time::timeout(
+        rt.config.apply_timeout,
+        snapshot::apply_from(rt, &state.store, &status),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("snapshot apply exceeded {:?}", rt.config.apply_timeout))??;
     Ok(())
 }
 

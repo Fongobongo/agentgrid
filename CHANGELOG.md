@@ -12,6 +12,20 @@
   `/v1/ha/*` until promoted. Single mode is byte-for-byte the old path.
   Operator surface: `ag cluster status|promote|demote|snapshot`; e2e:
   `tests/e2e/run-ha-manual.sh`.
+- **Control-plane HA phase 3: automated failover, artifact and client
+  failover.** Candidates only campaign when the old leader is unreachable and
+  refuse promotion when any voter is ahead; catch-up is bounded by
+  `AGENTGRID_HA_APPLY_TIMEOUT_SECS`. Artifact bytes replicate separately from
+  snapshots: the leader eagerly pushes the stored file (SHA-256 of the bytes
+  on disk, `.zst` aware) to peers, and a promoted leader pulls + verifies a
+  missing blob on read (`artifacts.stored_sha256`, migration 0094).
+  `node-daemon` accepts `AGENTGRID_SERVERS` (ordered CP URLs), follows the
+  `x-agentgrid-leader` hint on 503, reconnects immediately on WS close `4004`,
+  and retries enrollment across replicas; the CLI probes `AGENTGRID_SERVERS`
+  at startup; TS/Python SDKs take an ordered URL list. e2e:
+  `tests/e2e/run-ha-failover.sh` (`kill -9` leader, measured RTO ~2s, in-flight
+  task survives, artifact pulled from a peer, node follows, rejoin as
+  standby, graceful demote closes WS `4004`).
 
 ### Fixed
 

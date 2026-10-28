@@ -101,7 +101,7 @@ async fn drive_acp_session(
         },
     };
     // Stage 13: prefer the control-plane active profile; fall back to env.
-    let cp_profile = fetch_agent_profile(client, &cfg.server, &assignment.adapter).await;
+    let cp_profile = fetch_agent_profile(client, &cfg.base(), &assignment.adapter).await;
     let profile_text = cp_profile
         .as_ref()
         .map(|p| p.system_prompt.clone())
@@ -306,7 +306,7 @@ async fn drive_acp_session(
         .as_ref()
         .map(|p| p.mcp_server_ids.clone())
         .unwrap_or_default();
-    let mcp_payload = mcp_servers_payload(client, &cfg.server, &mcp_subset).await;
+    let mcp_payload = mcp_servers_payload(client, &cfg.base(), &mcp_subset).await;
     let session_id = match acp
         .session_new(SessionNewParams {
             agent: assignment.adapter.clone(),
@@ -339,7 +339,7 @@ async fn drive_acp_session(
     let sink2 = sink.clone();
     let acp2 = acp.clone();
     let client2 = client.clone();
-    let server2 = cfg.server.clone();
+    let server2 = cfg.base();
     let autonomy = effective_autonomy(cfg.autonomy, cp_profile.as_ref());
     // Plan 1.8 (#15): set by the stream task when an error event carries a
     // rate-limit marker; read at outcome time to decide account rotation.
@@ -422,7 +422,7 @@ async fn drive_acp_session(
     prompt_text.push_str(&compose_brain_block(ws_path).await);
     // Stage 9.2: append the operator-trusted skills discovered in this worktree
     // (fail-closed: untrusted skills are omitted, any lookup error = no block).
-    prompt_text.push_str(&compose_skills_block(client, &cfg.server, ws_path).await);
+    prompt_text.push_str(&compose_skills_block(client, &cfg.base(), ws_path).await);
     let sid_prompt = session_id.clone();
     let mut prompt = tokio::spawn(async move {
         acp3.session_prompt(SessionPromptParams {
@@ -434,7 +434,8 @@ async fn drive_acp_session(
     let cancel_client = client.clone();
     let cancel_url = format!(
         "{}/v1/node/attempts/{}/cancel",
-        cfg.server, assignment.attempt_id
+        cfg.base(),
+        assignment.attempt_id
     );
     let pid = child.id().unwrap_or(0);
     let timeout = Duration::from_secs(assignment.timeout_secs.max(1));
@@ -1002,7 +1003,7 @@ async fn amain() -> Result<()> {
     }
     tracing::info!(
         node_id = %cred.node_id,
-        server = %cfg.server,
+        server = %cfg.base(),
         adapters = ?cfg.adapters,
         "node daemon starting"
     );

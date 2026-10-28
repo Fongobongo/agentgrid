@@ -44,6 +44,9 @@ pub async fn get_artifact(
     if !is_safe_artifact_name(&name) {
         return Err(StatusCode::NOT_FOUND);
     }
+    // HA: a promoted replica may have the metadata (snapshot) but not the
+    // bytes yet; pull + verify before opening the file.
+    crate::ha::artifacts::ensure_local(&state, &task_id, &name).await;
     let mt = state
         .store
         .read_artifact_meta(&task_id, &name)
@@ -99,6 +102,7 @@ pub async fn get_artifact_node(
     if !allowed {
         return Err(StatusCode::NOT_FOUND);
     }
+    crate::ha::artifacts::ensure_local(&state, &task_id, &name).await;
     let mt = state
         .store
         .read_artifact_meta(&task_id, &name)

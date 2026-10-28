@@ -55,20 +55,57 @@ async fn enroll_node(cfg: &Config) -> Result<SavedCredential> {
             .map(adapter_permission_interception)
             .unwrap_or_else(|| "wrapper".into()),
     };
-    let resp = client
-        .post(format!("{}/v1/node/enroll", cfg.server))
-        .json(&body)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        let err = resp.text().await.unwrap_or_default();
-        anyhow::bail!("enroll failed: {}", err);
+    // With `AGENTGRID_SERVERS` the first configured URL may be a standby:
+    // follow the leader hint (or rotate) and retry instead of failing boot.
+    let attempts = cfg.endpoints.urls().len().max(1) * 2;
+    let mut last = String::new();
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        let resp = client
+            .post(format!("{}/v1/node/enroll", cfg.base()))
+            .json(&body)
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let enrolled: EnrollResponse = r.json().await?;
+                return Ok(SavedCredential {
+                    node_id: enrolled.node_id,
+                    credential: enrolled.credential,
+                });
+            }
+            Ok(r) => {
+                let status = r.status();
+                let hint = r
+                    .headers()
+                    .get("x-agentgrid-leader")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                last = r.text().await.unwrap_or_default();
+                let followed = cfg.endpoints.follow_hint(hint.as_deref());
+                if !followed && cfg.endpoints.urls().len() > 1 {
+                    cfg.endpoints.advance();
+                }
+                if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                    break;
+                }
+                tracing::warn!(
+                    "enroll: control plane is not the leader; retrying at {}",
+                    cfg.base()
+                );
+            }
+            Err(e) => {
+                last = e.to_string();
+                if cfg.endpoints.urls().len() > 1 {
+                    let next = cfg.endpoints.advance();
+                    tracing::warn!("enroll: control plane unreachable; rotating to {next}");
+                }
+            }
+        }
     }
-    let enrolled: EnrollResponse = resp.json().await?;
-    Ok(SavedCredential {
-        node_id: enrolled.node_id,
-        credential: enrolled.credential,
-    })
+    anyhow::bail!("enroll failed: {}", last)
 }
 
 /// After successful enrollment, scrub `AGENTGRID_ENROLL_TOKEN` from the

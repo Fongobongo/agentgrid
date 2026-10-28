@@ -74,6 +74,19 @@ pub fn parse_adapters(s: &str) -> Vec<AdapterSpec> {
         .collect()
 }
 
+impl Config {
+    /// Control-plane URL to use for the next request. HA: the currently
+    /// selected replica (leader hints / rotation update it in place).
+    pub fn base(&self) -> String {
+        let current = self.endpoints.current();
+        if current.is_empty() {
+            self.server.clone()
+        } else {
+            current
+        }
+    }
+}
+
 /// SavedCredential for the running process, stashed once at startup by
 /// `load_or_enroll`. Needed by code paths (error threshold, per-attempt
 /// overrides) that don't take the credential through their hot loop.
@@ -94,9 +107,67 @@ pub struct SavedCredential {
     pub credential: String,
 }
 
+/// Ordered control-plane endpoints. HA deployments list every replica
+/// (`AGENTGRID_SERVERS=a,b,c`); the daemon follows `X-AgentGrid-Leader`
+/// hints when they name a configured host and otherwise rotates in order.
+#[derive(Debug)]
+pub struct Endpoints {
+    urls: Vec<String>,
+    current: std::sync::atomic::AtomicUsize,
+}
+
+impl Endpoints {
+    pub fn new(urls: Vec<String>) -> Arc<Self> {
+        let urls: Vec<String> = urls
+            .into_iter()
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty())
+            .collect();
+        Arc::new(Self {
+            urls,
+            current: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    pub fn current(&self) -> String {
+        if self.urls.is_empty() {
+            return String::new();
+        }
+        let i = self.current.load(std::sync::atomic::Ordering::Relaxed) % self.urls.len();
+        self.urls[i].clone()
+    }
+
+    pub fn urls(&self) -> &[String] {
+        &self.urls
+    }
+
+    /// Follow a leader hint only when it matches a configured replica: the
+    /// hint comes from our CP, but a redirect to an unknown host is refused.
+    pub fn follow_hint(&self, hint: Option<&str>) -> bool {
+        let Some(hint) = hint.map(|h| h.trim().trim_end_matches('/')) else {
+            return false;
+        };
+        let Some(i) = self.urls.iter().position(|u| u == hint) else {
+            return false;
+        };
+        self.current.store(i, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// Advance to the next replica and return it.
+    pub fn advance(&self) -> String {
+        if !self.urls.is_empty() {
+            self.current
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.current()
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub server: String,
+    pub endpoints: Arc<Endpoints>,
     pub node_name: String,
     pub workspace_root: PathBuf,
     pub max_concurrency: u32,
@@ -233,9 +304,22 @@ fn parse_autonomy(v: Option<String>) -> AutonomyLevel {
 pub fn config_from_env() -> Config {
     let data_dir =
         std::env::var("AGENTGRID_DATA_DIR").unwrap_or_else(|_| "./agentgrid-data".into());
+    let server = std::env::var("AGENTGRID_SERVER")
+        .unwrap_or_else(|_| "http://127.0.0.1:7800".into())
+        .trim_end_matches('/')
+        .to_string();
+    let servers: Vec<String> = std::env::var("AGENTGRID_SERVERS")
+        .ok()
+        .map(|raw| raw.split(',').map(str::trim).map(str::to_string).collect())
+        .unwrap_or_default();
+    let endpoints = Endpoints::new(if servers.is_empty() {
+        vec![server.clone()]
+    } else {
+        servers
+    });
     Config {
-        server: std::env::var("AGENTGRID_SERVER")
-            .unwrap_or_else(|_| "http://127.0.0.1:7800".into()),
+        server,
+        endpoints,
         node_name: std::env::var("AGENTGRID_NODE_NAME")
             .unwrap_or_else(|_| hostname().unwrap_or_else(|| "node".into())),
         workspace_root: PathBuf::from(
@@ -379,5 +463,18 @@ mod tests {
         assert_eq!(accs.len(), 1);
         assert_eq!(accs[0].env, "FOO");
         assert_eq!(accs[0].tokens, vec!["k1".to_string(), "k2".to_string()]);
+    }
+
+    #[test]
+    fn endpoints_follow_configured_hint_and_rotate() {
+        let e = Endpoints::new(vec!["http://cp-a:7800/".into(), "http://cp-b:7800".into()]);
+        assert_eq!(e.current(), "http://cp-a:7800");
+        // Unknown hosts are never followed (no redirect off the configured set).
+        assert!(!e.follow_hint(Some("http://evil:7800")));
+        assert_eq!(e.current(), "http://cp-a:7800");
+        assert!(e.follow_hint(Some("http://cp-b:7800/")));
+        assert_eq!(e.current(), "http://cp-b:7800");
+        assert_eq!(e.advance(), "http://cp-a:7800");
+        assert_eq!(e.advance(), "http://cp-b:7800");
     }
 }

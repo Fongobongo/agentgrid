@@ -4,6 +4,11 @@
 use serde::{Deserialize, Serialize};
 
 pub const HA_TOKEN_HEADER: &str = "x-agentgrid-ha-token";
+/// Peer artifact replication: attempt id, on-disk file name and SHA-256 of
+/// the stored bytes travel as headers so names need no URL encoding.
+pub const ARTIFACT_ATTEMPT_HEADER: &str = "x-agentgrid-attempt-id";
+pub const ARTIFACT_NAME_HEADER: &str = "x-agentgrid-stored-name";
+pub const ARTIFACT_SHA_HEADER: &str = "x-agentgrid-artifact-sha256";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoteRequest {

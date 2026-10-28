@@ -4318,3 +4318,140 @@ mod ha_fencing_tests {
         tx.commit().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod artifact_blob_tests {
+    use super::Store;
+    use crate::store::now_iso;
+    use agentgrid_common::EnrollRequest;
+
+    async fn store(tag: &str) -> (Store, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("ag-blob-{tag}-{}.db", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&p);
+        (Store::open(p.to_str().unwrap()).await.unwrap(), p)
+    }
+
+    async fn seed_attempt(s: &Store, task_id: &str, att_id: &str) {
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "blob-node".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 1,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        sqlx::query(
+            "INSERT INTO tasks (id, repository, prompt, adapter, status, created_at, timeout_secs) \
+             VALUES (?, '', 'p', 'mock', 'queued', ?, 60)",
+        )
+        .bind(task_id)
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
+             VALUES (?, ?, 1, ?, 'succeeded', ?, ?, ?)",
+        )
+        .bind(att_id)
+        .bind(task_id)
+        .bind(&node_id)
+        .bind(now_iso())
+        .bind(now_iso())
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stored_hash_and_peer_roundtrip() {
+        let (a, pa) = store("a").await;
+        seed_attempt(&a, "task-blob-1", "att-blob-1").await;
+        let payload = b"diff --git a/x b/x\n";
+        a.save_artifact_bytes("att-blob-1", "changes.patch", payload, None, None)
+            .await
+            .unwrap();
+        let blob = a
+            .artifact_blob_meta("att-blob-1", "changes.patch")
+            .await
+            .unwrap()
+            .expect("blob metadata");
+        assert_eq!(blob.stored_name, "changes.patch");
+        assert!(!blob.compressed);
+        let sha = blob.sha256.expect("stored sha");
+        assert_eq!(sha, agentgrid_common::sha256_hex(payload));
+        let bytes = a
+            .artifact_blob_bytes("att-blob-1", "changes.patch")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, payload);
+
+        let (b, pb) = store("b").await;
+        b.write_artifact_blob("att-blob-1", "changes.patch", &bytes, &sha)
+            .await
+            .unwrap();
+        assert_eq!(
+            b.artifact_blob_bytes("att-blob-1", "changes.patch")
+                .await
+                .unwrap()
+                .unwrap(),
+            payload
+        );
+        // A tampered copy is refused before it reaches the artifact root.
+        assert!(b
+            .write_artifact_blob("att-blob-1", "changes.patch", b"tampered", &sha)
+            .await
+            .is_err());
+
+        a.pool.close().await;
+        b.pool.close().await;
+        let _ = std::fs::remove_file(pa);
+        let _ = std::fs::remove_file(pb);
+    }
+
+    #[tokio::test]
+    async fn compressed_blob_hashes_the_stored_frame() {
+        let (s, p) = store("zst").await;
+        seed_attempt(&s, "task-zst", "att-zst-blob").await;
+        let content: Vec<u8> = "agent log line\n".repeat(2000).into_bytes();
+        let resp = s
+            .save_artifact_bytes(
+                "att-zst-blob",
+                "big.log",
+                &content,
+                Some("text/plain"),
+                None,
+            )
+            .await
+            .unwrap();
+        let blob = s
+            .artifact_blob_meta("att-zst-blob", "big.log")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(blob.compressed);
+        assert_eq!(blob.stored_name, "big.log.zst");
+        let sha = blob.sha256.expect("stored sha");
+        // The stored hash is of the frame, not the logical content.
+        assert_ne!(sha, resp.sha256);
+        let frame = s
+            .artifact_blob_bytes("att-zst-blob", "big.log.zst")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sha, agentgrid_common::sha256_hex(&frame));
+        assert_eq!(zstd::stream::decode_all(frame.as_slice()).unwrap(), content);
+        s.pool.close().await;
+        let _ = std::fs::remove_file(p);
+    }
+}

@@ -562,6 +562,46 @@ pub fn classify_failure(e: &anyhow::Error) -> i32 {
     1
 }
 
+/// HA: pick the first reachable control plane from `AGENTGRID_SERVERS`
+/// (ordered, comma-separated), falling back to `--server`/`AGENTGRID_SERVER`.
+/// Unset means the historical single-URL behaviour with no probe.
+async fn resolve_base(client: &reqwest::Client, server: &str) -> String {
+    let primary = server.trim_end_matches('/').to_string();
+    let Ok(raw) = std::env::var("AGENTGRID_SERVERS") else {
+        return primary;
+    };
+    if raw.trim().is_empty() {
+        return primary;
+    }
+    let mut urls: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .collect();
+    if !urls.iter().any(|u| u == &primary) {
+        urls.push(primary);
+    }
+    for url in &urls {
+        // `/health/ready` is 200 only on the leader (a standby answers 503),
+        // so the probe picks a replica that actually accepts traffic.
+        let ok = client
+            .get(format!("{url}/health/ready"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if ok {
+            if url != &urls[0] {
+                eprintln!("using control plane {url}");
+            }
+            return url.clone();
+        }
+    }
+    urls[0].clone()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -580,7 +620,7 @@ async fn main() -> Result<()> {
         client_builder = client_builder.default_headers(headers);
     }
     let client = client_builder.build()?;
-    let base = cli.server.trim_end_matches('/').to_string();
+    let base = resolve_base(&client, &cli.server).await;
 
     let res: Result<()> = match cli.command {
         AgCommand::Run(a) => cmd_run(&client, &base, a).await,

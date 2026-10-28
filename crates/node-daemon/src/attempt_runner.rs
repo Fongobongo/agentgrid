@@ -205,7 +205,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         }
         let url = format!(
             "{}/v1/node/tasks/{}/artifacts/changes.patch",
-            cfg.server, task_id
+            cfg.base(),
+            task_id
         );
         match client.get(&url).send().await {
             Ok(r) if r.status().is_success() => match r.bytes().await {
@@ -266,7 +267,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // Stage 13: prefer the control-plane active profile (full: prompt +
     // autonomy + resource limits); fall back to env for the system prompt
     // (env sources are text-only, no autonomy/limits).
-    let cp_profile = fetch_agent_profile(&client, &cfg.server, &assignment.adapter).await;
+    let cp_profile = fetch_agent_profile(&client, &cfg.base(), &assignment.adapter).await;
     let prompt_text: Option<String> = cp_profile
         .as_ref()
         .map(|p| p.system_prompt.clone())
@@ -304,7 +305,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             &ws.path,
             &assignment.task_id,
             &assignment.eval_cases,
-            &cfg.server,
+            &cfg.base(),
             &assignment.fencing_token,
             &client,
         )
@@ -332,7 +333,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
             client.clone(),
-            cfg.server.clone(),
+            cfg.base(),
             assignment.fencing_token.clone(),
             outbox.clone(),
         );
@@ -343,7 +344,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         if matches!(
             ack_attempt(
                 &client,
-                &cfg.server,
+                &cfg.base(),
                 &assignment.attempt_id,
                 &assignment.fencing_token,
             )
@@ -360,7 +361,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         }
         create_agent_session(
             &client,
-            &cfg.server,
+            &cfg.base(),
             &assignment.attempt_id,
             &assignment.adapter,
             &assignment.fencing_token,
@@ -444,7 +445,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 );
                 let cancel_url = format!(
                     "{}/v1/node/attempts/{}/cancel",
-                    cfg.server, assignment.attempt_id
+                    cfg.base(),
+                    assignment.attempt_id
                 );
                 match run_validation(
                     &workdir,
@@ -452,7 +454,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                     vto,
                     cancel_url,
                     client.clone(),
-                    &cfg.server,
+                    &cfg.base(),
                     &assignment.attempt_id,
                     &assignment.fencing_token,
                     &sink,
@@ -530,7 +532,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         let spool_root = cfg.artifact_spool_root.clone();
         upload_if_exists(
             &client,
-            &cfg.server,
+            &cfg.base(),
             &assignment.attempt_id,
             "changes.patch",
             &workdir.join("changes.patch"),
@@ -541,7 +543,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         .await;
         upload_if_exists(
             &client,
-            &cfg.server,
+            &cfg.base(),
             &assignment.attempt_id,
             "validation.log",
             &workdir.join("validation.log"),
@@ -574,7 +576,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             .unwrap_or_default();
         report_complete(
             &client,
-            &cfg.server,
+            &cfg.base(),
             &assignment.attempt_id,
             exit_code,
             commit_sha,
@@ -673,7 +675,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 );
                 report_complete(
                     &client,
-                    &cfg.server,
+                    &cfg.base(),
                     &assignment.attempt_id,
                     127,
                     None,
@@ -705,7 +707,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 );
                 report_complete(
                     &client,
-                    &cfg.server,
+                    &cfg.base(),
                     &assignment.attempt_id,
                     127,
                     None,
@@ -750,12 +752,13 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         .unwrap_or(0);
     let cancel_url = format!(
         "{}/v1/node/attempts/{}/cancel",
-        cfg.server, assignment.attempt_id
+        cfg.base(),
+        assignment.attempt_id
     );
     let sink = EventSink::new(
         assignment.attempt_id.clone(),
         client.clone(),
-        cfg.server.clone(),
+        cfg.base(),
         assignment.fencing_token.clone(),
         outbox.clone(),
     );
@@ -784,7 +787,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     if matches!(
         ack_attempt(
             &client,
-            &cfg.server,
+            &cfg.base(),
             &assignment.attempt_id,
             &assignment.fencing_token,
         )
@@ -801,7 +804,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     }
     create_agent_session(
         &client,
-        &cfg.server,
+        &cfg.base(),
         &assignment.attempt_id,
         &assignment.adapter,
         &assignment.fencing_token,
@@ -1059,7 +1062,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 std::time::Duration::from_secs(assignment.validation_timeout_secs.unwrap_or(300));
             let cancel_url = format!(
                 "{}/v1/node/attempts/{}/cancel",
-                cfg.server, assignment.attempt_id
+                cfg.base(),
+                assignment.attempt_id
             );
             let v = run_validation(
                 &workdir,
@@ -1067,7 +1071,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 vto,
                 cancel_url,
                 client.clone(),
-                &cfg.server,
+                &cfg.base(),
                 &assignment.attempt_id,
                 &assignment.fencing_token,
                 &sink,
@@ -1228,7 +1232,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     let spool_root = cfg.artifact_spool_root.clone();
     upload_if_exists(
         &client,
-        &cfg.server,
+        &cfg.base(),
         &assignment.attempt_id,
         "changes.patch",
         &patch_path,
@@ -1239,7 +1243,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     .await;
     upload_if_exists(
         &client,
-        &cfg.server,
+        &cfg.base(),
         &assignment.attempt_id,
         "validation.log",
         &validation_log,
@@ -1250,7 +1254,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     .await;
     upload_if_exists(
         &client,
-        &cfg.server,
+        &cfg.base(),
         &assignment.attempt_id,
         "agent-raw-output.log",
         &raw_path,
@@ -1264,7 +1268,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     if is_zeroshot {
         upload_if_exists(
             &client,
-            &cfg.server,
+            &cfg.base(),
             &assignment.attempt_id,
             "zeroshot-result.json",
             &workdir.join("zeroshot-result.json"),
@@ -1315,7 +1319,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         .unwrap_or_default();
     report_complete(
         &client,
-        &cfg.server,
+        &cfg.base(),
         &assignment.attempt_id,
         code,
         commit_sha,

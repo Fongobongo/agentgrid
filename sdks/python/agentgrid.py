@@ -27,9 +27,23 @@ TERMINAL = {"succeeded", "failed", "cancelled", "blocked"}
 
 
 class Agentgrid:
-    def __init__(self, base: str, token: str | None = None) -> None:
-        self.base = base.rstrip("/")
+    def __init__(self, base: str | list[str], token: str | None = None) -> None:
+        self.bases = [b.rstrip("/") for b in (base if isinstance(base, list) else [base])]
+        if not self.bases:
+            raise ValueError("agentgrid: at least one control-plane URL is required")
         self.token = token if token is not None else os.environ.get("AGENTGRID_TOKEN", "")
+
+    @property
+    def base(self) -> str:
+        return self.bases[0]
+
+    def _prefer(self, hint: str | None) -> None:
+        if not hint:
+            return
+        url = hint.rstrip("/")
+        if url in self.bases[1:]:
+            self.bases.remove(url)
+            self.bases.insert(0, url)
 
     def _req(self, method: str, path: str, body: object | None = None) -> object:
         headers = {}
@@ -39,15 +53,30 @@ class Agentgrid:
         if body is not None:
             headers["Content-Type"] = "application/json"
             data = json.dumps(body).encode()
-        req = urllib.request.Request(
-            f"{self.base}{path}", data=data, headers=headers, method=method
-        )
-        try:
-            with urllib.request.urlopen(req) as resp:
-                raw = resp.read()
-                return json.loads(raw) if raw else None
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(f"agentgrid {method} {path} -> {e.code} {e.read().decode()}") from e
+        last_error: Exception | None = None
+        # Snapshot the order: following a leader hint reorders `bases` for
+        # later calls, but this pass must still try each replica once.
+        bases = list(self.bases)
+        for i, base in enumerate(bases):
+            req = urllib.request.Request(
+                f"{base}{path}", data=data, headers=headers, method=method
+            )
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    raw = resp.read()
+                    return json.loads(raw) if raw else None
+            except urllib.error.HTTPError as e:
+                if e.code == 503 and i + 1 < len(bases):
+                    self._prefer(e.headers.get("X-AgentGrid-Leader"))
+                    last_error = e
+                    continue
+                raise RuntimeError(
+                    f"agentgrid {method} {path} -> {e.code} {e.read().decode()}"
+                ) from e
+            except urllib.error.URLError as e:
+                last_error = e
+                continue
+        raise RuntimeError(f"agentgrid {method} {path}: no reachable control plane") from last_error
 
     def login(self, username: str, password: str) -> str:
         r = self._req("POST", "/v1/auth/login", {"username": username, "password": password})
@@ -103,11 +132,22 @@ class Agentgrid:
         headers = {}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        req = urllib.request.Request(
-            f"{self.base}/v1/tasks/{id}/artifacts/{name}", headers=headers, method="GET"
-        )
-        try:
-            with urllib.request.urlopen(req) as resp:
-                return resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(f"agentgrid artifact {name} -> {e.code}") from e
+        last_error: Exception | None = None
+        bases = list(self.bases)
+        for i, base in enumerate(bases):
+            req = urllib.request.Request(
+                f"{base}/v1/tasks/{id}/artifacts/{name}", headers=headers, method="GET"
+            )
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    return resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as e:
+                if e.code == 503 and i + 1 < len(bases):
+                    self._prefer(e.headers.get("X-AgentGrid-Leader"))
+                    last_error = e
+                    continue
+                raise RuntimeError(f"agentgrid artifact {name} -> {e.code}") from e
+            except urllib.error.URLError as e:
+                last_error = e
+                continue
+        raise RuntimeError(f"agentgrid artifact {name}: no reachable control plane") from last_error

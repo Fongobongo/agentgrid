@@ -93,7 +93,7 @@ mod tests {
     #[cfg(unix)]
     use crate::config::AdapterProtocol;
     #[cfg(unix)]
-    use crate::config::AdapterSpec;
+    use crate::config::{AdapterSpec, Endpoints};
     #[cfg(unix)]
     use crate::drive_acp_session;
     use crate::outbox;
@@ -585,6 +585,7 @@ mod tests {
         let server = dummy_ingest_server().await;
         let cfg = Config {
             server: server.clone(),
+            endpoints: Endpoints::new(vec![server.clone()]),
             node_name: "test".into(),
             workspace_root: cfg_ws,
             max_concurrency: 2,
@@ -667,7 +668,7 @@ mod tests {
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
             reqwest::Client::new(),
-            cfg.server.clone(),
+            cfg.base(),
             String::new(),
             Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
         );
@@ -720,6 +721,7 @@ mod tests {
         let rl_token_env = format!("AG_FAKE_TOKEN_{}", uuid::Uuid::new_v4());
         let mut cfg = Config {
             server: server.clone(),
+            endpoints: Endpoints::new(vec![server.clone()]),
             node_name: "test".into(),
             workspace_root: cfg_ws,
             max_concurrency: 2,
@@ -812,7 +814,7 @@ mod tests {
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
             reqwest::Client::new(),
-            cfg.server.clone(),
+            cfg.base(),
             String::new(),
             Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
         );
@@ -888,6 +890,7 @@ mod tests {
         // with parallel ACP tests in the same process).
         let cfg = Config {
             server: server.clone(),
+            endpoints: Endpoints::new(vec![server.clone()]),
             node_name: "test".into(),
             workspace_root: cfg_ws,
             max_concurrency: 2,
@@ -971,7 +974,7 @@ mod tests {
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
             reqwest::Client::new(),
-            cfg.server.clone(),
+            cfg.base(),
             String::new(),
             Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
         );
@@ -1015,6 +1018,7 @@ mod tests {
         let server = dummy_cancel_server().await;
         let cfg = Config {
             server: server.clone(),
+            endpoints: Endpoints::new(vec![server.clone()]),
             node_name: "test".into(),
             workspace_root: cfg_ws,
             max_concurrency: 2,
@@ -1099,7 +1103,7 @@ mod tests {
         let sink = EventSink::new(
             assignment.attempt_id.clone(),
             reqwest::Client::new(),
-            cfg.server.clone(),
+            cfg.base(),
             String::new(),
             Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
         );
@@ -1207,6 +1211,7 @@ mod tests {
 
             let cfg = Config {
                 server: server.clone(),
+                endpoints: Endpoints::new(vec![server.clone()]),
                 node_name: "test".into(),
                 workspace_root: cfg_ws,
                 max_concurrency: 2,
@@ -1300,7 +1305,7 @@ mod tests {
             let sink = EventSink::new(
                 assignment.attempt_id.clone(),
                 reqwest::Client::new(),
-                cfg.server.clone(),
+                cfg.base(),
                 String::new(),
                 Arc::new(
                     outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap(),

@@ -150,6 +150,7 @@ impl Store {
         // row the other writer committed, and on Windows the second rename
         // onto an existing target fails outright.
         let disk_path = path.with_file_name(&on_disk_name);
+        let stored_sha = sha256_bytes_hex(&write_bytes);
         let tmp = disk_path.with_extension(format!("tmp.upload-{}", Uuid::new_v4()));
         tokio::fs::write(&tmp, write_bytes).await?;
         tokio::fs::rename(&tmp, &disk_path).await?;
@@ -162,14 +163,15 @@ impl Store {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         sqlx::query(
-            "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at, media_type, sha256, stored_compressed) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at, media_type, sha256, stored_compressed, stored_sha256) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(attempt_id, name) DO UPDATE SET \
                 size_bytes = excluded.size_bytes, \
                 stored_at = excluded.stored_at, \
                 media_type = excluded.media_type, \
                 sha256 = excluded.sha256, \
-                stored_compressed = excluded.stored_compressed",
+                stored_compressed = excluded.stored_compressed, \
+                stored_sha256 = excluded.stored_sha256",
         )
         .bind(&id)
         .bind(attempt_id)
@@ -179,6 +181,7 @@ impl Store {
         .bind(media_type)
         .bind(&computed)
         .bind(stored_compressed as i64)
+        .bind(&stored_sha)
         .execute(&self.pool)
         .await?;
         Ok(ArtifactUploadResponse {
@@ -187,6 +190,94 @@ impl Store {
             media_type: media_type.map(|s| s.to_string()),
             sha256: computed,
         })
+    }
+
+    /// HA: metadata needed to move the stored bytes (not the logical content)
+    /// to/from a peer. `stored_name` is the on-disk file name (`<name>.zst`
+    /// when compressed) and `sha256` hashes exactly those bytes. `None` for
+    /// legacy rows written before `stored_sha256` existed — those cannot be
+    /// verified after a pull and are left to the snapshot/backup path.
+    pub async fn artifact_blob_meta(
+        &self,
+        attempt_id: &str,
+        name: &str,
+    ) -> Result<Option<ArtifactBlob>> {
+        if !is_safe_opaque_id(attempt_id) || !is_safe_artifact_name(name) {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT stored_compressed, stored_sha256, size_bytes FROM artifacts \
+             WHERE attempt_id = ? AND name = ?",
+        )
+        .bind(attempt_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| {
+            let compressed = r.try_get::<i64, _>("stored_compressed").unwrap_or(0) != 0;
+            ArtifactBlob {
+                attempt_id: attempt_id.to_string(),
+                name: name.to_string(),
+                stored_name: if compressed {
+                    format!("{name}.zst")
+                } else {
+                    name.to_string()
+                },
+                sha256: r
+                    .try_get::<Option<String>, _>("stored_sha256")
+                    .ok()
+                    .flatten(),
+                size: r.try_get::<i64, _>("size_bytes").unwrap_or(0) as u64,
+                compressed,
+            }
+        }))
+    }
+
+    /// HA: read the raw stored file (zstd frame included) for a peer push.
+    pub async fn artifact_blob_bytes(
+        &self,
+        attempt_id: &str,
+        stored_name: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let path = self.artifact_path(attempt_id, stored_name)?;
+        match tokio::fs::read(&path).await {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// HA: whether the stored file exists locally (metadata only, no read).
+    pub async fn artifact_blob_present(&self, attempt_id: &str, stored_name: &str) -> Result<bool> {
+        let path = self.artifact_path(attempt_id, stored_name)?;
+        match tokio::fs::metadata(&path).await {
+            Ok(m) => Ok(m.is_file()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// HA: write a peer's stored file (verified against its SHA-256). Metadata
+    /// is not touched — it arrives with the replicated database snapshot.
+    pub async fn write_artifact_blob(
+        &self,
+        attempt_id: &str,
+        stored_name: &str,
+        bytes: &[u8],
+        expected_sha: &str,
+    ) -> Result<()> {
+        let computed = sha256_bytes_hex(bytes);
+        if computed != expected_sha.trim().to_ascii_lowercase() {
+            anyhow::bail!("artifact blob sha256 mismatch");
+        }
+        let path = self.artifact_path(attempt_id, stored_name)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let tmp = path.with_extension(format!("tmp.ha-{}", Uuid::new_v4()));
+        tokio::fs::write(&tmp, bytes).await?;
+        tokio::fs::rename(&tmp, &path).await?;
+        Ok(())
     }
 
     /// List a task's artifacts (latest attempt) with metadata. Empty when the
@@ -346,6 +437,17 @@ impl Store {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// HA replication view of one artifact: the on-disk shape plus the hash of
+/// exactly those bytes.
+pub struct ArtifactBlob {
+    pub attempt_id: String,
+    pub name: String,
+    pub stored_name: String,
+    pub sha256: Option<String>,
+    pub size: u64,
+    pub compressed: bool,
 }
 
 /// Plan 6.7: an artifact opened for streaming. `len` is the logical

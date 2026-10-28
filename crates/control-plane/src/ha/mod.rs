@@ -7,6 +7,7 @@
 //! Single mode is the default and keeps the pre-HA code path: no HA sockets,
 //! no HA background tasks, and an always-open [`HaGate`].
 
+pub mod artifacts;
 pub mod config;
 pub mod election;
 pub mod protocol;

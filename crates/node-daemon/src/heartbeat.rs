@@ -467,18 +467,38 @@ pub fn spawn_heartbeat(
                 active_rss_mib: vmrss_mib,
                 max_rss_mib,
             };
-            if let Err(e) = client
-                .post(format!("{}/v1/node/heartbeat", cfg.server))
+            match client
+                .post(format!("{}/v1/node/heartbeat", cfg.base()))
                 .json(&req)
                 .send()
                 .await
             {
-                tracing::warn!("heartbeat failed: {e}");
-                if e.is_connect() || e.is_timeout() {
-                    if let (Some(mk), Some(p)) = (mk_client.as_ref(), cfg.proxies.current()) {
-                        tracing::warn!("egress proxy {p} failed on heartbeat; rotating");
-                        cfg.proxies.mark_dead(&p);
-                        client = mk();
+                Ok(r) if r.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                    let hint = r
+                        .headers()
+                        .get("x-agentgrid-leader")
+                        .and_then(|v| v.to_str().ok());
+                    if !cfg.endpoints.follow_hint(hint) && cfg.endpoints.urls().len() > 1 {
+                        cfg.endpoints.advance();
+                    }
+                    tracing::warn!(
+                        "heartbeat: control plane is not the leader; next at {}",
+                        cfg.base()
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("heartbeat failed: {e}");
+                    if e.is_connect() || e.is_timeout() {
+                        if cfg.endpoints.urls().len() > 1 {
+                            let next = cfg.endpoints.advance();
+                            tracing::warn!("heartbeat: rotating control-plane endpoint to {next}");
+                        }
+                        if let (Some(mk), Some(p)) = (mk_client.as_ref(), cfg.proxies.current()) {
+                            tracing::warn!("egress proxy {p} failed on heartbeat; rotating");
+                            cfg.proxies.mark_dead(&p);
+                            client = mk();
+                        }
                     }
                 }
             }

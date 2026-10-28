@@ -15,7 +15,7 @@ use crate::polling::{send_with_retry, upload_if_exists};
 async fn deliver_completion(cfg: &Config, client: &Client, c: outbox::CompletionLine) {
     let req = c.to_request();
     tracing::info!(attempt_id = %c.attempt_id, "redelivering durable completion");
-    let url = format!("{}/v1/node/attempts/{}/complete", cfg.server, c.attempt_id);
+    let url = format!("{}/v1/node/attempts/{}/complete", cfg.base(), c.attempt_id);
     let mut post = client.post(&url).json(&req);
     // Hardening P0 item 8: redeliver with the recorded fencing token so the
     // CP accepts (or 409-rejects) the stale writer just like a fresh send.
@@ -125,7 +125,7 @@ pub async fn startup_recovery(cfg: &Config, client: &Client) {
             // with no token yet, so a stale attempt is safely rejected.
             upload_if_exists(
                 client,
-                &cfg.server,
+                &cfg.base(),
                 attempt_id,
                 name,
                 path,

@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::protocol::{
     HaStatus, HeartbeatRequest, HeartbeatResponse, SnapshotManifest, VoteRequest, VoteResponse,
-    HA_TOKEN_HEADER,
+    ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER, HA_TOKEN_HEADER,
 };
 use super::role::HaRuntime;
 
@@ -56,6 +56,65 @@ pub async fn heartbeat(
         anyhow::bail!("ha heartbeat rejected with HTTP {}", resp.status());
     }
     Ok(resp.json().await?)
+}
+
+/// Push one stored artifact file to a peer. The body is the exact on-disk
+/// bytes (compressed shape included); the peer verifies `sha256`.
+pub async fn put_artifact(
+    rt: &HaRuntime,
+    base: &str,
+    attempt_id: &str,
+    stored_name: &str,
+    sha256: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    let resp = rt
+        .client()?
+        .put(url(base, "/v1/ha/artifact"))
+        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
+        .header(ARTIFACT_ATTEMPT_HEADER, attempt_id)
+        .header(ARTIFACT_NAME_HEADER, stored_name)
+        .header(ARTIFACT_SHA_HEADER, sha256)
+        .timeout(timeout(rt))
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .context("ha artifact push")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("ha artifact push returned HTTP {}", resp.status());
+    }
+    Ok(())
+}
+
+/// Fetch one stored artifact file from a peer. Returns the raw bytes and the
+/// peer's advertised stored-byte hash (the caller verifies both).
+pub async fn get_artifact(
+    rt: &HaRuntime,
+    base: &str,
+    attempt_id: &str,
+    stored_name: &str,
+) -> Result<(Vec<u8>, String)> {
+    let resp = rt
+        .client()?
+        .get(url(base, "/v1/ha/artifact"))
+        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
+        .header(ARTIFACT_ATTEMPT_HEADER, attempt_id)
+        .header(ARTIFACT_NAME_HEADER, stored_name)
+        .timeout(timeout(rt) * 4)
+        .send()
+        .await
+        .context("ha artifact fetch")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("ha artifact fetch returned HTTP {}", resp.status());
+    }
+    let sha = resp
+        .headers()
+        .get(ARTIFACT_SHA_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let bytes = resp.bytes().await?.to_vec();
+    Ok((bytes, sha))
 }
 
 pub async fn status(rt: &HaRuntime, base: &str) -> Result<HaStatus> {
