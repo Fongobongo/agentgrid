@@ -147,10 +147,10 @@
   snapshot, so the new leader came up with an empty database. The failure
   surfaced as a bare `503` (no body, no `x-agentgrid-role`, no `Retry-After`)
   on every `/v1/` route — that is `require_user_auth`'s bootstrap guard
-  (`user_count() == 0`), not the edge. Scenarios now snapshot every 2s and wait
-  until every standby reports `applied_seq >= 1` before killing the leader, so
-  they test failover to a caught-up replica instead of racing the snapshot
-  timer.
+  (`user_count() == 0`), not the edge. The scenarios now wait (up to 45s, one
+  snapshot interval plus the standby's 2s apply tick) until every standby
+  reports `applied_seq >= 1` before killing the leader, so they test failover
+  to a caught-up replica instead of racing the snapshot timer.
 - **The 3-host and 2+witness scenarios asserted durability they cannot
   have.** Both required the pre-kill task to be visible on the new leader, but
   they run in the default `snapshot` RPO mode, where a standby only ever pulls

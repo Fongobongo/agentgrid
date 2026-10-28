@@ -79,7 +79,7 @@ start_node() {  # $1 = id
       AGENTGRID_HA_ALLOW_PLAINTEXT=1 \
       AGENTGRID_HA_LEASE_TTL_SECS=4 \
       AGENTGRID_HA_ELECTION_TIMEOUT_MS=600 \
-      AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS=2 \
+      AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS=10 \
       AGENTGRID_HA_WITNESS_DIR="$dir/witness" \
       "$CP_BIN" >"$TMP/$id.log" 2>&1 &
   PID[$id]=$!
@@ -250,7 +250,7 @@ done
 echo "  task succeeded before kill"
 
 echo ">> wait for every standby to apply the bootstrap write"
-wait_replicated "$leader" 30 \
+wait_replicated "$leader" 45 \
   || { echo "FAIL: a standby never replicated (applied_seq stayed 0)" >&2; exit 1; }
 
 echo ">> hard-kill the leader ($leader)"
