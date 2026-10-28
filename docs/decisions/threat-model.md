@@ -157,3 +157,16 @@ External ACP clients can drive the grid as an ACP agent (Stage 6) since 0.2.
   dies before it starts (workspace prep, mirror clone, upstream landing)
   reports a terminal `infrastructure_failed` completion instead of leaving
   the CP waiting on its lease/timeout sweep.
+
+## 0.5.3 additions — control-plane HA (ADR 0021)
+
+| # | Threat | Mitigation | Gap / follow-up |
+|---|--------|-----------|-----------------|
+| T28 | Split brain: two leaders accept writes and diverge the SQLite copies | Term/epoch monotonicity, pre-vote, quorum leases that fence stale leaders; only a majority winner writes the epoch row; standbys reject data routes with 503 | S3 changeset listing has no pruning yet (standby polls all `.bin` keys each 2s) |
+| T29 | Stale/rejoined host resurrects old writes | Rejoining host sees a higher term/epoch; its DB is quarantined as `control-plane.db.stale-<epoch>` and it catches up from S3/peers as a standby | — |
+| T30 | Compromised peer forges votes/acks | JWT fingerprint (`x-agentgrid-ha-jwt-fingerprint`) compared when both sides present; mismatched fingerprint refused before voting/acking; witness authenticates with cluster token alone (no JWT secret) | — |
+| T31 | Object store (bucket) compromise | Bucket is data plane only, never votes; snapshot/changeset integrity verified by SHA-256 + `quick_check`; `latest.json` pointer written last; bucket versioning/lifecycle recommended | No automatic changeset pruning yet |
+| T32 | Witness vote flooded / DoS | Witness is vote/lease only, no data; sync writes need a data quorum (witness can't stand in for data freshness) | — |
+| T33 | JWT secret divergence between data hosts | Identical `AGENTGRID_JWT_SECRET` required on every data host; fingerprints published in `/v1/ha/status`; provision out of band; `ag cluster fetch-secret` is leader-only, cluster-token authenticated, TLS-required, disable after provisioning | — |
+| T34 | Edge forwards to a stale/ compromised leader | Edge re-discovers leader on `503 not_leader`/connect error with short TTL cache; it never accepts writes, leaderless answers `503` + `Retry-After` | Edge is stateless; a VIP/DNS is an alternative |
+

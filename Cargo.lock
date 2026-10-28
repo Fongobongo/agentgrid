@@ -110,6 +110,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentgrid-edge"
+version = "0.5.3"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentgrid-gateway"
 version = "0.5.3"
 dependencies = [

@@ -1,0 +1,163 @@
+# HA control plane: 3 data hosts (+ optional S3 object store) + stateless edge.
+# Plaintext dev variant: all inter-host traffic is HTTP; set
+# AGENTGRID_HA_ALLOW_PLAINTEXT=1. Production: terminate TLS in front of each
+# control plane and use https:// advertise URLs + S3 over TLS.
+#
+#   AGENTGRID_HA_CLUSTER_TOKEN must be >=32 bytes (shared by all hosts).
+#   AGENTGRID_JWT_SECRET must be >=32 bytes (identical on every data host).
+#   For S3 backend set AGENTGRID_HA_REPL_BACKEND=s3 + AGENTGRID_HA_S3_*.
+#
+#   docker compose -f deploy/compose/ha-3data.yml up -d
+#
+services:
+  cp-1:
+    image: ag-cp:test
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      AGENTGRID_ENV: production
+      AGENTGRID_LISTEN: 0.0.0.0:7800
+      AGENTGRID_DB: /var/lib/agentgrid/control-plane.db
+      AGENTGRID_ARTIFACT_ROOT: /var/lib/agentgrid/artifacts
+      AGENTGRID_JWT_SECRET: ${AGENTGRID_JWT_SECRET:?AGENTGRID_JWT_SECRET must be set (>=32 bytes)}
+      AGENTGRID_HA_MODE: ha
+      AGENTGRID_HA_ROLE: data
+      AGENTGRID_HA_NODE_ID: cp-1
+      AGENTGRID_HA_CLUSTER_ID: ${AGENTGRID_HA_CLUSTER_ID:?AGENTGRID_HA_CLUSTER_ID must be set}
+      AGENTGRID_HA_CLUSTER_TOKEN: ${AGENTGRID_HA_CLUSTER_TOKEN:?AGENTGRID_HA_CLUSTER_TOKEN must be set (>=32 bytes)}
+      AGENTGRID_HA_ADVERTISE_URL: http://cp-1:7800
+      AGENTGRID_HA_PEERS: cp-2@http://cp-2:7800,cp-3@http://cp-3:7800
+      AGENTGRID_HA_WITNESSES: ""
+      AGENTGRID_HA_ALLOW_PLAINTEXT: 1
+      AGENTGRID_HA_LEASE_TTL_SECS: 10
+      AGENTGRID_HA_ELECTION_TIMEOUT_MS: 1500
+      AGENTGRID_HA_RPO_MODE: ${AGENTGRID_HA_RPO_MODE:snapshot}
+      AGENTGRID_HA_REPL_BACKEND: ${AGENTGRID_HA_REPL_BACKEND:peer}
+      AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS: 60
+    volumes:
+      - agentgrid-ha-cp1:/var/lib/agentgrid
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/ready"]
+      interval: 15s
+      timeout: 5s
+      start-period: 10s
+      retries: 3
+
+  cp-2:
+    image: ag-cp:test
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      AGENTGRID_ENV: production
+      AGENTGRID_LISTEN: 0.0.0.0:7800
+      AGENTGRID_DB: /var/lib/agentgrid/control-plane.db
+      AGENTGRID_ARTIFACT_ROOT: /var/lib/agentgrid/artifacts
+      AGENTGRID_JWT_SECRET: ${AGENTGRID_JWT_SECRET:?AGENTGRID_JWT_SECRET must be set (>=32 bytes)}
+      AGENTGRID_HA_MODE: ha
+      AGENTGRID_HA_ROLE: data
+      AGENTGRID_HA_NODE_ID: cp-2
+      AGENTGRID_HA_CLUSTER_ID: ${AGENTGRID_HA_CLUSTER_ID}
+      AGENTGRID_HA_CLUSTER_TOKEN: ${AGENTGRID_HA_CLUSTER_TOKEN}
+      AGENTGRID_HA_ADVERTISE_URL: http://cp-2:7800
+      AGENTGRID_HA_PEERS: cp-1@http://cp-1:7800,cp-3@http://cp-3:7800
+      AGENTGRID_HA_WITNESSES: ""
+      AGENTGRID_HA_ALLOW_PLAINTEXT: 1
+      AGENTGRID_HA_LEASE_TTL_SECS: 10
+      AGENTGRID_HA_ELECTION_TIMEOUT_MS: 1500
+      AGENTGRID_HA_RPO_MODE: ${AGENTGRID_HA_RPO_MODE:snapshot}
+      AGENTGRID_HA_REPL_BACKEND: ${AGENTGRID_HA_REPL_BACKEND:peer}
+      AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS: 60
+    volumes:
+      - agentgrid-ha-cp2:/var/lib/agentgrid
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/ready"]
+      interval: 15s
+      timeout: 5s
+      start-period: 10s
+      retries: 3
+
+  cp-3:
+    image: ag-cp:test
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      AGENTGRID_ENV: production
+      AGENTGRID_LISTEN: 0.0.0.0:7800
+      AGENTGRID_DB: /var/lib/agentgrid/control-plane.db
+      AGENTGRID_ARTIFACT_ROOT: /var/lib/agentgrid/artifacts
+      AGENTGRID_JWT_SECRET: ${AGENTGRID_JWT_SECRET:?AGENTGRID_JWT_SECRET must be set (>=32 bytes)}
+      AGENTGRID_HA_MODE: ha
+      AGENTGRID_HA_ROLE: data
+      AGENTGRID_HA_NODE_ID: cp-3
+      AGENTGRID_HA_CLUSTER_ID: ${AGENTGRID_HA_CLUSTER_ID}
+      AGENTGRID_HA_CLUSTER_TOKEN: ${AGENTGRID_HA_CLUSTER_TOKEN}
+      AGENTGRID_HA_ADVERTISE_URL: http://cp-3:7800
+      AGENTGRID_HA_PEERS: cp-1@http://cp-1:7800,cp-2@http://cp-2:7800
+      AGENTGRID_HA_WITNESSES: ""
+      AGENTGRID_HA_ALLOW_PLAINTEXT: 1
+      AGENTGRID_HA_LEASE_TTL_SECS: 10
+      AGENTGRID_HA_ELECTION_TIMEOUT_MS: 1500
+      AGENTGRID_HA_RPO_MODE: ${AGENTGRID_HA_RPO_MODE:snapshot}
+      AGENTGRID_HA_REPL_BACKEND: ${AGENTGRID_HA_REPL_BACKEND:peer}
+      AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS: 60
+    volumes:
+      - agentgrid-ha-cp3:/var/lib/agentgrid
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/ready"]
+      interval: 15s
+      timeout: 5s
+      start-period: 10s
+      retries: 3
+
+  edge:
+    image: ag-edge:test
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      AGENTGRID_EDGE_LISTEN: 0.0.0.0:7900
+      AGENTGRID_EDGE_UPSTREAMS: http://cp-1:7800,http://cp-2:7800,http://cp-3:7800
+      AGENTGRID_HA_CLUSTER_TOKEN: ${AGENTGRID_HA_CLUSTER_TOKEN}
+    ports:
+      - "7900:7900"
+    depends_on:
+      cp-1:
+        condition: service_healthy
+      cp-2:
+        condition: service_healthy
+      cp-3:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7900/health/live"]
+      interval: 15s
+      timeout: 5s
+      start-period: 5s
+      retries: 3
+
+volumes:
+  agentgrid-ha-cp1:
+  agentgrid-ha-cp2:
+  agentgrid-ha-cp3:

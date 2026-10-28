@@ -9,6 +9,7 @@ members = [
     "crates/skills",
     "crates/acp",
     "crates/gateway",
+    "crates/edge",
 ]
 # cargo-fuzz crate: its own workspace (libfuzzer needs nightly + sanitizer
 # flags that must not leak into the stable CI/test builds).

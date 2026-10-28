@@ -1,0 +1,26 @@
+# Stateless agentgrid HA edge (HTTP/SSE/WS leader forwarder).
+# Bundled rustls; no system OpenSSL.
+FROM rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
+WORKDIR /src
+COPY . .
+RUN cargo build --release -p agentgrid-edge \
+    && mkdir -p /out \
+    && cp target/release/agentgrid-cp-edge /out/
+
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+LABEL org.opencontainers.image.title="agentgrid-cp-edge" \
+      org.opencontainers.image.source="https://github.com/earendil-works/agentgrid" \
+      org.opencontainers.image.description="AgentGrid HA edge (stateless HTTP/WS/SSE leader forwarder)" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -m -d /var/lib/agentgrid-edge edge
+USER edge
+WORKDIR /var/lib/agentgrid-edge
+COPY --from=builder /out/agentgrid-cp-edge /usr/local/bin/
+ENV AGENTGRID_EDGE_LISTEN=0.0.0.0:7900
+EXPOSE 7900
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:7900/health/live || exit 1
+ENTRYPOINT ["agentgrid-cp-edge"]

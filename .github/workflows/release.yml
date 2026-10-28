@@ -69,12 +69,12 @@ jobs:
             cross build --release --target ${{ matrix.target }} \
               -p agentgrid-control-plane -p agentgrid-cli \
               -p agentgrid-node-daemon -p agentgrid-adapters \
-              -p agentgrid-gateway -p agentgrid-acp
+              -p agentgrid-gateway -p agentgrid-edge -p agentgrid-acp
           else
             cargo build --release --target ${{ matrix.target }} \
               -p agentgrid-control-plane -p agentgrid-cli \
               -p agentgrid-node-daemon -p agentgrid-adapters \
-              -p agentgrid-gateway -p agentgrid-acp
+              -p agentgrid-gateway -p agentgrid-edge -p agentgrid-acp
           fi
 
       - name: binary size guardrail
@@ -106,7 +106,7 @@ jobs:
           mkdir -p ../../.size-baseline
           BASE=../../.size-baseline/${{ matrix.target }}.tsv
           {
-            for b in agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi; do
+            for b in agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi; do
               [ -f "$b" ] || continue
               printf '%s\t%s\n' "$b" "$(stat -c%s "$b")"
             done
@@ -132,7 +132,7 @@ jobs:
         # architecture assertion instead.
         run: |
           cd "target/${{ matrix.target }}/release"
-          for b in ag agentgrid-control-plane agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-pi adapter-opencode; do
+          for b in ag agentgrid-control-plane agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-pi adapter-opencode; do
             if file -b "$b" | grep -q "x86-64"; then
               "./$b" --version
             else
@@ -155,7 +155,7 @@ jobs:
       - name: checksums (SHA256SUMS)
         run: |
           cd "target/${{ matrix.target }}/release"
-          sha256sum agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi adapter-pi \
+          sha256sum agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi adapter-pi \
             > SHA256SUMS
           cat SHA256SUMS
 
@@ -168,6 +168,7 @@ jobs:
             target/${{ matrix.target }}/release/ag
             target/${{ matrix.target }}/release/agentgrid-node-daemon
             target/${{ matrix.target }}/release/agentgrid-gateway
+            target/${{ matrix.target }}/release/agentgrid-cp-edge
             target/${{ matrix.target }}/release/agentgrid-acp-agent
             target/${{ matrix.target }}/release/adapter-mock
             target/${{ matrix.target }}/release/adapter-claude
@@ -266,10 +267,10 @@ jobs:
               # download-artifact strips the exec bit (v4 known issue); restore
               # it or the published tarballs ship non-executable binaries
               # (first seen live on the v0.4.0 assets).
-              chmod +x agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
+              chmod +x agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge \
                 agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi
               tar czf "$GITHUB_WORKSPACE/release-assets/agentgrid-$t.tar.gz" \
-                agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
+                agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge \
                 agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi SHA256SUMS
             )
           done

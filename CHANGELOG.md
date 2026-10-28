@@ -4,7 +4,26 @@
 
 ### Added
 
-- **Control-plane HA (phases 1-2).** Optional `AGENTGRID_HA_MODE=ha` runs the
+- **Control-plane HA phase 6: stable endpoint, deploy, ADR, chaos.** Stateless
+  edge forwarder `crates/edge` (binary `agentgrid-cp-edge`) discovers the
+  leader via `GET /v1/ha/status`, forwards HTTP/SSE/downloads unchanged,
+  retries once after `503 not_leader` or connect error, bridges the node
+  WebSocket, answers `503` + `Retry-After` when leaderless, and exposes
+  Prometheus text metrics at `/metrics`. Dockerfile `Dockerfile.edge` +
+  release workflow build/size/smoke/checksum/upload entries. Compose files
+  `deploy/compose/ha-3data.yml` (3 data hosts + edge) and
+  `ha-2pluswitness.yml` (2 data + witness + edge), plaintext dev variants;
+  `deploy/install-control-plane.sh` gained HA flags
+  (`--ha-role/--ha-node-id/--ha-cluster-id/--ha-cluster-token/--ha-peers/
+  --ha-witnesses/--ha-advertise-url/--ha-rpo-mode/--ha-snapshot-interval/
+  --ha-allow-plaintext`). Chaos e2e:
+  `tests/e2e/run-ha-3host.sh`, `run-ha-2pluswitness.sh`,
+  `run-ha-partition.sh` (kill/SIGSTOP leader, assert exactly one leader, edge
+  forwarding, post-failover task, no dual writers). Docs: ADR 0021
+  (`docs/decisions/0021-control-plane-high-availability.md`, supersedes ADR
+  0001 constraint #9 and ADR 0008 deferral, keeps no-active-active and no-NFS),
+  `docs/ha-runbook.md`, `docs/ha-deployment.md`, threat-model additions
+  (T28–T34), monitoring via existing `/metrics` + Grafana dashboard.** Optional `AGENTGRID_HA_MODE=ha` runs the
   control plane as an active-passive cluster (`data` leaders/standbys plus
   token-only `witness` voters) with term/epoch election, quorum leases that
   fence stale leaders, `VACUUM INTO` snapshot replication verified by SHA-256
