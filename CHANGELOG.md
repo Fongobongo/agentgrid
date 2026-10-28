@@ -95,6 +95,20 @@
 
 ### Fixed
 
+- **Failover after a frozen host took minutes, not seconds.** `run-ha-partition.sh`
+  SIGSTOPs the leader, and the two survivors then needed ~9 minutes and 79
+  election terms to settle on a leader. Votes were collected **sequentially**
+  (`for peer in peers { vote(...).await }`), so each round blocked for the full
+  transport timeout on the frozen peer — and because both candidates blocked
+  for the same fixed duration, they stayed in lockstep, bumped the term
+  together and kept refusing each other. Round time was ~7s (2s catch-up + 2s
+  reachability probe + 2s vote + jitter), which drowned the 0–600ms
+  randomisation that is supposed to break exactly this symmetry.
+  Votes now go out concurrently and collection stops as soon as the quorum is
+  met, so an unreachable voter costs nothing; the reachability probe after a
+  failed pre-election catch-up is bounded by one election timeout instead of a
+  full transport timeout. Freshness guarantees are unchanged: data voters still
+  refuse a lagging candidate and `max_seq` still blocks promotion.
 - **The edge could hang forever on a leader that stopped answering.** The
   proxy bounded only the TCP connect (`connect_timeout(5s)`); a leader that
   accepted the connection and then went silent — `SIGSTOP`, partition, a
@@ -110,9 +124,19 @@
   `{"goal": ...}`, but `CreateTaskRequest` requires `prompt` and a
   non-nullable `repository`, so every scenario died on a `422` at the first
   `POST /v1/tasks` (`3host`, `2pluswitness`, `partition`). Payloads now match
-  the schema, and every `curl` in those scripts carries `--max-time` — an
-  unbounded `curl` against a `SIGSTOP`ped process is what turned one assertion
-  failure into a hung job.
+  the schema through a `create_task` helper that also honours the documented
+  `503 + Retry-After` contract instead of treating a leaderless instant as a
+  failure. Every `curl` in those scripts carries `--max-time` — an unbounded
+  `curl` against a `SIGSTOP`ped process is what turned one assertion failure
+  into a hung job.
+- **The 3-host and 2+witness scenarios asserted durability they cannot
+  have.** Both required the pre-kill task to be visible on the new leader, but
+  they run in the default `snapshot` RPO mode, where a standby only ever pulls
+  snapshots from a *live* leader — a write acked just before the kill is
+  allowed to be missing. They now probe that the edge reached *a* leader
+  (200 = survived, 404 = outside the RPO window, anything else = real
+  failure); durability is asserted by `run-ha-incremental.sh`, which runs with
+  sync replication.
 - **`Supply chain` was red on every HA push — gitleaks fixtures.** The
   allowlist entries are commit-scoped fingerprints, so each new commit that
   touched a fixture line (`tests/e2e/run-ha-2pluswitness.sh:22`, the

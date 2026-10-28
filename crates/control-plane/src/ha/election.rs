@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::time::Instant;
 
 use super::config::{NodeRole, RpoMode};
@@ -283,7 +284,20 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
     // would roll back acknowledged writes for no reason.
     if let Some(leader) = rt.shared.leader() {
         if let Err(e) = catch_up(state, &leader).await {
-            if transport::status(rt, &leader.url).await.is_ok() {
+            // Probe with a tight budget. `catch_up` already bounds the snapshot
+            // apply itself, so it is not wrapped here (cancelling it mid-restore
+            // would be worse than waiting); but the extra reachability check must
+            // not cost another full transport timeout on top — a leader that
+            // cannot answer `/v1/ha/status` within one election timeout is not
+            // serving, and waiting longer only delays failover.
+            let reachable = tokio::time::timeout(
+                rt.config.election_timeout,
+                transport::status(rt, &leader.url),
+            )
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false);
+            if reachable {
                 anyhow::bail!("leader {} reachable but catch-up failed: {e}", leader.id);
             }
             tracing::debug!("pre-election catch-up failed (leader unreachable): {e}");
@@ -307,24 +321,39 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
     let mut votes = 1usize;
     let mut data_votes = 1usize;
     let mut max_seq = rt.shared.applied_seq();
-    for peer in &rt.config.peers {
-        match transport::vote(rt, &peer.url, &req).await {
-            Ok(resp) => {
-                max_seq = max_seq.max(resp.applied_seq);
-                if resp.term > rt.shared.term() {
-                    rt.shared.set_term_and_vote(resp.term, None)?;
-                    return Ok(());
-                }
-                if resp.granted {
-                    votes += 1;
-                    data_votes += 1;
-                }
-            }
-            Err(e) => tracing::debug!(peer = %peer.id, "vote request failed: {e}"),
-        }
+    // Ask every voter at once and stop as soon as the quorum is met. Collecting
+    // sequentially meant one unreachable peer (a frozen leader keeps accepting
+    // connections but never answers, so each vote call burns the full transport
+    // timeout) serialised every round *and* re-synchronised the candidates:
+    // both survivors blocked on the same dead peer for the same 2s, then both
+    // bumped the term, so neither would grant the other's vote. That is how a
+    // 3-host cluster took 79 terms and ~9 minutes to elect after one SIGSTOP.
+    let mut pending = FuturesUnordered::new();
+    let targets: Vec<(bool, String, String)> = rt
+        .config
+        .peers
+        .iter()
+        .map(|p| (true, p.id.clone(), p.url.clone()))
+        .chain(
+            rt.config
+                .witnesses
+                .iter()
+                .map(|w| (false, w.id.clone(), w.url.clone())),
+        )
+        .collect();
+    for (is_data, id, url) in targets {
+        let req = req.clone();
+        pending.push(async move {
+            let out = transport::vote(rt, &url, &req).await;
+            (is_data, id, out)
+        });
     }
-    for w in &rt.config.witnesses {
-        match transport::vote(rt, &w.url, &req).await {
+    let mut won = voters.election_won(votes, data_votes, rt.config.rpo_mode);
+    while !won {
+        let Some((is_data, id, result)) = pending.next().await else {
+            break;
+        };
+        match result {
             Ok(resp) => {
                 max_seq = max_seq.max(resp.applied_seq);
                 if resp.term > rt.shared.term() {
@@ -333,9 +362,13 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
                 }
                 if resp.granted {
                     votes += 1;
+                    if is_data {
+                        data_votes += 1;
+                    }
                 }
+                won = voters.election_won(votes, data_votes, rt.config.rpo_mode);
             }
-            Err(e) => tracing::debug!(peer = %w.id, "witness vote request failed: {e}"),
+            Err(e) => tracing::debug!(peer = %id, "vote request failed: {e}"),
         }
     }
     if max_seq > rt.shared.applied_seq() {
