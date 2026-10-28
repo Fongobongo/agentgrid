@@ -48,6 +48,16 @@ struct Args {
     /// HA cluster token (also AGENTGRID_HA_CLUSTER_TOKEN).
     #[arg(long, env = "AGENTGRID_HA_CLUSTER_TOKEN")]
     cluster_token: String,
+    /// Seconds to wait for an upstream to start answering. Bounds only the
+    /// response head, so SSE and artifact downloads keep streaming. A leader
+    /// that stops answering (partition, SIGSTOP, long GC pause) must become a
+    /// retry on the new leader, not a client request that hangs forever.
+    #[arg(
+        long,
+        env = "AGENTGRID_EDGE_UPSTREAM_TIMEOUT_SECS",
+        default_value_t = 10
+    )]
+    upstream_timeout_secs: u64,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +72,7 @@ struct Metrics {
     leaderless_total: AtomicU64,
     retries_total: AtomicU64,
     upstream_errors_total: AtomicU64,
+    upstream_timeouts_total: AtomicU64,
     ws_bridges_total: AtomicU64,
 }
 
@@ -69,6 +80,8 @@ struct Edge {
     upstreams: Vec<String>,
     token: String,
     http: reqwest::Client,
+    /// Deadline for the response head of a proxied request.
+    upstream_timeout: Duration,
     leader: tokio::sync::RwLock<Option<CachedLeader>>,
     metrics: Metrics,
 }
@@ -79,7 +92,11 @@ struct CachedLeader {
 }
 
 impl Edge {
-    fn new(upstreams: Vec<String>, token: String) -> anyhow::Result<Arc<Self>> {
+    fn new(
+        upstreams: Vec<String>,
+        token: String,
+        upstream_timeout: Duration,
+    ) -> anyhow::Result<Arc<Self>> {
         if upstreams.is_empty() {
             anyhow::bail!("AGENTGRID_EDGE_UPSTREAMS must list at least one control plane");
         }
@@ -93,6 +110,7 @@ impl Edge {
             upstreams,
             token,
             http,
+            upstream_timeout,
             leader: tokio::sync::RwLock::new(None),
             metrics: Metrics::default(),
         }))
@@ -164,7 +182,11 @@ async fn main() -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .map(|s| s.trim_end_matches('/').to_string())
         .collect();
-    let edge = Edge::new(upstreams, args.cluster_token)?;
+    let edge = Edge::new(
+        upstreams,
+        args.cluster_token,
+        Duration::from_secs(args.upstream_timeout_secs.max(1)),
+    )?;
     let listen: std::net::SocketAddr = args.listen.parse()?;
     let app = Router::new()
         .route("/health/live", get(|| async { "ok" }))
@@ -207,6 +229,8 @@ async fn metrics(State(edge): State<Arc<Edge>>) -> Response {
         agentgrid_edge_retries_total {retries_total}\n\
         # TYPE agentgrid_edge_upstream_errors_total counter\n\
         agentgrid_edge_upstream_errors_total {upstream_errors_total}\n\
+        # TYPE agentgrid_edge_upstream_timeouts_total counter\n\
+        agentgrid_edge_upstream_timeouts_total {upstream_timeouts_total}\n\
         # TYPE agentgrid_edge_ws_bridges_total counter\n\
         agentgrid_edge_ws_bridges_total {ws_bridges_total}\n\
         # HELP agentgrid_edge_requests_total Total client requests handled by the edge.\n\
@@ -214,12 +238,17 @@ async fn metrics(State(edge): State<Arc<Edge>>) -> Response {
         # HELP agentgrid_edge_leaderless_total Requests answered 503 because no leader was reachable.\n\
         # HELP agentgrid_edge_retries_total Proxied requests retried once after 503/not_leader or connect error.\n\
         # HELP agentgrid_edge_upstream_errors_total Proxied requests that failed all upstream attempts.\n\
+        # HELP agentgrid_edge_upstream_timeouts_total Proxied requests whose upstream did not answer in time.\n\
         # HELP agentgrid_edge_ws_bridges_total Total WebSocket bridges established.\n",
         requests_total = edge.metrics.requests_total.load(Ordering::Relaxed),
         leader_discoveries_total = edge.metrics.leader_discoveries_total.load(Ordering::Relaxed),
         leaderless_total = edge.metrics.leaderless_total.load(Ordering::Relaxed),
         retries_total = edge.metrics.retries_total.load(Ordering::Relaxed),
         upstream_errors_total = edge.metrics.upstream_errors_total.load(Ordering::Relaxed),
+        upstream_timeouts_total = edge
+            .metrics
+            .upstream_timeouts_total
+            .load(Ordering::Relaxed),
         ws_bridges_total = edge.metrics.ws_bridges_total.load(Ordering::Relaxed),
     );
     (
@@ -275,7 +304,30 @@ async fn proxy(State(edge): State<Arc<Edge>>, req: Request) -> Response {
                 rb = rb.header(name, value);
             }
         }
-        let sent = rb.body(bytes.clone()).send().await;
+        // Bound the wait for the response *head* only. `send()` resolves once
+        // the headers are parsed, so a long SSE stream or a slow artifact
+        // download is unaffected — but an upstream that accepted the
+        // connection and then went silent (SIGSTOP, partition, stuck leader)
+        // surfaces as a timeout here and takes the retry path below instead of
+        // pinning the client request forever.
+        let sent = match tokio::time::timeout(edge.upstream_timeout, rb.body(bytes.clone()).send())
+            .await
+        {
+            Ok(sent) => {
+                sent.map_err(|e| tracing::debug!(error = %e, "edge upstream request failed"))
+            }
+            Err(_) => {
+                edge.metrics
+                    .upstream_timeouts_total
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    upstream = %base,
+                    timeout_secs = edge.upstream_timeout.as_secs(),
+                    "edge upstream did not answer in time"
+                );
+                Err(())
+            }
+        };
         match sent {
             Ok(resp) => {
                 // A standby answers with the role header; the leader may have
@@ -292,8 +344,7 @@ async fn proxy(State(edge): State<Arc<Edge>>, req: Request) -> Response {
                 }
                 return forward_response(resp);
             }
-            Err(e) => {
-                tracing::debug!(error = %e, "edge upstream request failed");
+            Err(()) => {
                 if !retried {
                     retried = true;
                     edge.metrics.retries_total.fetch_add(1, Ordering::Relaxed);
@@ -480,11 +531,64 @@ mod tests {
     }
 
     fn edge(urls: &[&str]) -> Arc<Edge> {
+        edge_with_timeout(urls, Duration::from_secs(10))
+    }
+
+    fn edge_with_timeout(urls: &[&str], timeout: Duration) -> Arc<Edge> {
         Edge::new(
             urls.iter().map(|u| (*u).to_string()).collect(),
             "token".into(),
+            timeout,
         )
         .expect("edge")
+    }
+
+    /// An upstream that answers `/v1/ha/status` (so discovery finds a leader)
+    /// but accepts every other request and then never answers — what a
+    /// SIGSTOPped or partitioned leader looks like from the edge.
+    ///
+    /// `demote_after_first_status` makes it report `standby` from the second
+    /// status call on, so a rediscovery after `invalidate()` moves to the
+    /// healthy peer instead of picking the silent node again.
+    async fn start_silent_upstream(demote_after_first_status: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent upstream");
+        let addr = listener.local_addr().expect("silent upstream addr");
+        let status_hits = Arc::new(AtomicU64::new(0));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let status_hits = Arc::clone(&status_hits);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if head.contains("/v1/ha/status") {
+                        let first = status_hits.fetch_add(1, Ordering::Relaxed) == 0;
+                        let role = if demote_after_first_status && !first {
+                            "standby"
+                        } else {
+                            "leader"
+                        };
+                        let body = format!(r#"{{"role":"{role}"}}"#);
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+                    // Swallow the request and hold the socket open: the client
+                    // sees a live connection with no response head.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                });
+            }
+        });
+        format!("http://{addr}")
     }
 
     fn get_request(path: &str) -> Request {
@@ -556,6 +660,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn silent_upstream_times_out_instead_of_hanging() {
+        // The regression this guards: a leader that accepts the connection and
+        // then stops answering (SIGSTOP / partition) used to pin the proxied
+        // request forever, so the edge never failed over and the client hung
+        // too. Now the head wait is bounded and the retry path runs.
+        let silent = start_silent_upstream(true).await;
+        let (fresh, fresh_up) = start_upstream("leader", StatusCode::OK).await;
+        let e = edge_with_timeout(&[&silent, &fresh], Duration::from_millis(300));
+
+        let started = Instant::now();
+        let resp = proxy(State(e.clone()), get_request("/v1/tasks")).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "bounded, not hung"
+        );
+        // First attempt timed out, the retry landed on the healthy upstream.
+        assert_eq!(e.metrics.upstream_timeouts_total.load(Ordering::Relaxed), 1);
+        assert_eq!(e.metrics.retries_total.load(Ordering::Relaxed), 1);
+        assert_eq!(fresh_up.hits.load(Ordering::Relaxed), 1);
+        assert_eq!(e.metrics.upstream_errors_total.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn all_upstreams_silent_is_a_502_not_a_hang() {
+        let a = start_silent_upstream(false).await;
+        let b = start_silent_upstream(false).await;
+        let e = edge_with_timeout(&[&a, &b], Duration::from_millis(200));
+
+        let resp = proxy(State(e.clone()), get_request("/v1/tasks")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(e.metrics.upstream_timeouts_total.load(Ordering::Relaxed), 2);
+        assert_eq!(e.metrics.upstream_errors_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
     async fn proxied_response_keeps_upstream_headers() {
         let (leader, _a) = start_upstream("leader", StatusCode::OK).await;
         let e = edge(&[&leader]);
@@ -598,5 +739,6 @@ mod tests {
         assert!(text.contains("agentgrid_edge_requests_total 3"));
         assert!(text.contains("agentgrid_edge_leaderless_total 0"));
         assert!(text.contains("# HELP agentgrid_edge_ws_bridges_total"));
+        assert!(text.contains("agentgrid_edge_upstream_timeouts_total 0"));
     }
 }

@@ -63,8 +63,11 @@ The edge forwarder (`agentgrid-cp-edge`) exposes its own counters on
 `/metrics`: `agentgrid_edge_requests_total`,
 `agentgrid_edge_leader_discoveries_total`, `agentgrid_edge_leaderless_total`,
 `agentgrid_edge_retries_total`, `agentgrid_edge_upstream_errors_total`,
-`agentgrid_edge_ws_bridges_total`. Scrape it as a second job — `leaderless_total`
-growing is the earliest signal that clients are seeing `503`.
+`agentgrid_edge_upstream_timeouts_total`, `agentgrid_edge_ws_bridges_total`.
+Scrape it as a second job — `leaderless_total` growing is the earliest signal
+that clients are seeing `503`; `upstream_timeouts_total` growing means the
+cached leader stopped answering and the edge is burning its retry budget
+(`AGENTGRID_EDGE_UPSTREAM_TIMEOUT_SECS`, default 10).
 
 ## Alerting suggestions
 

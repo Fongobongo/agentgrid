@@ -106,9 +106,13 @@ agentgrid-cp-edge --listen 0.0.0.0:7900
 - `GET /health/live` — edge itself is up.
 - `GET /health/ready` — a leader is reachable (else `503` + `Retry-After`).
 - `GET /metrics` — Prometheus text: requests, discoveries, leaderless, retries,
-  upstream errors, WS bridges.
-- Falls back to proxying; on `503 not_leader` or connect error it re-discovers
-  and retries once.
+  upstream errors, upstream timeouts, WS bridges.
+- Falls back to proxying; on `503 not_leader`, connect error or a leader that
+  stops answering it re-discovers and retries once.
+- `AGENTGRID_EDGE_UPSTREAM_TIMEOUT_SECS` (default 10) bounds the wait for a
+  response head. It deliberately covers only the head: SSE and artifact
+  downloads keep streaming. Lower it if you want faster failover at the cost
+  of giving up on slower endpoints.
 
 ## Chaos (tests/e2e)
 
