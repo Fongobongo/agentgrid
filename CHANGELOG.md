@@ -141,6 +141,16 @@
   failure. Every `curl` in those scripts carries `--max-time` — an unbounded
   `curl` against a `SIGSTOP`ped process is what turned one assertion failure
   into a hung job.
+- **The 3-host and 2+witness scenarios killed the leader before any standby
+  had data.** With `AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS=10` and a scenario that
+  bootstraps and fails over inside that window, no replica had ever applied a
+  snapshot, so the new leader came up with an empty database. The failure
+  surfaced as a bare `503` (no body, no `x-agentgrid-role`, no `Retry-After`)
+  on every `/v1/` route — that is `require_user_auth`'s bootstrap guard
+  (`user_count() == 0`), not the edge. Scenarios now snapshot every 2s and wait
+  until every standby reports `applied_seq >= 1` before killing the leader, so
+  they test failover to a caught-up replica instead of racing the snapshot
+  timer.
 - **The 3-host and 2+witness scenarios asserted durability they cannot
   have.** Both required the pre-kill task to be visible on the new leader, but
   they run in the default `snapshot` RPO mode, where a standby only ever pulls

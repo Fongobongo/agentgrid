@@ -36,6 +36,7 @@ USER="admin"
 PASS="changeme"
 
 declare -A PORT=([cp-a]=17901 [cp-b]=17902 [cp-c]=17903 [edge]=17904)
+DATA_IDS=(cp-a cp-b cp-c)
 declare -A PID=()
 TMP="$(mktemp -d -t ag-e2e-ha-3host-XXXXXX)"
 NODE_PID=""
@@ -78,7 +79,7 @@ start_node() {  # $1 = id
       AGENTGRID_HA_ALLOW_PLAINTEXT=1 \
       AGENTGRID_HA_LEASE_TTL_SECS=4 \
       AGENTGRID_HA_ELECTION_TIMEOUT_MS=600 \
-      AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS=10 \
+      AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS=2 \
       AGENTGRID_HA_WITNESS_DIR="$dir/witness" \
       "$CP_BIN" >"$TMP/$id.log" 2>&1 &
   PID[$id]=$!
@@ -118,6 +119,27 @@ create_task() {  # $1 = prompt
 field() { python3 -c 'import json,sys
 try: print(json.loads(sys.argv[1]).get(sys.argv[2], ""))
 except Exception: print("")' "$1" "$2"; }
+
+# Wait until every non-leader data host has applied at least one replicated
+# sequence. Killing the leader before that hands the cluster to a replica with
+# an empty database: `require_user_auth` then answers a bare 503 (no body, no
+# role header) on every `/v1/` route, because the bootstrap guard closes the
+# API when `user_count() == 0`. That looks exactly like an edge failure and is
+# not one.
+wait_replicated() {  # $1 = leader id, $2 = timeout secs
+  local leader="$1" rounds=$(( ${2:-30} * 5 )) id seq all
+  for _ in $(seq 1 "$rounds"); do
+    all=1
+    for id in "${DATA_IDS[@]}"; do
+      [ "$id" = "$leader" ] && continue
+      seq=$(field "$(ha_status "${PORT[$id]}" 2>/dev/null || true)" applied_seq)
+      case "$seq" in ''|*[!0-9]*) all=0 ;; *) [ "$seq" -ge 1 ] || all=0 ;; esac
+    done
+    [ "$all" = 1 ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
 
 count_leaders() {
   local n=0
@@ -226,6 +248,10 @@ except Exception: print("?")' 2>/dev/null || echo "?")
 done
 [ "$ok" = "1" ] || { echo "FAIL: task did not succeed" >&2; exit 1; }
 echo "  task succeeded before kill"
+
+echo ">> wait for every standby to apply the bootstrap write"
+wait_replicated "$leader" 30 \
+  || { echo "FAIL: a standby never replicated (applied_seq stayed 0)" >&2; exit 1; }
 
 echo ">> hard-kill the leader ($leader)"
 kill -9 "${PID[$leader]}" 2>/dev/null || true
