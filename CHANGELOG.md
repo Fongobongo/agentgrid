@@ -95,13 +95,54 @@
 
 ### Fixed
 
+- **Failover recovery went from ~133 s to ~50 s.** Three separate waits stacked
+  up in `run-ha-partition.sh` after the leader was frozen, and only the first
+  was visible in the logs:
+  - **The node's HTTP heartbeat inherited the long-poll's 120 s timeout.** The
+    beat that fired 1 s after the freeze only failed at `t+121 s`; because
+    `node_ineligibility` requires `status = online` and only a heartbeat (or a
+    poll) refreshes that column, the node could not be scheduled until then.
+    Beats are now bounded at 15 s and rotate on expiry like any other connect
+    error.
+  - **`WS_READ_IDLE_SECS` was 90 s** — six missed pings, because it was derived
+    from the node's own 30 s beat instead of the control plane's 15 s `PING`
+    cadence. Now 45 s (three missed pings), and the WS handshake bound dropped
+    15 s → 10 s.
+  - **A connected node stayed invisible to the scheduler.** See the entry
+    below on the WS `hello`.
+- **A node with a live WS connection was not schedulable until a heartbeat
+  reached the current leader.** `node_ineligibility` requires
+  `status = online`, and that column was refreshed only by `heartbeat` — or by
+  `register_or_touch_node` on the *poll* path. The WS path registered the
+  socket in memory and nothing else, so after a failover a node that had
+  already connected to the new leader stayed ineligible: in
+  `run-ha-partition.sh` the WS was up at `t+46 s` and the first attempt only
+  started at `t+89 s`, immediately after a heartbeat finally landed. The
+  `hello` handler now performs the same registration the poll transport does,
+  using the capabilities the hello already carries.
+- **Elections now finish in one round instead of two.** The voter side of
+  `handle_vote` persisted the candidate's term and demoted the local leader
+  *before* deciding whether to grant, so a node that could not win still
+  toppled the incumbent. In `run-ha-partition.sh` cp-a won term 2, cp-c's
+  term-3 bid landed 177 ms later and demoted it, cp-c was then refused for
+  being behind (seq 2 vs 3) and had to win term 4 — an extra term, an extra
+  snapshot restore on cp-a and ~3.3 s with no leader. `VoteRequest` gained
+  `pre_vote`: a probe that asks "would you vote for me at this term?" and
+  persists nothing, records no vote and demotes nobody. It is refused while a
+  leader was heard from within one election timeout (leader stickiness), so the
+  survivor whose timer fired a few hundred ms late stays quiet; stickiness
+  expires on its own when the leader really dies. A real round — which does bump
+  the term — only starts after a pre-vote quorum agrees. `campaign` now shares
+  one `solicit` fan-out for both rounds. Four unit tests cover it. Note: HA is
+  still unreleased, and the probe is only safe once every replica runs this
+  version (an older peer would treat a probe as a real vote).
 - **A node discarded the leader hint it had just followed, so WS failover never
   landed.** On `503 not_leader` the daemon called `Endpoints::follow_hint`,
   which moves `current` onto the leader — and then the reconnect loop called
   `advance()` unconditionally, stepping straight back off it onto the next
   standby. The hint that exists to shorten failover was therefore thrown away
   every time, and the node kept retrying standbys (plus the frozen old leader's
-  15 s handshake timeout) until the *poll fallback* happened to land on the new
+  handshake timeout) until the *poll fallback* happened to land on the new
   leader minutes later. In `run-ha-partition.sh` the new leader had been up
   since `t+7s` while the node did not reconnect until `t+134s`:
   `following leader hint to 127.0.0.1:17922` immediately followed by
@@ -118,11 +159,10 @@
   cp-b was in fact the only leader. All three scenarios now use a single-pass
   `scan_leaders` that yields the count and the id atomically, and assert a
   non-empty id explicitly.
-- **`run-ha-partition.sh` raced its own recovery budget.** A SIGSTOPped leader
-  keeps the socket open, so the node needs its full 90 s read-idle timeout
-  (`WS_READ_IDLE_SECS`) plus a 15 s handshake timeout against the frozen host
-  before it can re-register — the task then landed at ~188 s against a 180 s
-  budget, i.e. on the last iteration. The budget is now 300 s.
+- **`run-ha-partition.sh` raced its own recovery budget.** The task used to land
+  at ~188 s against a 180 s budget, i.e. on the last iteration, because the
+  node's detection chain was that long. Recovery is ~50 s now, and the budget
+  is 300 s so a slow runner cannot turn the assertion into a coin flip.
 - **`cargo clippy --all-targets` failed off unix.** `TEST_ENV_LOCK` in
   `node-daemon` was `#[cfg(test)]` while every user of it is `#[cfg(unix)]`,
   so it read as dead code on Windows. Gated `#[cfg(all(test, unix))]`.

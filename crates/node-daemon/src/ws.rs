@@ -29,9 +29,21 @@ const WS_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 /// session, not park it.
 const WS_SEND_TIMEOUT_SECS: u64 = 15;
 /// No inbound frame (the CP pings every ~15 s) for this long ⇒ half-open
-/// connection; 3× the heartbeat interval leaves ample headroom for a busy
-/// but healthy link.
-const WS_READ_IDLE_SECS: u64 = 90;
+/// connection.
+///
+/// The CP's `PING_INTERVAL` is 15 s, so this is three missed pings. It used to
+/// be 90 s — six missed pings, 3× *our* 30 s heartbeat rather than the peer's
+/// cadence — and that number was the single largest cost in a failover: a
+/// SIGSTOPped leader keeps the TCP socket open and answers nothing, so the node
+/// sat on a dead session for 90 s before even trying the new leader (see
+/// `run-ha-partition.sh`). Three missed pings is the usual bound; anything
+/// tighter starts treating a momentarily busy CP as dead.
+const WS_READ_IDLE_SECS: u64 = 45;
+/// Bound on the upgrade itself (TCP connect + HTTP handshake). A frozen leader
+/// accepts the connection and never answers, so this is the cost of *trying*
+/// the dead host before rotating to the next replica: 10 s keeps WAN tolerance
+/// while halving the old 15 s.
+const WS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 
 type WsStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -61,7 +73,7 @@ impl std::fmt::Display for ConnectError {
 }
 
 /// Connect and send the `Hello` handshake; returns the open socket.
-/// The handshake is time-bounded (10 s connect, 15 s overall): an accepting-
+/// The handshake is time-bounded (10 s connect, 10 s overall): an accepting-
 /// but-silent CP used to park the WS session setup forever.
 async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream, ConnectError> {
     let mut followed_hint = false;
@@ -85,7 +97,7 @@ async fn connect_inner(
         format!("Bearer {}", cred.credential).parse()?,
     );
     let connected = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(WS_HANDSHAKE_TIMEOUT_SECS),
         tokio_tungstenite::connect_async(req),
     )
     .await

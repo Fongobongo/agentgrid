@@ -92,6 +92,9 @@ pub async fn handle_vote(
     if req.term < term {
         return deny(term);
     }
+    if req.pre_vote {
+        return handle_pre_vote(rt, applied_seq, &req, deny);
+    }
     if req.term > term {
         if let Err(e) = rt.shared.set_term_and_vote(req.term, None) {
             tracing::warn!("persist vote failed: {e}");
@@ -131,6 +134,75 @@ pub async fn handle_vote(
     VoteResponse {
         term: current,
         granted: grant,
+        applied_seq,
+    }
+}
+
+/// Answer a pre-vote without touching any durable state.
+///
+/// The real round above persists the candidate's term and demotes the local
+/// leader *before* it decides whether to grant — so a node that cannot win
+/// still topples a healthy incumbent. That is the "disruptive server" problem,
+/// and it is what made `run-ha-partition.sh` elect twice: cp-a won term 2,
+/// cp-c's term-3 bid arrived 177 ms later and demoted it, cp-c was then refused
+/// because it was behind (seq 2 vs 3) and had to win term 4 — one extra term,
+/// one extra snapshot restore on cp-a, ~3.3 s of no leader.
+///
+/// A pre-vote only asks "would you vote for me at `term`?" and grants when:
+/// - the bid is for a term at least as new as ours (checked by the caller),
+/// - the candidate is not behind this replica, and
+/// - we have not heard from a live leader within one election timeout. That
+///   last rule is the whole point: a survivor whose timer fired a few hundred
+///   milliseconds after the winner's gets "no" and stays quiet instead of
+///   forcing a new term. It expires on its own when the leader really dies,
+///   because contact ages past the election timeout.
+fn handle_pre_vote(
+    rt: &HaRuntime,
+    applied_seq: u64,
+    req: &VoteRequest,
+    deny: impl Fn(u64) -> VoteResponse,
+) -> VoteResponse {
+    let term = rt.shared.term();
+    if applied_seq > req.applied_seq {
+        tracing::debug!(
+            candidate = %req.candidate_id,
+            candidate_seq = req.applied_seq,
+            local_seq = applied_seq,
+            "pre-vote: candidate is behind this replica"
+        );
+        return deny(term);
+    }
+    // Leader stickiness. `last_contact_ms` is refreshed by every heartbeat and
+    // initialised at startup, but a *known* leader is required too: at boot no
+    // leader is known and the first election must not be held back.
+    //
+    // The window is half an election timeout, not the whole thing, and both
+    // bounds matter:
+    //  - a live leader refreshes contact every `election_timeout/3`, so a
+    //    probe can never see an age above that and is refused;
+    //  - a dead leader stops refreshing, and the first probe arrives at least
+    //    one full timeout after the survivor's last contact — but the peer's
+    //    own last contact can be up to one heartbeat interval (T/3) later, so
+    //    the age it sees can be as low as 2T/3. With a T window that honest
+    //    first probe would be refused and the cluster would need a second
+    //    timer round, which is exactly the two-round election this is meant to
+    //    remove.
+    let stickiness = (rt.config.election_timeout.as_millis() as u64) / 2;
+    if rt.shared.leader().is_some() {
+        let age = mono_ms().saturating_sub(rt.shared.last_contact_ms());
+        if age < stickiness {
+            tracing::debug!(
+                candidate = %req.candidate_id,
+                term = req.term,
+                contact_age_ms = age,
+                "pre-vote refused: a live leader was heard from recently"
+            );
+            return deny(term);
+        }
+    }
+    VoteResponse {
+        term,
+        granted: true,
         applied_seq,
     }
 }
@@ -327,27 +399,119 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
         tracing::info!("not campaigning: local database awaits a full snapshot");
         return Ok(());
     }
+    let voters = voters_of(rt);
     let term = rt.shared.term() + 1;
-    rt.shared
-        .set_term_and_vote(term, Some(&rt.config.node_id))
-        .context("persist candidacy")?;
-    let req = VoteRequest {
+    let bid = VoteRequest {
         cluster_id: rt.config.cluster_id.clone(),
         term,
         candidate_id: rt.config.node_id.clone(),
         applied_seq: rt.shared.applied_seq(),
+        pre_vote: false,
     };
-    let voters = voters_of(rt);
-    let mut votes = 1usize;
-    let mut data_votes = 1usize;
-    let mut max_seq = rt.shared.applied_seq();
-    // Ask every voter at once and stop as soon as the quorum is met. Collecting
-    // sequentially meant one unreachable peer (a frozen leader keeps accepting
-    // connections but never answers, so each vote call burns the full transport
-    // timeout) serialised every round *and* re-synchronised the candidates:
-    // both survivors blocked on the same dead peer for the same 2s, then both
-    // bumped the term, so neither would grant the other's vote. That is how a
-    // 3-host cluster took 79 terms and ~9 minutes to elect after one SIGSTOP.
+
+    // Pre-vote first: ask whether a bid at `term` could win *without*
+    // persisting anything. Only a quorum's worth of "yes" is allowed to bump
+    // the term, because bumping it is what topples a live incumbent — and a
+    // candidate that would be refused anyway (behind on replication, or
+    // racing a leader that just won) has no business doing that. See
+    // `handle_pre_vote` for the 3.3 s two-round election this removes.
+    let probe = solicit(
+        rt,
+        &voters,
+        &VoteRequest {
+            pre_vote: true,
+            ..bid.clone()
+        },
+    )
+    .await;
+    if let Some(newer) = probe.newer_term {
+        rt.shared.set_term_and_vote(newer, None)?;
+        return Ok(());
+    }
+    if !voters.election_won(probe.votes, probe.data_votes, rt.config.rpo_mode) {
+        tracing::info!(
+            term,
+            votes = probe.votes,
+            data_votes = probe.data_votes,
+            "pre-vote failed: not bumping the term"
+        );
+        return Ok(());
+    }
+    if probe.max_seq > rt.shared.applied_seq() {
+        tracing::warn!(
+            term,
+            local_seq = rt.shared.applied_seq(),
+            max_seq = probe.max_seq,
+            "not campaigning: a voter is ahead of this replica"
+        );
+        return Ok(());
+    }
+
+    rt.shared
+        .set_term_and_vote(term, Some(&rt.config.node_id))
+        .context("persist candidacy")?;
+    let ballot = solicit(rt, &voters, &bid).await;
+    if let Some(newer) = ballot.newer_term {
+        rt.shared.set_term_and_vote(newer, None)?;
+        return Ok(());
+    }
+    let max_seq = ballot.max_seq.max(probe.max_seq);
+    if max_seq > rt.shared.applied_seq() {
+        tracing::warn!(
+            term,
+            local_seq = rt.shared.applied_seq(),
+            max_seq,
+            "not promoting: a voter is ahead of this replica"
+        );
+        return Ok(());
+    }
+    if voters.election_won(ballot.votes, ballot.data_votes, rt.config.rpo_mode) {
+        tracing::info!(
+            term,
+            votes = ballot.votes,
+            data_votes = ballot.data_votes,
+            "won HA election"
+        );
+        promote(state, term).await?;
+    } else {
+        tracing::info!(
+            term,
+            votes = ballot.votes,
+            data_votes = ballot.data_votes,
+            "lost HA election"
+        );
+    }
+    Ok(())
+}
+
+/// Result of one round of vote requests.
+struct Ballot {
+    /// Votes including this node's own.
+    votes: usize,
+    /// Data-replica votes including this node's own.
+    data_votes: usize,
+    /// Highest replication position seen among the answers.
+    max_seq: u64,
+    /// Set when a peer reported a newer term than ours: adopt it and stop.
+    newer_term: Option<u64>,
+}
+
+/// Ask every voter at once and stop as soon as the quorum is met.
+///
+/// Collecting sequentially meant one unreachable peer (a frozen leader keeps
+/// accepting connections but never answers, so each vote call burns the full
+/// transport timeout) serialised every round *and* re-synchronised the
+/// candidates: both survivors blocked on the same dead peer for the same 2s,
+/// then both bumped the term, so neither would grant the other's vote. That is
+/// how a 3-host cluster took 79 terms and ~9 minutes to elect after one
+/// SIGSTOP.
+async fn solicit(rt: &HaRuntime, voters: &VoterSet, req: &VoteRequest) -> Ballot {
+    let mut ballot = Ballot {
+        votes: 1,
+        data_votes: 1,
+        max_seq: rt.shared.applied_seq(),
+        newer_term: None,
+    };
     let mut pending = FuturesUnordered::new();
     let targets: Vec<(bool, String, String)> = rt
         .config
@@ -368,45 +532,30 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
             (is_data, id, out)
         });
     }
-    let mut won = voters.election_won(votes, data_votes, rt.config.rpo_mode);
+    let mut won = voters.election_won(ballot.votes, ballot.data_votes, rt.config.rpo_mode);
     while !won {
         let Some((is_data, id, result)) = pending.next().await else {
             break;
         };
         match result {
             Ok(resp) => {
-                max_seq = max_seq.max(resp.applied_seq);
+                ballot.max_seq = ballot.max_seq.max(resp.applied_seq);
                 if resp.term > rt.shared.term() {
-                    rt.shared.set_term_and_vote(resp.term, None)?;
-                    return Ok(());
+                    ballot.newer_term = Some(resp.term);
+                    return ballot;
                 }
                 if resp.granted {
-                    votes += 1;
+                    ballot.votes += 1;
                     if is_data {
-                        data_votes += 1;
+                        ballot.data_votes += 1;
                     }
                 }
-                won = voters.election_won(votes, data_votes, rt.config.rpo_mode);
+                won = voters.election_won(ballot.votes, ballot.data_votes, rt.config.rpo_mode);
             }
             Err(e) => tracing::debug!(peer = %id, "vote request failed: {e}"),
         }
     }
-    if max_seq > rt.shared.applied_seq() {
-        tracing::warn!(
-            term,
-            local_seq = rt.shared.applied_seq(),
-            max_seq,
-            "not promoting: a voter is ahead of this replica"
-        );
-        return Ok(());
-    }
-    if voters.election_won(votes, data_votes, rt.config.rpo_mode) {
-        tracing::info!(term, votes, data_votes, "won HA election");
-        promote(state, term).await?;
-    } else {
-        tracing::info!(term, votes, data_votes, "lost HA election");
-    }
-    Ok(())
+    ballot
 }
 
 async fn promote(state: &Arc<AppState>, term: u64) -> Result<()> {

@@ -14,6 +14,7 @@ use std::time::Duration;
 use agentgrid_common::ws::{
     NodeWsMsg, WS_CLOSE_BAD_PROTOCOL, WS_CLOSE_SUPERSEDED, WS_CLOSE_UNAUTHORIZED,
 };
+use agentgrid_common::PollRequest;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -168,6 +169,9 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
     let Some(NodeWsMsg::Hello {
         node_id: hello_node,
         protocol_version,
+        name,
+        adapters,
+        repositories,
         max_concurrency,
         ..
     }) = hello
@@ -202,6 +206,31 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
             })))
             .await;
         return;
+    }
+
+    // A live WS socket is the strongest liveness signal there is, so make the
+    // node schedulable *now* instead of waiting for its next heartbeat.
+    //
+    // `node_ineligibility` requires `status = online`, and that column is
+    // refreshed only by `heartbeat` — or by `register_or_touch_node` on the
+    // poll path. The WS path did neither, so after a failover a node that had
+    // already connected to the new leader stayed invisible to the scheduler
+    // until a heartbeat reached *that* leader. With the old leader frozen its
+    // beats hung, so `run-ha-partition.sh` showed a 43 s hole: WS connected at
+    // t+46 s, first attempt at t+89 s. Same call the poll transport makes, with
+    // the capabilities the hello already carries.
+    let registration = PollRequest {
+        node_id: node_id.clone(),
+        name,
+        adapters,
+        repositories,
+        max_concurrency,
+        protocol_version,
+    };
+    if let Err(e) = state.store.register_or_touch_node(&registration).await {
+        // Registration is bookkeeping; the socket still works (unacked
+        // redelivery below is keyed by node id, not by this row).
+        tracing::warn!(node_id, "ws hello: node registration failed: {e}");
     }
 
     let gen = state

@@ -20,6 +20,20 @@ use crate::git;
 use crate::outbox;
 use crate::sandbox;
 
+/// Bound on a single heartbeat round trip.
+///
+/// The HTTP client is shared with the long poll, whose 120 s timeout is
+/// correct for a request that is *supposed* to block until work arrives. A
+/// heartbeat must not inherit it: a SIGSTOPped (or partitioned) leader accepts
+/// the connection and answers nothing, so the request sits in the kernel send
+/// buffer for the whole two minutes. In `run-ha-partition.sh` the beat that
+/// fired 1 s after the freeze only failed at t+121 s, and the node — which the
+/// new leader had already accepted over WS — stayed unschedulable until it did,
+/// because `node_ineligibility` requires `status = online` and only a heartbeat
+/// (or a poll) refreshes that row. 15 s is ~1.5× the heartbeat interval and
+/// comfortably above a healthy LAN/WAN round trip.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Read 1-minute load average from /proc/loadavg.
 pub fn read_load_avg() -> f64 {
     std::fs::read_to_string("/proc/loadavg")
@@ -467,13 +481,30 @@ pub fn spawn_heartbeat(
                 active_rss_mib: vmrss_mib,
                 max_rss_mib,
             };
-            match client
-                .post(format!("{}/v1/node/heartbeat", cfg.base()))
-                .json(&req)
-                .send()
-                .await
-            {
-                Ok(r) if r.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+            // See HEARTBEAT_TIMEOUT: the shared client's 120 s poll timeout is
+            // wrong for a beat, and a frozen leader otherwise swallows it whole.
+            let posted = tokio::time::timeout(
+                HEARTBEAT_TIMEOUT,
+                client
+                    .post(format!("{}/v1/node/heartbeat", cfg.base()))
+                    .json(&req)
+                    .send(),
+            )
+            .await;
+            match posted {
+                Err(_) => {
+                    tracing::warn!("heartbeat timed out after {}s", HEARTBEAT_TIMEOUT.as_secs());
+                    if cfg.endpoints.urls().len() > 1 {
+                        let next = cfg.endpoints.advance();
+                        tracing::warn!("heartbeat: rotating control-plane endpoint to {next}");
+                    }
+                    if let (Some(mk), Some(p)) = (mk_client.as_ref(), cfg.proxies.current()) {
+                        tracing::warn!("egress proxy {p} timed out on heartbeat; rotating");
+                        cfg.proxies.mark_dead(&p);
+                        client = mk();
+                    }
+                }
+                Ok(Ok(r)) if r.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
                     let hint = r
                         .headers()
                         .get("x-agentgrid-leader")
@@ -486,8 +517,8 @@ pub fn spawn_heartbeat(
                         cfg.base()
                     );
                 }
-                Ok(_) => {}
-                Err(e) => {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
                     tracing::warn!("heartbeat failed: {e}");
                     if e.is_connect() || e.is_timeout() {
                         if cfg.endpoints.urls().len() > 1 {

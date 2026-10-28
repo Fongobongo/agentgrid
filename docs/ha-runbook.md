@@ -114,6 +114,29 @@ agentgrid-cp-edge --listen 0.0.0.0:7900
   downloads keep streaming. Lower it if you want faster failover at the cost
   of giving up on slower endpoints.
 
+## How fast a failover lands
+
+The control plane elects in about one election timeout (`AGENTGRID_HA_ELECTION_TIMEOUT_MS`,
+default 1500 ms): survivors pre-vote first, and a pre-vote is refused while a
+leader was heard from within half a timeout, so a node whose timer fires just
+after the winner's stays quiet instead of forcing a second term.
+
+Nodes follow on their own schedule, which is what an operator actually notices:
+
+- **Frozen leader (partition, `SIGSTOP`).** The socket stays open and answers
+  nothing, so the node needs its read-idle timeout — 45 s, three missed
+  control-plane pings — plus the 10 s handshake bound it spends on the dead
+  host before rotating. ~55 s end to end, after which the `hello` alone makes
+  it schedulable again.
+- **Killed leader (`SIGKILL`, crash).** The socket closes, so the reconnect is
+  immediate and only the election time is lost.
+- **Heartbeats** are bounded at 15 s. They used to inherit the long poll's
+  120 s client timeout, which left a node unschedulable for two minutes because
+  `status = online` is what the scheduler gates on.
+- **A `hello` over the WS is enough to be scheduled** — the control plane
+  registers the node from it, so a node does not wait for its next heartbeat to
+  become eligible after a failover.
+
 ## Chaos (tests/e2e)
 
 - `run-ha-3host.sh` — 3 data hosts + edge; kill -9 leader; assert failover,

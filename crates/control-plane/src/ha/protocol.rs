@@ -30,6 +30,13 @@ pub struct VoteRequest {
     /// Candidate's last applied replication sequence. Data voters refuse a
     /// candidate that is behind them.
     pub applied_seq: u64,
+    /// Pre-vote round (Raft §9.6, "disruptive servers"). The peer answers
+    /// whether it *would* grant a vote at this term, without persisting the
+    /// term, recording a vote, or demoting a live leader. A candidate only
+    /// starts a real round — which bumps the term and forces the incumbent to
+    /// step down — after a pre-vote quorum agrees.
+    #[serde(default)]
+    pub pre_vote: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -16,6 +16,16 @@ use crate::store::Store;
 const TEST_CLUSTER_TOKEN: &str = "0123456789abcdef0123456789abcdef"; // gitleaks:allow
 
 fn rt(node_id: &str) -> Arc<HaRuntime> {
+    rt_with_election_timeout(node_id, std::time::Duration::from_millis(1500))
+}
+
+/// Same cluster, custom election timeout — the leader-stickiness window is one
+/// election timeout, so a short one lets a test age leader contact without
+/// sleeping for seconds.
+fn rt_with_election_timeout(
+    node_id: &str,
+    election_timeout: std::time::Duration,
+) -> Arc<HaRuntime> {
     let mut c = HaConfig::single();
     c.mode = HaMode::Ha;
     c.role = NodeRole::Data;
@@ -25,6 +35,7 @@ fn rt(node_id: &str) -> Arc<HaRuntime> {
     c.advertise_url = format!("http://{node_id}:7800");
     c.allow_plaintext = true;
     c.data_replicas = 3;
+    c.election_timeout = election_timeout;
     c.peers = vec![
         super::config::HaPeer {
             id: "cp-b".into(),
@@ -77,6 +88,14 @@ fn vote_req(term: u64, candidate: &str, applied: u64) -> VoteRequest {
         term,
         candidate_id: candidate.into(),
         applied_seq: applied,
+        pre_vote: false,
+    }
+}
+
+fn pre_vote_req(term: u64, candidate: &str, applied: u64) -> VoteRequest {
+    VoteRequest {
+        pre_vote: true,
+        ..vote_req(term, candidate, applied)
     }
 }
 
@@ -127,6 +146,70 @@ async fn old_term_vote_is_rejected() {
     let r = election::handle_vote(&rt, None, 1, vote_req(2, "cp-c", 1)).await;
     assert!(!r.granted);
     assert_eq!(r.term, 3);
+}
+
+#[tokio::test]
+async fn pre_vote_never_bumps_the_term_or_topples_a_live_leader() {
+    let rt = rt("cp-a");
+    // cp-b won term 1 and its heartbeat just landed here.
+    election::handle_heartbeat(&rt, None, 1, hb(1, "cp-b", 1)).await;
+    // cp-c's election timer fired a moment later and it probes for term 2.
+    let r = election::handle_vote(&rt, None, 1, pre_vote_req(2, "cp-c", 1)).await;
+    assert!(!r.granted, "a live leader must not be disrupted by a probe");
+    assert_eq!(
+        r.term, 1,
+        "a probe must not report the probed term as adopted"
+    );
+    assert_eq!(rt.shared.term(), 1, "a probe must not persist the term");
+    assert_eq!(
+        rt.shared.leader().map(|l| l.id),
+        Some("cp-b".into()),
+        "the incumbent must survive the probe"
+    );
+}
+
+#[tokio::test]
+async fn pre_vote_is_granted_once_the_leader_goes_quiet() {
+    let rt = rt_with_election_timeout("cp-a", std::time::Duration::from_millis(50));
+    election::handle_heartbeat(&rt, None, 1, hb(1, "cp-b", 1)).await;
+    assert!(
+        !election::handle_vote(&rt, None, 1, pre_vote_req(2, "cp-c", 1))
+            .await
+            .granted,
+        "contact is fresh: the probe must be refused"
+    );
+    // A dead leader stops refreshing contact; after one election timeout the
+    // probe is granted so the cluster can move on instead of deadlocking.
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let r = election::handle_vote(&rt, None, 1, pre_vote_req(2, "cp-c", 1)).await;
+    assert!(r.granted, "stickiness must expire with the leader");
+    assert_eq!(rt.shared.term(), 1, "even a granted probe persists nothing");
+}
+
+#[tokio::test]
+async fn pre_vote_refuses_a_candidate_that_is_behind() {
+    let rt = rt("cp-a");
+    // No leader known, so stickiness does not apply: replication freshness is
+    // the only reason to refuse — and it is enough to stop the doomed bid.
+    let r = election::handle_vote(&rt, None, 10, pre_vote_req(1, "cp-b", 9)).await;
+    assert!(!r.granted);
+    let r = election::handle_vote(&rt, None, 10, pre_vote_req(1, "cp-b", 10)).await;
+    assert!(r.granted);
+}
+
+#[tokio::test]
+async fn a_granted_pre_vote_does_not_consume_the_durable_vote() {
+    let rt = rt("cp-a");
+    assert!(
+        election::handle_vote(&rt, None, 1, pre_vote_req(1, "cp-b", 1))
+            .await
+            .granted
+    );
+    // A probe that burned the durable vote would deadlock the very round it
+    // exists to protect: the candidate would then be refused in its real round.
+    assert_eq!(rt.shared.term(), 0, "the probe must not persist a term");
+    let r = election::handle_vote(&rt, None, 1, vote_req(1, "cp-c", 1)).await;
+    assert!(r.granted, "the real vote must still be available");
 }
 
 #[tokio::test]

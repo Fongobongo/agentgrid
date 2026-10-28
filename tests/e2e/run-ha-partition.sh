@@ -247,13 +247,13 @@ task=$(create_task "partition smoke") || true
 [ -n "$task" ] || { echo "FAIL: task create during partition" >&2; exit 1; }
 ok=0
 # SIGSTOP keeps the node's TCP socket open, so the daemon only notices the dead
-# session after its 90s read-idle timeout (`WS_READ_IDLE_SECS`) — the CP pings
-# every ~15s and the partition silences them. Re-registration plus the task run
-# then needs a few more seconds, and the reconnect has to work through the
-# frozen leader's 15s handshake timeout first, so the budget covers ~130s of
-# recovery: 300s leaves real margin instead of racing the last iteration. A
-# hard kill (3host) closes the socket and recovers immediately, which is why
-# that scenario keeps a shorter wait.
+# session after its read-idle timeout (`WS_READ_IDLE_SECS` = 45s: three missed
+# control-plane pings), then burns the 10s handshake timeout on the frozen host
+# before rotating to the new leader — ~55s end to end, since the hello makes it
+# schedulable the moment the socket is up. The budget stays at 300s so a slow
+# runner cannot turn the assertion into a coin flip; it exits on success. A hard
+# kill (3host) closes the socket and recovers immediately, which is why that
+# scenario keeps a shorter wait.
 for _ in $(seq 1 600); do
   st=$(curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
     | python3 -c 'import sys,json
