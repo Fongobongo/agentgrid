@@ -3,8 +3,9 @@
 #
 # Simulates a network partition by SIGSTOPping the leader (it stays alive but
 # unreachable) and asserts a new leader elects, the edge forwards to it, and a
-# task completes. Then SIGCONT the old leader (partition heals) and asserts it
-# rejoins as a standby with exactly one leader — no dual writers.
+# task completes — so a node-daemon runs through the edge, as in production.
+# Then SIGCONT the old leader (partition heals) and asserts it rejoins as a
+# standby with exactly one leader — no dual writers.
 #
 # Uses an agentgrid-cp-edge in front so client traffic follows the leader.
 #
@@ -133,6 +134,15 @@ wait_replicated() {  # $1 = leader id, $2 = timeout secs
   return 1
 }
 
+node_online() {  # $1 = base url
+  curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$1/v1/nodes" 2>/dev/null \
+    | python3 -c 'import sys,json
+try:
+ d=json.load(sys.stdin); ns=d.get("items",d) if isinstance(d,dict) else d
+ print(sum(1 for n in ns if n.get("status")=="online"))
+except Exception: print(0)' 2>/dev/null || echo 0
+}
+
 count_leaders() {
   local n=0
   for id in cp-a cp-b cp-c; do
@@ -180,6 +190,37 @@ jwt=$(curl -fsS --max-time 15 --connect-timeout 5 -H 'content-type: application/
   -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" \
   "$EDGE_BASE/v1/auth/login" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+
+echo ">> mint enrollment token (via edge)"
+enroll=$(curl -fsS --max-time 15 --connect-timeout 5 -X POST -H "authorization: Bearer $jwt" \
+  "$EDGE_BASE/v1/nodes/enrollment-token" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+[ -n "$enroll" ] || { echo "FAIL: enrollment token" >&2; exit 1; }
+
+echo ">> node-daemon through the edge"
+mkdir -p "$TMP/node" "$TMP/work" "$TMP/repos"
+env PATH="$ADAPTER_BIN:$PATH" \
+    RUST_LOG=info \
+    AGENTGRID_SERVER="$EDGE_BASE" \
+    AGENTGRID_SERVERS="http://127.0.0.1:${PORT[cp-a]},http://127.0.0.1:${PORT[cp-b]},http://127.0.0.1:${PORT[cp-c]}" \
+    AGENTGRID_DATA_DIR="$TMP/node" \
+    AGENTGRID_NODE_NAME="ha-partition-node" \
+    AGENTGRID_WORKSPACE_ROOT="$TMP/work" \
+    AGENTGRID_REPOSITORY_ROOT="$TMP/repos" \
+    AGENTGRID_ADAPTERS=mock \
+    AGENTGRID_MAX_CONCURRENCY=2 \
+    AGENTGRID_ENROLL_TOKEN="$enroll" \
+    AGENTGRID_MIN_FREE_DISK_MB=1024 \
+    AGENTGRID_MIN_FREE_MEM_MB=512 \
+    "$NODE_BIN" >"$TMP/node.log" 2>&1 &
+NODE_PID=$!
+
+for _ in $(seq 1 60); do
+  [ "$(node_online "$EDGE_BASE")" -ge 1 ] && break
+  sleep 0.5
+done
+[ "$(node_online "$EDGE_BASE")" -ge 1 ] || { echo "FAIL: node not online via edge" >&2; exit 1; }
+echo "  node online via edge"
 
 echo ">> wait for the standbys to apply the bootstrap write"
 wait_replicated "$leader" 45 \

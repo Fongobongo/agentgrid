@@ -95,6 +95,11 @@
 
 ### Fixed
 
+- **`run-ha-partition.sh` never started a worker.** It declared `NODE_BIN`,
+  checked that the binary existed, and then asserted "a task completes during
+  the partition" with no node-daemon running — the task could only ever stay
+  queued. It now mints an enrollment token, starts a node through the edge and
+  waits for it to report online, like the other two scenarios.
 - **The edge's WebSocket bridge had the same unbounded wait as HTTP.** A frozen
   leader accepts the TCP connection and never answers the upgrade, so
   `connect_async` parked the node's reconnect attempt forever: the node never
