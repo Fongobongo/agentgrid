@@ -9,6 +9,14 @@ pub const HA_TOKEN_HEADER: &str = "x-agentgrid-ha-token";
 pub const ARTIFACT_ATTEMPT_HEADER: &str = "x-agentgrid-attempt-id";
 pub const ARTIFACT_NAME_HEADER: &str = "x-agentgrid-stored-name";
 pub const ARTIFACT_SHA_HEADER: &str = "x-agentgrid-artifact-sha256";
+/// Incremental changeset push: leader epoch, batch sequence range and schema.
+pub const HA_EPOCH_HEADER: &str = "x-agentgrid-ha-epoch";
+pub const HA_SEQ_FIRST_HEADER: &str = "x-agentgrid-ha-seq-first";
+pub const HA_SEQ_LAST_HEADER: &str = "x-agentgrid-ha-seq-last";
+pub const HA_SCHEMA_HEADER: &str = "x-agentgrid-ha-schema-version";
+/// Rejection detail on a `409` changeset response.
+pub const HA_REASON_HEADER: &str = "x-agentgrid-ha-reason";
+pub const HA_APPLIED_SEQ_HEADER: &str = "x-agentgrid-ha-applied-seq";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoteRequest {
@@ -57,6 +65,8 @@ pub struct HaStatus {
     pub applied_seq: u64,
     pub schema_version: i64,
     pub snapshot_id: Option<String>,
+    /// Replication sequence captured in `snapshot_id`.
+    pub snapshot_seq: u64,
     pub snapshot_created_unix: i64,
     pub rpo_mode: String,
     pub data_replicas: usize,

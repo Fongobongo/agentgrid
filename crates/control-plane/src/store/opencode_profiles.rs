@@ -261,6 +261,7 @@ impl Store {
         // UPSERT on the unique `name`. The id is stable across updates so
         // foreign keys (nodes.opencode_profile_id) survive. `expires_at` is
         // replaced wholesale (None clears a previous TTL).
+        let mut tx = self.write_txn().await?;
         let row = sqlx::query(
             "INSERT INTO opencode_profiles (id, name, config_json, hash, expires_at, pinned_skills_json, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -282,8 +283,9 @@ impl Store {
         .bind(&pinned_json)
         .bind(&now)
         .bind(&now)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+        tx.commit().await?;
         let final_row = row_to_profile(&row);
         // Append the pre-PUT body as a revision so rollback can walk back
         // more than one step. The row's `prev_*` column is the fast path
@@ -291,16 +293,18 @@ impl Store {
         if let (Some(prev_json), Some(prev_hash)) =
             (&final_row.prev_config_json, &final_row.prev_hash)
         {
-            let _ = sqlx::query(
-                "INSERT INTO opencode_profile_revisions (profile_id, config_json, hash, saved_at)
-                 VALUES (?, ?, ?, ?)",
-            )
-            .bind(&final_row.id)
-            .bind(prev_json)
-            .bind(prev_hash)
-            .bind(&now)
-            .execute(&self.pool)
-            .await;
+            let _ = self
+                .write_one(
+                    sqlx::query(
+                        "INSERT INTO opencode_profile_revisions (profile_id, config_json, hash, saved_at)
+                         VALUES (?, ?, ?, ?)",
+                    )
+                    .bind(&final_row.id)
+                    .bind(prev_json)
+                    .bind(prev_hash)
+                    .bind(&now),
+                )
+                .await;
         }
         final_row.into_view()
     }
@@ -394,9 +398,8 @@ impl Store {
     }
 
     pub async fn delete_opencode_profile(&self, name: &str) -> Result<bool> {
-        let r = sqlx::query("DELETE FROM opencode_profiles WHERE name = ?")
-            .bind(name)
-            .execute(&self.pool)
+        let r = self
+            .write_one(sqlx::query("DELETE FROM opencode_profiles WHERE name = ?").bind(name))
             .await?;
         Ok(r.rows_affected() > 0)
     }
@@ -520,10 +523,12 @@ impl Store {
         node_id: &str,
         profile_id: Option<&str>,
     ) -> Result<(bool, Option<String>, Option<String>)> {
-        let r = sqlx::query("UPDATE nodes SET opencode_profile_id = ? WHERE id = ?")
-            .bind(profile_id)
-            .bind(node_id)
-            .execute(&self.pool)
+        let r = self
+            .write_one(
+                sqlx::query("UPDATE nodes SET opencode_profile_id = ? WHERE id = ?")
+                    .bind(profile_id)
+                    .bind(node_id),
+            )
             .await?;
         if r.rows_affected() == 0 {
             return Ok((false, None, None));
@@ -564,18 +569,19 @@ impl Store {
             Some(names) => canonicalize_pinned(names),
             None => None,
         };
-        sqlx::query(
-            "INSERT INTO opencode_config_audit (at, node_id, profile_id, hash, trigger, verify, pinned_untrusted_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO opencode_config_audit (at, node_id, profile_id, hash, trigger, verify, pinned_untrusted_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(now_iso())
+            .bind(node_id)
+            .bind(profile_id)
+            .bind(hash)
+            .bind(trigger)
+            .bind(verify)
+            .bind(&pinned_json),
         )
-        .bind(now_iso())
-        .bind(node_id)
-        .bind(profile_id)
-        .bind(hash)
-        .bind(trigger)
-        .bind(verify)
-        .bind(&pinned_json)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }

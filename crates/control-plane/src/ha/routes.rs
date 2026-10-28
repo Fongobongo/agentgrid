@@ -13,10 +13,13 @@ use tokio_util::io::ReaderStream;
 
 use super::protocol::{
     HeartbeatRequest, HeartbeatResponse, PromoteResponse, VoteRequest, VoteResponse,
-    ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER, HA_TOKEN_HEADER,
+    ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER, HA_APPLIED_SEQ_HEADER,
+    HA_EPOCH_HEADER, HA_REASON_HEADER, HA_SCHEMA_HEADER, HA_SEQ_FIRST_HEADER, HA_SEQ_LAST_HEADER,
+    HA_TOKEN_HEADER,
 };
 use super::role::HaRuntime;
 use super::{election, snapshot};
+use crate::store::ApplyOutcome;
 use crate::AppState;
 
 pub fn data_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -29,6 +32,7 @@ pub fn data_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ha/snapshot", post(snapshot_now))
         .route("/v1/ha/snapshot/{id}", get(snapshot_download))
         .route("/v1/ha/snapshot/{id}/manifest", get(snapshot_manifest))
+        .route("/v1/ha/changeset", post(changeset))
         .route("/v1/ha/artifact", get(artifact_get).put(artifact_put))
         .layer(axum::middleware::from_fn_with_state(state, data_token))
 }
@@ -108,11 +112,106 @@ async fn demote(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+/// Standby side of incremental replication: apply one changeset batch. Any
+/// reason to refuse answers `409` with the local applied sequence so the
+/// leader can cut a snapshot instead.
+async fn changeset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let rt = &state.ha;
+    let number = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let schema = headers
+        .get(HA_SCHEMA_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok());
+    let (Some(epoch), Some(first_seq), Some(last_seq), Some(schema_version)) = (
+        number(HA_EPOCH_HEADER),
+        number(HA_SEQ_FIRST_HEADER),
+        number(HA_SEQ_LAST_HEADER),
+        schema,
+    ) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let reject = |applied: u64, reason: &str| changeset_rejected(applied, reason);
+    if rt.is_leader() {
+        return reject(rt.shared.applied_seq(), "this node is the leader");
+    }
+    if rt.shared.need_full_snapshot() {
+        return reject(rt.shared.applied_seq(), "needs full snapshot");
+    }
+    let local_epoch = rt.gate.epoch();
+    if epoch < local_epoch {
+        return reject(rt.shared.applied_seq(), "stale epoch");
+    }
+    if epoch > local_epoch {
+        rt.gate.set_epoch(epoch);
+    }
+    let _apply = rt.shared.apply_lock.lock().await;
+    if rt.shared.need_full_snapshot() {
+        return reject(rt.shared.applied_seq(), "needs full snapshot");
+    }
+    match state
+        .store
+        .apply_changeset_batch(first_seq, last_seq, schema_version, &body)
+        .await
+    {
+        Ok(ApplyOutcome::Applied { seq }) => {
+            rt.shared.set_applied_seq(seq);
+            rt.shared.touch_leader();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(ApplyOutcome::Duplicate) => {
+            if rt.shared.applied_seq() < last_seq {
+                rt.shared.set_applied_seq(last_seq);
+            }
+            rt.shared.touch_leader();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(ApplyOutcome::Rejected {
+            applied_seq,
+            reason,
+        }) => reject(applied_seq, &reason),
+        Err(e) => {
+            tracing::warn!("changeset apply failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn changeset_rejected(applied_seq: u64, reason: &str) -> Response {
+    let reason: String = reason
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(160)
+        .collect();
+    let mut res = StatusCode::CONFLICT.into_response();
+    let headers = res.headers_mut();
+    let _ = headers.try_insert(
+        header::HeaderName::from_static(HA_APPLIED_SEQ_HEADER),
+        header::HeaderValue::from_str(&applied_seq.to_string())
+            .unwrap_or(header::HeaderValue::from_static("0")),
+    );
+    let _ = headers.try_insert(
+        header::HeaderName::from_static(HA_REASON_HEADER),
+        header::HeaderValue::from_str(&reason)
+            .unwrap_or(header::HeaderValue::from_static("rejected")),
+    );
+    res
+}
+
 async fn snapshot_now(State(state): State<Arc<AppState>>) -> Response {
     if !state.ha.is_leader() {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let rt = &state.ha;
+    let _create = rt.shared.snapshot_lock.lock().await;
     match snapshot::create(
         &state.store,
         &rt.shared,

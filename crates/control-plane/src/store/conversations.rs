@@ -15,14 +15,15 @@ impl Store {
     ) -> Result<agentgrid_common::Conversation> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO conversations (id, adapter, repository, created_at) VALUES (?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO conversations (id, adapter, repository, created_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(adapter)
+            .bind(repository)
+            .bind(&now),
         )
-        .bind(&id)
-        .bind(adapter)
-        .bind(repository)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(agentgrid_common::Conversation {
             id,
@@ -83,6 +84,7 @@ impl Store {
         // the MAX/INSERT pair cannot interleave across concurrent appends).
         // The UNIQUE(conversation_id, seq) index is the DB-side backstop.
         let id = Uuid::new_v4().to_string();
+        let mut tx = self.write_txn().await?;
         let seq: i64 = sqlx::query_scalar(
             "INSERT INTO conversation_messages (id, conversation_id, seq, role, content, task_id, created_at) \
              VALUES (?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_messages WHERE conversation_id = ?), ?, ?, ?, ?) \
@@ -95,8 +97,9 @@ impl Store {
         .bind(content)
         .bind(task_id)
         .bind(&now)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(seq)
     }
 
@@ -192,14 +195,15 @@ impl Store {
         seq: i64,
         task_id: Option<&str>,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE conversation_messages SET task_id = ? \
-             WHERE conversation_id = ? AND seq = ?",
+        self.write_one(
+            sqlx::query(
+                "UPDATE conversation_messages SET task_id = ? \
+                 WHERE conversation_id = ? AND seq = ?",
+            )
+            .bind(task_id)
+            .bind(conversation_id)
+            .bind(seq),
         )
-        .bind(task_id)
-        .bind(conversation_id)
-        .bind(seq)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }

@@ -274,15 +274,16 @@ impl Store {
             let projected = active_rss + free_slots_early * forecast_per_attempt;
             if projected > max_rss {
                 tx.commit().await?; // close the txn before logging
-                sqlx::query(
-                    "INSERT INTO metrics_capacity_pressure (at, node_id, threshold_mib, active_mib, forecast_mib) \
-                     VALUES (datetime('now'), ?, ?, ?, ?)",
+                self.write_one(
+                    sqlx::query(
+                        "INSERT INTO metrics_capacity_pressure (at, node_id, threshold_mib, active_mib, forecast_mib) \
+                         VALUES (datetime('now'), ?, ?, ?, ?)",
+                    )
+                    .bind(node_id)
+                    .bind(max_rss)
+                    .bind(active_rss)
+                    .bind(projected),
                 )
-                .bind(node_id)
-                .bind(max_rss)
-                .bind(active_rss)
-                .bind(projected)
-                .execute(&self.pool)
                 .await?;
                 tracing::info!(
                     node_id,

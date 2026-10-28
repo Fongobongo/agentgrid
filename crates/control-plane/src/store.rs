@@ -29,6 +29,7 @@ mod attempts;
 mod conversations;
 mod events;
 mod ha;
+pub use ha::ApplyOutcome;
 mod learnings;
 mod maintenance;
 // Plan 6.7: pure zstd-compression decision (routes tests prove the 30%
@@ -64,6 +65,9 @@ pub struct Store {
     /// `None` in single mode. In HA mode every write checks the lease gate
     /// and re-verifies the replicated epoch inside the transaction.
     ha_gate: Option<std::sync::Arc<HaGate>>,
+    /// Incremental replication (RPO async/sync). `None` in single and snapshot
+    /// modes; when set, every write transaction records a changeset.
+    repl: Option<std::sync::Arc<crate::ha::incremental::Replicator>>,
     /// Observability: last scheduler latency (queued→assigned) in ms and total
     /// assignments (Stage 2.5 ops). Wrapped in Arc so `Store` can derive Clone.
     pub(crate) scheduler_latency_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -164,8 +168,12 @@ pub fn write_txn_stats() -> (u64, u64) {
 /// transaction commits, rolls back, or is dropped. Never acquire two of
 /// these in the same task (the gate is non-reentrant and would deadlock).
 pub struct WriteTxn<'a> {
+    /// Session recording changes for incremental replication. Declared before
+    /// `tx` so it is deleted before the connection is released on drop.
+    session: Option<crate::ha::incremental::Session>,
     tx: sqlx::Transaction<'a, sqlx::Sqlite>,
     _permit: tokio::sync::SemaphorePermit<'static>,
+    repl: Option<std::sync::Arc<crate::ha::incremental::Replicator>>,
 }
 
 impl std::ops::Deref for WriteTxn<'_> {
@@ -183,11 +191,52 @@ impl std::ops::DerefMut for WriteTxn<'_> {
 
 impl<'a> WriteTxn<'a> {
     pub async fn commit(self) -> Result<()> {
-        Ok(self.tx.commit().await?)
+        let Self {
+            mut session,
+            mut tx,
+            _permit,
+            repl,
+        } = self;
+        let (Some(repl), Some(mut session)) = (repl, session.take()) else {
+            return Ok(tx.commit().await?);
+        };
+        let changes = session.take_changeset(&mut tx).await?;
+        drop(session);
+        let Some(bytes) = changes else {
+            return Ok(tx.commit().await?);
+        };
+        if bytes.len() as u64 > repl.max_changeset_bytes() {
+            tx.commit().await?;
+            tracing::warn!(
+                bytes = bytes.len(),
+                cap = repl.max_changeset_bytes(),
+                "write transaction exceeds the incremental changeset cap; \
+                 requesting a snapshot instead of shipping it"
+            );
+            repl.request_snapshot();
+            return Ok(());
+        }
+        // The sequence bump is part of the transaction, so an increment can
+        // never be lost or reordered relative to the data it carries.
+        let seq: i64 = sqlx::query_scalar(
+            "UPDATE ha_cluster_state SET repl_seq = repl_seq + 1, updated_at = ? \
+             WHERE id = 1 RETURNING repl_seq",
+        )
+        .bind(now_iso())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        // The write gate stays held through the sync acknowledgement so
+        // changesets leave in sequence order.
+        let res = repl.publish(seq.max(0) as u64, bytes).await;
+        drop(_permit);
+        res
     }
 
     pub async fn rollback(self) -> Result<()> {
-        Ok(self.tx.rollback().await?)
+        let Self { session, tx, .. } = self;
+        drop(session);
+        Ok(tx.rollback().await?)
     }
 }
 
@@ -207,8 +256,10 @@ async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<WriteTxn<'static>> {
         Ok(tx) => {
             WRITE_TXNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(WriteTxn {
+                session: None,
                 tx,
                 _permit: permit,
+                repl: None,
             })
         }
         Err(e) => {
@@ -223,29 +274,50 @@ async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<WriteTxn<'static>> {
 
 /// HA-fenced variant of [`begin_immediate`]. In HA mode it refuses writes on a
 /// standby or past-lease leader, then re-reads the replicated epoch inside the
-/// transaction so an old leader that missed a promotion cannot commit.
-async fn begin_checked(pool: &SqlitePool, gate: Option<&HaGate>) -> Result<WriteTxn<'static>> {
-    let Some(gate) = gate else {
-        return begin_immediate(pool).await;
+/// transaction so an old leader that missed a promotion cannot commit. With
+/// incremental replication configured, the transaction also records a SQLite
+/// changeset for the peer replicas.
+async fn begin_checked(
+    pool: &SqlitePool,
+    gate: Option<&HaGate>,
+    repl: Option<&std::sync::Arc<crate::ha::incremental::Replicator>>,
+) -> Result<WriteTxn<'static>> {
+    let mut tx = match gate {
+        Some(gate) => {
+            gate.assert_writable()?;
+            let mut tx = begin_immediate(pool).await?;
+            // The lease can expire while queued on the write gate.
+            if let Err(e) = gate.assert_writable() {
+                tx.rollback().await?;
+                return Err(e.into());
+            }
+            let epoch: i64 = sqlx::query_scalar("SELECT epoch FROM ha_cluster_state WHERE id = 1")
+                .fetch_one(&mut *tx)
+                .await?;
+            if epoch as u64 != gate.epoch() {
+                gate.note_fenced_write();
+                let err = FencedError {
+                    role: gate.role(),
+                    epoch: gate.epoch(),
+                };
+                tx.rollback().await?;
+                return Err(err.into());
+            }
+            tx
+        }
+        None => begin_immediate(pool).await?,
     };
-    gate.assert_writable()?;
-    let mut tx = begin_immediate(pool).await?;
-    // The lease can expire while queued on the write gate.
-    if let Err(e) = gate.assert_writable() {
-        tx.rollback().await?;
-        return Err(e.into());
-    }
-    let epoch: i64 = sqlx::query_scalar("SELECT epoch FROM ha_cluster_state WHERE id = 1")
-        .fetch_one(&mut *tx)
-        .await?;
-    if epoch as u64 != gate.epoch() {
-        gate.note_fenced_write();
-        let err = FencedError {
-            role: gate.role(),
-            epoch: gate.epoch(),
-        };
-        tx.rollback().await?;
-        return Err(err.into());
+    if let Some(repl) = repl {
+        match crate::ha::incremental::Session::attach(&mut tx, repl.tables()).await {
+            Ok(session) => {
+                tx.session = Some(session);
+                tx.repl = Some(repl.clone());
+            }
+            Err(e) => {
+                tx.rollback().await?;
+                return Err(e);
+            }
+        }
     }
     Ok(tx)
 }
@@ -436,7 +508,21 @@ impl Store {
 
     /// Fenced write transaction without bumping the per-store counter.
     pub(crate) async fn fenced_txn(&self) -> Result<WriteTxn<'static>> {
-        begin_checked(&self.pool, self.ha_gate.as_deref()).await
+        begin_checked(&self.pool, self.ha_gate.as_deref(), self.repl.as_ref()).await
+    }
+
+    /// Execute one statement as a fenced, replicated write transaction.
+    /// Single-statement writes use this instead of hitting the pool directly:
+    /// on a standby the write is refused, and with incremental replication the
+    /// statement is captured in a changeset for the data replicas.
+    pub(crate) async fn write_one<'q>(
+        &self,
+        query: sqlx::query::Query<'q, Sqlite, sqlx::sqlite::SqliteArguments>,
+    ) -> Result<sqlx::sqlite::SqliteQueryResult> {
+        let mut tx = self.write_txn().await?;
+        let res = query.execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(res)
     }
 
     /// True in single mode or on the current leader. Background loops use this
@@ -447,6 +533,25 @@ impl Store {
 
     pub(crate) fn ha_gate(&self) -> Option<&std::sync::Arc<HaGate>> {
         self.ha_gate.as_ref()
+    }
+
+    /// Install the incremental replicator (HA async/sync modes only).
+    pub(crate) fn attach_replicator(
+        &mut self,
+        repl: std::sync::Arc<crate::ha::incremental::Replicator>,
+    ) {
+        self.repl = Some(repl);
+    }
+
+    pub fn replicator(&self) -> Option<&std::sync::Arc<crate::ha::incremental::Replicator>> {
+        self.repl.as_ref()
+    }
+
+    /// Start the peer push worker. Idempotent; a no-op without a replicator.
+    pub fn start_replicator(&self) {
+        if let Some(repl) = &self.repl {
+            repl.start();
+        }
     }
 
     /// Write transactions begun by this store instance (tests/ops).
@@ -503,6 +608,7 @@ impl Store {
             db_path: std::path::PathBuf::from(db_path),
             artifact_root,
             ha_gate,
+            repl: None,
             scheduler_latency_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scheduler_assignments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             checkpoint_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -578,25 +684,26 @@ impl Store {
         let now = now_iso();
         let adapters = serde_json::to_string(&req.adapters)?;
         let repositories = serde_json::to_string(&req.repositories)?;
-        sqlx::query(
-            "INSERT INTO nodes (id, name, status, max_concurrency, adapters, repositories, active_attempts, last_heartbeat_at, created_at, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows) \
-             VALUES (?, ?, 'online', ?, ?, ?, 0, ?, ?, 0, 0, 0, 0) \
-             ON CONFLICT(id) DO UPDATE SET \
-                name = excluded.name, \
-                max_concurrency = excluded.max_concurrency, \
-                adapters = excluded.adapters, \
-                repositories = excluded.repositories, \
-                last_heartbeat_at = excluded.last_heartbeat_at, \
-                status = CASE WHEN nodes.status IN ('offline','pending') THEN 'online' ELSE nodes.status END",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO nodes (id, name, status, max_concurrency, adapters, repositories, active_attempts, last_heartbeat_at, created_at, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows) \
+                 VALUES (?, ?, 'online', ?, ?, ?, 0, ?, ?, 0, 0, 0, 0) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                    name = excluded.name, \
+                    max_concurrency = excluded.max_concurrency, \
+                    adapters = excluded.adapters, \
+                    repositories = excluded.repositories, \
+                    last_heartbeat_at = excluded.last_heartbeat_at, \
+                    status = CASE WHEN nodes.status IN ('offline','pending') THEN 'online' ELSE nodes.status END",
+            )
+            .bind(&req.node_id)
+            .bind(&req.name)
+            .bind(req.max_concurrency as i64)
+            .bind(&adapters)
+            .bind(&repositories)
+            .bind(&now)
+            .bind(&now),
         )
-        .bind(&req.node_id)
-        .bind(&req.name)
-        .bind(req.max_concurrency as i64)
-        .bind(&adapters)
-        .bind(&repositories)
-        .bind(&now)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }
@@ -606,13 +713,14 @@ async fn revert_expired_leases(
     pool: &SqlitePool,
     now: &str,
     gate: Option<&HaGate>,
+    repl: Option<&std::sync::Arc<crate::ha::incremental::Replicator>>,
 ) -> Result<usize> {
     // Race-safe (hardening P0 item 7): a single `BEGIN IMMEDIATE` transaction
     // selects AND cancels expired leases so a concurrent `ack_attempt` cannot
     // double-flip. The per-attempt cancel is CAS (`status = 'assigned'`), and we
     // only requeue the task / decrement `active_attempts` for rows we actually
     // moved — never for an attempt that was already ACKed or terminal.
-    let mut tx = begin_checked(pool, gate).await?;
+    let mut tx = begin_checked(pool, gate, repl).await?;
     let rows = sqlx::query(
         "SELECT id, task_id, node_id FROM attempts WHERE status = 'assigned' AND ack_deadline < ?",
     )
@@ -661,7 +769,12 @@ async fn revert_expired_leases(
     Ok(reverted)
 }
 
-async fn mark_offline_nodes(pool: &SqlitePool, now: &str, gate: Option<&HaGate>) -> Result<()> {
+async fn mark_offline_nodes(
+    pool: &SqlitePool,
+    now: &str,
+    gate: Option<&HaGate>,
+    repl: Option<&std::sync::Arc<crate::ha::incremental::Replicator>>,
+) -> Result<()> {
     // Race-safe (hardening P0 item 7): CAS `online` -> `offline` under a single
     // write transaction and only run `lose_node_attempts` for nodes we actually
     // flipped. A concurrent heartbeat re-asserting `online` (via
@@ -669,7 +782,7 @@ async fn mark_offline_nodes(pool: &SqlitePool, now: &str, gate: Option<&HaGate>)
     let cutoff = chrono::DateTime::parse_from_rfc3339(now)
         .map(|d| (d - chrono::Duration::seconds(30)).to_rfc3339())
         .unwrap_or_else(|_| (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339());
-    let mut tx = begin_checked(pool, gate).await?;
+    let mut tx = begin_checked(pool, gate, repl).await?;
     let rows = sqlx::query(
         "SELECT id FROM nodes WHERE status = 'online' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)",
     )

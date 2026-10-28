@@ -20,14 +20,15 @@ impl Store {
         let expires_at = iso_plus_secs(600);
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO enrollment_tokens (id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO enrollment_tokens (id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&hash)
+            .bind(&expires_at)
+            .bind(&now),
         )
-        .bind(&id)
-        .bind(&hash)
-        .bind(&expires_at)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok((token, expires_at))
     }
@@ -127,8 +128,10 @@ impl Store {
         // same storage shape as `adapters`/`repositories` above.
         let repo_states = serde_json::to_string(&req.repo_states)?;
         let now = now_iso();
-        let affected = sqlx::query(
-            "UPDATE nodes SET name = ?, \
+        let affected = self
+            .write_one(
+                sqlx::query(
+                    "UPDATE nodes SET name = ?, \
                status = CASE WHEN status = 'revoked' THEN 'revoked' ELSE ? END, \
                agent_version = ?, max_concurrency = ?, adapters = ?, repositories = ?, \
                load_avg = ?, free_disk_mb = ?, free_memory_mb = ?, cpu_count = ?, mem_available_mb = ?, last_heartbeat_at = ?, \
@@ -136,47 +139,47 @@ impl Store {
                outbox_bytes = ?, artifact_spool_bytes = ?, \
                outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ? \
              WHERE id = ?",
-        )
-        // active_attempts is intentionally not heartbeat-settable: it is the
-        // CP-authoritative quota counter (assign/complete + reconcile), and a
-        // stale or lying node report could break tasks_max enforcement.
-        .bind(&req.name)
-        .bind(node_status_str(status))
-        .bind(&req.agent_version)
-        .bind(req.max_concurrency as i64)
-        .bind(&adapters)
-        .bind(&repos)
-        .bind(req.load_avg)
-        .bind(req.free_disk_mb as i64)
-        .bind(req.free_memory_mb as i64)
-        .bind(req.cpu_count as i64)
-        .bind(req.mem_available_mb as i64)
-        .bind(&now)
-        .bind(req.unsafe_active as i64)
-        .bind(&req.permission_interception)
-        .bind(req.outbox_bytes as i64)
-        .bind(req.artifact_spool_bytes as i64)
-        .bind(req.outbox_rows as i64)
-        .bind(req.outbox_oldest_pending_age_ms as i64)
-        .bind(req.outbox_corruption_count as i64)
-        .bind(req.outbox_completion_rows as i64)
-        .bind(req.repo_lock_wait_ms as i64)
-        .bind(&req.sandbox_backend)
-        .bind(req.enforced_limits as i64)
-        .bind(req.repo_cache_bytes as i64)
-        .bind(req.workspace_bytes as i64)
-        .bind(&req.network_mode)
-        .bind(req.active_rss_mib as i64)
-        .bind(req.max_rss_mib as i64)
-        .bind(req.max_rss_mib as i64)
-        // Plan 6.11: systemd transient-scope capability.
-        .bind(req.systemd_scope_supported as i64)
-        // Plan 2.5 (#204): per-repository attach state (JSON array).
-        .bind(&repo_states)
-        .bind(node_id)
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
+                )
+                // active_attempts is intentionally not heartbeat-settable: it is the
+                // CP-authoritative quota counter (assign/complete + reconcile), and a
+                // stale or lying node report could break tasks_max enforcement.
+                .bind(&req.name)
+                .bind(node_status_str(status))
+                .bind(&req.agent_version)
+                .bind(req.max_concurrency as i64)
+                .bind(&adapters)
+                .bind(&repos)
+                .bind(req.load_avg)
+                .bind(req.free_disk_mb as i64)
+                .bind(req.free_memory_mb as i64)
+                .bind(req.cpu_count as i64)
+                .bind(req.mem_available_mb as i64)
+                .bind(&now)
+                .bind(req.unsafe_active as i64)
+                .bind(&req.permission_interception)
+                .bind(req.outbox_bytes as i64)
+                .bind(req.artifact_spool_bytes as i64)
+                .bind(req.outbox_rows as i64)
+                .bind(req.outbox_oldest_pending_age_ms as i64)
+                .bind(req.outbox_corruption_count as i64)
+                .bind(req.outbox_completion_rows as i64)
+                .bind(req.repo_lock_wait_ms as i64)
+                .bind(&req.sandbox_backend)
+                .bind(req.enforced_limits as i64)
+                .bind(req.repo_cache_bytes as i64)
+                .bind(req.workspace_bytes as i64)
+                .bind(&req.network_mode)
+                .bind(req.active_rss_mib as i64)
+                .bind(req.max_rss_mib as i64)
+                .bind(req.max_rss_mib as i64)
+                // Plan 6.11: systemd transient-scope capability.
+                .bind(req.systemd_scope_supported as i64)
+                // Plan 2.5 (#204): per-repository attach state (JSON array).
+                .bind(&repo_states)
+                .bind(node_id),
+            )
+            .await?
+            .rows_affected();
         if affected == 1 && status == NodeStatus::Offline {
             // Race-safe (same discipline as `mark_offline_nodes`): the flip
             // above and the loss sweep are not atomic together, so a poll
@@ -222,13 +225,14 @@ impl Store {
     /// lose any in-flight attempts (Stage 1.2).
     pub async fn revoke_node(&self, node_id: &str) -> Result<bool> {
         let now = now_iso();
-        let affected =
-            sqlx::query("UPDATE nodes SET status = 'revoked', revoked_at = ? WHERE id = ?")
-                .bind(&now)
-                .bind(node_id)
-                .execute(&self.pool)
-                .await?
-                .rows_affected();
+        let affected = self
+            .write_one(
+                sqlx::query("UPDATE nodes SET status = 'revoked', revoked_at = ? WHERE id = ?")
+                    .bind(&now)
+                    .bind(node_id),
+            )
+            .await?
+            .rows_affected();
         if affected == 1 {
             self.audit("node", Some(node_id), "revoke", None, None)
                 .await?;
@@ -243,10 +247,12 @@ impl Store {
     /// undrained. In-flight attempts are untouched; the heartbeat keeps the
     /// node online so maintenance can drain gracefully.
     pub async fn set_node_drained(&self, node_id: &str, drained: bool) -> Result<bool> {
-        let affected = sqlx::query("UPDATE nodes SET drained = ? WHERE id = ?")
-            .bind(drained as i64)
-            .bind(node_id)
-            .execute(&self.pool)
+        let affected = self
+            .write_one(
+                sqlx::query("UPDATE nodes SET drained = ? WHERE id = ?")
+                    .bind(drained as i64)
+                    .bind(node_id),
+            )
             .await?
             .rows_affected();
         if affected == 1 {
@@ -279,15 +285,17 @@ impl Store {
     /// Revoke a user session by jti (JWT ID).
     pub async fn revoke_session(&self, jti: &str, username: &str) -> Result<bool> {
         let now = now_iso();
-        let affected = sqlx::query(
-            "INSERT OR IGNORE INTO revoked_sessions (jti, username, revoked_at) VALUES (?, ?, ?)",
-        )
-        .bind(jti)
-        .bind(username)
-        .bind(&now)
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
+        let affected = self
+            .write_one(
+                sqlx::query(
+                    "INSERT OR IGNORE INTO revoked_sessions (jti, username, revoked_at) VALUES (?, ?, ?)",
+                )
+                .bind(jti)
+                .bind(username)
+                .bind(&now),
+            )
+            .await?
+            .rows_affected();
         Ok(affected == 1)
     }
 

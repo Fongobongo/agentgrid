@@ -17,13 +17,16 @@ impl Store {
     /// (the handler then drops the replay). Uses the write txn (single
     /// writer) so two concurrent replays cannot both insert.
     pub async fn webhook_delivery_fresh(&self, guid: &str) -> Result<bool> {
-        let n =
-            sqlx::query("INSERT OR IGNORE INTO webhook_deliveries (guid, seen_at) VALUES (?, ?)")
+        let n = self
+            .write_one(
+                sqlx::query(
+                    "INSERT OR IGNORE INTO webhook_deliveries (guid, seen_at) VALUES (?, ?)",
+                )
                 .bind(guid)
-                .bind(now_iso())
-                .execute(&self.pool)
-                .await?
-                .rows_affected();
+                .bind(now_iso()),
+            )
+            .await?
+            .rows_affected();
         Ok(n == 1)
     }
 
@@ -31,38 +34,39 @@ impl Store {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
-        sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&req.repository)
+            .bind(&req.prompt)
+            .bind(&req.adapter)
+            .bind(&req.requested_node_id)
+            .bind(&req.base_commit)
+            .bind(&req.parent_acp_session_id)
+            .bind(&req.network_mode)
+            .bind(&now)
+            .bind(timeout_secs)
+            .bind(&req.validation_command)
+            .bind(&req.security_profile)
+            .bind(&req.group_id)
+            .bind(&req.agent_id)
+            .bind(&req.consensus_group_id)
+            .bind(&req.consensus_member)
+            .bind(req.opencode_override.as_ref().map(|o| serde_json::to_string(o).unwrap_or_default()))
+            .bind(req.github_push)
+            .bind(&req.github_repo)
+            .bind(req.github_issue)
+            .bind(&req.github_base_ref)
+            .bind(req.github_create)
+            .bind(req.max_attempts)
+            .bind(req.consensus_mode.as_deref().unwrap_or("solve"))
+            .bind(&req.review_of)
+            .bind(req.max_tokens.map(|v| v as i64))
+            .bind(req.max_cost_cents.map(|v| v as i64)),
         )
-        .bind(&id)
-        .bind(&req.repository)
-        .bind(&req.prompt)
-        .bind(&req.adapter)
-        .bind(&req.requested_node_id)
-        .bind(&req.base_commit)
-        .bind(&req.parent_acp_session_id)
-        .bind(&req.network_mode)
-        .bind(&now)
-        .bind(timeout_secs)
-        .bind(&req.validation_command)
-        .bind(&req.security_profile)
-        .bind(&req.group_id)
-        .bind(&req.agent_id)
-        .bind(&req.consensus_group_id)
-        .bind(&req.consensus_member)
-        .bind(req.opencode_override.as_ref().map(|o| serde_json::to_string(o).unwrap_or_default()))
-        .bind(req.github_push)
-        .bind(&req.github_repo)
-        .bind(req.github_issue)
-        .bind(&req.github_base_ref)
-        .bind(req.github_create)
-        .bind(req.max_attempts)
-        .bind(req.consensus_mode.as_deref().unwrap_or("solve"))
-        .bind(&req.review_of)
-        .bind(req.max_tokens.map(|v| v as i64))
-        .bind(req.max_cost_cents.map(|v| v as i64))
-        .execute(&self.pool)
         .await?;
         Ok(TaskView {
             id,
@@ -301,21 +305,26 @@ impl Store {
         if tag.is_empty() {
             return Ok(());
         }
-        sqlx::query("INSERT OR IGNORE INTO task_tags (task_id, tag, created_at) VALUES (?, ?, ?)")
+        self.write_one(
+            sqlx::query(
+                "INSERT OR IGNORE INTO task_tags (task_id, tag, created_at) VALUES (?, ?, ?)",
+            )
             .bind(task_id)
             .bind(tag)
-            .bind(now_iso())
-            .execute(&self.pool)
-            .await?;
+            .bind(now_iso()),
+        )
+        .await?;
         Ok(())
     }
 
     /// Plan 1.3 (#13): remove a tag. Returns whether it existed.
     pub async fn remove_tag(&self, task_id: &str, tag: &str) -> Result<bool> {
-        let r = sqlx::query("DELETE FROM task_tags WHERE task_id = ? AND tag = ?")
-            .bind(task_id)
-            .bind(tag)
-            .execute(&self.pool)
+        let r = self
+            .write_one(
+                sqlx::query("DELETE FROM task_tags WHERE task_id = ? AND tag = ?")
+                    .bind(task_id)
+                    .bind(tag),
+            )
             .await?;
         Ok(r.rows_affected() > 0)
     }
@@ -338,11 +347,12 @@ impl Store {
     /// Kept out of `CreateTaskRequest` on purpose — only the rework route
     /// ever sets it, so the ~20 other constructors stay untouched.
     pub async fn set_task_rework_of(&self, task_id: &str, attempt_id: &str) -> Result<()> {
-        sqlx::query("UPDATE tasks SET rework_of = ? WHERE id = ?")
-            .bind(attempt_id)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE tasks SET rework_of = ? WHERE id = ?")
+                .bind(attempt_id)
+                .bind(task_id),
+        )
+        .await?;
         Ok(())
     }
 

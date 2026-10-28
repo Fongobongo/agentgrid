@@ -206,6 +206,9 @@ pub async fn manual_promote(state: &Arc<AppState>) -> Result<()> {
             tracing::warn!("manual promotion catch-up failed: {e}");
         }
     }
+    if rt.shared.need_full_snapshot() {
+        anyhow::bail!("local replica must restore the leader snapshot before promotion");
+    }
     promote(state, term).await
 }
 
@@ -217,6 +220,12 @@ pub async fn demote(state: &Arc<AppState>, reason: &str) {
     }
     rt.gate.demote();
     rt.shared.clear_leader();
+    // A demoted leader may have committed writes the rest of the cluster never
+    // saw. Its local copy is therefore untrusted: restore the new leader's
+    // snapshot before campaigning again, and report a zero replication position
+    // so it can still vote for a fresh candidate.
+    rt.shared.set_need_full_snapshot();
+    rt.shared.set_applied_seq(0);
     state
         .ws_registry
         .close_all(
@@ -270,6 +279,10 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
             }
             tracing::debug!("pre-election catch-up failed (leader unreachable): {e}");
         }
+    }
+    if rt.shared.need_full_snapshot() {
+        tracing::info!("not campaigning: local database awaits a full snapshot");
+        return Ok(());
     }
     let term = rt.shared.term() + 1;
     rt.shared
@@ -336,15 +349,22 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
 
 async fn promote(state: &Arc<AppState>, term: u64) -> Result<()> {
     let rt = &state.ha;
+    if rt.shared.need_full_snapshot() {
+        anyhow::bail!("refusing to promote a replica that needs a full snapshot");
+    }
     let _guard = rt.shared.promote_lock.lock().await;
     if rt.is_leader() || rt.shared.term() != term {
         return Ok(());
     }
     let db_epoch = state.store.ha_epoch().await?;
     let epoch = term.max(db_epoch + 1);
+    // Snapshot mode reserves a fresh sequence for the snapshot the new leader
+    // ships; incremental modes continue from the applied position so standbys
+    // do not see a gap in the changeset stream.
+    let bump_seq = rt.config.rpo_mode == RpoMode::Snapshot;
     let seq = state
         .store
-        .promote_epoch(epoch, term, &rt.config.node_id)
+        .promote_epoch(epoch, term, &rt.config.node_id, bump_seq)
         .await?;
     rt.gate.promote_for(epoch, rt.config.lease_ttl);
     rt.shared
@@ -422,6 +442,13 @@ async fn leader_loop(state: Arc<AppState>) {
         if !rt.is_leader() {
             continue;
         }
+        // Incremental replication fell outside its RPO budget: the leader can
+        // no longer promise the configured durability, so stop accepting
+        // writes and let a caught-up replica take over.
+        if rt.shared.take_replication_lost() {
+            demote(&state, "incremental replication lost").await;
+            continue;
+        }
         let met =
             acks >= voters.majority() && voters.write_quorum_met(data_acks, rt.config.rpo_mode);
         if met {
@@ -435,10 +462,12 @@ async fn leader_loop(state: Arc<AppState>) {
                 "HA quorum acknowledgement missing; lease will expire"
             );
         }
-        if next_snapshot.elapsed() >= rt.config.snapshot_interval {
+        let requested = rt.shared.take_snapshot_request();
+        if requested || next_snapshot.elapsed() >= rt.config.snapshot_interval {
             next_snapshot = Instant::now();
             let epoch = rt.gate.epoch();
             let term = rt.shared.term();
+            let _create = rt.shared.snapshot_lock.lock().await;
             match snapshot::create(&state.store, &rt.shared, &rt.config.cluster_id, epoch, term)
                 .await
             {
@@ -520,6 +549,7 @@ pub async fn status_of(rt: &HaRuntime, store: Option<&Store>) -> Result<super::p
         applied_seq,
         schema_version,
         snapshot_id: rt.shared.snapshot_id(),
+        snapshot_seq: rt.shared.snapshot_seq(),
         snapshot_created_unix: rt.shared.snapshot_created_unix(),
         rpo_mode: rpo_str(rt.config.rpo_mode).to_string(),
         data_replicas: rt.config.data_replicas,

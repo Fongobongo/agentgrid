@@ -15,6 +15,16 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::Connection;
 
 use super::Store;
+use crate::ha::incremental;
+use crate::store::WRITE_GATE;
+
+/// Result of applying a replicated changeset batch on a standby.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    Applied { seq: u64 },
+    Duplicate,
+    Rejected { applied_seq: u64, reason: String },
+}
 
 /// Result of validating a snapshot file before applying it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,30 +72,48 @@ impl Store {
     }
 
     /// Leader-side promotion: persist the new epoch under an unfenced write
-    /// transaction (the gate is flipped only after this commits) and reserve a
-    /// fresh replication sequence for the snapshot the new leader will ship.
-    pub async fn promote_epoch(&self, epoch: u64, term: u64, leader_id: &str) -> Result<u64> {
+    /// transaction (the gate is flipped only after this commits). In snapshot
+    /// mode it also reserves a fresh replication sequence for the snapshot the
+    /// new leader will ship; incremental modes keep the current sequence so
+    /// standbys do not see a gap.
+    pub async fn promote_epoch(
+        &self,
+        epoch: u64,
+        term: u64,
+        leader_id: &str,
+        bump_seq: bool,
+    ) -> Result<u64> {
         let seq = self
-            .promote_epoch_inner(epoch, term, leader_id)
+            .promote_epoch_inner(epoch, term, leader_id, bump_seq)
             .await
             .context("persist ha_cluster_state epoch")?;
         Ok(seq)
     }
 
-    async fn promote_epoch_inner(&self, epoch: u64, term: u64, leader_id: &str) -> Result<u64> {
+    async fn promote_epoch_inner(
+        &self,
+        epoch: u64,
+        term: u64,
+        leader_id: &str,
+        bump_seq: bool,
+    ) -> Result<u64> {
         let schema = self.schema_version().await?;
         let mut tx = super::begin_immediate(&self.pool).await?;
-        sqlx::query(
+        let sql = if bump_seq {
             "UPDATE ha_cluster_state SET epoch = ?, term = ?, leader_id = ?, \
-             schema_version = ?, repl_seq = repl_seq + 1, updated_at = ? WHERE id = 1",
-        )
-        .bind(epoch as i64)
-        .bind(term as i64)
-        .bind(leader_id)
-        .bind(schema)
-        .bind(super::now_iso())
-        .execute(&mut *tx)
-        .await?;
+             schema_version = ?, repl_seq = repl_seq + 1, updated_at = ? WHERE id = 1"
+        } else {
+            "UPDATE ha_cluster_state SET epoch = ?, term = ?, leader_id = ?, \
+             schema_version = ?, updated_at = ? WHERE id = 1"
+        };
+        sqlx::query(sql)
+            .bind(epoch as i64)
+            .bind(term as i64)
+            .bind(leader_id)
+            .bind(schema)
+            .bind(super::now_iso())
+            .execute(&mut *tx)
+            .await?;
         let seq: i64 = sqlx::query_scalar("SELECT repl_seq FROM ha_cluster_state WHERE id = 1")
             .fetch_one(&mut *tx)
             .await?;
@@ -132,6 +160,111 @@ impl Store {
             .await?;
         conn.close().await.ok();
         Ok(SnapshotCheck { schema_version })
+    }
+
+    /// `VACUUM INTO` a snapshot and return the replication sequence it
+    /// contains. The write gate stays held across both steps, so no commit can
+    /// land between the sequence read and the copy.
+    pub async fn snapshot_to(&self, name: &str) -> Result<u64> {
+        let _permit = WRITE_GATE
+            .acquire()
+            .await
+            .expect("write gate semaphore closed");
+        let seq = self.ha_repl_seq().await?;
+        self.backup_to(name).await?;
+        Ok(seq)
+    }
+
+    /// Keep a consistent copy of the local database that may hold writes the
+    /// cluster never acknowledged (a demoted leader). Best effort: a failed
+    /// quarantine is logged, not fatal.
+    pub async fn quarantine(&self, epoch: u64) -> Option<String> {
+        let name = format!(
+            "control-plane.db.stale-{epoch}-{}",
+            chrono::Utc::now().timestamp()
+        );
+        match self.backup_to(&name).await {
+            Ok(()) => {
+                tracing::warn!(file = %name, "quarantined local database before snapshot restore");
+                Some(name)
+            }
+            Err(e) => {
+                tracing::warn!("database quarantine failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Apply a replicated changeset batch (`first_seq..=last_seq`) on a
+    /// standby. Commits with `synchronous=FULL` so an acknowledged sync write
+    /// survives a standby crash. Any conflict aborts the whole batch; the
+    /// caller then falls back to a snapshot.
+    pub async fn apply_changeset_batch(
+        &self,
+        first_seq: u64,
+        last_seq: u64,
+        schema_version: i64,
+        bytes: &[u8],
+    ) -> Result<ApplyOutcome> {
+        // Serialise applies (and re-read the watermark under the gate) so two
+        // peer requests cannot both pass the gap check and apply the batch.
+        let _permit = WRITE_GATE
+            .acquire()
+            .await
+            .expect("write gate semaphore closed");
+        let local_schema = self.schema_version().await?;
+        let applied = self.ha_repl_seq().await?;
+        if schema_version != local_schema {
+            return Ok(ApplyOutcome::Rejected {
+                applied_seq: applied,
+                reason: format!("schema {schema_version} != local {local_schema}"),
+            });
+        }
+        if last_seq <= applied {
+            return Ok(ApplyOutcome::Duplicate);
+        }
+        if first_seq != applied + 1 {
+            return Ok(ApplyOutcome::Rejected {
+                applied_seq: applied,
+                reason: format!("gap: expected {}, batch starts {first_seq}", applied + 1),
+            });
+        }
+        let mut conn = self.pool.acquire().await?;
+        // WAL + NORMAL is not durable across an OS crash; the apply path pays
+        // the fsync so a data-quorum ack is never lost with the standby.
+        sqlx::query("PRAGMA synchronous=FULL")
+            .execute(&mut *conn)
+            .await?;
+        let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("PRAGMA defer_foreign_keys=ON")
+            .execute(&mut *tx)
+            .await?;
+        let applied_raw = {
+            let mut handle = tx.lock_handle().await?;
+            let db = handle.as_raw_handle().as_ptr();
+            // SAFETY: `db` is a live handle and the lock is held for the call.
+            unsafe { incremental::apply_raw(db, bytes) }
+        };
+        if let Err(e) = applied_raw {
+            tx.rollback().await?;
+            sqlx::query("PRAGMA synchronous=NORMAL")
+                .execute(&mut *conn)
+                .await?;
+            return Ok(ApplyOutcome::Rejected {
+                applied_seq: applied,
+                reason: format!("apply failed: {e}"),
+            });
+        }
+        sqlx::query("UPDATE ha_cluster_state SET repl_seq = ?, updated_at = ? WHERE id = 1")
+            .bind(last_seq as i64)
+            .bind(super::now_iso())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        sqlx::query("PRAGMA synchronous=NORMAL")
+            .execute(&mut *conn)
+            .await?;
+        Ok(ApplyOutcome::Applied { seq: last_seq })
     }
 
     /// Apply `snapshot` into the live database file via the SQLite backup API.

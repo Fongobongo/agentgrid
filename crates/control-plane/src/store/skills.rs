@@ -15,20 +15,21 @@ impl Store {
         decided_by: &str,
     ) -> Result<()> {
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO skills_trust (name, source, trusted, decided_by, decided_at) \
-             VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT (name, source) DO UPDATE SET \
-                 trusted = excluded.trusted, \
-                 decided_by = excluded.decided_by, \
-                 decided_at = excluded.decided_at",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO skills_trust (name, source, trusted, decided_by, decided_at) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (name, source) DO UPDATE SET \
+                     trusted = excluded.trusted, \
+                     decided_by = excluded.decided_by, \
+                     decided_at = excluded.decided_at",
+            )
+            .bind(name)
+            .bind(source)
+            .bind(if trusted { 1 } else { 0 })
+            .bind(decided_by)
+            .bind(&now),
         )
-        .bind(name)
-        .bind(source)
-        .bind(if trusted { 1 } else { 0 })
-        .bind(decided_by)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }
@@ -94,23 +95,24 @@ impl Store {
     /// Stage 13: MCP server registry. Insert or replace a trusted server.
     pub async fn upsert_mcp_server(&self, body: &McpServerCreate) -> Result<McpServer> {
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO mcp_servers \
-             (id, name, command, args, env_requirements, enabled, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET \
-                 name = excluded.name, command = excluded.command, \
-                 args = excluded.args, env_requirements = excluded.env_requirements, \
-                 enabled = excluded.enabled",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO mcp_servers \
+                 (id, name, command, args, env_requirements, enabled, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                     name = excluded.name, command = excluded.command, \
+                     args = excluded.args, env_requirements = excluded.env_requirements, \
+                     enabled = excluded.enabled",
+            )
+            .bind(&body.id)
+            .bind(&body.name)
+            .bind(&body.command)
+            .bind(serde_json::to_string(&body.args).unwrap_or_else(|_| "[]".into()))
+            .bind(serde_json::to_string(&body.env_requirements).unwrap_or_else(|_| "[]".into()))
+            .bind(if body.enabled { 1i64 } else { 0 })
+            .bind(&now),
         )
-        .bind(&body.id)
-        .bind(&body.name)
-        .bind(&body.command)
-        .bind(serde_json::to_string(&body.args).unwrap_or_else(|_| "[]".into()))
-        .bind(serde_json::to_string(&body.env_requirements).unwrap_or_else(|_| "[]".into()))
-        .bind(if body.enabled { 1i64 } else { 0 })
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(self
             .get_mcp_server(&body.id)
@@ -140,9 +142,8 @@ impl Store {
     }
 
     pub async fn delete_mcp_server(&self, id: &str) -> Result<bool> {
-        let affected = sqlx::query("DELETE FROM mcp_servers WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
+        let affected = self
+            .write_one(sqlx::query("DELETE FROM mcp_servers WHERE id = ?").bind(id))
             .await?
             .rows_affected();
         Ok(affected == 1)

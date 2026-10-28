@@ -148,7 +148,7 @@ async fn epoch_and_seq_bookkeeping() {
     let (store, path) = open_store("epoch").await;
     assert_eq!(store.ha_epoch().await.unwrap(), 0);
     assert_eq!(store.ha_repl_seq().await.unwrap(), 0);
-    let seq = store.promote_epoch(3, 2, "cp-a").await.unwrap();
+    let seq = store.promote_epoch(3, 2, "cp-a", true).await.unwrap();
     assert_eq!(seq, 1);
     assert_eq!(store.ha_epoch().await.unwrap(), 3);
     assert_eq!(store.ha_term().await.unwrap(), 2);
@@ -165,7 +165,7 @@ async fn snapshot_round_trips_into_a_second_store() {
         .unwrap();
     // The leader persists its epoch before snapshotting; the restored copy
     // must carry that epoch.
-    src.promote_epoch(1, 1, "cp-a").await.unwrap();
+    src.promote_epoch(1, 1, "cp-a", true).await.unwrap();
     let runtime = rt("cp-a");
     let manifest = snapshot::create(&src, &runtime.shared, "prod", 1, 1)
         .await
@@ -207,7 +207,7 @@ async fn promoted_standby_replicates_and_fences_old_leader() {
     let leader = Store::open_with_gate(leader_path.to_str().unwrap(), Some(leader_rt.gate.clone()))
         .await
         .unwrap();
-    leader.promote_epoch(1, 1, "cp-a").await.unwrap();
+    leader.promote_epoch(1, 1, "cp-a", true).await.unwrap();
     leader_rt
         .gate
         .promote_for(1, std::time::Duration::from_secs(30));
@@ -234,7 +234,7 @@ async fn promoted_standby_replicates_and_fences_old_leader() {
     assert_eq!(standby.user_count().await.unwrap(), 1);
 
     // The standby takes over at a higher epoch and can write.
-    let seq = standby.promote_epoch(2, 2, "cp-b").await.unwrap();
+    let seq = standby.promote_epoch(2, 2, "cp-b", true).await.unwrap();
     standby_rt
         .gate
         .promote_for(2, std::time::Duration::from_secs(30));
@@ -273,7 +273,7 @@ async fn manual_promotion_flips_gate_and_writes_epoch() {
     assert!(store.write_txn().await.is_err());
 
     // Simulate the promotion the election loop performs.
-    store.promote_epoch(1, 1, "cp-a").await.unwrap();
+    store.promote_epoch(1, 1, "cp-a", true).await.unwrap();
     gate.promote_for(1, std::time::Duration::from_secs(5));
     assert_eq!(gate.role(), HaRole::Leader);
     assert!(store.write_txn().await.is_ok());
@@ -282,4 +282,131 @@ async fn manual_promotion_flips_gate_and_writes_epoch() {
     assert!(store.write_txn().await.is_err());
     store.pool.close().await;
     cleanup(&path);
+}
+
+#[tokio::test]
+async fn incremental_promotion_keeps_repl_seq() {
+    let (store, path) = open_store("promote-inc").await;
+    // Snapshot mode reserves a sequence for the delta the new leader ships.
+    assert_eq!(store.promote_epoch(1, 1, "cp-a", true).await.unwrap(), 1);
+    // Incremental modes keep it: a bump would open a gap the standbys cannot
+    // close without a snapshot.
+    assert_eq!(store.promote_epoch(2, 2, "cp-b", false).await.unwrap(), 1);
+    assert_eq!(store.ha_repl_seq().await.unwrap(), 1);
+    assert_eq!(store.ha_epoch().await.unwrap(), 2);
+    store.pool.close().await;
+    cleanup(&path);
+}
+
+#[cfg(feature = "ha-incremental")]
+fn rt_incremental(node_id: &str) -> Arc<HaRuntime> {
+    let mut c = HaConfig::single();
+    c.mode = HaMode::Ha;
+    c.role = NodeRole::Data;
+    c.node_id = node_id.to_string();
+    c.cluster_id = "prod".into();
+    c.cluster_token = "0123456789abcdef0123456789abcdef".into();
+    c.advertise_url = format!("http://{node_id}:7800");
+    c.allow_plaintext = true;
+    c.data_replicas = 3;
+    c.rpo_mode = super::config::RpoMode::Async;
+    c.peers = vec![];
+    HaRuntime::new(c).expect("runtime")
+}
+
+#[cfg(feature = "ha-incremental")]
+#[tokio::test]
+async fn changeset_batch_round_trip_is_idempotent() {
+    use super::incremental::Session;
+    use crate::store::ApplyOutcome;
+
+    let runtime = rt_incremental("cp-a");
+    let (src, src_path) = open_store("inc-src").await;
+    let repl = super::incremental::Replicator::new(runtime, &src.pool)
+        .await
+        .unwrap();
+    let (dst, dst_path) = open_store("inc-dst").await;
+
+    let mut tx = src.write_txn().await.unwrap();
+    let mut session = Session::attach(&mut tx, repl.tables()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash, role, created_at) \
+         VALUES ('u1', 'alice', 'x', 'admin', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let bytes = session
+        .take_changeset(&mut tx)
+        .await
+        .unwrap()
+        .expect("session recorded the insert");
+    drop(session);
+    tx.commit().await.unwrap();
+
+    let schema = repl.schema_version();
+    assert_eq!(
+        dst.apply_changeset_batch(1, 1, schema, &bytes)
+            .await
+            .unwrap(),
+        ApplyOutcome::Applied { seq: 1 }
+    );
+    assert_eq!(dst.user_count().await.unwrap(), 1);
+    assert_eq!(dst.ha_repl_seq().await.unwrap(), 1);
+
+    // Replay is a no-op, not an error (peers retry after a lost ack).
+    assert_eq!(
+        dst.apply_changeset_batch(1, 1, schema, &bytes)
+            .await
+            .unwrap(),
+        ApplyOutcome::Duplicate
+    );
+    // A gap and a schema mismatch are rejected with the local watermark.
+    assert!(matches!(
+        dst.apply_changeset_batch(3, 3, schema, &bytes)
+            .await
+            .unwrap(),
+        ApplyOutcome::Rejected { applied_seq: 1, .. }
+    ));
+    assert!(matches!(
+        dst.apply_changeset_batch(2, 2, schema + 1, &bytes)
+            .await
+            .unwrap(),
+        ApplyOutcome::Rejected { .. }
+    ));
+
+    dst.pool.close().await;
+    src.pool.close().await;
+    cleanup(&src_path);
+    cleanup(&dst_path);
+}
+
+#[cfg(feature = "ha-incremental")]
+#[tokio::test]
+async fn writes_record_changesets_and_bump_seq() {
+    let runtime = rt_incremental("cp-a");
+    let (mut src, src_path) = open_store("inc-commit").await;
+    let repl = super::incremental::Replicator::new(runtime.clone(), &src.pool)
+        .await
+        .unwrap();
+    src.attach_replicator(repl);
+
+    src.create_user("alice", "secret123", agentgrid_common::ROLE_ADMIN)
+        .await
+        .unwrap();
+    assert_eq!(src.ha_repl_seq().await.unwrap(), 1);
+    // Async mode advances the applied watermark on enqueue.
+    assert_eq!(runtime.shared.applied_seq(), 1);
+
+    src.set_shared_context("grp", "key", "value").await.unwrap();
+    assert_eq!(src.ha_repl_seq().await.unwrap(), 2);
+    assert_eq!(runtime.shared.applied_seq(), 2);
+
+    // Reads and zero-row writes record nothing and do not burn a sequence.
+    assert_eq!(src.user_count().await.unwrap(), 1);
+    src.set_node_drained("missing-node", true).await.unwrap();
+    assert_eq!(src.ha_repl_seq().await.unwrap(), 2);
+
+    src.pool.close().await;
+    cleanup(&src_path);
 }

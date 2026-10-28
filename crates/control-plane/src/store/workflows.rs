@@ -33,16 +33,17 @@ impl Store {
             Some(b) => Some(serde_json::to_string(b)?),
             None => None,
         };
-        sqlx::query(
-            "INSERT INTO workflow_templates (id, name, steps_json, budget_json, created_at) \
-             VALUES (?, ?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO workflow_templates (id, name, steps_json, budget_json, created_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(name)
+            .bind(&steps_json)
+            .bind(&budget_json)
+            .bind(&created_at),
         )
-        .bind(&id)
-        .bind(name)
-        .bind(&steps_json)
-        .bind(&budget_json)
-        .bind(&created_at)
-        .execute(&self.pool)
         .await?;
         Ok(WorkflowTemplate {
             id,
@@ -283,11 +284,12 @@ impl Store {
                 },
             )
             .await?;
-        sqlx::query("UPDATE workflow_runs SET assembly = 1, adapter = ? WHERE id = ?")
-            .bind(&adapter)
-            .bind(&run.id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE workflow_runs SET assembly = 1, adapter = ? WHERE id = ?")
+                .bind(&adapter)
+                .bind(&run.id),
+        )
+        .await?;
         Ok(WorkflowRun {
             assembly: true,
             adapter: Some(adapter),
@@ -437,18 +439,19 @@ impl Store {
         }
         let id = format!("wfsch-{}", Uuid::new_v4());
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO workflow_schedules \
-             (id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at) \
-             VALUES (?, ?, ?, ?, '', ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO workflow_schedules \
+                 (id, template_id, interval_seconds, autonomy, last_run_at, enabled, created_at) \
+                 VALUES (?, ?, ?, ?, '', ?, ?)",
+            )
+            .bind(&id)
+            .bind(template_id)
+            .bind(body.interval_seconds)
+            .bind(&body.autonomy)
+            .bind(if body.enabled { 1i64 } else { 0 })
+            .bind(&now),
         )
-        .bind(&id)
-        .bind(template_id)
-        .bind(body.interval_seconds)
-        .bind(&body.autonomy)
-        .bind(if body.enabled { 1i64 } else { 0 })
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(WorkflowSchedule {
             id,
@@ -494,9 +497,8 @@ impl Store {
 
     /// Delete a schedule. Returns whether a schedule was deleted.
     pub async fn delete_workflow_schedule(&self, id: &str) -> Result<bool> {
-        let affected = sqlx::query("DELETE FROM workflow_schedules WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
+        let affected = self
+            .write_one(sqlx::query("DELETE FROM workflow_schedules WHERE id = ?").bind(id))
             .await?
             .rows_affected();
         Ok(affected == 1)
@@ -531,15 +533,17 @@ impl Store {
             // Claim the fire slot atomically: only the tick that moves
             // last_run_at FROM its observed value creates the run. A racing
             // tick's CAS matches 0 rows and skips.
-            let claimed = sqlx::query(
-                "UPDATE workflow_schedules SET last_run_at = ? WHERE id = ? AND last_run_at = ?",
-            )
-            .bind(&now_iso)
-            .bind(&s.id)
-            .bind(&s.last_run_at)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+            let claimed = self
+                .write_one(
+                    sqlx::query(
+                        "UPDATE workflow_schedules SET last_run_at = ? WHERE id = ? AND last_run_at = ?",
+                    )
+                    .bind(&now_iso)
+                    .bind(&s.id)
+                    .bind(&s.last_run_at),
+                )
+                .await?
+                .rows_affected();
             if claimed != 1 {
                 continue;
             }
@@ -850,12 +854,13 @@ impl Store {
         status: WorkflowRunStatus,
         finished_at: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("UPDATE workflow_runs SET status = ?, finished_at = ? WHERE id = ?")
-            .bind(role_str_status(status))
-            .bind(finished_at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE workflow_runs SET status = ?, finished_at = ? WHERE id = ?")
+                .bind(role_str_status(status))
+                .bind(finished_at)
+                .bind(id),
+        )
+        .await?;
         Ok(())
     }
 
@@ -867,13 +872,14 @@ impl Store {
         let now = now_iso();
         match status {
             WorkflowStepStatus::Running => {
-                sqlx::query(
-                    "UPDATE workflow_steps SET status = ?, started_at = COALESCE(started_at, ?) WHERE id = ?",
+                self.write_one(
+                    sqlx::query(
+                        "UPDATE workflow_steps SET status = ?, started_at = COALESCE(started_at, ?) WHERE id = ?",
+                    )
+                    .bind(role_str_status(status))
+                    .bind(&now)
+                    .bind(step_run_id),
                 )
-                .bind(role_str_status(status))
-                .bind(&now)
-                .bind(step_run_id)
-                .execute(&self.pool)
                 .await?;
             }
             WorkflowStepStatus::Succeeded
@@ -881,21 +887,23 @@ impl Store {
             | WorkflowStepStatus::Blocked
             | WorkflowStepStatus::Skipped
             | WorkflowStepStatus::Cancelled => {
-                sqlx::query(
-                    "UPDATE workflow_steps SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ?",
+                self.write_one(
+                    sqlx::query(
+                        "UPDATE workflow_steps SET status = ?, finished_at = COALESCE(finished_at, ?) WHERE id = ?",
+                    )
+                    .bind(role_str_status(status))
+                    .bind(&now)
+                    .bind(step_run_id),
                 )
-                .bind(role_str_status(status))
-                .bind(&now)
-                .bind(step_run_id)
-                .execute(&self.pool)
                 .await?;
             }
             WorkflowStepStatus::Pending => {
-                sqlx::query("UPDATE workflow_steps SET status = ? WHERE id = ?")
-                    .bind(role_str_status(status))
-                    .bind(step_run_id)
-                    .execute(&self.pool)
-                    .await?;
+                self.write_one(
+                    sqlx::query("UPDATE workflow_steps SET status = ? WHERE id = ?")
+                        .bind(role_str_status(status))
+                        .bind(step_run_id),
+                )
+                .await?;
             }
         }
         Ok(())
@@ -903,20 +911,22 @@ impl Store {
 
     /// Stage 8: bump the attempt counter used by the lost-step retry policy.
     async fn set_step_attempts(&self, step_run_id: &str, attempts: u32) -> Result<()> {
-        sqlx::query("UPDATE workflow_steps SET attempts = ? WHERE id = ?")
-            .bind(attempts as i64)
-            .bind(step_run_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE workflow_steps SET attempts = ? WHERE id = ?")
+                .bind(attempts as i64)
+                .bind(step_run_id),
+        )
+        .await?;
         Ok(())
     }
 
     async fn set_role_run_task(&self, step_run_id: &str, task_id: &str) -> Result<()> {
-        sqlx::query("UPDATE role_runs SET task_id = ? WHERE step_run_id = ?")
-            .bind(task_id)
-            .bind(step_run_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE role_runs SET task_id = ? WHERE step_run_id = ?")
+                .bind(task_id)
+                .bind(step_run_id),
+        )
+        .await?;
         Ok(())
     }
 
@@ -925,11 +935,12 @@ impl Store {
         step_run_id: &str,
         status: WorkflowStepStatus,
     ) -> Result<()> {
-        sqlx::query("UPDATE role_runs SET status = ? WHERE step_run_id = ?")
-            .bind(role_str_status(status))
-            .bind(step_run_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE role_runs SET status = ? WHERE step_run_id = ?")
+                .bind(role_str_status(status))
+                .bind(step_run_id),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1153,11 +1164,12 @@ impl Store {
 
     /// Stage 13: stamp a pending plan onto the run row (read on approval).
     async fn set_workflow_run_plan(&self, run_id: &str, plan: &str) -> Result<()> {
-        sqlx::query("UPDATE workflow_runs SET plan = ? WHERE id = ?")
-            .bind(plan)
-            .bind(run_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE workflow_runs SET plan = ? WHERE id = ?")
+                .bind(plan)
+                .bind(run_id),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1433,17 +1445,18 @@ impl Store {
                 tail_from = from;
                 tail_to = to;
             }
-            sqlx::query(
-                "UPDATE workflow_runs SET handoff_streak = ?, handoff_streak_max = ?, \
-                     handoff_last_from = ?, handoff_last_to = ? \
-                 WHERE id = ?",
+            self.write_one(
+                sqlx::query(
+                    "UPDATE workflow_runs SET handoff_streak = ?, handoff_streak_max = ?, \
+                         handoff_last_from = ?, handoff_last_to = ? \
+                     WHERE id = ?",
+                )
+                .bind(cur)
+                .bind(longest)
+                .bind(tail_from)
+                .bind(tail_to)
+                .bind(&run_id),
             )
-            .bind(cur)
-            .bind(longest)
-            .bind(tail_from)
-            .bind(tail_to)
-            .bind(&run_id)
-            .execute(&self.pool)
             .await?;
         }
         Ok(())
@@ -1745,19 +1758,21 @@ impl Store {
                         // than WEDGE_GRACE_SECS; a live claim re-links within
                         // milliseconds, a true wedge stays stale forever.
                         const WEDGE_GRACE_SECS: i64 = 60;
-                        let reset = sqlx::query(
-                            "UPDATE workflow_steps SET status = 'pending', \
-                             started_at = NULL \
-                             WHERE id = ? AND status = 'running' \
-                             AND COALESCE(started_at, '') <> '' \
-                             AND julianday(started_at) * 86400.0 \
-                                 < julianday('now') * 86400.0 - ?",
-                        )
-                        .bind(&step.id)
-                        .bind(WEDGE_GRACE_SECS)
-                        .execute(&self.pool)
-                        .await?
-                        .rows_affected()
+                        let reset = self
+                            .write_one(
+                                sqlx::query(
+                                    "UPDATE workflow_steps SET status = 'pending', \
+                                     started_at = NULL \
+                                     WHERE id = ? AND status = 'running' \
+                                     AND COALESCE(started_at, '') <> '' \
+                                     AND julianday(started_at) * 86400.0 \
+                                         < julianday('now') * 86400.0 - ?",
+                                )
+                                .bind(&step.id)
+                                .bind(WEDGE_GRACE_SECS),
+                            )
+                            .await?
+                            .rows_affected()
                             > 0;
                         if reset {
                             tracing::warn!(
@@ -1779,16 +1794,18 @@ impl Store {
                                     // concurrently, and without the CAS both
                                     // would emit the handoff / fire plan
                                     // expansion twice.
-                                    let claimed = sqlx::query(
-                                        "UPDATE workflow_steps SET status = 'succeeded', \
-                                         finished_at = COALESCE(finished_at, ?) \
-                                         WHERE id = ? AND status = 'running'",
-                                    )
-                                    .bind(now_iso())
-                                    .bind(&step.id)
-                                    .execute(&self.pool)
-                                    .await?
-                                    .rows_affected()
+                                    let claimed = self
+                                        .write_one(
+                                            sqlx::query(
+                                                "UPDATE workflow_steps SET status = 'succeeded', \
+                                                 finished_at = COALESCE(finished_at, ?) \
+                                                 WHERE id = ? AND status = 'running'",
+                                            )
+                                            .bind(now_iso())
+                                            .bind(&step.id),
+                                        )
+                                        .await?
+                                        .rows_affected()
                                         > 0;
                                     if !claimed {
                                         continue;
@@ -1866,16 +1883,18 @@ impl Store {
                                     // CAS on the attempts counter: concurrent
                                     // ticks must not both claim the same retry
                                     // (that created duplicate retry tasks).
-                                    let claimed = sqlx::query(
-                                        "UPDATE workflow_steps SET attempts = ? \
-                                         WHERE id = ? AND attempts = ?",
-                                    )
-                                    .bind(attempts as i64)
-                                    .bind(&step.id)
-                                    .bind(step.attempts as i64)
-                                    .execute(&self.pool)
-                                    .await?
-                                    .rows_affected()
+                                    let claimed = self
+                                        .write_one(
+                                            sqlx::query(
+                                                "UPDATE workflow_steps SET attempts = ? \
+                                                 WHERE id = ? AND attempts = ?",
+                                            )
+                                            .bind(attempts as i64)
+                                            .bind(&step.id)
+                                            .bind(step.attempts as i64),
+                                        )
+                                        .await?
+                                        .rows_affected()
                                         > 0;
                                     if !claimed {
                                         continue;
@@ -1995,16 +2014,18 @@ impl Store {
                                             // create a new task with feedback.
                                             let u = upstream.unwrap();
                                             let new_attempts = u.attempts + 1;
-                                            let claimed = sqlx::query(
-                                                "UPDATE workflow_steps SET attempts = ? \
-                                                 WHERE id = ? AND attempts = ?",
-                                            )
-                                            .bind(new_attempts as i64)
-                                            .bind(&u.id)
-                                            .bind(u.attempts as i64)
-                                            .execute(&self.pool)
-                                            .await?
-                                            .rows_affected()
+                                            let claimed = self
+                                                .write_one(
+                                                    sqlx::query(
+                                                        "UPDATE workflow_steps SET attempts = ? \
+                                                         WHERE id = ? AND attempts = ?",
+                                                    )
+                                                    .bind(new_attempts as i64)
+                                                    .bind(&u.id)
+                                                    .bind(u.attempts as i64),
+                                                )
+                                                .await?
+                                                .rows_affected()
                                                 > 0;
                                             if claimed {
                                                 let prompt = format!(
@@ -2114,16 +2135,18 @@ impl Store {
                                     }
                                 }
                                 TaskStatus::Cancelled => {
-                                    let claimed = sqlx::query(
-                                        "UPDATE workflow_steps SET status = 'cancelled', \
-                                         finished_at = COALESCE(finished_at, ?) \
-                                         WHERE id = ? AND status = 'running'",
-                                    )
-                                    .bind(now_iso())
-                                    .bind(&step.id)
-                                    .execute(&self.pool)
-                                    .await?
-                                    .rows_affected()
+                                    let claimed = self
+                                        .write_one(
+                                            sqlx::query(
+                                                "UPDATE workflow_steps SET status = 'cancelled', \
+                                                 finished_at = COALESCE(finished_at, ?) \
+                                                 WHERE id = ? AND status = 'running'",
+                                            )
+                                            .bind(now_iso())
+                                            .bind(&step.id),
+                                        )
+                                        .await?
+                                        .rows_affected()
                                         > 0;
                                     if claimed {
                                         status_by_id

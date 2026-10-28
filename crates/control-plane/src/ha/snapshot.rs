@@ -69,6 +69,11 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Leader: write `ha-snap-<epoch>-<seq>.db` + manifest and advertise it.
+///
+/// In incremental modes the snapshot is cut at the current replication
+/// sequence under the write gate, so it is a consistent base for the changesets
+/// that follow. When nothing has committed since the advertised snapshot, that
+/// snapshot is reused instead of writing an identical copy.
 pub async fn create(
     store: &Store,
     shared: &HaShared,
@@ -78,13 +83,25 @@ pub async fn create(
 ) -> Result<SnapshotManifest> {
     let dir = store.data_dir().to_path_buf();
     std::fs::create_dir_all(&dir)?;
-    let seq = store.next_repl_seq().await?;
-    let id = snapshot_id(epoch, seq);
-    let db_name = db_file_name(&id);
+    if let Some(id) = shared.snapshot_id() {
+        if shared.snapshot_seq() == store.ha_repl_seq().await? {
+            if let Ok(m) = read_manifest(&dir, &id) {
+                return Ok(m);
+            }
+        }
+    }
     // `backup_to` refuses to overwrite; write a unique temp name then rename so
     // a leftover file from a crashed previous attempt cannot wedge replication.
-    let tmp_name = format!("{db_name}.tmp-{}", uuid::Uuid::new_v4());
-    store.backup_to(&tmp_name).await?;
+    let tmp_name = format!("ha-snap-tmp-{}.db", uuid::Uuid::new_v4());
+    let seq = if store.replicator().is_some() {
+        store.snapshot_to(&tmp_name).await?
+    } else {
+        let seq = store.next_repl_seq().await?;
+        store.backup_to(&tmp_name).await?;
+        seq
+    };
+    let id = snapshot_id(epoch, seq);
+    let db_name = db_file_name(&id);
     let db_path = dir.join(&db_name);
     std::fs::rename(dir.join(&tmp_name), &db_path)?;
     let (sha256, size) = {
@@ -108,7 +125,7 @@ pub async fn create(
     let tmp = mpath.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&manifest)?)?;
     std::fs::rename(&tmp, &mpath)?;
-    shared.set_snapshot(Some(id), manifest.created_unix);
+    shared.set_snapshot(Some(id), manifest.seq, manifest.created_unix);
     prune(&dir);
     Ok(manifest)
 }
@@ -157,25 +174,31 @@ fn prune(dir: &Path) {
 }
 
 /// Standby: fetch and apply the leader's advertised snapshot when it is newer
-/// than what this node already has. Returns true when a snapshot was applied.
+/// than what this node already has, or always when this node demoted and its
+/// local copy may hold unacknowledged writes. Returns true when a snapshot was
+/// applied.
 pub async fn apply_from(rt: &HaRuntime, store: &Store, status: &HaStatus) -> Result<bool> {
     let Some(id) = status.snapshot_id.as_deref() else {
         return Ok(false);
     };
-    if status.applied_seq <= rt.shared.applied_seq()
-        && status.snapshot_created_unix <= rt.shared.snapshot_created_unix()
-    {
-        return Ok(false);
-    }
     let Some(leader_url) = status.leader_url.as_deref() else {
         return Ok(false);
     };
-    // One restore at a time; re-check freshness under the lock because the
-    // apply loop and an operator catch-up can race for the same snapshot.
-    let _apply = rt.shared.apply_lock.lock().await;
-    if status.applied_seq <= rt.shared.applied_seq()
-        && status.snapshot_created_unix <= rt.shared.snapshot_created_unix()
-    {
+    let stale = || {
+        rt.shared.need_full_snapshot()
+            || (status.snapshot_seq > rt.shared.applied_seq()
+                && status.snapshot_created_unix > rt.shared.snapshot_created_unix())
+    };
+    if !stale() {
+        return Ok(false);
+    }
+    // A download can take minutes; changesets keep applying meanwhile, so only
+    // the swap itself takes the restore lock. This lock dedupes parallel
+    // downloads (apply loop vs. operator catch-up).
+    let Ok(_snapshot) = rt.shared.snapshot_lock.try_lock() else {
+        return Ok(false);
+    };
+    if !stale() {
         return Ok(false);
     }
     let manifest = transport::manifest(rt, leader_url, id).await?;
@@ -216,13 +239,39 @@ pub async fn apply_from(rt: &HaRuntime, store: &Store, status: &HaStatus) -> Res
             manifest.schema_version
         );
     }
-    store.restore_snapshot(incoming.clone()).await?;
+    let forced = rt.shared.need_full_snapshot();
+    {
+        let _apply = rt.shared.apply_lock.lock().await;
+        // Increments may have caught up past the snapshot while it downloaded;
+        // restoring would roll them back.
+        let local_seq = store.ha_repl_seq().await?;
+        if !forced && local_seq >= manifest.seq {
+            if rt.shared.applied_seq() < local_seq {
+                rt.shared.set_applied_seq(local_seq);
+            }
+            let _ = tokio::fs::remove_file(&incoming).await;
+            return Ok(false);
+        }
+        if forced {
+            let _ = store.quarantine(rt.gate.epoch()).await;
+        }
+        store.restore_snapshot(incoming.clone()).await?;
+    }
     let _ = tokio::fs::remove_file(&incoming).await;
     rt.shared.set_applied_seq(manifest.seq);
-    rt.shared
-        .set_snapshot(Some(manifest.snapshot_id.clone()), manifest.created_unix);
+    rt.shared.set_snapshot(
+        Some(manifest.snapshot_id.clone()),
+        manifest.seq,
+        manifest.created_unix,
+    );
     rt.gate.set_epoch(store.ha_epoch().await?);
     rt.shared.set_leader(&status.node_id, leader_url);
-    tracing::info!(snapshot = %manifest.snapshot_id, seq = manifest.seq, "applied HA snapshot");
+    rt.shared.clear_need_full_snapshot();
+    tracing::info!(
+        snapshot = %manifest.snapshot_id,
+        seq = manifest.seq,
+        forced,
+        "applied HA snapshot"
+    );
     Ok(true)
 }

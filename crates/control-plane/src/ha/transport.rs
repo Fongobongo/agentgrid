@@ -10,12 +10,31 @@ use tokio::io::AsyncWriteExt;
 
 use super::protocol::{
     HaStatus, HeartbeatRequest, HeartbeatResponse, SnapshotManifest, VoteRequest, VoteResponse,
-    ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER, HA_TOKEN_HEADER,
+    ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER, HA_APPLIED_SEQ_HEADER,
+    HA_EPOCH_HEADER, HA_REASON_HEADER, HA_SCHEMA_HEADER, HA_SEQ_FIRST_HEADER, HA_SEQ_LAST_HEADER,
+    HA_TOKEN_HEADER,
 };
 use super::role::HaRuntime;
 
+/// Result of pushing a changeset batch to a data peer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangesetAck {
+    /// Peer applied (or already had) the batch.
+    Applied,
+    /// Peer was already at or past the batch's last sequence.
+    Duplicate,
+    /// Peer refused: sequence gap, schema mismatch, stale epoch or promotion.
+    Rejected { applied_seq: u64, reason: String },
+}
+
 fn timeout(rt: &HaRuntime) -> Duration {
     (rt.config.election_timeout * 3).max(Duration::from_secs(2))
+}
+
+/// Changeset pushes are on the commit path (sync mode), so keep their budget
+/// below the leader's lease renewal cadence.
+fn changeset_timeout(rt: &HaRuntime) -> Duration {
+    Duration::from_secs(2).min(timeout(rt))
 }
 
 fn url(base: &str, path: &str) -> String {
@@ -115,6 +134,65 @@ pub async fn get_artifact(
         .to_string();
     let bytes = resp.bytes().await?.to_vec();
     Ok((bytes, sha))
+}
+
+/// Push one changeset batch (bytes of `first_seq..=last_seq`) to a data peer.
+pub async fn push_changeset(
+    rt: &HaRuntime,
+    base: &str,
+    epoch: u64,
+    first_seq: u64,
+    last_seq: u64,
+    schema_version: i64,
+    bytes: &[u8],
+) -> Result<ChangesetAck> {
+    let resp = rt
+        .client()?
+        .post(url(base, "/v1/ha/changeset"))
+        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
+        .header(HA_EPOCH_HEADER, epoch.to_string())
+        .header(HA_SEQ_FIRST_HEADER, first_seq.to_string())
+        .header(HA_SEQ_LAST_HEADER, last_seq.to_string())
+        .header(HA_SCHEMA_HEADER, schema_version.to_string())
+        .timeout(changeset_timeout(rt))
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .context("ha changeset push")?;
+    match resp.status() {
+        reqwest::StatusCode::NO_CONTENT => Ok(ChangesetAck::Applied),
+        reqwest::StatusCode::CONFLICT => Ok(ChangesetAck::Rejected {
+            applied_seq: resp
+                .headers()
+                .get(HA_APPLIED_SEQ_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            reason: resp
+                .headers()
+                .get(HA_REASON_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("rejected")
+                .to_string(),
+        }),
+        other => anyhow::bail!("ha changeset push returned HTTP {other}"),
+    }
+}
+
+/// Ask the leader to cut a snapshot now (standby detected a sequence gap).
+pub async fn request_snapshot(rt: &HaRuntime, base: &str) -> Result<()> {
+    let resp = rt
+        .client()?
+        .post(url(base, "/v1/ha/snapshot"))
+        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
+        .timeout(timeout(rt))
+        .send()
+        .await
+        .context("ha snapshot request")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("ha snapshot request returned HTTP {}", resp.status());
+    }
+    Ok(())
 }
 
 pub async fn status(rt: &HaRuntime, base: &str) -> Result<HaStatus> {

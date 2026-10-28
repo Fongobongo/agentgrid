@@ -59,15 +59,16 @@ impl Store {
         value: &str,
         node_id: Option<&str>,
     ) -> Result<i64> {
-        sqlx::query(
-            "INSERT INTO adapter_env (adapter, key, value, node_id) VALUES (?, ?, ?, ?) \
-             ON CONFLICT (adapter, key, node_id) DO UPDATE SET value = excluded.value",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO adapter_env (adapter, key, value, node_id) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT (adapter, key, node_id) DO UPDATE SET value = excluded.value",
+            )
+            .bind(adapter)
+            .bind(key)
+            .bind(value)
+            .bind(node_id.unwrap_or("")),
         )
-        .bind(adapter)
-        .bind(key)
-        .bind(value)
-        .bind(node_id.unwrap_or(""))
-        .execute(&self.pool)
         .await?;
         Ok(sqlx::query_scalar::<_, i64>(
             "SELECT id FROM adapter_env \
@@ -81,9 +82,8 @@ impl Store {
     }
 
     pub async fn remove_adapter_env(&self, id: i64) -> Result<u64> {
-        Ok(sqlx::query("DELETE FROM adapter_env WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
+        Ok(self
+            .write_one(sqlx::query("DELETE FROM adapter_env WHERE id = ?").bind(id))
             .await?
             .rows_affected())
     }

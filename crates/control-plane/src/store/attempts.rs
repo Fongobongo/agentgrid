@@ -674,15 +674,16 @@ impl Store {
     pub async fn create_agent_session(&self, attempt_id: &str, adapter: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO agent_sessions (id, attempt_id, adapter, started_at, status) \
-             VALUES (?, ?, ?, ?, 'running')",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO agent_sessions (id, attempt_id, adapter, started_at, status) \
+                 VALUES (?, ?, ?, ?, 'running')",
+            )
+            .bind(&id)
+            .bind(attempt_id)
+            .bind(adapter)
+            .bind(&now),
         )
-        .bind(&id)
-        .bind(attempt_id)
-        .bind(adapter)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(id)
     }
@@ -1020,10 +1021,13 @@ impl Store {
     }
 
     pub async fn set_node_degraded(&self, node_id: &str) -> Result<()> {
-        sqlx::query("UPDATE nodes SET status = 'degraded' WHERE id = ? AND status != 'revoked'")
-            .bind(node_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query(
+                "UPDATE nodes SET status = 'degraded' WHERE id = ? AND status != 'revoked'",
+            )
+            .bind(node_id),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1161,11 +1165,12 @@ impl Store {
             None,
         )
         .await?;
-        sqlx::query("UPDATE attempts SET tokens_avoided_bytes = ? WHERE id = ?")
-            .bind(avoided)
-            .bind(&attempt_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE attempts SET tokens_avoided_bytes = ? WHERE id = ?")
+                .bind(avoided)
+                .bind(&attempt_id),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -1246,18 +1251,19 @@ impl Store {
     ) -> Result<agentgrid_common::PatchAnnotation> {
         let id = format!("anno-{}", uuid::Uuid::new_v4());
         let created = now_iso();
-        sqlx::query(
-            "INSERT INTO patch_annotations (id, attempt_id, file, line_start, line_end, comment, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO patch_annotations (id, attempt_id, file, line_start, line_end, comment, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(attempt_id)
+            .bind(&req.file)
+            .bind(req.line_start)
+            .bind(req.line_end)
+            .bind(&req.comment)
+            .bind(&created),
         )
-        .bind(&id)
-        .bind(attempt_id)
-        .bind(&req.file)
-        .bind(req.line_start)
-        .bind(req.line_end)
-        .bind(&req.comment)
-        .bind(&created)
-        .execute(&self.pool)
         .await?;
         Ok(agentgrid_common::PatchAnnotation {
             id,

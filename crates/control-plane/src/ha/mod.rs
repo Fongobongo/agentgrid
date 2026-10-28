@@ -10,6 +10,7 @@
 pub mod artifacts;
 pub mod config;
 pub mod election;
+pub mod incremental;
 pub mod protocol;
 pub mod quorum;
 pub mod role;

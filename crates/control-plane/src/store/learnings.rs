@@ -53,18 +53,19 @@ impl Store {
     ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO repo_learnings (id, repository, statement, confidence, source_attempt_id, approved, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO repo_learnings (id, repository, statement, confidence, source_attempt_id, approved, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            )
+            .bind(&id)
+            .bind(repository)
+            .bind(statement)
+            .bind(confidence.clamp(0.0, 1.0))
+            .bind(source_attempt_id)
+            .bind(&now)
+            .bind(&now),
         )
-        .bind(&id)
-        .bind(repository)
-        .bind(statement)
-        .bind(confidence.clamp(0.0, 1.0))
-        .bind(source_attempt_id)
-        .bind(&now)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(id)
     }
@@ -73,11 +74,13 @@ impl Store {
     /// row was actually touched (id existed).
     pub async fn approve_learning(&self, id: &str, approved: bool) -> Result<bool> {
         let now = now_iso();
-        let n = sqlx::query("UPDATE repo_learnings SET approved = ?, updated_at = ? WHERE id = ?")
-            .bind(if approved { 1 } else { 0 })
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
+        let n = self
+            .write_one(
+                sqlx::query("UPDATE repo_learnings SET approved = ?, updated_at = ? WHERE id = ?")
+                    .bind(if approved { 1 } else { 0 })
+                    .bind(&now)
+                    .bind(id),
+            )
             .await?
             .rows_affected();
         Ok(n > 0)
@@ -85,9 +88,8 @@ impl Store {
 
     /// Remove a learning (admin / operator action).
     pub async fn delete_learning(&self, id: &str) -> Result<bool> {
-        let n = sqlx::query("DELETE FROM repo_learnings WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
+        let n = self
+            .write_one(sqlx::query("DELETE FROM repo_learnings WHERE id = ?").bind(id))
             .await?
             .rows_affected();
         Ok(n > 0)

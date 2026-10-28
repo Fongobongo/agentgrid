@@ -15,12 +15,24 @@ impl Store {
     /// drifted — approval expiry only ran on the loop side).
     pub async fn tick_maintenance(&self) -> Result<()> {
         let now = now_iso();
-        let reverted = revert_expired_leases(&self.pool, &now, self.ha_gate.as_deref()).await?;
+        let reverted = revert_expired_leases(
+            &self.pool,
+            &now,
+            self.ha_gate.as_deref(),
+            self.repl.as_ref(),
+        )
+        .await?;
         if reverted > 0 {
             self.lease_reverts
                 .fetch_add(reverted as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        mark_offline_nodes(&self.pool, &now, self.ha_gate.as_deref()).await?;
+        mark_offline_nodes(
+            &self.pool,
+            &now,
+            self.ha_gate.as_deref(),
+            self.repl.as_ref(),
+        )
+        .await?;
         // Approval expiry + scheduled-workflow triggers fire on the shared
         // cadence; without them scheduled workflows would never fire and
         // approvals would never expire in production.
@@ -38,11 +50,12 @@ impl Store {
     /// Test/debug: set an attempt's ack deadline (e.g. into the past to drive
     /// the unacked-assignment revert without waiting).
     pub async fn set_attempt_ack_deadline(&self, attempt_id: &str, iso: &str) -> Result<()> {
-        sqlx::query("UPDATE attempts SET ack_deadline = ? WHERE id = ?")
-            .bind(iso)
-            .bind(attempt_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE attempts SET ack_deadline = ? WHERE id = ?")
+                .bind(iso)
+                .bind(attempt_id),
+        )
+        .await?;
         Ok(())
     }
 
@@ -299,18 +312,18 @@ impl Store {
     /// Recompute each node's `active_attempts` from the attempt table and apply
     /// it where it differs. Returns the number of nodes whose counter changed.
     pub async fn reconcile_active_attempts(&self) -> Result<u64> {
-        let res = sqlx::query(
-            "UPDATE nodes SET active_attempts = (\
-               SELECT COUNT(*) FROM attempts \
-               WHERE attempts.node_id = nodes.id \
-                 AND attempts.status IN ('assigned','running','validating')) \
-             WHERE active_attempts <> (\
-               SELECT COUNT(*) FROM attempts \
-               WHERE attempts.node_id = nodes.id \
-                 AND attempts.status IN ('assigned','running','validating'))",
-        )
-        .execute(&self.pool)
-        .await?;
+        let res = self
+            .write_one(sqlx::query(
+                "UPDATE nodes SET active_attempts = (\
+                   SELECT COUNT(*) FROM attempts \
+                   WHERE attempts.node_id = nodes.id \
+                     AND attempts.status IN ('assigned','running','validating')) \
+                 WHERE active_attempts <> (\
+                   SELECT COUNT(*) FROM attempts \
+                   WHERE attempts.node_id = nodes.id \
+                     AND attempts.status IN ('assigned','running','validating'))",
+            ))
+            .await?;
         // Hardening P2 item 35: surface how many nodes had a drifted counter we
         // repaired (a non-zero value here indicates a scheduler/counter bug).
         let repaired = res.rows_affected();
@@ -461,9 +474,8 @@ impl Store {
                 let _ = tokio::fs::remove_dir(&dir).await;
             }
         }
-        let res = sqlx::query("DELETE FROM artifacts WHERE stored_at < ?")
-            .bind(&cutoff)
-            .execute(&self.pool)
+        let res = self
+            .write_one(sqlx::query("DELETE FROM artifacts WHERE stored_at < ?").bind(&cutoff))
             .await?;
         let duration_secs = start.elapsed().as_secs();
         self.artifact_cleanup_runs
@@ -598,11 +610,12 @@ impl Store {
             if missing {
                 metadata_without_file += 1;
                 if !dry_run {
-                    sqlx::query("DELETE FROM artifacts WHERE attempt_id = ? AND name = ?")
-                        .bind(attempt_id)
-                        .bind(name)
-                        .execute(&self.pool)
-                        .await?;
+                    self.write_one(
+                        sqlx::query("DELETE FROM artifacts WHERE attempt_id = ? AND name = ?")
+                            .bind(attempt_id)
+                            .bind(name),
+                    )
+                    .await?;
                 }
             }
         }

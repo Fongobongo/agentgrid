@@ -49,13 +49,14 @@ impl Store {
     /// Flip the active-revision pointer (rollback = point at an older revision).
     /// Idempotent; the revision must exist.
     pub async fn activate_profile(&self, id: &str, revision: i64) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO agent_profiles_active (id, active_revision) VALUES (?, ?) \
-             ON CONFLICT(id) DO UPDATE SET active_revision = excluded.active_revision",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO agent_profiles_active (id, active_revision) VALUES (?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET active_revision = excluded.active_revision",
+            )
+            .bind(id)
+            .bind(revision),
         )
-        .bind(id)
-        .bind(revision)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }

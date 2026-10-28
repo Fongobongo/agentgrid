@@ -1,0 +1,6 @@
+# HA incremental replication uses the SQLite session extension. The bundled
+# SQLite is compiled with it unconditionally: the pre-generated libsqlite3-sys
+# bindings already expose the API, so enabling the C code here avoids the
+# bindgen/libclang toolchain dependency of libsqlite3-sys' `session` feature.
+[env]
+LIBSQLITE3_FLAGS = "SQLITE_ENABLE_SESSION=1 SQLITE_ENABLE_PREUPDATE_HOOK=1"

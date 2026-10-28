@@ -20,18 +20,19 @@ impl Store {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
-        sqlx::query(
-            "INSERT INTO repositories (id, name, git_url, default_branch, validation_command, created_at, requirements) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO repositories (id, name, git_url, default_branch, validation_command, created_at, requirements) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&req.name)
+            .bind(&req.git_url)
+            .bind(&req.default_branch)
+            .bind(&req.validation_command)
+            .bind(&now)
+            .bind(&requirements),
         )
-        .bind(&id)
-        .bind(&req.name)
-        .bind(&req.git_url)
-        .bind(&req.default_branch)
-        .bind(&req.validation_command)
-        .bind(&now)
-        .bind(&requirements)
-        .execute(&self.pool)
         .await?;
         Ok(RepositoryView {
             id,

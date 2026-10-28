@@ -45,20 +45,21 @@ impl Store {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         let skills = req.skills.join(",");
-        sqlx::query(
-            "INSERT INTO agents (id, name, role, prompt, skills_json, budget_usd, max_tasks, heartbeat_interval_secs, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO agents (id, name, role, prompt, skills_json, budget_usd, max_tasks, heartbeat_interval_secs, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&name)
+            .bind(req.role.trim())
+            .bind(&req.prompt)
+            .bind(&skills)
+            .bind(req.budget_usd)
+            .bind(req.max_tasks)
+            .bind(req.heartbeat_interval_secs)
+            .bind(&now),
         )
-        .bind(&id)
-        .bind(&name)
-        .bind(req.role.trim())
-        .bind(&req.prompt)
-        .bind(&skills)
-        .bind(req.budget_usd)
-        .bind(req.max_tasks)
-        .bind(req.heartbeat_interval_secs)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         self.log_agent_action(&id, "created", "agent registered")
             .await?;
@@ -92,15 +93,16 @@ impl Store {
     pub async fn log_agent_action(&self, agent_id: &str, action: &str, detail: &str) -> Result<()> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO agent_actions (id, agent_id, action, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO agent_actions (id, agent_id, action, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(agent_id)
+            .bind(action)
+            .bind(detail)
+            .bind(&now),
         )
-        .bind(&id)
-        .bind(agent_id)
-        .bind(action)
-        .bind(detail)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }
@@ -209,11 +211,12 @@ impl Store {
     /// Record a heartbeat fire (updates `last_heartbeat_at`).
     pub async fn record_agent_heartbeat(&self, agent_id: &str) -> Result<()> {
         let now = now_iso();
-        sqlx::query("UPDATE agents SET last_heartbeat_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(agent_id)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("UPDATE agents SET last_heartbeat_at = ? WHERE id = ?")
+                .bind(&now)
+                .bind(agent_id),
+        )
+        .await?;
         self.log_agent_action(agent_id, "heartbeat", "scheduled task spawned")
             .await
     }

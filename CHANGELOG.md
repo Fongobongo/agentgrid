@@ -26,6 +26,22 @@
   `tests/e2e/run-ha-failover.sh` (`kill -9` leader, measured RTO ~2s, in-flight
   task survives, artifact pulled from a peer, node follows, rejoin as
   standby, graceful demote closes WS `4004`).
+- **Control-plane HA phase 4: incremental changeset replication.**
+  `AGENTGRID_HA_RPO_MODE=async|sync` (build feature `ha-incremental`) records
+  every write transaction with the SQLite session extension and ships
+  changesets to the data replicas instead of waiting for snapshots. `async`
+  coalesces commits into ≤1s batches and demotes the leader when no data
+  replica acknowledges within `AGENTGRID_HA_ASYNC_MAX_LAG_MS`; `sync` holds
+  the write gate across a data-quorum ack, so an acknowledged write survives
+  leader loss (RPO=0). Standbys apply batches atomically with
+  `synchronous=FULL`, reject gaps/schema mismatches/conflicts (leader falls
+  back to a snapshot), and a demoted leader refuses increments until a forced
+  snapshot restores it. The session extension is compiled in via
+  `.cargo/config.toml` (no bindgen/libclang); writes that bypassed the fence
+  now go through `Store::write_one`. e2e:
+  `tests/e2e/run-ha-incremental.sh` (async/sync, no snapshots cut, `kill -9`
+  leader keeps the acknowledged task).
+
 
 ### Fixed
 

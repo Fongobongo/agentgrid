@@ -25,17 +25,18 @@ impl Store {
             anyhow::bail!("invalid group_id or key");
         }
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO shared_context (task_group_id, key, value, updated_at) \
-         VALUES (?, ?, ?, ?) \
-         ON CONFLICT(task_group_id, key) DO UPDATE SET \
-            value = excluded.value, updated_at = excluded.updated_at",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO shared_context (task_group_id, key, value, updated_at) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(task_group_id, key) DO UPDATE SET \
+                    value = excluded.value, updated_at = excluded.updated_at",
+            )
+            .bind(group_id)
+            .bind(key)
+            .bind(value)
+            .bind(&now),
         )
-        .bind(group_id)
-        .bind(key)
-        .bind(value)
-        .bind(&now)
-        .execute(&self.pool)
         .await?;
         Ok(())
     }
@@ -81,11 +82,12 @@ impl Store {
         if !is_safe_opaque_id(group_id) || !is_safe_context_key(key) {
             anyhow::bail!("invalid group_id or key");
         }
-        sqlx::query("DELETE FROM shared_context WHERE task_group_id = ? AND key = ?")
-            .bind(group_id)
-            .bind(key)
-            .execute(&self.pool)
-            .await?;
+        self.write_one(
+            sqlx::query("DELETE FROM shared_context WHERE task_group_id = ? AND key = ?")
+                .bind(group_id)
+                .bind(key),
+        )
+        .await?;
         Ok(())
     }
 }

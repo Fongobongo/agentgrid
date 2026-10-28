@@ -45,20 +45,22 @@ impl Store {
         let now = now_iso();
         // No check-then-insert: the unique constraint on username decides, so
         // concurrent creates cannot both succeed.
-        let res = sqlx::query(
-            "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(username)
-        .bind(&hash)
-        .bind(role)
-        .bind(&now)
-        .execute(&self.pool)
-        .await;
+        let res = self
+            .write_one(
+                sqlx::query(
+                    "INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(&id)
+                .bind(username)
+                .bind(&hash)
+                .bind(role)
+                .bind(&now),
+            )
+            .await;
         match res {
             Ok(_) => Ok(true),
             Err(e) if format!("{e}").contains("UNIQUE") => Ok(false),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e),
         }
     }
 

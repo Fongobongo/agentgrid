@@ -26,21 +26,22 @@ impl Store {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         let expires = iso_plus_secs(ttl_secs);
-        sqlx::query(
-        "INSERT INTO approvals (id, task_id, attempt_id, session_id, permission, status, created_at, expires_at, step_run_id, scope) \
-         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(task_id)
-    .bind(attempt_id)
-    .bind(session_id)
-    .bind(permission)
-    .bind(&now)
-    .bind(&expires)
-    .bind(step_run_id)
-    .bind(scope)
-    .execute(&self.pool)
-    .await?;
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO approvals (id, task_id, attempt_id, session_id, permission, status, created_at, expires_at, step_run_id, scope) \
+                 VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(task_id)
+            .bind(attempt_id)
+            .bind(session_id)
+            .bind(permission)
+            .bind(&now)
+            .bind(&expires)
+            .bind(step_run_id)
+            .bind(scope),
+        )
+        .await?;
         Ok(id)
     }
 
@@ -74,17 +75,22 @@ impl Store {
         };
         let decided = now_iso();
         let audit = serde_json::json!({ "actor": actor, "event": event, "at": decided });
-        let res = sqlx::query(
-            "UPDATE approvals SET status = ?, decided_at = ?, reason = ?, audit = ? \
-         WHERE id = ? AND status = 'pending'",
-        )
-        .bind(serde_json::to_value(next).map(|v| v.as_str().unwrap_or("pending").to_string())?)
-        .bind(&decided)
-        .bind(reason)
-        .bind(audit.to_string())
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        let res = self
+            .write_one(
+                sqlx::query(
+                    "UPDATE approvals SET status = ?, decided_at = ?, reason = ?, audit = ? \
+                     WHERE id = ? AND status = 'pending'",
+                )
+                .bind(
+                    serde_json::to_value(next)
+                        .map(|v| v.as_str().unwrap_or("pending").to_string())?,
+                )
+                .bind(&decided)
+                .bind(reason)
+                .bind(audit.to_string())
+                .bind(id),
+            )
+            .await?;
         Ok(res.rows_affected() > 0)
     }
 
@@ -190,12 +196,13 @@ impl Store {
     /// timed out. Only non-terminal steps/runs are touched, so a finished run
     /// is never reopened. Idempotent.
     pub async fn block_step_and_run(&self, step_run_id: &str) -> Result<()> {
+        let mut tx = self.write_txn().await?;
         sqlx::query(
             "UPDATE workflow_steps SET status = 'blocked' \
              WHERE id = ? AND status NOT IN ('succeeded','failed','blocked','skipped')",
         )
         .bind(step_run_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             "UPDATE workflow_runs SET status = 'blocked' \
@@ -203,8 +210,9 @@ impl Store {
              AND status NOT IN ('succeeded','failed','cancelled','blocked','plan_ready')",
         )
         .bind(step_run_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 }

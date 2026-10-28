@@ -162,27 +162,28 @@ impl Store {
         let size = bytes.len() as i64;
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
-        sqlx::query(
-            "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at, media_type, sha256, stored_compressed, stored_sha256) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(attempt_id, name) DO UPDATE SET \
-                size_bytes = excluded.size_bytes, \
-                stored_at = excluded.stored_at, \
-                media_type = excluded.media_type, \
-                sha256 = excluded.sha256, \
-                stored_compressed = excluded.stored_compressed, \
-                stored_sha256 = excluded.stored_sha256",
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO artifacts (id, attempt_id, name, size_bytes, stored_at, media_type, sha256, stored_compressed, stored_sha256) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(attempt_id, name) DO UPDATE SET \
+                    size_bytes = excluded.size_bytes, \
+                    stored_at = excluded.stored_at, \
+                    media_type = excluded.media_type, \
+                    sha256 = excluded.sha256, \
+                    stored_compressed = excluded.stored_compressed, \
+                    stored_sha256 = excluded.stored_sha256",
+            )
+            .bind(&id)
+            .bind(attempt_id)
+            .bind(name)
+            .bind(size)
+            .bind(&now)
+            .bind(media_type)
+            .bind(&computed)
+            .bind(stored_compressed as i64)
+            .bind(&stored_sha),
         )
-        .bind(&id)
-        .bind(attempt_id)
-        .bind(name)
-        .bind(size)
-        .bind(&now)
-        .bind(media_type)
-        .bind(&computed)
-        .bind(stored_compressed as i64)
-        .bind(&stored_sha)
-        .execute(&self.pool)
         .await?;
         Ok(ArtifactUploadResponse {
             name: name.to_string(),

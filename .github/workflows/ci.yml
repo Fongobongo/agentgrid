@@ -42,6 +42,13 @@ jobs:
       # timing can be reintroduced under a nightly job if needed.
       - name: test
         run: cargo test --workspace
+      # Phase 4 incremental replication. The SQLite session extension is
+      # compiled in unconditionally (`.cargo/config.toml`); the feature gates
+      # the Rust paths only, so this exercises the async/sync code in CI.
+      - name: clippy (ha-incremental)
+        run: cargo clippy -p agentgrid-control-plane --all-targets --features ha-incremental -- -D warnings
+      - name: test (ha-incremental)
+        run: cargo test -p agentgrid-control-plane --features ha-incremental
       - name: build
         run: cargo build --workspace
       # Plan 1.9 (#17): workflows are code — validate every committed

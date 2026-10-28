@@ -119,7 +119,13 @@ impl AppState {
         db_path: &str,
         ha: Arc<ha::HaRuntime>,
     ) -> anyhow::Result<Arc<Self>> {
-        let store = Store::open_with_gate(db_path, ha.store_gate()).await?;
+        let mut store = Store::open_with_gate(db_path, ha.store_gate()).await?;
+        // Config rejects async/sync unless built with `ha-incremental`, so this
+        // is only reachable in a build that has the SQLite session extension.
+        if ha.is_ha() && ha.config.rpo_mode != ha::RpoMode::Snapshot {
+            let repl = ha::incremental::Replicator::new(ha.clone(), &store.pool).await?;
+            store.attach_replicator(repl);
+        }
         let production = std::env::var("AGENTGRID_ENV").as_deref() == Ok("production");
         let preset = match ha.config.jwt_secret_file.as_ref() {
             Some(path) => Some(
@@ -817,6 +823,7 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
 /// HA data-node entry point: start as standby (the election loop promotes it),
 /// run the same background tasks (they idle while not leader) and serve.
 pub async fn serve_ha(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    state.store.start_replicator();
     start_background(state.clone());
     ha::election::start(state.clone()).await?;
     serve_listener(state, addr).await

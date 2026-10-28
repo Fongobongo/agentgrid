@@ -215,8 +215,15 @@ impl HaConfig {
         if data_replicas == 2 && witnesses_count == 0 {
             bail!("2 data replicas need at least 1 witness (otherwise a single host loss has no quorum)");
         }
-        if rpo_mode == RpoMode::Sync && !cfg!(feature = "ha-incremental") {
-            bail!("RPO mode sync requires a build with the ha-incremental feature");
+        if rpo_mode != RpoMode::Snapshot && !cfg!(feature = "ha-incremental") {
+            bail!(
+                "RPO mode {} requires a build with the ha-incremental feature",
+                match rpo_mode {
+                    RpoMode::Async => "async",
+                    RpoMode::Sync => "sync",
+                    RpoMode::Snapshot => "snapshot",
+                }
+            );
         }
 
         let max_changeset_bytes = get(map, "AGENTGRID_HA_MAX_CHANGESET_MB")

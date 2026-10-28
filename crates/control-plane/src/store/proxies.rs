@@ -41,18 +41,19 @@ impl Store {
     }
 
     pub async fn add_proxy(&self, url: &str, node_id: Option<&str>) -> Result<i64> {
-        let r = sqlx::query("INSERT INTO proxies (url, node_id) VALUES (?, ?)")
-            .bind(url)
-            .bind(node_id)
-            .execute(&self.pool)
+        let r = self
+            .write_one(
+                sqlx::query("INSERT INTO proxies (url, node_id) VALUES (?, ?)")
+                    .bind(url)
+                    .bind(node_id),
+            )
             .await?;
         Ok(r.last_insert_rowid())
     }
 
     pub async fn remove_proxy(&self, id: i64) -> Result<u64> {
-        Ok(sqlx::query("DELETE FROM proxies WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
+        Ok(self
+            .write_one(sqlx::query("DELETE FROM proxies WHERE id = ?").bind(id))
             .await?
             .rows_affected())
     }
