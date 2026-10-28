@@ -1,0 +1,87 @@
+name: HA chaos
+
+# Regression gate for the control-plane HA cluster (ADR 0021): election,
+# quorum leases, snapshot/incremental replication, failover and the edge
+# forwarder. The scenarios are process-based (no Docker), so a stock
+# ubuntu-latest runner can host a 3-node cluster on loopback.
+#
+# These are the only tests that actually kill a leader, partition it with
+# SIGSTOP and assert "exactly one leader / no acknowledged write lost", so
+# they run nightly and on demand. On pull requests they are label-gated
+# (`ha-chaos`) because a full pass costs ~4x a normal CI run.
+on:
+  # Any change to the HA machinery gets the chaos suite immediately; other
+  # pushes wait for the nightly.
+  push:
+    branches: [master]
+    paths:
+      - "crates/control-plane/src/ha/**"
+      - "crates/edge/**"
+      - "crates/node-daemon/src/**"
+      - "tests/e2e/run-ha-*.sh"
+      - ".github/workflows/ha-chaos.yml"
+  schedule:
+    # Offset from the main nightly (03:00) so the two do not fight for runners.
+    - cron: "0 4 * * *"
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  chaos:
+    name: chaos / ${{ matrix.scenario }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Skip on PRs unless the `ha-chaos` label is present.
+    if: >
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ha-chaos')
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [3host, 2pluswitness, partition, incremental]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      # rust-toolchain.toml pins 1.99.1 with profile=minimal; the action's
+      # `components:` input targets its own default toolchain, so add the
+      # components to the pinned one explicitly (same trap as ci.yml).
+      - name: add fmt/clippy to the pinned toolchain
+        run: |
+          tc=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
+          rustup component add rustfmt clippy --toolchain "$tc"
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      # The scripts expect prebuilt debug binaries in target/debug and do not
+      # build anything themselves. `ha-incremental` is additive: one binary
+      # with the feature serves every scenario (the RPO mode is env-driven),
+      # and run-ha-incremental.sh hard-fails without it.
+      - name: build cluster binaries
+        run: |
+          cargo build \
+            -p agentgrid-control-plane \
+            -p agentgrid-node-daemon \
+            -p agentgrid-edge \
+            -p agentgrid-adapters \
+            --features agentgrid-control-plane/ha-incremental
+      - name: run scenario
+        # AG_E2E_KEEP=1 leaves each scenario's temp dir in place so the
+        # per-process logs survive for the artifact upload below.
+        env:
+          AG_E2E_KEEP: "1"
+          RUST_LOG: info
+        run: |
+          set -o pipefail
+          bash "tests/e2e/run-ha-${{ matrix.scenario }}.sh" 2>&1 | tee "/tmp/ha-${{ matrix.scenario }}.log"
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ha-chaos-${{ matrix.scenario }}-logs
+          path: |
+            /tmp/ha-${{ matrix.scenario }}.log
+            /tmp/ag-e2e-*
+          if-no-files-found: ignore
+          retention-days: 7
