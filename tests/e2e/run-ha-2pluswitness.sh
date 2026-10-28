@@ -142,28 +142,33 @@ wait_replicated() {  # $1 = leader id, $2 = timeout secs
   return 1
 }
 
-count_leaders() {
-  local n=0
-  for id in cp-a cp-b; do
-    local s
-    s=$(ha_status "${PORT[$id]}" 2>/dev/null || true)
+# One pass over every data host, printed as "<leader_count> <first_leader_id>".
+#
+# The count and the id must come from the *same* pass: asking "how many
+# leaders are there" and then "which one" as two separate sweeps is a race —
+# during a failover the first sweep can see the old leader and the second can
+# see nobody, so `wait_leader` returned success with an empty id and every
+# later assertion compared against "". A witness is never a leader, so it is
+# not polled here.
+scan_leaders() {
+  local n=0 id="" host s role
+  for host in cp-a cp-b; do
+    s=$(ha_status "${PORT[$host]}" 2>/dev/null || true)
     [ -n "$s" ] || continue
-    [ "$(field "$s" role)" = "leader" ] && n=$((n + 1))
+    role=$(field "$s" role)
+    if [ "$role" = "leader" ]; then
+      n=$((n + 1))
+      [ -n "$id" ] || id="$host"
+    fi
   done
-  echo "$n"
+  echo "$n $id"
 }
-leader_id() {
-  for id in cp-a cp-b; do
-    local s
-    s=$(ha_status "${PORT[$id]}" 2>/dev/null || true)
-    [ -n "$s" ] || continue
-    [ "$(field "$s" role)" = "leader" ] && { echo "$id"; return; }
-  done
-}
-wait_leader() {  # [timeout_secs]
-  local rounds=$(( ${1:-100} * 5 ))
+
+wait_leader() {  # [timeout_secs] — prints the leader id on success
+  local rounds=$(( ${1:-100} * 5 )) n id
   for _ in $(seq 1 "$rounds"); do
-    if [ "$(count_leaders)" = 1 ]; then leader_id; return 0; fi
+    read -r n id <<<"$(scan_leaders)"
+    if [ "$n" = "1" ] && [ -n "$id" ]; then echo "$id"; return 0; fi
     sleep 0.2
   done
   return 1
@@ -286,5 +291,6 @@ except Exception: print("?")' 2>/dev/null || echo "?")
   sleep 0.5
 done
 [ "$ok" = "1" ] || { echo "FAIL: post-failover task did not succeed" >&2; exit 1; }
-[ "$(count_leaders)" = "1" ] || { echo "FAIL: $(count_leaders) leaders after failover" >&2; exit 1; }
+read -r final_n final_l <<<"$(scan_leaders)"
+[ "$final_n" = "1" ] || { echo "FAIL: ${final_n} leaders after failover (${final_l:-none})" >&2; exit 1; }
 echo "PASS: 2+witness chaos (leader kill, witness quorum, edge forwarding, post-failover task)"

@@ -1015,7 +1015,11 @@ async fn amain() -> Result<()> {
 /// `AG_FAKE_*`). Per-module locks were not enough: the ACPE tests prepending
 /// their fixture dir to `PATH` could drop the ws tests' `adapter-mock` off
 /// `PATH` mid-spawn (nightly stress 40475001835 / 40075910072).
-#[cfg(test)]
+///
+/// Every user of it is `#[cfg(unix)]` (the process-level adapter fixtures are
+/// POSIX), so it is gated the same way — otherwise an off-unix `cargo clippy
+/// --all-targets` reports it as dead code.
+#[cfg(all(test, unix))]
 pub(crate) static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]

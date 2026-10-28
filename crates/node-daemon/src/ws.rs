@@ -17,9 +17,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::MaybeTlsStream;
 
-#[cfg(test)]
-use crate::config::Endpoints;
-use crate::config::{Config, SavedCredential};
+use crate::config::{Config, Endpoints, SavedCredential};
 use crate::polling::{dispatch_batch, poll_loop_inner};
 
 /// Consecutive WS connection failures tolerated before `auto` transport runs
@@ -47,10 +45,39 @@ fn ws_url(server: &str) -> String {
     }
 }
 
+/// A failed connect attempt, plus whether it already moved the daemon onto a
+/// hinted leader. The reconnect loops must not rotate after that: rotating
+/// steps *off* the leader they were just told about, so the failover never
+/// lands (see `next_after_failure`).
+struct ConnectError {
+    error: anyhow::Error,
+    followed_hint: bool,
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+
 /// Connect and send the `Hello` handshake; returns the open socket.
 /// The handshake is time-bounded (10 s connect, 15 s overall): an accepting-
 /// but-silent CP used to park the WS session setup forever.
-async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream> {
+async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream, ConnectError> {
+    let mut followed_hint = false;
+    connect_inner(cfg, cred, &mut followed_hint)
+        .await
+        .map_err(|error| ConnectError {
+            error,
+            followed_hint,
+        })
+}
+
+async fn connect_inner(
+    cfg: &Config,
+    cred: &SavedCredential,
+    followed_hint: &mut bool,
+) -> Result<WsStream> {
     let url = format!("{}/v1/node/ws", ws_url(&cfg.base()));
     let mut req = url.into_client_request()?;
     req.headers_mut().insert(
@@ -73,7 +100,8 @@ async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream> 
                     .headers()
                     .get("x-agentgrid-leader")
                     .and_then(|v| v.to_str().ok());
-                if cfg.endpoints.follow_hint(hint) {
+                *followed_hint = cfg.endpoints.follow_hint(hint);
+                if *followed_hint {
                     tracing::info!("ws: following leader hint to {}", cfg.base());
                 }
             }
@@ -238,6 +266,22 @@ async fn handle_msg(
     Ok(())
 }
 
+/// Next endpoint to try after a failed connect, or `None` when the daemon
+/// should stay where it is.
+///
+/// A failure that already followed a `x-agentgrid-leader` hint must not rotate:
+/// `follow_hint` moved `current` onto the leader, and `advance()` would
+/// immediately step off it onto a standby — so the very hint that exists to
+/// shorten failover was being thrown away, and a node kept retrying standbys
+/// (and the frozen old leader) until the poll fallback happened to land on the
+/// new leader minutes later. `heartbeat` and `poll` already guard this.
+fn next_after_failure(endpoints: &Endpoints, followed_hint: bool) -> Option<String> {
+    if followed_hint || endpoints.urls().len() < 2 {
+        return None;
+    }
+    Some(endpoints.advance())
+}
+
 /// WS transport: reconnect with exponential backoff (1s → 60s) forever, so a
 /// CP restart or network drop heals itself without manual intervention.
 pub async fn ws_loop<F: Fn() -> Client>(
@@ -268,8 +312,7 @@ pub async fn ws_loop<F: Fn() -> Client>(
             }
             Err(e) => {
                 tracing::warn!("ws connect failed: {e}");
-                if cfg.endpoints.urls().len() > 1 {
-                    let next = cfg.endpoints.advance();
+                if let Some(next) = next_after_failure(&cfg.endpoints, e.followed_hint) {
                     tracing::warn!("ws: rotating control-plane endpoint to {next}");
                 }
             }
@@ -315,8 +358,7 @@ pub async fn auto_loop<F: Fn() -> Client + Clone>(
             Err(e) => {
                 consecutive_failures += 1;
                 tracing::warn!("ws connect failed ({consecutive_failures}): {e}");
-                if cfg.endpoints.urls().len() > 1 {
-                    let next = cfg.endpoints.advance();
+                if let Some(next) = next_after_failure(&cfg.endpoints, e.followed_hint) {
                     tracing::warn!("ws: rotating control-plane endpoint to {next}");
                 }
                 if consecutive_failures >= MAX_CONSECUTIVE_WS_FAILURES {
@@ -338,6 +380,48 @@ pub async fn auto_loop<F: Fn() -> Client + Clone>(
                 }
             }
         }
+    }
+}
+
+// Transport-agnostic: runs on every platform, unlike the process-level tests
+// below.
+#[cfg(test)]
+mod failover_tests {
+    use super::*;
+
+    fn endpoints() -> Arc<Endpoints> {
+        Endpoints::new(vec![
+            "http://127.0.0.1:17921".into(),
+            "http://127.0.0.1:17922".into(),
+            "http://127.0.0.1:17923".into(),
+        ])
+    }
+
+    #[test]
+    fn a_followed_hint_is_not_rotated_away_from() {
+        let e = endpoints();
+        assert!(e.follow_hint(Some("http://127.0.0.1:17922")));
+        assert_eq!(e.current(), "http://127.0.0.1:17922");
+        // The regression: rotating here moved `current` to 17923 (a standby),
+        // so the daemon never retried the leader the hint pointed at.
+        assert_eq!(next_after_failure(&e, true), None);
+        assert_eq!(e.current(), "http://127.0.0.1:17922");
+    }
+
+    #[test]
+    fn a_failure_without_a_hint_still_rotates() {
+        let e = endpoints();
+        assert_eq!(
+            next_after_failure(&e, false).as_deref(),
+            Some("http://127.0.0.1:17922")
+        );
+        assert_eq!(e.current(), "http://127.0.0.1:17922");
+    }
+
+    #[test]
+    fn a_single_endpoint_never_rotates() {
+        let e = Endpoints::new(vec!["http://127.0.0.1:17921".into()]);
+        assert_eq!(next_after_failure(&e, false), None);
     }
 }
 

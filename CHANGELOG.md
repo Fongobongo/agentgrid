@@ -95,6 +95,37 @@
 
 ### Fixed
 
+- **A node discarded the leader hint it had just followed, so WS failover never
+  landed.** On `503 not_leader` the daemon called `Endpoints::follow_hint`,
+  which moves `current` onto the leader — and then the reconnect loop called
+  `advance()` unconditionally, stepping straight back off it onto the next
+  standby. The hint that exists to shorten failover was therefore thrown away
+  every time, and the node kept retrying standbys (plus the frozen old leader's
+  15 s handshake timeout) until the *poll fallback* happened to land on the new
+  leader minutes later. In `run-ha-partition.sh` the new leader had been up
+  since `t+7s` while the node did not reconnect until `t+134s`:
+  `following leader hint to 127.0.0.1:17922` immediately followed by
+  `rotating control-plane endpoint to 127.0.0.1:17923` (a standby).
+  `connect_once` now reports whether it followed a hint, and
+  `next_after_failure` refuses to rotate in that case — the guard `heartbeat`
+  and `poll` already had. Three unit tests pin the behaviour.
+- **`wait_leader` in the HA chaos scripts could report success with no leader
+  named.** `count_leaders` and `leader_id` were two separate sweeps, so during
+  a failover the first could see the old leader and the second see nobody; the
+  helper returned 0 with an empty id and every later assertion compared against
+  `""`. That is how `run-ha-partition.sh` failed as
+  `FAIL: leader after heal= expected` — with nothing after the `=`, although
+  cp-b was in fact the only leader. All three scenarios now use a single-pass
+  `scan_leaders` that yields the count and the id atomically, and assert a
+  non-empty id explicitly.
+- **`run-ha-partition.sh` raced its own recovery budget.** A SIGSTOPped leader
+  keeps the socket open, so the node needs its full 90 s read-idle timeout
+  (`WS_READ_IDLE_SECS`) plus a 15 s handshake timeout against the frozen host
+  before it can re-register — the task then landed at ~188 s against a 180 s
+  budget, i.e. on the last iteration. The budget is now 300 s.
+- **`cargo clippy --all-targets` failed off unix.** `TEST_ENV_LOCK` in
+  `node-daemon` was `#[cfg(test)]` while every user of it is `#[cfg(unix)]`,
+  so it read as dead code on Windows. Gated `#[cfg(all(test, unix))]`.
 - **`run-ha-partition.sh` never started a worker.** It declared `NODE_BIN`,
   checked that the binary existed, and then asserted "a task completes during
   the partition" with no node-daemon running — the task could only ever stay

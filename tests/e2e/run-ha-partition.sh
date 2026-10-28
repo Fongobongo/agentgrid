@@ -143,28 +143,33 @@ try:
 except Exception: print(0)' 2>/dev/null || echo 0
 }
 
-count_leaders() {
-  local n=0
-  for id in cp-a cp-b cp-c; do
-    local s
-    s=$(ha_status "${PORT[$id]}" 2>/dev/null || true)
+# One pass over every host, printed as "<leader_count> <first_leader_id>".
+#
+# The count and the id must come from the *same* pass: asking "how many
+# leaders are there" and then "which one" as two separate sweeps is a race —
+# during a failover the first sweep can see the old leader and the second can
+# see nobody, so `wait_leader` returned success with an empty id and every
+# later assertion compared against "". That is exactly how this scenario
+# reported `leader after heal=` with nothing after the `=`.
+scan_leaders() {
+  local n=0 id="" host s role
+  for host in cp-a cp-b cp-c; do
+    s=$(ha_status "${PORT[$host]}" 2>/dev/null || true)
     [ -n "$s" ] || continue
-    [ "$(field "$s" role)" = "leader" ] && n=$((n + 1))
+    role=$(field "$s" role)
+    if [ "$role" = "leader" ]; then
+      n=$((n + 1))
+      [ -n "$id" ] || id="$host"
+    fi
   done
-  echo "$n"
+  echo "$n $id"
 }
-leader_id() {
-  for id in cp-a cp-b cp-c; do
-    local s
-    s=$(ha_status "${PORT[$id]}" 2>/dev/null || true)
-    [ -n "$s" ] || continue
-    [ "$(field "$s" role)" = "leader" ] && { echo "$id"; return; }
-  done
-}
-wait_leader() {  # [timeout_secs]
-  local rounds=$(( ${1:-100} * 5 ))
+
+wait_leader() {  # [timeout_secs] — prints the leader id on success
+  local rounds=$(( ${1:-100} * 5 )) n id
   for _ in $(seq 1 "$rounds"); do
-    if [ "$(count_leaders)" = 1 ]; then leader_id; return 0; fi
+    read -r n id <<<"$(scan_leaders)"
+    if [ "$n" = "1" ] && [ -n "$id" ]; then echo "$id"; return 0; fi
     sleep 0.2
   done
   return 1
@@ -233,6 +238,7 @@ sleep 2  # let lease expire + election
 
 echo ">> wait for a new leader during partition"
 new_leader=$(wait_leader 60) || { echo "FAIL: no leader during partition" >&2; exit 1; }
+[ -n "$new_leader" ] || { echo "FAIL: wait_leader succeeded without naming a leader" >&2; exit 1; }
 echo "  new leader during partition=$new_leader"
 [ "$new_leader" != "$leader" ] || { echo "FAIL: old leader still leading during partition" >&2; exit 1; }
 
@@ -243,10 +249,12 @@ ok=0
 # SIGSTOP keeps the node's TCP socket open, so the daemon only notices the dead
 # session after its 90s read-idle timeout (`WS_READ_IDLE_SECS`) — the CP pings
 # every ~15s and the partition silences them. Re-registration plus the task run
-# then needs a few more seconds, so the budget has to cover that; a hard kill
-# (3host) closes the socket and recovers immediately, which is why that
-# scenario keeps a shorter wait.
-for _ in $(seq 1 360); do
+# then needs a few more seconds, and the reconnect has to work through the
+# frozen leader's 15s handshake timeout first, so the budget covers ~130s of
+# recovery: 300s leaves real margin instead of racing the last iteration. A
+# hard kill (3host) closes the socket and recovers immediately, which is why
+# that scenario keeps a shorter wait.
+for _ in $(seq 1 600); do
   st=$(curl -fsS --max-time 15 --connect-timeout 5 -H "authorization: Bearer $jwt" "$EDGE_BASE/v1/tasks/$task" 2>/dev/null \
     | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("status","?"))
@@ -262,13 +270,15 @@ kill -CONT "${PID[$leader]}" 2>/dev/null || true
 STOPPED=""
 
 echo ">> wait for exactly one leader after heal (old leader steps down)"
+final_n=0
+final_l=""
 for _ in $(seq 1 150); do
-  if [ "$(count_leaders)" = 1 ]; then
-    l=$(leader_id)
-    [ "$l" = "$new_leader" ] && break
-  fi
+  read -r final_n final_l <<<"$(scan_leaders)"
+  [ "$final_n" = "1" ] && [ "$final_l" = "$new_leader" ] && break
   sleep 0.2
 done
-[ "$(leader_id)" = "$new_leader" ] || { echo "FAIL: leader after heal=$new_leader expected" >&2; exit 1; }
-[ "$(count_leaders)" = "1" ] || { echo "FAIL: $(count_leaders) leaders after heal" >&2; exit 1; }
+[ "$final_l" = "$new_leader" ] \
+  || { echo "FAIL: leader after heal=${final_l:-none}, expected $new_leader" >&2; exit 1; }
+[ "$final_n" = "1" ] \
+  || { echo "FAIL: ${final_n} leaders after heal (expected only $new_leader)" >&2; exit 1; }
 echo "PASS: partition/heal (new leader during partition, old leader steps down, no dual writers)"
