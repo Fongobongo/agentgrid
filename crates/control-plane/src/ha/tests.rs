@@ -9,13 +9,19 @@ use super::role::{HaRole, HaRuntime};
 use super::{election, snapshot};
 use crate::store::Store;
 
+/// Throwaway cluster token shared by the in-process HA tests below. Never a
+/// credential: it only authenticates processes this module starts on
+/// 127.0.0.1. Declared once so the secret scanner has a single place to
+/// allow (inline, because fingerprints are commit-scoped).
+const TEST_CLUSTER_TOKEN: &str = "0123456789abcdef0123456789abcdef"; // gitleaks:allow
+
 fn rt(node_id: &str) -> Arc<HaRuntime> {
     let mut c = HaConfig::single();
     c.mode = HaMode::Ha;
     c.role = NodeRole::Data;
     c.node_id = node_id.to_string();
     c.cluster_id = "prod".into();
-    c.cluster_token = "0123456789abcdef0123456789abcdef".into();
+    c.cluster_token = TEST_CLUSTER_TOKEN.into();
     c.advertise_url = format!("http://{node_id}:7800");
     c.allow_plaintext = true;
     c.data_replicas = 3;
@@ -38,7 +44,7 @@ fn rt_s3(node_id: &str, endpoint: &str, rpo: RpoMode) -> Arc<HaRuntime> {
     c.role = NodeRole::Data;
     c.node_id = node_id.to_string();
     c.cluster_id = "prod".into();
-    c.cluster_token = "0123456789abcdef0123456789abcdef".into();
+    c.cluster_token = TEST_CLUSTER_TOKEN.into();
     c.advertise_url = format!("http://{node_id}:7800");
     c.allow_plaintext = true;
     c.data_replicas = 3;
@@ -427,7 +433,7 @@ fn rt_incremental(node_id: &str) -> Arc<HaRuntime> {
     c.role = NodeRole::Data;
     c.node_id = node_id.to_string();
     c.cluster_id = "prod".into();
-    c.cluster_token = "0123456789abcdef0123456789abcdef".into();
+    c.cluster_token = TEST_CLUSTER_TOKEN.into();
     c.advertise_url = format!("http://{node_id}:7800");
     c.allow_plaintext = true;
     c.data_replicas = 3;

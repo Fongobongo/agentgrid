@@ -1,5 +1,11 @@
 # Gitleaks allowlist — known false positives (format: <commit>:<file>:<rule>:<line>).
 #
+# Prefer inline `# gitleaks:allow` comments on the fixture line itself: the
+# scanner runs with `--log-opts=-1`, so a commit-scoped fingerprint goes stale
+# the moment anyone edits the line, and every later push touching that file
+# turns red again. Fingerprints below are kept only for commits already in
+# history.
+#
 # tests/e2e/rm-rss-test.sh: the "secret" is a hardcoded JWT signing key for a
 # throwaway local control-plane instance the RSS e2e script boots on
 # 127.0.0.1:7812 — a test fixture, never a real credential.

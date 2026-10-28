@@ -305,8 +305,8 @@ mod tests {
             String::new(),
             test_outbox("a2"),
         );
-        let secrets = vec!["sk-LEAK-12345".to_string()];
-        let cmd = "printf 'token=sk-LEAK-12345 line\n'; exit 0";
+        let secrets = vec!["sk-LEAK-12345".to_string()]; // gitleaks:allow
+        let cmd = "printf 'token=sk-LEAK-12345 line\n'; exit 0"; // gitleaks:allow
         let out = run_validation(
             &dir,
             cmd,
@@ -1420,7 +1420,7 @@ mod tests {
     /// the redactor: fix the path, do not weaken the test.
     #[tokio::test]
     async fn read_stream_never_leaks_secrets_regulator() {
-        let secret = "sk-live-abc123XYZ".to_string();
+        let secret = "sk-live-abc123XYZ".to_string(); // gitleaks:allow
         let sink = EventSink::new(
             "a-secrets".into(),
             reqwest::Client::new(),

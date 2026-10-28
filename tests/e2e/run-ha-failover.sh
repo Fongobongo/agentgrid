@@ -18,8 +18,11 @@ CP_BIN="${AGENTGRID_CP_BIN:-$ROOT/target/debug/agentgrid-control-plane}"
 NODE_BIN="${AGENTGRID_NODE_BIN:-$ROOT/target/debug/agentgrid-node-daemon}"
 ADAPTER_BIN="$ROOT/target/debug"
 
-TOKEN="e2e-ha-cluster-token-0123456789abcdef"
-JWT_SECRET="e2e-ha-jwt-secret-0123456789abcdef0123456789"
+# Throwaway fixtures for control-plane processes this script boots on
+# 127.0.0.1; never real credentials. The inline allow keeps gitleaks from
+# re-flagging the same line on every edit (fingerprints are commit-scoped).
+TOKEN="e2e-ha-cluster-token-0123456789abcdef"  # gitleaks:allow
+JWT_SECRET="e2e-ha-jwt-secret-0123456789abcdef0123456789"  # gitleaks:allow
 CLUSTER="e2e"
 USER="admin"
 PASS="changeme"
