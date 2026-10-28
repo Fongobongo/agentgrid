@@ -8,12 +8,13 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::config::{HaConfig, HaMode, NodeRole};
+use super::backend::S3Client;
+use super::config::{HaConfig, HaMode, NodeRole, ReplBackend};
 use super::shared::HaShared;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +201,14 @@ pub struct HaRuntime {
     pub shared: HaShared,
     /// Peer HTTP client. Built only in HA mode.
     pub client: Option<reqwest::Client>,
+    /// Object-storage data plane, when `AGENTGRID_HA_REPL_BACKEND=s3`.
+    pub s3: Option<S3Client>,
+    /// SHA-256 of the shared JWT secret. Compared during peer handshakes so a
+    /// host with a different secret cannot silently serve a split brain.
+    jwt_fingerprint: Mutex<Option<String>>,
+    /// The shared JWT secret itself, kept only for the opt-in one-time
+    /// provisioning endpoint. Never persisted to SQLite.
+    jwt_secret: Mutex<Option<String>>,
 }
 
 impl HaRuntime {
@@ -209,6 +218,9 @@ impl HaRuntime {
             gate: HaGate::single(),
             shared: HaShared::default(),
             client: None,
+            s3: None,
+            jwt_fingerprint: Mutex::new(None),
+            jwt_secret: Mutex::new(None),
         })
     }
 
@@ -241,11 +253,22 @@ impl HaRuntime {
         } else {
             None
         };
+        let s3 = match (&config.repl_backend, config.s3.as_ref()) {
+            (ReplBackend::S3, Some(cfg)) => Some(S3Client::new(
+                cfg,
+                &config.cluster_id,
+                config.allow_plaintext,
+            )?),
+            _ => None,
+        };
         Ok(Arc::new(Self {
             config,
             gate,
             shared,
             client,
+            s3,
+            jwt_fingerprint: Mutex::new(None),
+            jwt_secret: Mutex::new(None),
         }))
     }
 
@@ -277,6 +300,32 @@ impl HaRuntime {
             .ok_or_else(|| anyhow::anyhow!("HA peer client is unavailable in single mode"))
     }
 
+    /// Record the shared JWT secret and publish its fingerprint to peers.
+    pub fn set_jwt_secret(&self, secret: &[u8]) {
+        let fingerprint = agentgrid_common::sha256_hex(secret);
+        *self
+            .jwt_fingerprint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(fingerprint);
+        *self.jwt_secret.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(String::from_utf8_lossy(secret).into_owned());
+    }
+
+    pub fn jwt_fingerprint(&self) -> Option<String> {
+        self.jwt_fingerprint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Only the opt-in `GET /v1/ha/secret` handler reads this.
+    pub fn jwt_secret(&self) -> Option<String> {
+        self.jwt_secret
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// `None` in single mode: the store then skips lease/epoch fencing.
     pub fn store_gate(&self) -> Option<Arc<HaGate>> {
         self.is_ha().then(|| self.gate.clone())
@@ -286,6 +335,24 @@ impl HaRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jwt_fingerprint_tracks_the_secret() {
+        let rt = HaRuntime::single();
+        assert!(rt.jwt_fingerprint().is_none());
+        let secret = b"0123456789abcdef0123456789abcdef";
+        rt.set_jwt_secret(secret);
+        assert_eq!(
+            rt.jwt_fingerprint().unwrap(),
+            agentgrid_common::sha256_hex(secret)
+        );
+        assert_eq!(rt.jwt_secret().unwrap(), String::from_utf8_lossy(secret));
+        rt.set_jwt_secret(b"fedcba9876543210fedcba9876543210");
+        assert_ne!(
+            rt.jwt_fingerprint().unwrap(),
+            agentgrid_common::sha256_hex(secret)
+        );
+    }
 
     #[test]
     fn single_is_always_writable() {

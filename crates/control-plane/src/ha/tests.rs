@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::config::{HaConfig, HaMode, NodeRole};
+use super::config::{HaConfig, HaMode, NodeRole, ReplBackend, RpoMode, S3Config};
 use super::protocol::{HeartbeatRequest, VoteRequest};
 use super::role::{HaRole, HaRuntime};
 use super::{election, snapshot};
@@ -19,6 +19,39 @@ fn rt(node_id: &str) -> Arc<HaRuntime> {
     c.advertise_url = format!("http://{node_id}:7800");
     c.allow_plaintext = true;
     c.data_replicas = 3;
+    c.peers = vec![
+        super::config::HaPeer {
+            id: "cp-b".into(),
+            url: "http://cp-b:7800".into(),
+        },
+        super::config::HaPeer {
+            id: "cp-c".into(),
+            url: "http://cp-c:7800".into(),
+        },
+    ];
+    HaRuntime::new(c).expect("runtime")
+}
+
+fn rt_s3(node_id: &str, endpoint: &str, rpo: RpoMode) -> Arc<HaRuntime> {
+    let mut c = HaConfig::single();
+    c.mode = HaMode::Ha;
+    c.role = NodeRole::Data;
+    c.node_id = node_id.to_string();
+    c.cluster_id = "prod".into();
+    c.cluster_token = "0123456789abcdef0123456789abcdef".into();
+    c.advertise_url = format!("http://{node_id}:7800");
+    c.allow_plaintext = true;
+    c.data_replicas = 3;
+    c.rpo_mode = rpo;
+    c.repl_backend = ReplBackend::S3;
+    c.s3 = Some(S3Config {
+        endpoint: endpoint.to_string(),
+        bucket: "agentgrid".into(),
+        region: "us-east-1".into(),
+        prefix: "ha".into(),
+        access_key: "AKIAIOSFODNN7EXAMPLE".into(),
+        secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+    });
     c.peers = vec![
         super::config::HaPeer {
             id: "cp-b".into(),
@@ -167,9 +200,7 @@ async fn snapshot_round_trips_into_a_second_store() {
     // must carry that epoch.
     src.promote_epoch(1, 1, "cp-a", true).await.unwrap();
     let runtime = rt("cp-a");
-    let manifest = snapshot::create(&src, &runtime.shared, "prod", 1, 1)
-        .await
-        .unwrap();
+    let manifest = snapshot::create(&runtime, &src).await.unwrap();
     assert!(manifest.size > 0);
     let file = snapshot::snapshot_path(src.data_dir(), &manifest.snapshot_id).unwrap();
     assert!(file.exists());
@@ -201,6 +232,99 @@ async fn snapshot_round_trips_into_a_second_store() {
 }
 
 #[tokio::test]
+async fn snapshot_round_trips_through_object_storage() {
+    use super::backend::s3::mock::MockS3;
+
+    let (mock, endpoint) = MockS3::start().await;
+    let src_rt = rt_s3("cp-a", &endpoint, RpoMode::Snapshot);
+    let (src, src_path) = open_store("s3-snap-src").await;
+    src.create_user("alice", "secret123", agentgrid_common::ROLE_ADMIN)
+        .await
+        .unwrap();
+    src.promote_epoch(1, 1, "cp-a", true).await.unwrap();
+    let manifest = snapshot::create(&src_rt, &src).await.unwrap();
+    assert!(
+        mock.keys()
+            .iter()
+            .any(|k| k.ends_with("snapshots/latest.json")),
+        "latest pointer missing: {:?}",
+        mock.keys()
+    );
+    assert!(
+        mock.keys()
+            .iter()
+            .any(|k| k.ends_with(&format!("{}.db", manifest.snapshot_id))),
+        "snapshot database missing: {:?}",
+        mock.keys()
+    );
+
+    let dst_rt = rt_s3("cp-b", &endpoint, RpoMode::Snapshot);
+    let (dst, dst_path) = open_store("s3-snap-dst").await;
+    assert_eq!(dst.user_count().await.unwrap(), 0);
+    assert!(snapshot::apply_from_s3(&dst_rt, &dst).await.unwrap());
+    assert_eq!(dst.user_count().await.unwrap(), 1);
+    assert_eq!(dst.ha_epoch().await.unwrap(), 1);
+    assert_eq!(dst.ha_repl_seq().await.unwrap(), manifest.seq);
+    // Nothing newer: a second poll is a no-op, not a restore.
+    assert!(!snapshot::apply_from_s3(&dst_rt, &dst).await.unwrap());
+
+    dst.pool.close().await;
+    src.pool.close().await;
+    cleanup(&src_path);
+    cleanup(&dst_path);
+}
+
+#[cfg(feature = "ha-incremental")]
+#[tokio::test]
+async fn object_storage_changesets_apply_in_order() {
+    use super::backend::s3::mock::MockS3;
+    use super::incremental::{apply_s3_pending, Replicator, Session};
+
+    let (_mock, endpoint) = MockS3::start().await;
+    let src_rt = rt_s3("cp-a", &endpoint, RpoMode::Async);
+    let dst_rt = rt_s3("cp-b", &endpoint, RpoMode::Async);
+    let (src, src_path) = open_store("s3-inc-src").await;
+    let (dst, dst_path) = open_store("s3-inc-dst").await;
+    let repl = Replicator::new(src_rt.clone(), &src.pool).await.unwrap();
+
+    let mut tx = src.write_txn().await.unwrap();
+    let mut session = Session::attach(&mut tx, repl.tables()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash, role, created_at) \
+         VALUES ('u1', 'alice', 'x', 'admin', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let bytes = session
+        .take_changeset(&mut tx)
+        .await
+        .unwrap()
+        .expect("session recorded the insert");
+    drop(session);
+    tx.commit().await.unwrap();
+
+    src_rt
+        .s3
+        .as_ref()
+        .unwrap()
+        .put_changeset(1, repl.schema_version(), 1, 1, &bytes)
+        .await
+        .unwrap();
+    assert_eq!(apply_s3_pending(&dst_rt, &dst).await.unwrap(), 1);
+    assert_eq!(dst.user_count().await.unwrap(), 1);
+    assert_eq!(dst.ha_repl_seq().await.unwrap(), 1);
+    // Already at the watermark: no duplicate apply and no error.
+    assert_eq!(apply_s3_pending(&dst_rt, &dst).await.unwrap(), 0);
+    assert_eq!(dst.user_count().await.unwrap(), 1);
+
+    dst.pool.close().await;
+    src.pool.close().await;
+    cleanup(&src_path);
+    cleanup(&dst_path);
+}
+
+#[tokio::test]
 async fn promoted_standby_replicates_and_fences_old_leader() {
     let leader_rt = rt("cp-a");
     let leader_path = temp_db("fo-leader");
@@ -226,9 +350,7 @@ async fn promoted_standby_replicates_and_fences_old_leader() {
     .unwrap();
     assert!(standby.write_txn().await.is_err());
 
-    let manifest = snapshot::create(&leader, &leader_rt.shared, "prod", 1, 1)
-        .await
-        .unwrap();
+    let manifest = snapshot::create(&leader_rt, &leader).await.unwrap();
     let file = snapshot::snapshot_path(leader.data_dir(), &manifest.snapshot_id).unwrap();
     standby.restore_snapshot(file.clone()).await.unwrap();
     assert_eq!(standby.user_count().await.unwrap(), 1);

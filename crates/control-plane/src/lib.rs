@@ -178,6 +178,7 @@ impl AppState {
                 rand::rng().random::<[u8; 32]>().to_vec()
             }
         };
+        ha.set_jwt_secret(&jwt_secret);
         // Hardening P0: when no users exist (fresh install), mint a
         // one-time setup token printed to stdout so only an operator with
         // console access can create the first admin. Consumed on first use;

@@ -1,6 +1,7 @@
 //! HA configuration. Env-only to match the rest of the control plane.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -54,7 +55,7 @@ pub struct HaPeer {
     pub url: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct S3Config {
     pub endpoint: String,
     pub bucket: String,
@@ -62,6 +63,19 @@ pub struct S3Config {
     pub prefix: String,
     pub access_key: String,
     pub secret_key: String,
+}
+
+impl fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Config")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .field("access_key", &self.access_key)
+            .field("secret_key", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +100,10 @@ pub struct HaConfig {
     pub apply_timeout: Duration,
     pub artifact_sync: ArtifactSync,
     pub jwt_secret_file: Option<PathBuf>,
+    /// Allow `GET /v1/ha/secret` for one-time secret provisioning. Disabled by
+    /// default; the endpoint also requires leader role and (outside explicit
+    /// plaintext mode) TLS.
+    pub secret_fetch: bool,
     pub witness_dir: PathBuf,
     pub allow_plaintext: bool,
     pub max_changeset_bytes: u64,
@@ -116,6 +134,7 @@ impl HaConfig {
             apply_timeout: Duration::from_secs(300),
             artifact_sync: ArtifactSync::Eager,
             jwt_secret_file: None,
+            secret_fetch: false,
             witness_dir: PathBuf::from("/var/lib/agentgrid/witness"),
             allow_plaintext: false,
             max_changeset_bytes: 8 * 1024 * 1024,
@@ -252,6 +271,7 @@ impl HaConfig {
             apply_timeout: secs(map, "AGENTGRID_HA_APPLY_TIMEOUT_SECS", 300, 10..=3600)?,
             artifact_sync,
             jwt_secret_file: get(map, "AGENTGRID_HA_JWT_SECRET_FILE").map(PathBuf::from),
+            secret_fetch: get(map, "AGENTGRID_HA_SECRET_FETCH").as_deref() == Some("1"),
             witness_dir: get(map, "AGENTGRID_HA_WITNESS_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/var/lib/agentgrid/witness")),
@@ -296,6 +316,7 @@ const ENV_KEYS: &[&str] = &[
     "AGENTGRID_HA_APPLY_TIMEOUT_SECS",
     "AGENTGRID_HA_ARTIFACT_SYNC",
     "AGENTGRID_HA_JWT_SECRET_FILE",
+    "AGENTGRID_HA_SECRET_FETCH",
     "AGENTGRID_HA_WITNESS_DIR",
     "AGENTGRID_HA_ALLOW_PLAINTEXT",
     "AGENTGRID_HA_MAX_CHANGESET_MB",
@@ -425,6 +446,31 @@ mod tests {
             "https://cp-a.example:7800".into(),
         );
         m
+    }
+
+    #[test]
+    fn s3_backend_parses_and_redacts_the_secret() {
+        let mut m = base();
+        m.insert(
+            "AGENTGRID_HA_PEERS".into(),
+            "cp-b@https://b,cp-c@https://c".into(),
+        );
+        m.insert("AGENTGRID_HA_REPL_BACKEND".into(), "s3".into());
+        m.insert(
+            "AGENTGRID_HA_S3_ENDPOINT".into(),
+            "https://s3.example".into(),
+        );
+        m.insert("AGENTGRID_HA_S3_BUCKET".into(), "agentgrid".into());
+        m.insert("AGENTGRID_HA_S3_ACCESS_KEY".into(), "AKIA".into());
+        m.insert(
+            "AGENTGRID_HA_S3_SECRET_KEY".into(),
+            "topsecret-access-key-material".into(),
+        );
+        let cfg = HaConfig::from_map(&m).unwrap();
+        assert_eq!(cfg.repl_backend, ReplBackend::S3);
+        let dbg = format!("{:?}", cfg.s3.expect("s3 config"));
+        assert!(dbg.contains("<redacted>"), "{dbg}");
+        assert!(!dbg.contains("topsecret-access-key-material"), "{dbg}");
     }
 
     #[test]

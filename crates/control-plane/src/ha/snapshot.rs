@@ -2,8 +2,9 @@
 //!
 //! The leader writes a consistent copy with the existing `VACUUM INTO` backup
 //! path, hashes the *file*, and advertises the snapshot in `/v1/ha/status`.
-//! A standby downloads it, verifies size + SHA-256 + `quick_check`, then
-//! applies it in place (see `store::ha`) and records the applied sequence.
+//! A standby downloads it from the leader or object storage, verifies size +
+//! SHA-256 + `quick_check`, then applies it in place (see `store::ha`) and
+//! records the applied sequence.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,6 @@ use sha2::{Digest, Sha256};
 
 use super::protocol::{HaStatus, SnapshotManifest};
 use super::role::HaRuntime;
-use super::shared::HaShared;
 use super::transport;
 use crate::store::Store;
 
@@ -68,24 +68,21 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Leader: write `ha-snap-<epoch>-<seq>.db` + manifest and advertise it.
+/// Leader: write `ha-snap-<epoch>-<seq>.db` + manifest, advertise it and (in
+/// S3 backend mode) publish both to object storage.
 ///
 /// In incremental modes the snapshot is cut at the current replication
 /// sequence under the write gate, so it is a consistent base for the changesets
 /// that follow. When nothing has committed since the advertised snapshot, that
-/// snapshot is reused instead of writing an identical copy.
-pub async fn create(
-    store: &Store,
-    shared: &HaShared,
-    cluster_id: &str,
-    epoch: u64,
-    term: u64,
-) -> Result<SnapshotManifest> {
+/// snapshot is reused instead of writing an identical copy (and republished to
+/// S3, which repairs a previous failed upload).
+pub async fn create(rt: &HaRuntime, store: &Store) -> Result<SnapshotManifest> {
     let dir = store.data_dir().to_path_buf();
     std::fs::create_dir_all(&dir)?;
-    if let Some(id) = shared.snapshot_id() {
-        if shared.snapshot_seq() == store.ha_repl_seq().await? {
+    if let Some(id) = rt.shared.snapshot_id() {
+        if rt.shared.snapshot_seq() == store.ha_repl_seq().await? {
             if let Ok(m) = read_manifest(&dir, &id) {
+                publish_s3(rt, &dir, &m).await?;
                 return Ok(m);
             }
         }
@@ -100,7 +97,7 @@ pub async fn create(
         store.backup_to(&tmp_name).await?;
         seq
     };
-    let id = snapshot_id(epoch, seq);
+    let id = snapshot_id(rt.gate.epoch(), seq);
     let db_name = db_file_name(&id);
     let db_path = dir.join(&db_name);
     std::fs::rename(dir.join(&tmp_name), &db_path)?;
@@ -111,10 +108,10 @@ pub async fn create(
             .context("snapshot hash task panicked")??
     };
     let manifest = SnapshotManifest {
-        cluster_id: cluster_id.to_string(),
+        cluster_id: rt.config.cluster_id.clone(),
         snapshot_id: id.clone(),
-        epoch,
-        term,
+        epoch: rt.gate.epoch(),
+        term: rt.shared.term(),
         seq,
         schema_version: store.schema_version().await?,
         sha256,
@@ -125,9 +122,25 @@ pub async fn create(
     let tmp = mpath.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&manifest)?)?;
     std::fs::rename(&tmp, &mpath)?;
-    shared.set_snapshot(Some(id), manifest.seq, manifest.created_unix);
+    rt.shared
+        .set_snapshot(Some(id), manifest.seq, manifest.created_unix);
     prune(&dir);
+    publish_s3(rt, &dir, &manifest).await?;
     Ok(manifest)
+}
+
+async fn publish_s3(rt: &HaRuntime, dir: &Path, manifest: &SnapshotManifest) -> Result<()> {
+    let Some(s3) = &rt.s3 else {
+        return Ok(());
+    };
+    let db_path = snapshot_path(dir, &manifest.snapshot_id)?;
+    s3.put_snapshot(
+        &manifest.snapshot_id,
+        &db_path,
+        &serde_json::to_vec_pretty(manifest)?,
+    )
+    .await
+    .context("publish HA snapshot to object storage")
 }
 
 pub fn read_manifest(dir: &Path, id: &str) -> Result<SnapshotManifest> {
@@ -173,6 +186,29 @@ fn prune(dir: &Path) {
     }
 }
 
+fn validate_manifest(rt: &HaRuntime, manifest: &SnapshotManifest) -> Result<()> {
+    if manifest.cluster_id != rt.config.cluster_id {
+        anyhow::bail!(
+            "snapshot {} belongs to cluster {:?}, not {:?}",
+            manifest.snapshot_id,
+            manifest.cluster_id,
+            rt.config.cluster_id
+        );
+    }
+    if !is_safe_snapshot_id(&manifest.snapshot_id) {
+        anyhow::bail!("invalid snapshot id {:?}", manifest.snapshot_id);
+    }
+    Ok(())
+}
+
+/// A snapshot is needed when this replica was demoted (its local copy may hold
+/// unacknowledged writes), or when the advertised snapshot is newer than both
+/// the applied position and the last snapshot this replica restored.
+fn is_stale(rt: &HaRuntime, seq: u64, created_unix: i64) -> bool {
+    rt.shared.need_full_snapshot()
+        || (seq > rt.shared.applied_seq() && created_unix > rt.shared.snapshot_created_unix())
+}
+
 /// Standby: fetch and apply the leader's advertised snapshot when it is newer
 /// than what this node already has, or always when this node demoted and its
 /// local copy may hold unacknowledged writes. Returns true when a snapshot was
@@ -184,12 +220,8 @@ pub async fn apply_from(rt: &HaRuntime, store: &Store, status: &HaStatus) -> Res
     let Some(leader_url) = status.leader_url.as_deref() else {
         return Ok(false);
     };
-    let stale = || {
-        rt.shared.need_full_snapshot()
-            || (status.snapshot_seq > rt.shared.applied_seq()
-                && status.snapshot_created_unix > rt.shared.snapshot_created_unix())
-    };
-    if !stale() {
+    let schema_differs = status.schema_version != store.schema_version().await?;
+    if !is_stale(rt, status.snapshot_seq, status.snapshot_created_unix) && !schema_differs {
         return Ok(false);
     }
     // A download can take minutes; changesets keep applying meanwhile, so only
@@ -198,50 +230,88 @@ pub async fn apply_from(rt: &HaRuntime, store: &Store, status: &HaStatus) -> Res
     let Ok(_snapshot) = rt.shared.snapshot_lock.try_lock() else {
         return Ok(false);
     };
-    if !stale() {
+    let schema_differs = status.schema_version != store.schema_version().await?;
+    if !is_stale(rt, status.snapshot_seq, status.snapshot_created_unix) && !schema_differs {
         return Ok(false);
     }
     let manifest = transport::manifest(rt, leader_url, id).await?;
-    if manifest.cluster_id != rt.config.cluster_id {
-        anyhow::bail!(
-            "snapshot {} belongs to cluster {:?}, not {:?}",
-            manifest.snapshot_id,
-            manifest.cluster_id,
-            rt.config.cluster_id
-        );
+    validate_manifest(rt, &manifest)?;
+    let dir = store.data_dir().to_path_buf();
+    let incoming = dir.join(format!("incoming-{}.db", manifest.snapshot_id));
+    transport::download(rt, leader_url, id, &incoming).await?;
+    let applied = install_snapshot(rt, store, &manifest, &incoming).await?;
+    if applied {
+        rt.shared.set_leader(&status.node_id, leader_url);
+    }
+    Ok(applied)
+}
+
+/// Standby in S3 backend mode: poll the `latest.json` pointer directly. This
+/// must work when the old leader is unreachable, which is exactly when a new
+/// standby needs a base snapshot most.
+pub async fn apply_from_s3(rt: &HaRuntime, store: &Store) -> Result<bool> {
+    let Some(s3) = &rt.s3 else {
+        return Ok(false);
+    };
+    let Some(bytes) = s3.latest_snapshot_manifest().await? else {
+        return Ok(false);
+    };
+    let manifest: SnapshotManifest =
+        serde_json::from_slice(&bytes).context("parse latest S3 snapshot manifest")?;
+    validate_manifest(rt, &manifest)?;
+    let schema_differs = manifest.schema_version != store.schema_version().await?;
+    if !is_stale(rt, manifest.seq, manifest.created_unix) && !schema_differs {
+        return Ok(false);
+    }
+    let Ok(_snapshot) = rt.shared.snapshot_lock.try_lock() else {
+        return Ok(false);
+    };
+    let schema_differs = manifest.schema_version != store.schema_version().await?;
+    if !is_stale(rt, manifest.seq, manifest.created_unix) && !schema_differs {
+        return Ok(false);
     }
     let dir = store.data_dir().to_path_buf();
-    let incoming = dir.join(format!("incoming-{id}.db"));
-    let downloaded = transport::download(rt, leader_url, id, &incoming).await?;
-    if downloaded != manifest.size {
-        let _ = tokio::fs::remove_file(&incoming).await;
-        anyhow::bail!(
-            "snapshot {id} size mismatch: got {downloaded}, manifest {}",
-            manifest.size
-        );
-    }
+    let incoming = dir.join(format!("incoming-{}.db", manifest.snapshot_id));
+    s3.download_snapshot(&manifest.snapshot_id, &incoming)
+        .await?;
+    install_snapshot(rt, store, &manifest, &incoming).await
+}
+
+/// Verify and restore a downloaded snapshot. The caller holds
+/// `snapshot_lock`; this function takes `apply_lock` only for the swap.
+async fn install_snapshot(
+    rt: &HaRuntime,
+    store: &Store,
+    manifest: &SnapshotManifest,
+    incoming: &Path,
+) -> Result<bool> {
     let (sha, size) = {
-        let p = incoming.clone();
+        let p = incoming.to_path_buf();
         tokio::task::spawn_blocking(move || sha256_file(&p))
             .await
             .context("snapshot hash task panicked")??
     };
     if size != manifest.size || sha != manifest.sha256 {
-        let _ = tokio::fs::remove_file(&incoming).await;
-        anyhow::bail!("snapshot {id} integrity check failed (sha/size mismatch)");
-    }
-    let check = Store::verify_snapshot_file(&incoming).await?;
-    if check.schema_version != manifest.schema_version {
-        let _ = tokio::fs::remove_file(&incoming).await;
+        let _ = tokio::fs::remove_file(incoming).await;
         anyhow::bail!(
-            "snapshot {id} schema {} != manifest {}",
+            "snapshot {} integrity check failed (sha/size mismatch)",
+            manifest.snapshot_id
+        );
+    }
+    let check = Store::verify_snapshot_file(incoming).await?;
+    if check.schema_version != manifest.schema_version {
+        let _ = tokio::fs::remove_file(incoming).await;
+        anyhow::bail!(
+            "snapshot {} schema {} != manifest {}",
+            manifest.snapshot_id,
             check.schema_version,
             manifest.schema_version
         );
     }
-    let forced = rt.shared.need_full_snapshot();
-    {
+    let schema_mismatch = check.schema_version != store.schema_version().await?;
+    let applied = {
         let _apply = rt.shared.apply_lock.lock().await;
+        let forced = rt.shared.need_full_snapshot() || schema_mismatch;
         // Increments may have caught up past the snapshot while it downloaded;
         // restoring would roll them back.
         let local_seq = store.ha_repl_seq().await?;
@@ -249,15 +319,16 @@ pub async fn apply_from(rt: &HaRuntime, store: &Store, status: &HaStatus) -> Res
             if rt.shared.applied_seq() < local_seq {
                 rt.shared.set_applied_seq(local_seq);
             }
-            let _ = tokio::fs::remove_file(&incoming).await;
+            let _ = tokio::fs::remove_file(incoming).await;
             return Ok(false);
         }
-        if forced {
+        if rt.shared.need_full_snapshot() {
             let _ = store.quarantine(rt.gate.epoch()).await;
         }
-        store.restore_snapshot(incoming.clone()).await?;
-    }
-    let _ = tokio::fs::remove_file(&incoming).await;
+        store.restore_snapshot(incoming.to_path_buf()).await?;
+        true
+    };
+    let _ = tokio::fs::remove_file(incoming).await;
     rt.shared.set_applied_seq(manifest.seq);
     rt.shared.set_snapshot(
         Some(manifest.snapshot_id.clone()),
@@ -265,13 +336,11 @@ pub async fn apply_from(rt: &HaRuntime, store: &Store, status: &HaStatus) -> Res
         manifest.created_unix,
     );
     rt.gate.set_epoch(store.ha_epoch().await?);
-    rt.shared.set_leader(&status.node_id, leader_url);
     rt.shared.clear_need_full_snapshot();
     tracing::info!(
         snapshot = %manifest.snapshot_id,
         seq = manifest.seq,
-        forced,
         "applied HA snapshot"
     );
-    Ok(true)
+    Ok(applied)
 }

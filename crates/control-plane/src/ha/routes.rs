@@ -12,10 +12,10 @@ use axum::{Json, Router};
 use tokio_util::io::ReaderStream;
 
 use super::protocol::{
-    HeartbeatRequest, HeartbeatResponse, PromoteResponse, VoteRequest, VoteResponse,
-    ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER, HA_APPLIED_SEQ_HEADER,
-    HA_EPOCH_HEADER, HA_REASON_HEADER, HA_SCHEMA_HEADER, HA_SEQ_FIRST_HEADER, HA_SEQ_LAST_HEADER,
-    HA_TOKEN_HEADER,
+    HeartbeatRequest, HeartbeatResponse, PromoteResponse, SecretResponse, VoteRequest,
+    VoteResponse, ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER,
+    HA_APPLIED_SEQ_HEADER, HA_EPOCH_HEADER, HA_JWT_FINGERPRINT_HEADER, HA_REASON_HEADER,
+    HA_SCHEMA_HEADER, HA_SEQ_FIRST_HEADER, HA_SEQ_LAST_HEADER, HA_TOKEN_HEADER,
 };
 use super::role::HaRuntime;
 use super::{election, snapshot};
@@ -34,6 +34,7 @@ pub fn data_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ha/snapshot/{id}/manifest", get(snapshot_manifest))
         .route("/v1/ha/changeset", post(changeset))
         .route("/v1/ha/artifact", get(artifact_get).put(artifact_put))
+        .route("/v1/ha/secret", get(secret))
         .layer(axum::middleware::from_fn_with_state(state, data_token))
 }
 
@@ -61,6 +62,26 @@ async fn data_token(State(state): State<Arc<AppState>>, req: Request, next: Next
     }
     if !token_ok(&state.ha, req.headers()) {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    // Secret provisioning is the one call a not-yet-provisioned host makes; it
+    // cannot present a fingerprint it does not have yet. It still needs the
+    // cluster token, leader role, TLS config and an explicit opt-in flag.
+    if req.uri().path() != "/v1/ha/secret" {
+        if let Some(expected) = state.ha.jwt_fingerprint() {
+            // A witness has no JWT secret and therefore sends no fingerprint;
+            // it still authenticates with the cluster token. A data host that
+            // presents a *different* fingerprint is misconfigured and is
+            // refused before it can vote or acknowledge writes.
+            if let Some(presented) = req
+                .headers()
+                .get(HA_JWT_FINGERPRINT_HEADER)
+                .and_then(|v| v.to_str().ok())
+            {
+                if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+            }
+        }
     }
     next.run(req).await
 }
@@ -212,17 +233,33 @@ async fn snapshot_now(State(state): State<Arc<AppState>>) -> Response {
     }
     let rt = &state.ha;
     let _create = rt.shared.snapshot_lock.lock().await;
-    match snapshot::create(
-        &state.store,
-        &rt.shared,
-        &rt.config.cluster_id,
-        rt.gate.epoch(),
-        rt.shared.term(),
-    )
-    .await
-    {
+    match snapshot::create(rt, &state.store).await {
         Ok(m) => Json(m).into_response(),
         Err(e) => error_500(e),
+    }
+}
+
+/// Opt-in one-time JWT secret provisioning. Requires the cluster token, leader
+/// role, TLS (unless plaintext was explicitly allowed) and
+/// `AGENTGRID_HA_SECRET_FETCH=1`. Disable the flag after provisioning.
+async fn secret(State(state): State<Arc<AppState>>) -> Response {
+    let rt = &state.ha;
+    if !rt.config.secret_fetch {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !rt.is_leader() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    if !rt.config.allow_plaintext && !rt.config.advertise_url.starts_with("https://") {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match (rt.jwt_secret(), rt.jwt_fingerprint()) {
+        (Some(secret), Some(fingerprint)) => Json(SecretResponse {
+            secret,
+            fingerprint,
+        })
+        .into_response(),
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
 

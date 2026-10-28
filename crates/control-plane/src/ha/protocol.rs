@@ -4,6 +4,10 @@
 use serde::{Deserialize, Serialize};
 
 pub const HA_TOKEN_HEADER: &str = "x-agentgrid-ha-token";
+/// SHA-256 of the shared JWT secret, compared on every peer RPC so a host
+/// provisioned with a different secret cannot acknowledge writes and then
+/// issue sessions the leader would reject (or vice versa).
+pub const HA_JWT_FINGERPRINT_HEADER: &str = "x-agentgrid-ha-jwt-fingerprint";
 /// Peer artifact replication: attempt id, on-disk file name and SHA-256 of
 /// the stored bytes travel as headers so names need no URL encoding.
 pub const ARTIFACT_ATTEMPT_HEADER: &str = "x-agentgrid-attempt-id";
@@ -71,6 +75,8 @@ pub struct HaStatus {
     pub rpo_mode: String,
     pub data_replicas: usize,
     pub witnesses: usize,
+    /// SHA-256 of the shared JWT secret, when this host has one configured.
+    pub jwt_fingerprint: Option<String>,
     pub error: Option<String>,
 }
 
@@ -93,4 +99,11 @@ pub struct PromoteResponse {
     pub role: String,
     pub epoch: u64,
     pub message: String,
+}
+
+/// Opt-in one-time provisioning response for `ag cluster fetch-secret`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SecretResponse {
+    pub secret: String,
+    pub fingerprint: String,
 }

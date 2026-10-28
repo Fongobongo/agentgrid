@@ -28,6 +28,7 @@ use super::config::RpoMode;
 use super::quorum::VoterSet;
 use super::role::{mono_ms, HaRuntime};
 use super::transport::{self, ChangesetAck};
+use crate::store::{ApplyOutcome, Store};
 
 /// Async mode coalesces commits into one peer request for at most this long.
 const ASYNC_BATCH_WINDOW: Duration = Duration::from_millis(1000);
@@ -387,9 +388,16 @@ impl Replicator {
     }
 
     /// Push one changeset batch to every data peer; returns the number of
-    /// replicas that have it (self included).
+    /// replicas that have it (self included). In S3 backend mode one
+    /// successful PUT is the remote durable acknowledgement: self + object
+    /// store = 2 data acks, which is the majority for 2 and 3 data replicas.
     async fn push_batch(&self, first_seq: u64, last_seq: u64, bytes: &[u8]) -> Result<usize> {
         let epoch = self.rt.gate.epoch();
+        if let Some(s3) = &self.rt.s3 {
+            s3.put_changeset(epoch, self.schema_version, first_seq, last_seq, bytes)
+                .await?;
+            return Ok(2);
+        }
         let mut acks = 1;
         for peer in &self.rt.config.peers {
             match transport::push_changeset(
@@ -422,4 +430,79 @@ impl Replicator {
         }
         Ok(acks)
     }
+}
+
+/// Standby in S3 backend mode: apply committed changeset objects in order.
+/// Returns the number of batches applied. A gap, schema mismatch or rejected
+/// batch stops the pass; the snapshot loop then restores `latest.json`.
+pub async fn apply_s3_pending(rt: &HaRuntime, store: &Store) -> Result<usize> {
+    let Some(s3) = &rt.s3 else {
+        return Ok(0);
+    };
+    if rt.is_leader() || rt.shared.need_full_snapshot() {
+        return Ok(0);
+    }
+    let schema_version = store.schema_version().await?;
+    let mut applied = 0usize;
+    for key in s3.list_changesets().await? {
+        let Some((first_seq, last_seq)) = super::backend::S3Client::changeset_range(&key) else {
+            continue;
+        };
+        let local = store.ha_repl_seq().await?.max(rt.shared.applied_seq());
+        if last_seq <= local {
+            continue;
+        }
+        if first_seq > local + 1 {
+            tracing::info!(
+                first_seq,
+                local,
+                "object-storage changeset gap; waiting for a snapshot"
+            );
+            break;
+        }
+        let Some(obj) = s3.get_changeset(&key).await? else {
+            continue;
+        };
+        if obj.first_seq != first_seq || obj.last_seq != last_seq {
+            anyhow::bail!("changeset object {key} header/range mismatch");
+        }
+        if obj.schema_version != schema_version {
+            tracing::warn!(
+                key,
+                schema = obj.schema_version,
+                local = schema_version,
+                "changeset schema mismatch; waiting for a snapshot"
+            );
+            break;
+        }
+        if obj.epoch < rt.gate.epoch() {
+            continue;
+        }
+        if obj.epoch > rt.gate.epoch() {
+            rt.gate.set_epoch(obj.epoch);
+        }
+        let _apply = rt.shared.apply_lock.lock().await;
+        match store
+            .apply_changeset_batch(obj.first_seq, obj.last_seq, obj.schema_version, &obj.bytes)
+            .await?
+        {
+            ApplyOutcome::Applied { seq } => {
+                rt.shared.set_applied_seq(seq);
+                applied += 1;
+            }
+            ApplyOutcome::Duplicate => {
+                if rt.shared.applied_seq() < obj.last_seq {
+                    rt.shared.set_applied_seq(obj.last_seq);
+                }
+            }
+            ApplyOutcome::Rejected {
+                applied_seq,
+                reason,
+            } => {
+                tracing::warn!(key, applied_seq, reason, "object changeset rejected");
+                break;
+            }
+        }
+    }
+    Ok(applied)
 }

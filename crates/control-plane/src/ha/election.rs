@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use tokio::time::Instant;
 
 use super::config::{NodeRole, RpoMode};
+use super::incremental;
 use super::protocol::{HeartbeatRequest, HeartbeatResponse, VoteRequest, VoteResponse};
 use super::quorum::VoterSet;
 use super::role::{mono_ms, HaRole, HaRuntime};
@@ -192,6 +193,10 @@ pub async fn manual_promote(state: &Arc<AppState>) -> Result<()> {
     if rt.is_leader() {
         return Ok(());
     }
+    // In object-storage mode the candidate must consume the data plane before
+    // asking for votes; the old leader may be gone, so peer catch-up is not
+    // enough to establish freshness.
+    catch_up_s3(state).await?;
     let term = rt.shared.term() + 1;
     rt.shared
         .set_term_and_vote(term, Some(&rt.config.node_id))?;
@@ -267,6 +272,10 @@ async fn election_loop(state: Arc<AppState>) {
 
 async fn election_round(state: &Arc<AppState>) -> Result<()> {
     let rt = &state.ha;
+    // Object storage may hold changesets/snapshots the old leader never got to
+    // push peer-to-peer. Consume it before asking for votes so this candidate
+    // does not rewind committed data.
+    catch_up_s3(state).await?;
     // A candidate must carry the freshest data it can get before asking for
     // votes; a data voter will refuse a lagging candidate anyway. If the old
     // leader still answers but catch-up failed, do NOT campaign: a reachable
@@ -465,12 +474,8 @@ async fn leader_loop(state: Arc<AppState>) {
         let requested = rt.shared.take_snapshot_request();
         if requested || next_snapshot.elapsed() >= rt.config.snapshot_interval {
             next_snapshot = Instant::now();
-            let epoch = rt.gate.epoch();
-            let term = rt.shared.term();
             let _create = rt.shared.snapshot_lock.lock().await;
-            match snapshot::create(&state.store, &rt.shared, &rt.config.cluster_id, epoch, term)
-                .await
-            {
+            match snapshot::create(rt, &state.store).await {
                 Ok(m) => {
                     tracing::info!(snapshot = %m.snapshot_id, seq = m.seq, "wrote HA snapshot")
                 }
@@ -492,11 +497,37 @@ async fn apply_loop(state: Arc<AppState>) {
         if rt.is_leader() {
             continue;
         }
+        // S3 is a data plane independent of the leader's HTTP surface: a
+        // standby must keep applying changesets and the latest snapshot even
+        // while the old leader is unreachable.
+        if rt.s3.is_some() {
+            match incremental::apply_s3_pending(rt, &state.store).await {
+                Ok(0) => {}
+                Ok(n) => tracing::debug!(batches = n, "applied object-storage changesets"),
+                Err(e) => {
+                    tracing::warn!("object-storage changeset apply failed: {e}");
+                    rt.shared.set_error(Some(format!("changeset: {e}")));
+                }
+            }
+            if let Err(e) = snapshot::apply_from_s3(rt, &state.store).await {
+                tracing::warn!("object-storage snapshot apply failed: {e}");
+                rt.shared.set_error(Some(format!("apply: {e}")));
+            }
+        }
         let Some(leader) = rt.shared.leader() else {
             continue;
         };
         match transport::status(rt, &leader.url).await {
             Ok(status) if status.role == "leader" => {
+                if status.jwt_fingerprint != rt.jwt_fingerprint() {
+                    tracing::warn!(
+                        leader = %leader.id,
+                        "leader JWT fingerprint mismatch; refusing its snapshot"
+                    );
+                    rt.shared
+                        .set_error(Some("jwt fingerprint mismatch with leader".into()));
+                    continue;
+                }
                 rt.shared.set_leader(&status.node_id, &leader.url);
                 rt.shared.touch_leader();
                 if let Err(e) = snapshot::apply_from(rt, &state.store, &status).await {
@@ -510,11 +541,27 @@ async fn apply_loop(state: Arc<AppState>) {
     }
 }
 
+async fn catch_up_s3(state: &Arc<AppState>) -> Result<()> {
+    let rt = &state.ha;
+    if rt.s3.is_none() {
+        return Ok(());
+    }
+    incremental::apply_s3_pending(rt, &state.store).await?;
+    snapshot::apply_from_s3(rt, &state.store).await?;
+    if rt.shared.need_full_snapshot() {
+        anyhow::bail!("object storage did not provide a snapshot this replica can trust");
+    }
+    Ok(())
+}
+
 async fn catch_up(state: &Arc<AppState>, leader: &LeaderInfo) -> Result<()> {
     let rt = &state.ha;
     let status = transport::status(rt, &leader.url).await?;
     if status.role != "leader" {
         anyhow::bail!("{} is not a leader (role={})", leader.id, status.role);
+    }
+    if status.jwt_fingerprint != rt.jwt_fingerprint() {
+        anyhow::bail!("{} has a different JWT secret fingerprint", leader.id);
     }
     rt.shared.set_leader(&status.node_id, &leader.url);
     rt.shared.touch_leader();
@@ -554,6 +601,7 @@ pub async fn status_of(rt: &HaRuntime, store: Option<&Store>) -> Result<super::p
         rpo_mode: rpo_str(rt.config.rpo_mode).to_string(),
         data_replicas: rt.config.data_replicas,
         witnesses: rt.config.witnesses_count,
+        jwt_fingerprint: rt.jwt_fingerprint(),
         error: rt.shared.last_error(),
     })
 }

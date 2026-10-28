@@ -8,6 +8,7 @@
 //! no HA background tasks, and an always-open [`HaGate`].
 
 pub mod artifacts;
+pub mod backend;
 pub mod config;
 pub mod election;
 pub mod incremental;

@@ -11,10 +11,20 @@ use tokio::io::AsyncWriteExt;
 use super::protocol::{
     HaStatus, HeartbeatRequest, HeartbeatResponse, SnapshotManifest, VoteRequest, VoteResponse,
     ARTIFACT_ATTEMPT_HEADER, ARTIFACT_NAME_HEADER, ARTIFACT_SHA_HEADER, HA_APPLIED_SEQ_HEADER,
-    HA_EPOCH_HEADER, HA_REASON_HEADER, HA_SCHEMA_HEADER, HA_SEQ_FIRST_HEADER, HA_SEQ_LAST_HEADER,
-    HA_TOKEN_HEADER,
+    HA_EPOCH_HEADER, HA_JWT_FINGERPRINT_HEADER, HA_REASON_HEADER, HA_SCHEMA_HEADER,
+    HA_SEQ_FIRST_HEADER, HA_SEQ_LAST_HEADER, HA_TOKEN_HEADER,
 };
 use super::role::HaRuntime;
+
+/// Every peer request carries the cluster token and, when configured, the JWT
+/// fingerprint. Redirects are disabled on the shared client.
+fn auth(rt: &HaRuntime, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    let rb = rb.header(HA_TOKEN_HEADER, &rt.config.cluster_token);
+    match rt.jwt_fingerprint() {
+        Some(fp) => rb.header(HA_JWT_FINGERPRINT_HEADER, fp),
+        None => rb,
+    }
+}
 
 /// Result of pushing a changeset batch to a data peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,15 +52,16 @@ fn url(base: &str, path: &str) -> String {
 }
 
 pub async fn vote(rt: &HaRuntime, base: &str, req: &VoteRequest) -> Result<VoteResponse> {
-    let resp = rt
-        .client()?
-        .post(url(base, "/v1/ha/vote"))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .timeout(timeout(rt))
-        .json(req)
-        .send()
-        .await
-        .context("ha vote request")?;
+    let resp = auth(
+        rt,
+        rt.client()?
+            .post(url(base, "/v1/ha/vote"))
+            .timeout(timeout(rt)),
+    )
+    .json(req)
+    .send()
+    .await
+    .context("ha vote request")?;
     if !resp.status().is_success() {
         anyhow::bail!("ha vote rejected with HTTP {}", resp.status());
     }
@@ -62,15 +73,16 @@ pub async fn heartbeat(
     base: &str,
     req: &HeartbeatRequest,
 ) -> Result<HeartbeatResponse> {
-    let resp = rt
-        .client()?
-        .post(url(base, "/v1/ha/heartbeat"))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .timeout(timeout(rt))
-        .json(req)
-        .send()
-        .await
-        .context("ha heartbeat request")?;
+    let resp = auth(
+        rt,
+        rt.client()?
+            .post(url(base, "/v1/ha/heartbeat"))
+            .timeout(timeout(rt)),
+    )
+    .json(req)
+    .send()
+    .await
+    .context("ha heartbeat request")?;
     if !resp.status().is_success() {
         anyhow::bail!("ha heartbeat rejected with HTTP {}", resp.status());
     }
@@ -87,18 +99,19 @@ pub async fn put_artifact(
     sha256: &str,
     bytes: &[u8],
 ) -> Result<()> {
-    let resp = rt
-        .client()?
-        .put(url(base, "/v1/ha/artifact"))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .header(ARTIFACT_ATTEMPT_HEADER, attempt_id)
-        .header(ARTIFACT_NAME_HEADER, stored_name)
-        .header(ARTIFACT_SHA_HEADER, sha256)
-        .timeout(timeout(rt))
-        .body(bytes.to_vec())
-        .send()
-        .await
-        .context("ha artifact push")?;
+    let resp = auth(
+        rt,
+        rt.client()?
+            .put(url(base, "/v1/ha/artifact"))
+            .header(ARTIFACT_ATTEMPT_HEADER, attempt_id)
+            .header(ARTIFACT_NAME_HEADER, stored_name)
+            .header(ARTIFACT_SHA_HEADER, sha256)
+            .timeout(timeout(rt)),
+    )
+    .body(bytes.to_vec())
+    .send()
+    .await
+    .context("ha artifact push")?;
     if !resp.status().is_success() {
         anyhow::bail!("ha artifact push returned HTTP {}", resp.status());
     }
@@ -113,16 +126,17 @@ pub async fn get_artifact(
     attempt_id: &str,
     stored_name: &str,
 ) -> Result<(Vec<u8>, String)> {
-    let resp = rt
-        .client()?
-        .get(url(base, "/v1/ha/artifact"))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .header(ARTIFACT_ATTEMPT_HEADER, attempt_id)
-        .header(ARTIFACT_NAME_HEADER, stored_name)
-        .timeout(timeout(rt) * 4)
-        .send()
-        .await
-        .context("ha artifact fetch")?;
+    let resp = auth(
+        rt,
+        rt.client()?
+            .get(url(base, "/v1/ha/artifact"))
+            .header(ARTIFACT_ATTEMPT_HEADER, attempt_id)
+            .header(ARTIFACT_NAME_HEADER, stored_name)
+            .timeout(timeout(rt) * 4),
+    )
+    .send()
+    .await
+    .context("ha artifact fetch")?;
     if !resp.status().is_success() {
         anyhow::bail!("ha artifact fetch returned HTTP {}", resp.status());
     }
@@ -146,19 +160,20 @@ pub async fn push_changeset(
     schema_version: i64,
     bytes: &[u8],
 ) -> Result<ChangesetAck> {
-    let resp = rt
-        .client()?
-        .post(url(base, "/v1/ha/changeset"))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .header(HA_EPOCH_HEADER, epoch.to_string())
-        .header(HA_SEQ_FIRST_HEADER, first_seq.to_string())
-        .header(HA_SEQ_LAST_HEADER, last_seq.to_string())
-        .header(HA_SCHEMA_HEADER, schema_version.to_string())
-        .timeout(changeset_timeout(rt))
-        .body(bytes.to_vec())
-        .send()
-        .await
-        .context("ha changeset push")?;
+    let resp = auth(
+        rt,
+        rt.client()?
+            .post(url(base, "/v1/ha/changeset"))
+            .header(HA_EPOCH_HEADER, epoch.to_string())
+            .header(HA_SEQ_FIRST_HEADER, first_seq.to_string())
+            .header(HA_SEQ_LAST_HEADER, last_seq.to_string())
+            .header(HA_SCHEMA_HEADER, schema_version.to_string())
+            .timeout(changeset_timeout(rt)),
+    )
+    .body(bytes.to_vec())
+    .send()
+    .await
+    .context("ha changeset push")?;
     match resp.status() {
         reqwest::StatusCode::NO_CONTENT => Ok(ChangesetAck::Applied),
         reqwest::StatusCode::CONFLICT => Ok(ChangesetAck::Rejected {
@@ -181,14 +196,15 @@ pub async fn push_changeset(
 
 /// Ask the leader to cut a snapshot now (standby detected a sequence gap).
 pub async fn request_snapshot(rt: &HaRuntime, base: &str) -> Result<()> {
-    let resp = rt
-        .client()?
-        .post(url(base, "/v1/ha/snapshot"))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .timeout(timeout(rt))
-        .send()
-        .await
-        .context("ha snapshot request")?;
+    let resp = auth(
+        rt,
+        rt.client()?
+            .post(url(base, "/v1/ha/snapshot"))
+            .timeout(timeout(rt)),
+    )
+    .send()
+    .await
+    .context("ha snapshot request")?;
     if !resp.status().is_success() {
         anyhow::bail!("ha snapshot request returned HTTP {}", resp.status());
     }
@@ -196,14 +212,15 @@ pub async fn request_snapshot(rt: &HaRuntime, base: &str) -> Result<()> {
 }
 
 pub async fn status(rt: &HaRuntime, base: &str) -> Result<HaStatus> {
-    let resp = rt
-        .client()?
-        .get(url(base, "/v1/ha/status"))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .timeout(timeout(rt))
-        .send()
-        .await
-        .context("ha status request")?;
+    let resp = auth(
+        rt,
+        rt.client()?
+            .get(url(base, "/v1/ha/status"))
+            .timeout(timeout(rt)),
+    )
+    .send()
+    .await
+    .context("ha status request")?;
     if !resp.status().is_success() {
         anyhow::bail!("ha status returned HTTP {}", resp.status());
     }
@@ -211,14 +228,15 @@ pub async fn status(rt: &HaRuntime, base: &str) -> Result<HaStatus> {
 }
 
 pub async fn manifest(rt: &HaRuntime, base: &str, id: &str) -> Result<SnapshotManifest> {
-    let resp = rt
-        .client()?
-        .get(url(base, &format!("/v1/ha/snapshot/{id}/manifest")))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .timeout(timeout(rt))
-        .send()
-        .await
-        .context("ha snapshot manifest request")?;
+    let resp = auth(
+        rt,
+        rt.client()?
+            .get(url(base, &format!("/v1/ha/snapshot/{id}/manifest")))
+            .timeout(timeout(rt)),
+    )
+    .send()
+    .await
+    .context("ha snapshot manifest request")?;
     if !resp.status().is_success() {
         anyhow::bail!("ha snapshot manifest returned HTTP {}", resp.status());
     }
@@ -227,14 +245,15 @@ pub async fn manifest(rt: &HaRuntime, base: &str, id: &str) -> Result<SnapshotMa
 
 /// Stream a snapshot into `dest`; the caller verifies size and hash.
 pub async fn download(rt: &HaRuntime, base: &str, id: &str, dest: &Path) -> Result<u64> {
-    let mut resp = rt
-        .client()?
-        .get(url(base, &format!("/v1/ha/snapshot/{id}")))
-        .header(HA_TOKEN_HEADER, &rt.config.cluster_token)
-        .timeout(timeout(rt) * 20)
-        .send()
-        .await
-        .context("ha snapshot download")?;
+    let mut resp = auth(
+        rt,
+        rt.client()?
+            .get(url(base, &format!("/v1/ha/snapshot/{id}")))
+            .timeout(timeout(rt) * 20),
+    )
+    .send()
+    .await
+    .context("ha snapshot download")?;
     if !resp.status().is_success() {
         anyhow::bail!("ha snapshot download returned HTTP {}", resp.status());
     }

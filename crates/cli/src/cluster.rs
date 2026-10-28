@@ -8,7 +8,6 @@ use clap::{Args, Subcommand};
 use serde_json::Value;
 
 use crate::err_if_fail;
-
 const TOKEN_HEADER: &str = "x-agentgrid-ha-token";
 
 #[derive(Args)]
@@ -30,6 +29,12 @@ pub enum ClusterCmd {
     Demote,
     /// Ask the leader to write a snapshot now.
     Snapshot,
+    /// Fetch the shared JWT secret from the leader (provisioning).
+    FetchSecret {
+        /// Write the secret to this file with mode 0600 instead of stdout.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 pub async fn cmd_cluster(
@@ -97,6 +102,45 @@ pub async fn cmd_cluster(
                     out.get("epoch").and_then(Value::as_u64).unwrap_or(0),
                     out.get("size").and_then(Value::as_u64).unwrap_or(0),
                 );
+            }
+        }
+        ClusterCmd::FetchSecret { out } => {
+            let value = call(
+                client,
+                base,
+                &a.token,
+                reqwest::Method::GET,
+                "/v1/ha/secret",
+                "fetch-secret",
+            )
+            .await?;
+            let secret = value
+                .get("secret")
+                .and_then(Value::as_str)
+                .context("fetch-secret response has no secret")?;
+            let fingerprint = value
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, format!("{secret}\n"))
+                        .with_context(|| format!("write {}", path.display()))?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                            .with_context(|| format!("chmod {}", path.display()))?;
+                    }
+                    println!(
+                        "wrote JWT secret to {} (fingerprint {fingerprint})",
+                        path.display()
+                    );
+                }
+                None => {
+                    println!("{secret}");
+                    eprintln!("fingerprint={fingerprint}");
+                }
             }
         }
     }

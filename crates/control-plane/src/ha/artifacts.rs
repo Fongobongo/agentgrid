@@ -40,6 +40,12 @@ pub async fn push_eager(state: &AppState, attempt_id: &str, name: &str) {
             return;
         }
     };
+    if let Some(s3) = &rt.s3 {
+        if let Err(e) = s3.put_artifact(&sha, &bytes).await {
+            tracing::warn!("HA artifact push to object storage failed: {e}");
+        }
+        return;
+    }
     for peer in &rt.config.peers {
         if let Err(e) =
             transport::put_artifact(rt, &peer.url, attempt_id, &blob.stored_name, &sha, &bytes)
@@ -89,6 +95,32 @@ pub async fn ensure_attempt_local(state: &AppState, attempt_id: &str, name: &str
             tracing::warn!("HA artifact pull: local stat failed: {e}");
             return;
         }
+    }
+    if let Some(s3) = &rt.s3 {
+        match s3.get_artifact(&sha).await {
+            Ok(Some(bytes)) if agentgrid_common::sha256_hex(&bytes) == sha => {
+                match state
+                    .store
+                    .write_artifact_blob(attempt_id, &blob.stored_name, &bytes, &sha)
+                    .await
+                {
+                    Ok(()) => tracing::info!(
+                        attempt = %attempt_id,
+                        artifact = %name,
+                        "pulled HA artifact from object storage"
+                    ),
+                    Err(e) => tracing::warn!("HA artifact pull: write failed: {e}"),
+                }
+            }
+            Ok(Some(_)) => {
+                tracing::warn!(attempt = %attempt_id, "HA artifact object hash mismatch")
+            }
+            Ok(None) => {
+                tracing::warn!(attempt = %attempt_id, "HA artifact object missing in storage")
+            }
+            Err(e) => tracing::warn!("HA artifact pull from object storage failed: {e}"),
+        }
+        return;
     }
     let mut bases: Vec<String> = Vec::new();
     if let Some(leader) = rt.shared.leader() {
