@@ -12,6 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use index::IndexArgs;
 
 mod autopilot;
+mod cluster;
 mod index;
 mod nodes;
 mod phase;
@@ -86,6 +87,8 @@ enum AgCommand {
     AdapterEnv(registry::AdapterEnvArgs),
     /// Start the control plane (standalone binary).
     Server(ServerStartArgs),
+    /// Control-plane HA: status, promote, demote, snapshot.
+    Cluster(cluster::ClusterArgs),
     /// Define and run Agentgrid workflows (DAGs of agent steps).
     Workflow(workflow::WorkflowArgs),
     /// One-button project assembly: goal in, architect-planned multi-host
@@ -597,6 +600,7 @@ async fn main() -> Result<()> {
         AgCommand::Proxy(a) => registry::cmd_proxy(&client, &base, a).await,
         AgCommand::AdapterEnv(a) => registry::cmd_adapter_env(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
+        AgCommand::Cluster(a) => cluster::cmd_cluster(&client, &base, cli.json, a).await,
         AgCommand::Workflow(a) => workflow::cmd_workflow(&client, &base, a, cli.json).await,
         AgCommand::Assemble(a) => workflow::cmd_assemble(&client, &base, a).await,
         AgCommand::Tui(a) => cmd_tui(&client, &base, a).await,

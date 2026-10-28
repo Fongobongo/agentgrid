@@ -8,6 +8,7 @@ mod auth;
 use auth::Claims;
 mod config;
 mod diff_scan;
+pub mod ha;
 mod middleware;
 mod notify;
 mod routes;
@@ -52,6 +53,8 @@ pub(crate) fn poll_timeout() -> std::time::Duration {
 /// plaintext dev keeps working.
 pub struct AppState {
     pub store: Store,
+    /// HA role/config. Inert in single mode (`HaRuntime::single()`).
+    pub ha: Arc<ha::HaRuntime>,
     /// Plan 534: cross-aggregate workflow orchestration (attempt completion →
     /// workflow run advance). Handlers call the service instead of the store
     /// when the operation spans aggregates.
@@ -106,35 +109,59 @@ pub struct AppState {
 impl AppState {
     /// Open (or create) the SQLite database at `db_path` and return shared state.
     pub async fn open(db_path: &str) -> anyhow::Result<Arc<Self>> {
-        let store = Store::open(db_path).await?;
+        Self::open_with_runtime(db_path, ha::HaRuntime::single()).await
+    }
+
+    /// HA-aware open. In single mode this is exactly [`Self::open`]; in HA
+    /// mode the store gets the fencing gate and the JWT secret may come from
+    /// a per-host credential file.
+    pub async fn open_with_runtime(
+        db_path: &str,
+        ha: Arc<ha::HaRuntime>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let store = Store::open_with_gate(db_path, ha.store_gate()).await?;
         let production = std::env::var("AGENTGRID_ENV").as_deref() == Ok("production");
-        let jwt_secret = match std::env::var("AGENTGRID_JWT_SECRET") {
-            Ok(s) => {
+        let preset = match ha.config.jwt_secret_file.as_ref() {
+            Some(path) => Some(
+                std::fs::read_to_string(path)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "AGENTGRID_HA_JWT_SECRET_FILE {} is unreadable: {e}",
+                            path.display()
+                        )
+                    })?
+                    .trim()
+                    .to_string(),
+            ),
+            None => std::env::var("AGENTGRID_JWT_SECRET").ok(),
+        };
+        let jwt_secret = match preset {
+            Some(s) => {
                 // Hardening P0: a weak JWT secret forges session cookies.
                 if s.len() < 32 {
                     if production {
                         anyhow::bail!(
-                            "AGENTGRID_JWT_SECRET is shorter than 32 bytes; \
+                            "JWT secret is shorter than 32 bytes; \
                              refusing to start in AGENTGRID_ENV=production"
                         );
                     }
                     tracing::warn!(
-                        "AGENTGRID_JWT_SECRET is shorter than 32 bytes; \
+                        "JWT secret is shorter than 32 bytes; \
                          session tokens are vulnerable to brute force"
                     );
                 }
                 s.into_bytes()
             }
-            Err(_) => {
+            None => {
                 // A random-per-start secret invalidates previously issued
                 // *user session* JWTs after a restart (node credentials are
                 // independent: they are hashed and stored in `nodes`, not
                 // signed with this secret). In production a stable secret is
-                // mandatory; elsewhere we warn and use a random one.
-                if production {
+                // mandatory; HA always requires one so failover keeps sessions.
+                if production || ha.is_ha() {
                     anyhow::bail!(
-                        "AGENTGRID_JWT_SECRET unset; refusing to start in \
-                         AGENTGRID_ENV=production (set a stable >=32-byte secret)"
+                        "JWT secret unset; refusing to start in production/HA \
+                         (set AGENTGRID_JWT_SECRET or AGENTGRID_HA_JWT_SECRET_FILE)"
                     );
                 }
                 tracing::warn!(
@@ -222,6 +249,7 @@ impl AppState {
         let scheduler = services::SchedulerService::new(store.clone(), assignment_notify.clone());
         let state = Arc::new(Self {
             store,
+            ha,
             lifecycle,
             scheduler,
             assignment_notify,
@@ -727,6 +755,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/workflow-runs/{id}/cancel",
             post(routes::workflows::cancel_workflow_run_handler),
         )
+        .merge(ha::routes::data_router(state.clone()))
         .layer(DefaultBodyLimit::max(state.limits.artifact))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -749,6 +778,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // JSON formatter attaches the current span to each event, so the id is
         // correlatable across the whole request without per-handler plumbing.
         .layer(axum::middleware::from_fn(middleware::request_id_middleware))
+        // HA: a standby answers every non-health/HA route with 503 + leader
+        // hint. Must run before auth so clients see "not leader", not 401.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ha::routes::leader_gate,
+        ))
         .fallback(middleware::spa_fallback)
         // Plan 6.6: response compression for payloads above 8 KiB (event
         // batches, task details, artifacts listings). Smaller responses
@@ -765,13 +800,65 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
 // ----- workflows (Stage 7.2) -----
 
-/// Bind and serve. Starts background maintenance (lease/heartbeat jobs).
+/// Bind and serve a single-mode (or already-promoted) control plane. Starts
+/// background maintenance (lease/heartbeat jobs).
 /// If `AGENTGRID_TLS_CERT` and `AGENTGRID_TLS_KEY` are both set, the listener is
 /// wrapped in a rustls TLS acceptor (no system OpenSSL); otherwise plaintext.
 pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    if let Err(e) = state.store.reconcile_on_startup().await {
-        tracing::warn!("startup reconcile failed: {e}");
+    if !state.ha.is_ha() {
+        if let Err(e) = state.store.reconcile_on_startup().await {
+            tracing::warn!("startup reconcile failed: {e}");
+        }
     }
+    start_background(state.clone());
+    serve_listener(state, addr).await
+}
+
+/// HA data-node entry point: start as standby (the election loop promotes it),
+/// run the same background tasks (they idle while not leader) and serve.
+pub async fn serve_ha(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    start_background(state.clone());
+    ha::election::start(state.clone()).await?;
+    serve_listener(state, addr).await
+}
+
+/// Witness entry point: no database, no AppState, only peer RPC + health.
+pub async fn serve_witness(
+    ha: Arc<ha::HaRuntime>,
+    addr: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    ha::witness::start(&ha)?;
+    let app = ha::witness::router(ha);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    match (
+        std::env::var("AGENTGRID_TLS_CERT"),
+        std::env::var("AGENTGRID_TLS_KEY"),
+    ) {
+        (Ok(cert), Ok(key)) => {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let acceptor = tls::load_tls_acceptor(&cert, &key)?;
+            tracing::info!("HA witness listening with TLS on {addr}");
+            axum::serve(
+                tls::TlsListener {
+                    tcp: listener,
+                    acceptor,
+                },
+                app,
+            )
+            .with_graceful_shutdown(tls::shutdown_signal(None))
+            .await?;
+        }
+        _ => {
+            tracing::info!("HA witness listening on {addr} (plaintext)");
+            axum::serve(listener, app)
+                .with_graceful_shutdown(tls::shutdown_signal(None))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn start_background(state: Arc<AppState>) {
     state.store.start_maintenance();
     // Stage 13 / line 487: re-advance in-flight workflow runs so a CP restart
     // does not strand them; idempotent, best-effort per run.
@@ -785,6 +872,9 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                if !state.ha.is_leader() {
+                    continue;
+                }
                 match state.store.expire_opencode_profiles().await {
                     Ok(expired) => {
                         for (name, nodes) in expired {
@@ -808,6 +898,9 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
             }
         });
     }
+}
+
+async fn serve_listener(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let app = build_router(state.clone());
     match (
@@ -825,13 +918,13 @@ pub async fn serve(state: Arc<AppState>, addr: std::net::SocketAddr) -> anyhow::
                 },
                 app,
             )
-            .with_graceful_shutdown(tls::shutdown_signal(state.clone()))
+            .with_graceful_shutdown(tls::shutdown_signal(Some(state)))
             .await?;
         }
         _ => {
             tracing::info!("control plane listening on {addr} (plaintext)");
             axum::serve(listener, app)
-                .with_graceful_shutdown(tls::shutdown_signal(state.clone()))
+                .with_graceful_shutdown(tls::shutdown_signal(Some(state)))
                 .await?;
         }
     }

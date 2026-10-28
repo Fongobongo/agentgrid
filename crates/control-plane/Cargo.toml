@@ -64,6 +64,9 @@ zstd = "0.14"
 [features]
 default = []
 opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:prometheus"]
+# Incremental SQLite changeset replication (RPO async/sync). Off by default so
+# single-mode and musl builds keep the current dependency graph.
+ha-incremental = []
 
 [dev-dependencies]
 tower.workspace = true

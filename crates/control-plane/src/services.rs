@@ -216,6 +216,9 @@ impl SchedulerService {
         req: &PollRequest,
         max_batch: usize,
     ) -> anyhow::Result<(bool, Vec<agentgrid_common::Assignment>)> {
+        if let Some(gate) = self.store.ha_gate() {
+            gate.assert_writable()?;
+        }
         let mut degraded = false;
         if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
             self.store.set_node_degraded(&req.node_id).await?;

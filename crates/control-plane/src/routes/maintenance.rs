@@ -326,6 +326,35 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::r
         "agentgrid_sqlite_write_lock_failures_total {write_lock_failures}\n"
     ));
 
+    // HA role/lease observability. Emitted only in HA mode so single-mode
+    // metric output stays byte-identical.
+    if state.ha.is_ha() {
+        s.push_str("# HELP agentgrid_cp_role Current control-plane HA role (1 = active role).\n");
+        s.push_str("# TYPE agentgrid_cp_role gauge\n");
+        let current = state.ha.role().as_str();
+        for role in ["single", "standby", "leader", "witness"] {
+            let v = u8::from(role == current);
+            s.push_str(&format!("agentgrid_cp_role{{role=\"{role}\"}} {v}\n"));
+        }
+        s.push_str("# HELP agentgrid_cp_epoch Current HA epoch (fencing generation).\n");
+        s.push_str("# TYPE agentgrid_cp_epoch gauge\n");
+        s.push_str(&format!("agentgrid_cp_epoch {}\n", state.ha.gate.epoch()));
+        s.push_str("# HELP agentgrid_ha_lease_remaining_seconds Seconds left on the leader quorum lease.\n");
+        s.push_str("# TYPE agentgrid_ha_lease_remaining_seconds gauge\n");
+        s.push_str(&format!(
+            "agentgrid_ha_lease_remaining_seconds {:.3}\n",
+            state.ha.gate.lease_remaining().as_secs_f64()
+        ));
+        s.push_str(
+            "# HELP agentgrid_ha_fenced_writes_total Writes rejected by the HA lease/epoch gate.\n",
+        );
+        s.push_str("# TYPE agentgrid_ha_fenced_writes_total counter\n");
+        s.push_str(&format!(
+            "agentgrid_ha_fenced_writes_total {}\n",
+            state.ha.gate.fenced_writes()
+        ));
+    }
+
     let (poll_requests, poll_ms) = crate::routes::events::poll_stats();
     s.push_str("# HELP agentgrid_poll_requests_total Node poll requests served.\n");
     s.push_str("# TYPE agentgrid_poll_requests_total counter\n");

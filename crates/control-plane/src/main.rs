@@ -2,7 +2,8 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
-use agentgrid_control_plane::{serve, AppState};
+use agentgrid_control_plane::ha::NodeRole;
+use agentgrid_control_plane::{serve, serve_ha, serve_witness, AppState};
 use anyhow::Result;
 
 /// Guard against two control-plane processes opening the same SQLite DB on one
@@ -90,10 +91,22 @@ async fn amain() -> Result<()> {
         .parse()?;
     let db_path = std::env::var("AGENTGRID_DB").unwrap_or_else(|_| "control-plane.db".into());
 
+    let ha = agentgrid_control_plane::ha::HaRuntime::from_env()?;
+    if ha.is_ha() && ha.config.role == NodeRole::Witness {
+        // A witness keeps no database and holds no instance lock; its durable
+        // vote lives in AGENTGRID_HA_WITNESS_DIR.
+        return serve_witness(ha, addr).await;
+    }
+
     // Hold the single-instance lock for the whole process lifetime (the File
-    // drops when `main` returns, releasing the flock).
+    // drops when `main` returns, releasing the flock). In HA each host has its
+    // own database copy, so the lock still guards against two local writers.
     let _instance_lock = acquire_instance_lock(&db_path)?;
 
-    let state = AppState::open(&db_path).await?;
-    serve(state, addr).await
+    let state = AppState::open_with_runtime(&db_path, ha).await?;
+    if state.ha.is_ha() {
+        serve_ha(state, addr).await
+    } else {
+        serve(state, addr).await
+    }
 }

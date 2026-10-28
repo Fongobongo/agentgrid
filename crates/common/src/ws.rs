@@ -67,6 +67,9 @@ pub enum NodeWsMsg {
 pub const WS_CLOSE_UNAUTHORIZED: u16 = 4001;
 pub const WS_CLOSE_BAD_PROTOCOL: u16 = 4002;
 pub const WS_CLOSE_SUPERSEDED: u16 = 4003;
+/// Control plane lost the leader lease / was demoted: reconnect promptly to
+/// the new leader hinted by `X-AgentGrid-Leader`.
+pub const WS_CLOSE_DEMOTED: u16 = 4004;
 
 #[cfg(test)]
 mod tests {

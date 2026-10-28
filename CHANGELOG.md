@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Control-plane HA (phases 1-2).** Optional `AGENTGRID_HA_MODE=ha` runs the
+  control plane as an active-passive cluster (`data` leaders/standbys plus
+  token-only `witness` voters) with term/epoch election, quorum leases that
+  fence stale leaders, `VACUUM INTO` snapshot replication verified by SHA-256
+  and `quick_check`, and a standby that answers only `/health/*` and
+  `/v1/ha/*` until promoted. Single mode is byte-for-byte the old path.
+  Operator surface: `ag cluster status|promote|demote|snapshot`; e2e:
+  `tests/e2e/run-ha-manual.sh`.
+
 ### Fixed
 
 - **Lost assignment wake-ups in the CP.** `notify_waiters` stores no permit,

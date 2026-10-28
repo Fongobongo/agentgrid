@@ -4253,3 +4253,68 @@ mod mem_gate_tests {
         assert_eq!(n.repo_states.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod ha_fencing_tests {
+    use super::Store;
+    use crate::ha::{FencedError, HaGate, HaRole};
+    use sqlx::Row;
+    use uuid::Uuid;
+
+    async fn store_with_gate(gate: std::sync::Arc<HaGate>) -> (Store, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("ag-ha-gate-{}.db", Uuid::new_v4()));
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open_with_gate(p.to_str().unwrap(), Some(gate))
+            .await
+            .unwrap();
+        (s, p)
+    }
+
+    #[tokio::test]
+    async fn standby_gate_blocks_writes() {
+        let gate = HaGate::new(HaRole::Standby, 0);
+        let (s, _p) = store_with_gate(gate.clone()).await;
+        let err = match s.write_txn().await {
+            Ok(_) => panic!("standby write must be fenced"),
+            Err(e) => e,
+        };
+        assert!(err.downcast_ref::<FencedError>().is_some(), "{err}");
+        assert_eq!(gate.fenced_writes(), 1);
+    }
+
+    #[tokio::test]
+    async fn leader_with_matching_epoch_can_write() {
+        let gate = HaGate::new(HaRole::Leader, 0);
+        gate.promote(0, u64::MAX - 1);
+        let (s, _p) = store_with_gate(gate).await;
+        let mut tx = s.write_txn().await.unwrap();
+        let row = sqlx::query("SELECT epoch FROM ha_cluster_state WHERE id = 1")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<i64, _>("epoch"), 0);
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn epoch_mismatch_fences_the_write() {
+        let gate = HaGate::new(HaRole::Leader, 9);
+        gate.promote(9, u64::MAX - 1);
+        let (s, _p) = store_with_gate(gate.clone()).await;
+        let err = match s.write_txn().await {
+            Ok(_) => panic!("stale epoch must be fenced"),
+            Err(e) => e,
+        };
+        assert!(err.downcast_ref::<FencedError>().is_some(), "{err}");
+        assert_eq!(gate.fenced_writes(), 1);
+    }
+
+    #[tokio::test]
+    async fn single_mode_store_has_no_fence() {
+        let p = std::env::temp_dir().join(format!("ag-ha-single-{}.db", Uuid::new_v4()));
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(p.to_str().unwrap()).await.unwrap();
+        let tx = s.write_txn().await.unwrap();
+        tx.commit().await.unwrap();
+    }
+}

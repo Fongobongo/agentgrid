@@ -14,6 +14,8 @@ use agentgrid_common::{
 };
 use anyhow::Result;
 use sqlx::pool::PoolOptions;
+
+use crate::ha::{FencedError, HaGate};
 use sqlx::sqlite::{
     Sqlite, SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous,
 };
@@ -26,6 +28,7 @@ mod artifacts;
 mod attempts;
 mod conversations;
 mod events;
+mod ha;
 mod learnings;
 mod maintenance;
 // Plan 6.7: pure zstd-compression decision (routes tests prove the 30%
@@ -55,7 +58,12 @@ const DEFAULT_EVENT_PAGE: u64 = 1000;
 #[derive(Clone)]
 pub struct Store {
     pub pool: SqlitePool,
+    /// Database file path (metrics, HA snapshots, in-place restore).
+    db_path: std::path::PathBuf,
     artifact_root: std::path::PathBuf,
+    /// `None` in single mode. In HA mode every write checks the lease gate
+    /// and re-verifies the replicated epoch inside the transaction.
+    ha_gate: Option<std::sync::Arc<HaGate>>,
     /// Observability: last scheduler latency (queued→assigned) in ms and total
     /// assignments (Stage 2.5 ops). Wrapped in Arc so `Store` can derive Clone.
     pub(crate) scheduler_latency_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -211,6 +219,35 @@ async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<WriteTxn<'static>> {
             Err(e.into())
         }
     }
+}
+
+/// HA-fenced variant of [`begin_immediate`]. In HA mode it refuses writes on a
+/// standby or past-lease leader, then re-reads the replicated epoch inside the
+/// transaction so an old leader that missed a promotion cannot commit.
+async fn begin_checked(pool: &SqlitePool, gate: Option<&HaGate>) -> Result<WriteTxn<'static>> {
+    let Some(gate) = gate else {
+        return begin_immediate(pool).await;
+    };
+    gate.assert_writable()?;
+    let mut tx = begin_immediate(pool).await?;
+    // The lease can expire while queued on the write gate.
+    if let Err(e) = gate.assert_writable() {
+        tx.rollback().await?;
+        return Err(e.into());
+    }
+    let epoch: i64 = sqlx::query_scalar("SELECT epoch FROM ha_cluster_state WHERE id = 1")
+        .fetch_one(&mut *tx)
+        .await?;
+    if epoch as u64 != gate.epoch() {
+        gate.note_fenced_write();
+        let err = FencedError {
+            role: gate.role(),
+            epoch: gate.epoch(),
+        };
+        tx.rollback().await?;
+        return Err(err.into());
+    }
+    Ok(tx)
 }
 
 /// Parse a profile autonomy string (`l0`..`l4`) into an `AutonomyLevel`.
@@ -391,10 +428,25 @@ impl Store {
     /// per-instance [`Self::write_txn_count`] (see the field doc: exact-count
     /// test assertions need per-store isolation under parallel test runs).
     pub(crate) async fn write_txn(&self) -> Result<WriteTxn<'static>> {
-        let tx = begin_immediate(&self.pool).await?;
+        let tx = self.fenced_txn().await?;
         self.write_txn_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(tx)
+    }
+
+    /// Fenced write transaction without bumping the per-store counter.
+    pub(crate) async fn fenced_txn(&self) -> Result<WriteTxn<'static>> {
+        begin_checked(&self.pool, self.ha_gate.as_deref()).await
+    }
+
+    /// True in single mode or on the current leader. Background loops use this
+    /// to idle on standbys without touching the database.
+    pub(crate) fn ha_allows_work(&self) -> bool {
+        self.ha_gate.as_ref().map(|g| g.is_leader()).unwrap_or(true)
+    }
+
+    pub(crate) fn ha_gate(&self) -> Option<&std::sync::Arc<HaGate>> {
+        self.ha_gate.as_ref()
     }
 
     /// Write transactions begun by this store instance (tests/ops).
@@ -404,6 +456,13 @@ impl Store {
     }
 
     pub async fn open(db_path: &str) -> Result<Self> {
+        Self::open_with_gate(db_path, None).await
+    }
+
+    pub async fn open_with_gate(
+        db_path: &str,
+        ha_gate: Option<std::sync::Arc<HaGate>>,
+    ) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
             .filename(db_path)
             .create_if_missing(true)
@@ -441,7 +500,9 @@ impl Store {
         let _ = std::fs::create_dir_all(&artifact_root);
         Ok(Self {
             pool,
+            db_path: std::path::PathBuf::from(db_path),
             artifact_root,
+            ha_gate,
             scheduler_latency_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scheduler_assignments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             checkpoint_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -541,13 +602,17 @@ impl Store {
     }
 }
 
-async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<usize> {
+async fn revert_expired_leases(
+    pool: &SqlitePool,
+    now: &str,
+    gate: Option<&HaGate>,
+) -> Result<usize> {
     // Race-safe (hardening P0 item 7): a single `BEGIN IMMEDIATE` transaction
     // selects AND cancels expired leases so a concurrent `ack_attempt` cannot
     // double-flip. The per-attempt cancel is CAS (`status = 'assigned'`), and we
     // only requeue the task / decrement `active_attempts` for rows we actually
     // moved — never for an attempt that was already ACKed or terminal.
-    let mut tx = begin_immediate(pool).await?;
+    let mut tx = begin_checked(pool, gate).await?;
     let rows = sqlx::query(
         "SELECT id, task_id, node_id FROM attempts WHERE status = 'assigned' AND ack_deadline < ?",
     )
@@ -596,7 +661,7 @@ async fn revert_expired_leases(pool: &SqlitePool, now: &str) -> Result<usize> {
     Ok(reverted)
 }
 
-async fn mark_offline_nodes(pool: &SqlitePool, now: &str) -> Result<()> {
+async fn mark_offline_nodes(pool: &SqlitePool, now: &str, gate: Option<&HaGate>) -> Result<()> {
     // Race-safe (hardening P0 item 7): CAS `online` -> `offline` under a single
     // write transaction and only run `lose_node_attempts` for nodes we actually
     // flipped. A concurrent heartbeat re-asserting `online` (via
@@ -604,7 +669,7 @@ async fn mark_offline_nodes(pool: &SqlitePool, now: &str) -> Result<()> {
     let cutoff = chrono::DateTime::parse_from_rfc3339(now)
         .map(|d| (d - chrono::Duration::seconds(30)).to_rfc3339())
         .unwrap_or_else(|_| (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339());
-    let mut tx = begin_immediate(pool).await?;
+    let mut tx = begin_checked(pool, gate).await?;
     let rows = sqlx::query(
         "SELECT id FROM nodes WHERE status = 'online' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)",
     )

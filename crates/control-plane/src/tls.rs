@@ -60,8 +60,8 @@ pub fn load_tls_acceptor(
 }
 
 /// Await Ctrl-C / SIGTERM, then truncate the WAL so a restart replays nothing
-/// stale (Stage 2.5 ops).
-pub async fn shutdown_signal(state: Arc<AppState>) {
+/// stale (Stage 2.5 ops). `None` for processes without a database (witness).
+pub async fn shutdown_signal(state: Option<Arc<AppState>>) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -80,7 +80,9 @@ pub async fn shutdown_signal(state: Arc<AppState>) {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
-    let _ = state.store.wal_checkpoint().await;
+    if let Some(state) = state {
+        let _ = state.store.wal_checkpoint().await;
+    }
 }
 
 #[cfg(test)]

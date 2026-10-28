@@ -237,6 +237,11 @@ pub fn user_protected(path: &str) -> bool {
     if path.starts_with("/v1/webhooks/") {
         return false;
     }
+    // HA peer RPC carries the cluster token and must work before the first
+    // user exists (a fresh cluster bootstraps over these routes).
+    if path.starts_with("/v1/ha/") {
+        return false;
+    }
     if path == "/v1/auth/login" || path == "/v1/auth/setup" || path == "/v1/auth/logout" {
         return false;
     }
@@ -430,6 +435,11 @@ pub async fn auth_logout(
 }
 
 pub async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
+    // A standby is alive but must never receive traffic: only the leader (or
+    // a single-mode node) is ready.
+    if !state.ha.is_leader() {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     let dir = std::path::Path::new(&state.db_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))

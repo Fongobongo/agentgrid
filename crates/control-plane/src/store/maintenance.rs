@@ -15,12 +15,12 @@ impl Store {
     /// drifted — approval expiry only ran on the loop side).
     pub async fn tick_maintenance(&self) -> Result<()> {
         let now = now_iso();
-        let reverted = revert_expired_leases(&self.pool, &now).await?;
+        let reverted = revert_expired_leases(&self.pool, &now, self.ha_gate.as_deref()).await?;
         if reverted > 0 {
             self.lease_reverts
                 .fetch_add(reverted as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        mark_offline_nodes(&self.pool, &now).await?;
+        mark_offline_nodes(&self.pool, &now, self.ha_gate.as_deref()).await?;
         // Approval expiry + scheduled-workflow triggers fire on the shared
         // cadence; without them scheduled workflows would never fire and
         // approvals would never expire in production.
@@ -72,6 +72,10 @@ impl Store {
             let mut last_backup = std::time::Instant::now();
             loop {
                 tokio::time::sleep(Duration::from_secs(15)).await;
+                // HA standbys do no maintenance: every tick writes.
+                if !store.ha_allows_work() {
+                    continue;
+                }
                 if let Err(e) = store.tick_maintenance().await {
                     tracing::warn!("maintenance tick failed: {e}");
                 }
@@ -149,6 +153,10 @@ impl Store {
             // Drop the first sleep so a fresh boot picks up in-flight runs
             // immediately (covers recovery after restart).
             loop {
+                if !store.ha_allows_work() {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 let ids = match store.running_workflow_run_ids().await {
                     Ok(ids) => ids,
                     Err(e) => {
@@ -181,6 +189,10 @@ impl Store {
             .unwrap_or(5);
         tokio::spawn(async move {
             loop {
+                if !store.ha_allows_work() {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 let now_unix = chrono::Utc::now().timestamp();
                 let due = match store.due_agents(now_unix).await {
                     Ok(d) => d,
@@ -237,6 +249,9 @@ impl Store {
     /// may still complete them and report back; node-death is caught by the
     /// normal `node_lost` path. (Idea: hatchet-style durable startup-reconcile.)
     pub async fn reconcile_on_startup(&self) -> Result<()> {
+        if !self.ha_allows_work() {
+            return Ok(());
+        }
         let inflight: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM attempts WHERE status IN ('assigned','running')",
         )

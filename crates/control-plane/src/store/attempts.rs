@@ -1348,7 +1348,7 @@ impl Store {
     /// contiguous sequence slot, ingest_id from the shared counter, indexed by
     /// the events_fts triggers (searchable via `GET /v1/search/events`).
     pub async fn append_audit_event(&self, attempt_id: &str, kind: &str, text: &str) -> Result<()> {
-        let mut tx = super::begin_immediate(&self.pool).await?;
+        let mut tx = self.fenced_txn().await?;
         let seq: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_events WHERE attempt_id = ?",
         )

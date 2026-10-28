@@ -110,6 +110,18 @@ impl WsRegistry {
     pub async fn connection_count(&self) -> usize {
         self.conns.lock().await.len()
     }
+
+    /// Close every connection with `code` (HA demotion: nodes must reconnect
+    /// to the new leader instead of waiting for a ping timeout).
+    pub async fn close_all(&self, code: u16, reason: &str) {
+        let conns = self.conns.lock().await;
+        for c in conns.values() {
+            let _ = c.tx.try_send(Message::Close(Some(CloseFrame {
+                code,
+                reason: reason.to_string().into(),
+            })));
+        }
+    }
 }
 
 /// Reconnect redeliveries of unacked assignments (observability for the
@@ -334,6 +346,12 @@ async fn handle_client_msg(state: &Arc<AppState>, node_id: &str, msg: NodeWsMsg)
 pub fn start_pump(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
+            // Standbys have no API mutations and therefore no assignments to
+            // push; idle until promotion.
+            if !state.ha.is_leader() {
+                tokio::time::sleep(PUMP_TICK).await;
+                continue;
+            }
             // Build the waiter BEFORE running the pass so a notify landing
             // mid-pass re-runs the loop. `enable()` registers this waiter
             // immediately: `notify_waiters` does NOT store a permit, so an
