@@ -421,3 +421,182 @@ async fn bridge_ws(client: WebSocket, url: &str, headers: &HeaderMap) -> anyhow:
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use axum::Json;
+
+    /// One fake control plane: `/v1/ha/status` reports `role`, everything else
+    /// answers `proxy` (a 503 also demotes the fake, like a real old leader).
+    #[derive(Clone)]
+    struct Upstream {
+        role: Arc<Mutex<&'static str>>,
+        proxy: StatusCode,
+        hits: Arc<AtomicU64>,
+    }
+
+    async fn start_upstream(role: &'static str, proxy: StatusCode) -> (String, Upstream) {
+        let up = Upstream {
+            role: Arc::new(Mutex::new(role)),
+            proxy,
+            hits: Arc::new(AtomicU64::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/ha/status", get(ha_status))
+            .fallback(proxied)
+            .with_state(up.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let addr = listener.local_addr().expect("upstream addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), up)
+    }
+
+    async fn ha_status(State(up): State<Upstream>) -> Json<serde_json::Value> {
+        let role = *up.role.lock().expect("role lock");
+        Json(serde_json::json!({ "role": role }))
+    }
+
+    async fn proxied(State(up): State<Upstream>) -> Response {
+        up.hits.fetch_add(1, Ordering::Relaxed);
+        if up.proxy == StatusCode::SERVICE_UNAVAILABLE {
+            // A leader that lost the election reports standby from now on.
+            *up.role.lock().expect("role lock") = "standby";
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(HeaderName::from_static("x-agentgrid-role"), "standby")],
+                "not leader",
+            )
+                .into_response()
+        } else {
+            (StatusCode::OK, "ok").into_response()
+        }
+    }
+
+    fn edge(urls: &[&str]) -> Arc<Edge> {
+        Edge::new(
+            urls.iter().map(|u| (*u).to_string()).collect(),
+            "token".into(),
+        )
+        .expect("edge")
+    }
+
+    fn get_request(path: &str) -> Request {
+        Request::builder()
+            .method("GET")
+            .uri(path)
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn discovers_the_leader_among_upstreams() {
+        let (standby, _a) = start_upstream("standby", StatusCode::OK).await;
+        let (leader, _b) = start_upstream("leader", StatusCode::OK).await;
+        let e = edge(&[&standby, &leader]);
+        assert_eq!(e.leader().await.as_deref(), Some(leader.as_str()));
+    }
+
+    #[tokio::test]
+    async fn unreachable_upstreams_are_leaderless() {
+        let e = edge(&["http://127.0.0.1:1"]);
+        assert!(e.leader().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn leaderless_cluster_answers_503_with_retry_after() {
+        let (standby, _a) = start_upstream("standby", StatusCode::OK).await;
+        let e = edge(&[&standby]);
+        assert!(e.leader().await.is_none());
+
+        let resp = proxy(State(e.clone()), get_request("/v1/tasks")).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(header::RETRY_AFTER)
+                .expect("retry-after")
+                .to_str()
+                .expect("ascii"),
+            "2"
+        );
+        assert_eq!(e.metrics.leaderless_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn proxy_retries_once_after_not_leader() {
+        let (old, old_up) = start_upstream("leader", StatusCode::SERVICE_UNAVAILABLE).await;
+        let (new, new_up) = start_upstream("leader", StatusCode::OK).await;
+        let e = edge(&[&old, &new]);
+
+        let resp = proxy(State(e.clone()), get_request("/v1/tasks")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(old_up.hits.load(Ordering::Relaxed), 1);
+        assert_eq!(new_up.hits.load(Ordering::Relaxed), 1);
+        assert_eq!(e.metrics.retries_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn proxy_retry_budget_is_a_single_attempt() {
+        let (a, a_up) = start_upstream("leader", StatusCode::SERVICE_UNAVAILABLE).await;
+        let (b, b_up) = start_upstream("leader", StatusCode::SERVICE_UNAVAILABLE).await;
+        let e = edge(&[&a, &b]);
+
+        let resp = proxy(State(e.clone()), get_request("/v1/tasks")).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // First attempt plus exactly one retry: never a loop.
+        let total = a_up.hits.load(Ordering::Relaxed) + b_up.hits.load(Ordering::Relaxed);
+        assert_eq!(total, 2);
+        assert_eq!(e.metrics.retries_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn proxied_response_keeps_upstream_headers() {
+        let (leader, _a) = start_upstream("leader", StatusCode::OK).await;
+        let e = edge(&[&leader]);
+        let resp = proxy(State(e), get_request("/v1/tasks?state=queued")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn hop_by_hop_headers_are_stripped() {
+        for name in [
+            "connection",
+            "keep-alive",
+            "transfer-encoding",
+            "content-length",
+            "upgrade",
+            "host",
+        ] {
+            assert!(
+                is_hop_by_hop(&HeaderName::from_static(name)),
+                "{name} must not be forwarded"
+            );
+        }
+        for name in ["authorization", "x-agentgrid-role", "content-type"] {
+            assert!(
+                !is_hop_by_hop(&HeaderName::from_static(name)),
+                "{name} must be forwarded"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_counters() {
+        let e = edge(&["http://127.0.0.1:1"]);
+        e.metrics.requests_total.fetch_add(3, Ordering::Relaxed);
+        let resp = metrics(State(e)).await;
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("metrics body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(text.contains("agentgrid_edge_requests_total 3"));
+        assert!(text.contains("agentgrid_edge_leaderless_total 0"));
+        assert!(text.contains("# HELP agentgrid_edge_ws_bridges_total"));
+    }
+}
