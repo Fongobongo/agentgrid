@@ -95,6 +95,22 @@
 
 ### Fixed
 
+- **A leader that lost a same-term race was muted forever, and the cluster
+  could end up with no electable candidate.** `demote()` unconditionally set
+  `need_full_snapshot` (and zeroed `applied_seq`) on the theory that a demoted
+  leader may have committed writes nobody else saw. A node that wins an
+  election and is demoted 400 ms later by the same-term winner's heartbeat has
+  served nothing, yet it became permanently ineligible to campaign. In
+  `run-ha-partition.sh` that left cp-a muted while cp-c refused to campaign
+  because its cached "leader" (cp-a) still *answered* — 11 minutes of
+  `not campaigning: local database awaits a full snapshot` and
+  `leader cp-a reachable but catch-up failed: cp-a is not a leader`.
+  - `HaGate` now counts writes admitted since the last promotion
+    (`admitted_writes`, reset in `promote`), and `demote` only condemns the
+    local copy when that count is non-zero.
+  - The pre-election reachability probe now blocks only when the cached leader
+    still reports `role=leader`. A peer that answers `standby` is a stale hint,
+    not a reason to skip an election.
 - **A frozen peer made leadership flap, not just elections slow.** The lease
   loop sent heartbeats **sequentially** with a `max(election_timeout*3, 2s)`
   transport timeout, on a tick of `election_timeout/3` (200 ms in the chaos

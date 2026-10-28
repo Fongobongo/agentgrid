@@ -87,6 +87,11 @@ pub struct HaGate {
     /// Monotonic milliseconds; `u64::MAX` means "no lease required" (single).
     lease_until_ms: AtomicU64,
     fenced_writes: AtomicU64,
+    /// Writes admitted while this node was leader, reset on every promotion.
+    /// A leader that demotes without ever admitting a write has nothing the
+    /// rest of the cluster could have missed, so it must not be condemned to
+    /// a full snapshot (and with it, permanent ineligibility to campaign).
+    admitted_writes: AtomicU64,
 }
 
 impl HaGate {
@@ -96,6 +101,7 @@ impl HaGate {
             epoch: AtomicU64::new(0),
             lease_until_ms: AtomicU64::new(u64::MAX),
             fenced_writes: AtomicU64::new(0),
+            admitted_writes: AtomicU64::new(0),
         })
     }
 
@@ -106,6 +112,7 @@ impl HaGate {
             epoch: AtomicU64::new(epoch),
             lease_until_ms: AtomicU64::new(lease),
             fenced_writes: AtomicU64::new(0),
+            admitted_writes: AtomicU64::new(0),
         })
     }
 
@@ -141,6 +148,7 @@ impl HaGate {
             HaRole::Standby | HaRole::Witness => false,
         };
         if ok {
+            self.admitted_writes.fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
             self.fenced_writes.fetch_add(1, Ordering::Relaxed);
@@ -155,6 +163,7 @@ impl HaGate {
     pub fn promote(&self, epoch: u64, lease_until_ms: u64) {
         self.epoch.store(epoch, Ordering::Release);
         self.lease_until_ms.store(lease_until_ms, Ordering::Release);
+        self.admitted_writes.store(0, Ordering::Release);
         self.role.store(HaRole::Leader as u8, Ordering::Release);
     }
 
@@ -190,6 +199,11 @@ impl HaGate {
 
     pub fn fenced_writes(&self) -> u64 {
         self.fenced_writes.load(Ordering::Relaxed)
+    }
+
+    /// Writes admitted since the last promotion (see `admitted_writes`).
+    pub fn admitted_writes(&self) -> u64 {
+        self.admitted_writes.load(Ordering::Relaxed)
     }
 }
 
@@ -387,5 +401,33 @@ mod tests {
         g.promote(3, u64::MAX - 1);
         assert_eq!(g.epoch(), 3);
         assert_eq!(g.role(), HaRole::Leader);
+    }
+
+    #[test]
+    fn admitted_writes_are_per_leadership_term() {
+        // `demote` uses this to decide whether the local copy is trustworthy:
+        // a node that won an election and lost a same-term race milliseconds
+        // later admitted nothing, so it must stay electable.
+        let g = HaGate::new(HaRole::Standby, 1);
+        g.promote(2, u64::MAX - 1);
+        assert_eq!(g.admitted_writes(), 0);
+        assert!(g.assert_writable().is_ok());
+        assert!(g.assert_writable().is_ok());
+        assert_eq!(g.admitted_writes(), 2);
+        g.demote();
+        assert_eq!(
+            g.admitted_writes(),
+            2,
+            "demote keeps the count for the check"
+        );
+        g.promote(3, u64::MAX - 1);
+        assert_eq!(g.admitted_writes(), 0, "a new term starts clean");
+    }
+
+    #[test]
+    fn a_leader_without_a_lease_admits_nothing() {
+        let g = HaGate::new(HaRole::Leader, 5);
+        assert!(g.assert_writable().is_err());
+        assert_eq!(g.admitted_writes(), 0);
     }
 }

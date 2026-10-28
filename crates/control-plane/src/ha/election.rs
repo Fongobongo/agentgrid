@@ -230,8 +230,21 @@ pub async fn demote(state: &Arc<AppState>, reason: &str) {
     // saw. Its local copy is therefore untrusted: restore the new leader's
     // snapshot before campaigning again, and report a zero replication position
     // so it can still vote for a fresh candidate.
-    rt.shared.set_need_full_snapshot();
-    rt.shared.set_applied_seq(0);
+    //
+    // Only when it actually admitted writes, though. A node that wins an
+    // election and loses a same-term race milliseconds later has served
+    // nothing; condemning it to a snapshot made it permanently ineligible to
+    // campaign, which in a 3-host cluster where the third host is frozen left
+    // no electable candidate at all.
+    if rt.gate.admitted_writes() > 0 {
+        rt.shared.set_need_full_snapshot();
+        rt.shared.set_applied_seq(0);
+    } else {
+        tracing::info!(
+            term = rt.shared.term(),
+            "demoted without admitting a write; local state is still trustworthy"
+        );
+    }
     state
         .ws_registry
         .close_all(
@@ -287,20 +300,27 @@ async fn election_round(state: &Arc<AppState>) -> Result<()> {
             // Probe with a tight budget. `catch_up` already bounds the snapshot
             // apply itself, so it is not wrapped here (cancelling it mid-restore
             // would be worse than waiting); but the extra reachability check must
-            // not cost another full transport timeout on top — a leader that
-            // cannot answer `/v1/ha/status` within one election timeout is not
-            // serving, and waiting longer only delays failover.
-            let reachable = tokio::time::timeout(
+            // not cost another full transport timeout on top.
+            //
+            // Only a host that still *reports itself leader* blocks the
+            // election. A cached leader that answers with `role=standby` is a
+            // stale hint, and treating mere reachability as "no failover is
+            // due" deadlocked the cluster: every survivor refused to campaign
+            // while pointing at a demoted peer.
+            let still_leading = tokio::time::timeout(
                 rt.config.election_timeout,
                 transport::status(rt, &leader.url),
             )
             .await
-            .map(|r| r.is_ok())
+            .map(|r| matches!(r, Ok(s) if s.role == "leader"))
             .unwrap_or(false);
-            if reachable {
+            if still_leading {
                 anyhow::bail!("leader {} reachable but catch-up failed: {e}", leader.id);
             }
-            tracing::debug!("pre-election catch-up failed (leader unreachable): {e}");
+            tracing::debug!(
+                "pre-election catch-up failed (no leader at {}): {e}",
+                leader.id
+            );
         }
     }
     if rt.shared.need_full_snapshot() {
