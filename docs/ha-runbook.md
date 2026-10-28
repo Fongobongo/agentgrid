@@ -31,6 +31,8 @@ Optional:
 - `AGENTGRID_HA_RPO_MODE=snapshot|async|sync` (default snapshot)
 - `AGENTGRID_HA_REPL_BACKEND=peer|s3` (default peer)
 - `AGENTGRID_HA_S3_*` (endpoint, bucket, region, prefix, access_key, secret_key)
+- `AGENTGRID_HA_CHANGESET_RETENTION` (batches kept below the last snapshot,
+  default 256, `0` disables pruning — see `docs/ha-object-storage.md`)
 - `AGENTGRID_HA_LEASE_TTL_SECS` (default 10), `AGENTGRID_HA_ELECTION_TIMEOUT_MS` (default 1500)
 - `AGENTGRID_HA_SNAPSHOT_INTERVAL_SECS` (default 60)
 - `AGENTGRID_HA_SECRET_FETCH=1` (leader-only one-time JWT secret provisioning; disable after)

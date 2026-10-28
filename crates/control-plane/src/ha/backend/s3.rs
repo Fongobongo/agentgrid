@@ -221,6 +221,14 @@ impl S3Client {
 
     /// List keys under `prefix` (relative to this cluster's namespace).
     pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.list_from(prefix, None).await
+    }
+
+    /// List keys under `prefix`, starting strictly after `start_after` (a key
+    /// relative to this cluster's namespace). ListObjectsV2 `start-after` is
+    /// what keeps a standby's changeset poll proportional to the *new*
+    /// batches instead of the whole prefix.
+    pub async fn list_from(&self, prefix: &str, start_after: Option<&str>) -> Result<Vec<String>> {
         let mut out = Vec::new();
         let mut token: Option<String> = None;
         for _ in 0..MAX_LIST_PAGES {
@@ -229,6 +237,9 @@ impl S3Client {
                 ("prefix".into(), self.object_key(prefix)),
                 ("max-keys".into(), "1000".into()),
             ];
+            if let Some(after) = start_after {
+                query.push(("start-after".into(), self.object_key(after)));
+            }
             if let Some(t) = token.as_deref() {
                 query.push(("continuation-token".into(), t.to_string()));
             }
@@ -315,6 +326,46 @@ impl S3Client {
     pub async fn list_changesets(&self) -> Result<Vec<String>> {
         let keys = self.list("changesets/").await?;
         Ok(keys.into_iter().filter(|k| k.ends_with(".bin")).collect())
+    }
+
+    /// Changeset keys strictly newer than `after_seq`.
+    ///
+    /// Keys are zero-padded (`changesets/<first>-<last>.bin`), so a plain
+    /// `start-after` of the bare sequence number is both correct and cheap:
+    /// a standby that is already at `after_seq` no longer re-lists every batch
+    /// ever written (the old behaviour grew O(batches) at one poll per 2 s).
+    pub async fn list_changesets_after(&self, after_seq: u64) -> Result<Vec<String>> {
+        let start = format!("changesets/{after_seq:020}");
+        let keys = self.list_from("changesets/", Some(&start)).await?;
+        Ok(keys.into_iter().filter(|k| k.ends_with(".bin")).collect())
+    }
+
+    /// Delete changeset batches whose whole range is at or below `below_seq`,
+    /// keeping the newest `keep` of them. Returns how many objects were
+    /// removed.
+    ///
+    /// `below_seq` is the sequence a snapshot already contains, so nothing
+    /// deleted here is needed to reconstruct that state; `keep` is the safety
+    /// margin for a standby that is mid-catch-up (it falls back to the
+    /// snapshot if it still hits a gap).
+    pub async fn prune_changesets(&self, below_seq: u64, keep: usize) -> Result<usize> {
+        let mut eligible: Vec<(u64, u64, String)> = self
+            .list_changesets()
+            .await?
+            .into_iter()
+            .filter_map(|key| {
+                let (first, last) = Self::changeset_range(&key)?;
+                (last <= below_seq).then_some((first, last, key))
+            })
+            .collect();
+        eligible.sort();
+        let drop_count = eligible.len().saturating_sub(keep);
+        let mut deleted = 0usize;
+        for (_, _, key) in eligible.into_iter().take(drop_count) {
+            self.delete(&key).await?;
+            deleted += 1;
+        }
+        Ok(deleted)
     }
 
     /// Sequence range encoded in a changeset object key. Returns `None` for a
@@ -717,6 +768,8 @@ pub mod mock {
         prefix: Option<String>,
         #[serde(rename = "continuation-token")]
         _continuation_token: Option<String>,
+        #[serde(rename = "start-after")]
+        start_after: Option<String>,
     }
 
     async fn list(
@@ -725,12 +778,19 @@ pub mod mock {
         Query(q): Query<ListQuery>,
     ) -> Response {
         let prefix = format!("{bucket}/{}", q.prefix.unwrap_or_default());
+        let start_after = q.start_after.map(|k| format!("{bucket}/{k}"));
         let objects = s.objects.lock().expect("mock s3 lock");
         let mut xml = String::from(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListBucketResult><IsTruncated>false</IsTruncated>",
         );
-        for key in objects.keys().filter(|k| k.starts_with(&prefix)) {
+        let mut keys: Vec<&String> = objects
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .filter(|k| start_after.as_ref().is_none_or(|after| *k > after))
+            .collect();
+        keys.sort();
+        for key in keys {
             let rest = key.strip_prefix(&format!("{bucket}/")).unwrap_or(key);
             xml.push_str(&format!(
                 "<Contents><Key>{}</Key></Contents>",
@@ -860,5 +920,56 @@ mod tests {
             }
         );
         assert_eq!(mock.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_changesets_after_skips_applied_batches() {
+        let (_mock, endpoint) = MockS3::start().await;
+        let client = S3Client::new(&cfg(endpoint), "prod", true).expect("client");
+        for (first, last) in [(1u64, 3u64), (4, 6), (7, 9)] {
+            client
+                .put_changeset(1, 94, first, last, b"x")
+                .await
+                .expect("put changeset");
+        }
+        assert_eq!(client.list_changesets().await.unwrap().len(), 3);
+
+        let after = client.list_changesets_after(6).await.expect("list");
+        assert_eq!(after.len(), 1, "only the batch above the applied seq");
+        assert!(after[0].ends_with("-00000000000000000009.bin"));
+
+        // Caught up: the poll must return nothing instead of the whole prefix.
+        assert!(client
+            .list_changesets_after(9)
+            .await
+            .expect("list")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn prune_changesets_keeps_the_newest_margin() {
+        let (mock, endpoint) = MockS3::start().await;
+        let client = S3Client::new(&cfg(endpoint), "prod", true).expect("client");
+        for batch in 1u64..=5 {
+            client
+                .put_changeset(1, 94, batch * 2 - 1, batch * 2, b"x")
+                .await
+                .expect("put changeset");
+        }
+
+        // Batches (1,2) and (3,4) are inside the snapshot at seq 4 and beyond
+        // the retention margin.
+        assert_eq!(client.prune_changesets(4, 0).await.expect("prune"), 2);
+        assert_eq!(mock.len(), 3);
+
+        // Keeping more than is eligible deletes nothing.
+        assert_eq!(client.prune_changesets(10, 10).await.expect("prune"), 0);
+        assert_eq!(mock.len(), 3);
+
+        // Margin of one: everything at or below seq 10 except the newest.
+        assert_eq!(client.prune_changesets(10, 1).await.expect("prune"), 2);
+        let left = client.list_changesets().await.expect("list");
+        assert_eq!(left.len(), 1);
+        assert!(left[0].ends_with("-00000000000000000010.bin"));
     }
 }

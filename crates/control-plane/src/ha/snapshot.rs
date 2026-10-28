@@ -140,7 +140,27 @@ async fn publish_s3(rt: &HaRuntime, dir: &Path, manifest: &SnapshotManifest) -> 
         &serde_json::to_vec_pretty(manifest)?,
     )
     .await
-    .context("publish HA snapshot to object storage")
+    .context("publish HA snapshot to object storage")?;
+    // Everything at or below `manifest.seq` is inside the snapshot we just
+    // published, so the older changeset batches are dead weight — without
+    // this the bucket grows one object per second forever and every standby
+    // LIST gets slower. A standby that still needed a pruned batch detects
+    // the gap and restores this snapshot instead (documented behaviour).
+    let keep = rt.config.changeset_retention;
+    if keep > 0 && rt.is_leader() {
+        match s3.prune_changesets(manifest.seq, keep).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                deleted = n,
+                seq = manifest.seq,
+                keep,
+                "pruned object-storage changesets"
+            ),
+            // Pruning is housekeeping: never fail a good snapshot over it.
+            Err(e) => tracing::warn!("changeset prune failed: {e}"),
+        }
+    }
+    Ok(())
 }
 
 pub fn read_manifest(dir: &Path, id: &str) -> Result<SnapshotManifest> {

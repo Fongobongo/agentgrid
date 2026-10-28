@@ -20,6 +20,8 @@ AGENTGRID_HA_S3_REGION=us-east-1
 AGENTGRID_HA_S3_PREFIX=prod
 AGENTGRID_HA_S3_ACCESS_KEY=...
 AGENTGRID_HA_S3_SECRET_KEY=...
+# optional: batches kept below the last snapshot (0 = never prune)
+AGENTGRID_HA_CHANGESET_RETENTION=256
 ```
 
 `AGENTGRID_HA_ALLOW_PLAINTEXT=1` is required only for a plaintext `http://`
@@ -41,6 +43,20 @@ A standby always trusts the manifest/envelope header, verifies size + SHA-256
 and `quick_check`, and falls back to the latest snapshot when a changeset gap or
 schema mismatch appears. Uploads are ordered database → manifest → `latest.json`
 so a reader never sees a pointer to an incomplete snapshot.
+
+### Retention and polling cost
+
+- A standby lists changesets with `start-after` set to its own applied
+  sequence, so a poll costs one LIST over *new* batches rather than over the
+  cluster's whole write history.
+- After each successful snapshot upload the leader deletes changeset batches
+  fully contained in that snapshot, keeping the newest
+  `AGENTGRID_HA_CHANGESET_RETENTION` batches (default `256`, `0` disables
+  pruning). Without this the bucket gains one object per write batch forever.
+- A standby that needs a pruned batch sees a gap and restores the snapshot
+  instead; that is the documented fallback, not an error. Size the retention
+  margin for the longest catch-up you want to serve without a snapshot
+  (256 batches ≈ 4 minutes at the default 1 s async batching).
 
 ## Durability semantics
 

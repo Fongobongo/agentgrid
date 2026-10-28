@@ -107,6 +107,10 @@ pub struct HaConfig {
     pub witness_dir: PathBuf,
     pub allow_plaintext: bool,
     pub max_changeset_bytes: u64,
+    /// Object-storage changeset batches kept below the last snapshot's
+    /// sequence. Pruning runs on the leader after each snapshot upload; `0`
+    /// disables it (batches accumulate forever).
+    pub changeset_retention: usize,
     /// Number of data replicas in the cluster, including self when data.
     pub data_replicas: usize,
     /// Number of witness voters, including self when witness.
@@ -138,6 +142,7 @@ impl HaConfig {
             witness_dir: PathBuf::from("/var/lib/agentgrid/witness"),
             allow_plaintext: false,
             max_changeset_bytes: 8 * 1024 * 1024,
+            changeset_retention: 256,
             data_replicas: 1,
             witnesses_count: 0,
         }
@@ -252,6 +257,15 @@ impl HaConfig {
             .unwrap_or(8)
             .saturating_mul(1024 * 1024);
 
+        let changeset_retention = get(map, "AGENTGRID_HA_CHANGESET_RETENTION")
+            .map(|v| v.parse::<usize>())
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("AGENTGRID_HA_CHANGESET_RETENTION must be an integer"))?
+            .unwrap_or(256);
+        if changeset_retention > 1_000_000 {
+            bail!("AGENTGRID_HA_CHANGESET_RETENTION must be <= 1000000, got {changeset_retention}");
+        }
+
         Ok(Self {
             mode,
             role,
@@ -277,6 +291,7 @@ impl HaConfig {
                 .unwrap_or_else(|| PathBuf::from("/var/lib/agentgrid/witness")),
             allow_plaintext,
             max_changeset_bytes,
+            changeset_retention,
             data_replicas,
             witnesses_count,
         })
@@ -320,6 +335,7 @@ const ENV_KEYS: &[&str] = &[
     "AGENTGRID_HA_WITNESS_DIR",
     "AGENTGRID_HA_ALLOW_PLAINTEXT",
     "AGENTGRID_HA_MAX_CHANGESET_MB",
+    "AGENTGRID_HA_CHANGESET_RETENTION",
 ];
 
 fn get(map: &HashMap<String, String>, key: &str) -> Option<String> {

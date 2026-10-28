@@ -59,14 +59,18 @@ unchanged.
 - Witness never stores data or acks writes; object storage never votes.
 - No NFS/CIFS/network-attached DB or artifacts (still).
 - Sync-mode writes need a data quorum; a witness vote alone is insufficient.
-- S3 changeset listing has no pruning yet; a standby polls all `.bin` keys
-  each 2s (operational note: prune old changesets).
+- S3 changeset listing starts after the standby's applied sequence, and the
+  leader prunes batches already contained in its newest snapshot
+  (`AGENTGRID_HA_CHANGESET_RETENTION`, default 256, `0` disables). A standby
+  that needs a pruned batch falls back to the snapshot.
 
 ## Non-goals (kept from ADR 0001 / 0008)
 
 - No active-active SQLite / multi-writer.
 - No etcd/Consul (possible later election adapter, separate ADR).
-- No automatic S3 changeset pruning in this release.
+- Pruning is leader-driven and sequence-based only: no bucket lifecycle rules,
+  no per-replica acknowledgement tracking (a lagging replica degrades to a
+  snapshot instead).
 
 ## Verification
 
@@ -78,5 +82,8 @@ unchanged.
 - Chaos e2e: `tests/e2e/run-ha-3host.sh`, `run-ha-2pluswitness.sh`,
   `run-ha-partition.sh` — kill/partition leader, exactly one leader, no
   acknowledged write loss, task completes, edge forwards, nodes reconnect.
+  These run in CI (`.github/workflows/ha-chaos.yml`) on every change under
+  `crates/control-plane/src/ha/`, `crates/edge/`, `crates/node-daemon/src/`
+  or `tests/e2e/run-ha-*.sh`, nightly, and on PRs labelled `ha-chaos`.
 - `cargo deny check` + `cargo audit`; musl release build with and without
   `ha-incremental`.

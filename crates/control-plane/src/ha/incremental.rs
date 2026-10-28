@@ -28,6 +28,30 @@ use super::config::RpoMode;
 use super::quorum::VoterSet;
 use super::role::{mono_ms, HaRuntime};
 use super::transport::{self, ChangesetAck};
+
+/// Changeset batches applied on this host, and apply attempts that ended in a
+/// rejection/gap. Process-wide (like the SQLite write-path counters) so
+/// `/metrics` can show a standby that stopped making progress.
+static BATCHES_APPLIED: AtomicU64 = AtomicU64::new(0);
+static APPLY_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// `(batches applied, apply failures)` since process start.
+pub fn changeset_stats() -> (u64, u64) {
+    (
+        BATCHES_APPLIED.load(Ordering::Relaxed),
+        APPLY_FAILURES.load(Ordering::Relaxed),
+    )
+}
+
+pub(crate) fn note_batches(n: usize) {
+    if n > 0 {
+        BATCHES_APPLIED.fetch_add(n as u64, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn note_apply_failure() {
+    APPLY_FAILURES.fetch_add(1, Ordering::Relaxed);
+}
 use crate::store::{ApplyOutcome, Store};
 
 /// Async mode coalesces commits into one peer request for at most this long.
@@ -444,7 +468,11 @@ pub async fn apply_s3_pending(rt: &HaRuntime, store: &Store) -> Result<usize> {
     }
     let schema_version = store.schema_version().await?;
     let mut applied = 0usize;
-    for key in s3.list_changesets().await? {
+    // Start the LIST after what we already have: the previous version listed
+    // the whole `changesets/` prefix on every 2 s tick, so an idle standby's
+    // poll cost grew linearly with the cluster's write history.
+    let start_after = store.ha_repl_seq().await?.max(rt.shared.applied_seq());
+    for key in s3.list_changesets_after(start_after).await? {
         let Some((first_seq, last_seq)) = super::backend::S3Client::changeset_range(&key) else {
             continue;
         };
@@ -458,6 +486,7 @@ pub async fn apply_s3_pending(rt: &HaRuntime, store: &Store) -> Result<usize> {
                 local,
                 "object-storage changeset gap; waiting for a snapshot"
             );
+            note_apply_failure();
             break;
         }
         let Some(obj) = s3.get_changeset(&key).await? else {
@@ -500,9 +529,11 @@ pub async fn apply_s3_pending(rt: &HaRuntime, store: &Store) -> Result<usize> {
                 reason,
             } => {
                 tracing::warn!(key, applied_seq, reason, "object changeset rejected");
+                note_apply_failure();
                 break;
             }
         }
     }
+    note_batches(applied);
     Ok(applied)
 }
