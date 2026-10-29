@@ -78,6 +78,6 @@ reqwest.workspace = true
 # Contract test parses docs/openapi.yaml for real (a YAML syntax error or an
 # unresolvable $ref must fail CI, not sail through a line scanner). Same crate
 # the workspace already uses for workflow manifests.
-serde-saphyr = "1"
+serde-saphyr = "2"
 # Plan 0.3 2.2: WS test client (plaintext in-process tests).
 tokio-tungstenite = "0.30"

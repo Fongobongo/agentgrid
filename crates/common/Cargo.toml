@@ -15,7 +15,7 @@ serde_json.workspace = true
 # is workflow-manifest deserialization (no serialization needed, but the
 # default features are kept: trimming them saves nothing measurable and
 # non-default feature combos are less tested upstream).
-serde-saphyr = "1"
+serde-saphyr = "2"
 sha2.workspace = true
 uuid.workspace = true
 chrono.workspace = true
