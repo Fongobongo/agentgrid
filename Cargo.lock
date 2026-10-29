@@ -93,6 +93,7 @@ dependencies = [
  "rust-embed",
  "rustls",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "sha2 0.11.1",
  "sqlx",

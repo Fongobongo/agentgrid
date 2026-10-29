@@ -192,6 +192,47 @@
 
 ### Fixed
 
+- **`docs/openapi.yaml` is a valid OpenAPI document again.** Nothing in the
+  repo ever parsed it — the contract test only scanned lines for path keys — so
+  three YAML syntax errors and a handful of dangling references sat there
+  invisibly: an unquoted `description: Plan 1.6 (#3b): …` (a plain scalar may
+  not contain `: `), a `parameters:` indented one level too shallow, which
+  hoisted it to path level and orphaned the operation's `responses:`, and an
+  unterminated single-quoted scalar in a `400` description. On top of that,
+  four `$ref`s pointed at schemas that did not exist (`CreateTaskRequest`,
+  `TaskView`, `components.responses.Unauthorized`) and two `security:`
+  requirements named schemes that were not defined (`userAuth` / `nodeAuth` vs
+  the defined `bearerAuth` / `nodeCred`). A client generator rejects the whole
+  document for any of these, not just the broken part. The two missing DTO
+  schemas are now written out field by field, the schemes are renamed to the
+  names the requirements use, and `components.responses` exists.
+- **The OpenAPI document now describes the surface it claims to.** With the
+  file finally parseable, `redocly lint` could see the rest: 58 operations
+  never declared the path parameters their own path template requires
+  (`/v1/tasks/{id}/cancel` documented no `{id}`), so a generated client had no
+  way to know the call takes one; only five of 121 operations carried a
+  `security:` requirement and the rest inherited nothing, which reads as
+  "public" and would have generated an unauthenticated client for a JWT-only
+  API; there was no `servers:` entry; six operations documented no 4xx at all;
+  and 52 `nullable: true` keywords were silently ignored, because OpenAPI 3.1
+  dropped the keyword in favour of JSON Schema union types — `finished_at` was
+  typed `string` instead of `string | null`. Path parameters are now declared
+  once per path, `security` defaults to `userAuth` at the document root with
+  `[]` on the genuinely public operations (health, metrics, version, auth
+  setup/login/logout, webhooks, HA peer RPC — the same list
+  `auth::user_protected` exempts) and `nodeAuth` on `/v1/node/*`, and every
+  `nullable` became `type: [X, "null"]` (or `anyOf` with a null branch for the
+  `$ref` case). `redocly lint` reports **0 errors**; the 121 warnings left are
+  all missing `operationId`s, which the hand-written TS client does not use.
+- **The contract test parses the document instead of scanning it.** It now
+  loads `docs/openapi.yaml` with the workspace YAML parser (a syntax error
+  fails the build), resolves every `$ref` against `components.schemas` /
+  `components.responses`, checks that every `security:` requirement names a
+  defined scheme, and compares `CreateTaskRequest` / `TaskView` against the Rust
+  structs in `crates/common/src/lib.rs` field by field — both directions, plus
+  `required` (non-`Option` fields without `#[serde(default)]`). Verified by
+  renaming a documented field: the test fails with the exact missing/extra
+  pair. This is what makes a *missing* schema a build error rather than a hole.
 - **A per-task token ceiling no longer reports success when the breach lands
   after the run.** The ceiling was enforced only by a 1 s poll racing the
   child, so it could fire only if the adapter reported usage *during* the run.

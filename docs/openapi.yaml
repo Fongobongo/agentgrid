@@ -2,12 +2,16 @@ openapi: 3.1.0
 info:
   title: AgentGrid Control Plane API
   version: 0.1.0
+  license:
+    name: MIT
+    identifier: MIT
   description: |
     Public REST API of the AgentGrid control plane (`/v1` prefix). All
     node-facing routes (`/v1/node/*`) require node credentials; user-facing
     routes require a JWT obtained from `/v1/auth/setup` (first user) or
-    `/v1/auth/login`. WebSocket is **not** part of the MVP — event streaming
-    uses SSE at `/v1/tasks/{id}/events/stream`.
+    `/v1/auth/login`. Event streaming is SSE at
+    `/v1/tasks/{id}/events/stream`; nodes additionally have a WebSocket
+    transport at `/v1/node/ws` (see `docs/node-ws-protocol.md`).
 
     This document is a generated summary of the public surface; see
     `crates/control-plane/src/lib.rs` for the authoritative route table.
@@ -33,16 +37,24 @@ info:
     header (echoed/used for log correlation); the body `request_id` matches a
     freshly minted id for clients that only read the body.
 
+servers:
+  - url: /
+    description: Same origin the control plane is served from.
+security:
+  - userAuth: []
 paths:
   /health/live:
     get:
       summary: Liveness probe (always 200)
+      security: []
   /health/ready:
     get:
       summary: Readiness probe (DB + disk-writable check)
+      security: []
   /metrics:
     get:
       summary: Prometheus metrics endpoint
+      security: []
   /v1/version:
     get:
       summary: Build + contract versions (public)
@@ -52,16 +64,20 @@ paths:
         major; mismatch → node degraded), `capabilities_schema` (heartbeat
         capabilities array), `supported_event_versions` (event ingest
         contract). Used by `ag doctor` and the release smoke test.
+      security: []
   /v1/auth/setup:
     post:
       summary: Create the first admin user (one-time)
       description: Fails with 409 once a user exists. Returns a JWT on success.
+      security: []
   /v1/auth/login:
     post:
       summary: Exchange credentials for a JWT
+      security: []
   /v1/auth/logout:
     post:
       summary: Invalidate the current JWT
+      security: []
   /v1/users:
     get:
       summary: List users (username + role)
@@ -133,9 +149,19 @@ paths:
         required: true
         schema: { type: string }
   /v1/tasks/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Request cancellation of a running task
   /v1/tasks/{id}/retry:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Re-queue a failed/cancelled task
   /v1/search:
@@ -182,7 +208,7 @@ paths:
   /v1/attempts/{id}/annotations:
     get:
       summary: List inline annotations on an attempt's diff/plan
-      description: Plan 1.6 (#3b): reviewer comments pinned to file/line.
+      description: 'Plan 1.6 (#3b): reviewer comments pinned to file/line.'
     post:
       summary: Leave an inline annotation
       description: |
@@ -207,17 +233,22 @@ paths:
         required: true
         schema: { type: string }
   /v1/attempts/{id}/rework:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Send an attempt for rework with the annotations as feedback
       description: |
         Plan 1.6 (#3b): creates a NEW task whose prompt is the original
         prompt plus an `[ANNOTATIONS]` block built from the attempt's inline
         annotations. Returns the new task id.
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema: { type: string }
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
       responses:
         '201':
           description: Rework task created
@@ -227,6 +258,7 @@ paths:
                 type: object
                 properties:
                   task_id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/tasks/{id}/review-approval:
     get:
       summary: Fetch the pending patch-review approval for a task
@@ -269,6 +301,7 @@ paths:
         signature against `AGENTGRID_GITHUB_WEBHOOK_SECRET`, then creates a
         task from the issue body when the issue carries the `agent` label.
         Disabled (404) when the secret is unset.
+      security: []
   /v1/webhooks/github/check_run:
     post:
       summary: GitHub check_run webhook → spawn a CI-fix task
@@ -278,6 +311,7 @@ paths:
         failed check's log and attempts the minimal fix. Success/skipped
         conclusions are acked silently. HMAC verified via
         `AGENTGRID_GITHUB_WEBHOOK_SECRET`; disabled (404) when unset.
+      security: []
   /v1/webhooks/github/pull_request:
     post:
       summary: GitHub pull_request webhook → spawn a conflict-resolve task
@@ -288,6 +322,7 @@ paths:
         conflicts to make the PR mergeable. Clean/blocked states are acked
         silently. HMAC verified via `AGENTGRID_GITHUB_WEBHOOK_SECRET`;
         disabled (404) when unset.
+      security: []
   /v1/task-groups/{id}/context:
     get:
       summary: List shared-context notes for a task group
@@ -319,14 +354,15 @@ paths:
                 prompt: { type: string, default: "" }
                 skills: { type: array, items: { type: string } }
                 budget_usd: { type: number, default: 0 }
-                max_tasks: { type: integer, nullable: true }
-                heartbeat_interval_secs: { type: integer, nullable: true }
+                max_tasks: { type: [integer, "null"] }
+                heartbeat_interval_secs: { type: [integer, "null"] }
       responses:
         "201":
           description: Agent created
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Agent" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     get:
       summary: List org agents with current task spend
       responses:
@@ -337,7 +373,13 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Agent" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/agents/{id}/actions:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: An agent's immutable action trail (plan 2.1 #18)
       description: Newest first, capped at 500 rows.
@@ -354,7 +396,13 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/AgentAction" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/agents/{id}/tasks:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Create a task attributed to an agent (plan 2.1 #18)
       description: |
@@ -418,6 +466,11 @@ paths:
           required: true
           schema: { type: string }
   /v1/tasks/{id}/events:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: List task events (polling)
       description: |
@@ -439,6 +492,11 @@ paths:
           required: false
           schema: { type: integer }
   /v1/tasks/{id}/events/stream:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: SSE event stream (Last-Event-ID resume supported)
       description: |
@@ -453,12 +511,27 @@ paths:
         (task/node/workflow-run counts by status) moves. Clients refetch their
         lists on those events; an idle client receives only 15 s keep-alives.
   /v1/tasks/{id}/approvals:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: List pending approvals for a task
   /v1/tasks/{id}/eligibility:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Show scheduler eligibility reasoning for a task
   /v1/tasks/{id}/artifacts:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: List a task's artifacts (latest attempt) with metadata
       description: |
@@ -466,6 +539,15 @@ paths:
         artifacts on its latest attempt. Empty array when the task has no
         attempts or none uploaded artifacts.
   /v1/tasks/{id}/artifacts/{name}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Download a named artifact by content
   /v1/nodes:
@@ -478,6 +560,11 @@ paths:
         `artifact_spool_bytes` (hardening P2 item 35): local storage pressure —
         a node whose spool grows is backing up and not draining.
   /v1/nodes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch a node by id
   /v1/opencode-profiles:
@@ -490,6 +577,11 @@ paths:
         the profile. Storage is opaque JSON validated against a small
         key allowlist; secrets stay out (env placeholders only).
   /v1/opencode-profiles/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Show one opencode profile
     put:
@@ -508,6 +600,11 @@ paths:
     delete:
       summary: Delete a profile (nodes keep their last-applied on-disk config)
   /v1/opencode-profiles/{name}/rollback:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: "Swap the profile back N revisions"
       description: |
@@ -526,6 +623,11 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { description: Profile unknown or no previous revision exists. }
   /v1/opencode-profiles/{name}/assign-percent:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: "A/B split the fleet between two profiles"
       description: |
@@ -551,10 +653,15 @@ paths:
                 percent: { type: integer, minimum: 0, maximum: 100 }
       responses:
         '200': { description: Moved. Body reports the moved node ids and counts per arm. }
-        '400': { description: '`other` equals `{name}`, or `percent` > 100. }
+        '400': { description: "`other` equals `{name}`, or `percent` > 100." }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { description: Either profile unknown. }
   /v1/nodes/{id}/opencode-profile:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Assign or clear the profile applied by a node
       description: |
@@ -590,7 +697,7 @@ paths:
               properties:
                 hash: { type: string }
                 trigger: { type: string, enum: [ws_push, error_threshold, interval, startup] }
-                profile_id: { type: string, nullable: true }
+                profile_id: { type: [string, "null"] }
       responses:
         '204':
           description: Audit recorded.
@@ -599,12 +706,22 @@ paths:
         '401':
           description: Node auth required.
   /v1/nodes/{id}/opencode-audit:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Recent opencode-config apply events for this node
       description: |
         One row per apply (ws_push | error_threshold | interval | startup).
         Useful for the dashboard "who's on which profile" view.
   /v1/nodes/{id}/drain:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Drain / undrain a node for maintenance
       description: |
@@ -644,9 +761,11 @@ paths:
   /v1/node/enroll:
     post:
       summary: Enroll a new node with a one-time token (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/node/heartbeat:
     post:
       summary: Publish node status/load/capabilities (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/node/poll:
     post:
       summary: Long-poll a node for an assignment (node credentials)
@@ -656,6 +775,7 @@ paths:
         (capped at the node's free concurrency slots) made in one write
         transaction; without the header exactly the legacy single
         `assignment` semantics apply.
+      security: [{ nodeAuth: [] }]
   /v1/node/ws:
     get:
       summary: Node WebSocket control channel upgrade (node credentials)
@@ -666,41 +786,100 @@ paths:
         (401 without upgrade). Message envelopes and close codes:
         `docs/node-ws-protocol.md`. Polling remains the N-1 fallback with
         identical scheduling semantics.
+      security: [{ nodeAuth: [] }]
   /v1/node/attempts/{id}/ack:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Acknowledge an assignment started (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/node/attempts/{id}/begin_validate:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Signal the post-agent validation command has started (node credentials)
       description: |
         Moves the attempt (and task) `running → validating` (CAS). Idempotent:
         a retried signal on an already-validating/terminal attempt returns 200
         without error; a stale fencing token yields 409.
+      security: [{ nodeAuth: [] }]
   /v1/node/attempts/{id}/events:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Ingest a batch of adapter events (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/node/attempts/{id}/complete:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Report a terminal completion (node credentials)
       description: |
         Idempotent on terminal attempts — a late/stale completion is
         rejected, audited as `complete.rejected_terminal` (with the source
         attempt status), and acked without corrupting the task status.
+      security: [{ nodeAuth: [] }]
   /v1/node/attempts/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Poll whether cancellation was requested (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/node/attempts/{id}/session:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Open an agent session for an attempt (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/node/attempts/{id}/artifacts:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Upload a JSON artifact (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/node/attempts/{id}/artifacts/raw:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Upload a binary artifact (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/node/tasks/{id}/artifacts/{name}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch an artifact for streaming (node credentials)
+      security: [{ nodeAuth: [] }]
   /v1/repositories:
     get:
       summary: List repositories
@@ -712,41 +891,95 @@ paths:
     post:
       summary: Create a workflow definition
   /v1/workflows/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch a workflow definition
   /v1/workflows/{id}/runs:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Start a workflow run from a definition
   /v1/assembly:
     post:
       summary: One-button assembly — goal in, ephemeral architect template + marked run out (admin)
   /v1/workflows/{id}/schedules:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: List schedules for a workflow
     post:
       summary: Create a schedule for a workflow
   /v1/workflows/{id}/schedules/{sid}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: sid
+        in: path
+        required: true
+        schema: { type: string }
     delete:
       summary: Delete a schedule
   /v1/workflow-runs:
     get:
       summary: List workflow runs
   /v1/workflow-runs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch a workflow run
   /v1/workflow-runs/{id}/approve-plan:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Approve an architect plan (PlanReady -> expand)
   /v1/workflow-runs/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Cancel a workflow run
   /v1/workflow-runs/{id}/plan:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch the emitted plan (PlanReady)
   /v1/workflow-runs/{id}/projection:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch the run projection (roles/nodes/verdicts)
   /v1/workflow-runs/{id}/tick:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Advance the run one scheduler tick (admin/debug)
   /v1/approvals:
@@ -759,21 +992,46 @@ paths:
         Query: `action` (exact-match filter, optional), `limit` (1..500,
         default 100). Returns `{items: AuditEvent[]}`; 503 on storage outage.
   /v1/approvals/{id}/allow:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Allow a pending approval
   /v1/approvals/{id}/deny:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Deny a pending approval
   /v1/approvals/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch an approval
   /v1/conversations:
     get:
       summary: List conversations
   /v1/conversations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch a conversation
   /v1/conversations/{id}/messages:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: List messages in a conversation
   /v1/profiles:
@@ -782,11 +1040,21 @@ paths:
     post:
       summary: Create/revise an agent profile
   /v1/profiles/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch a profile
     post:
       summary: Create a new profile revision
   /v1/profiles/{id}/activate:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Mark a profile revision active
   /v1/mcp-servers:
@@ -800,6 +1068,11 @@ paths:
         shell, hard-coded secrets). A Critical finding rejects registration
         with 422; warnings are allowed.
   /v1/mcp-servers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     delete:
       summary: Delete an MCP server registry entry
   /v1/policy/evaluate:
@@ -809,9 +1082,19 @@ paths:
     get:
       summary: List discovered skills (operator-trusted)
   /v1/skills/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: Fetch a single skill's trust state
   /v1/repos/{repo}/learnings:
+    parameters:
+      - name: repo
+        in: path
+        required: true
+        schema: { type: string }
     get:
       summary: List repo learnings (Plan 2.8 #19)
       description: |
@@ -847,8 +1130,13 @@ paths:
                 repository: { type: string }
                 statement: { type: string }
                 confidence: { type: number, default: 0.5, minimum: 0, maximum: 1 }
-                source_attempt_id: { type: string, nullable: true }
+                source_attempt_id: { type: [string, "null"] }
   /v1/learnings/{id}/approve:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Approve (or demote) a repo learning
       parameters:
@@ -864,6 +1152,11 @@ paths:
               properties:
                 approved: { type: boolean, default: true }
   /v1/learnings/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     delete:
       summary: Remove a repo learning
       responses:
@@ -883,6 +1176,7 @@ paths:
         wins on key collision.
       responses:
         '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     put:
       summary: Upsert an adapter env entry
       requestBody:
@@ -901,6 +1195,11 @@ paths:
         '200': { description: Upserted }
         '400': { description: Invalid adapter/key }
   /v1/adapter-env/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     delete:
       summary: Remove an adapter env entry
       parameters:
@@ -920,6 +1219,7 @@ paths:
         and rotate on failure (dead proxy is retried after 5 minutes).
       responses:
         '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       summary: Register an egress proxy
       requestBody:
@@ -937,6 +1237,11 @@ paths:
         '400': { description: Invalid proxy URL }
         '409': { description: Already registered }
   /v1/proxies/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
     delete:
       summary: Remove an egress proxy
       parameters:
@@ -948,9 +1253,19 @@ paths:
         '204': { description: Removed }
         '404': { description: Not found }
   /v1/skills/{name}/trust:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Trust a skill
   /v1/skills/{name}/untrust:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     post:
       summary: Untrust a skill (fail-closed)
 components:
@@ -964,9 +1279,9 @@ components:
         prompt: { type: string }
         skills: { type: array, items: { type: string } }
         budget_usd: { type: number }
-        max_tasks: { type: integer, nullable: true }
-        heartbeat_interval_secs: { type: integer, nullable: true }
-        last_heartbeat_at: { type: string, nullable: true }
+        max_tasks: { type: [integer, "null"] }
+        heartbeat_interval_secs: { type: [integer, "null"] }
+        last_heartbeat_at: { type: [string, "null"] }
         created_at: { type: string }
         tasks_spent: { type: integer }
     AgentAction:
@@ -977,12 +1292,232 @@ components:
         action: { type: string }
         detail: { type: string }
         created_at: { type: string }
+    ErrorEnvelope:
+      type: object
+      description: Single machine-readable error body used by every structured error response.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                Stable machine-readable code: `invalid_state_transition`,
+                `artifact_hash_mismatch`, `batch_too_large`, `rate_limited`,
+                `not_found`, `unauthorized`, `forbidden`, `internal_error`,
+                `service_unavailable`.
+            message: { type: string }
+            request_id:
+              type: string
+              description: Matches the `X-Request-Id` response header.
+    OpencodeOverride:
+      type: object
+      description: |
+        Per-task opencode config override, merged shallowly over the node's
+        active profile and injected as OPENCODE_CONFIG_CONTENT (dies with the
+        adapter process).
+      properties:
+        model: { type: [string, "null"] }
+        small_model: { type: [string, "null"] }
+        config:
+          type: [object, "null"]
+          additionalProperties: true
+          description: Partial opencode config object; override keys win.
+    CreateTaskRequest:
+      type: object
+      description: |
+        Body of `POST /v1/tasks` (and of `POST /v1/agents/{id}/tasks`, where it
+        is additionally attributed to an org agent). Only `prompt`,
+        `repository` and `adapter` are mandatory; every other field is an
+        optional refinement.
+      required: [prompt, repository, adapter]
+      properties:
+        prompt:
+          type: string
+          description: The instruction handed to the agent.
+        repository:
+          type: string
+          description: Repository the node checks out before running the agent.
+        adapter:
+          type: string
+          description: Adapter name to run (e.g. `opencode`, `claude-code`).
+        requested_node_id:
+          type: [string, "null"]
+          description: Pin the task to one node. Absent/null => the scheduler picks any eligible node.
+        timeout_secs:
+          type: [integer, "null"]
+          minimum: 0
+          description: Per-task timeout in seconds; server default when unset.
+        validation_command:
+          type: [string, "null"]
+          description: Validation command overriding the repository default.
+        base_commit:
+          type: [string, "null"]
+          description: Exact commit to check out; null => branch from the repository default branch.
+        parent_acp_session_id:
+          type: [string, "null"]
+          description: ACP session to resume; null => a fresh session.
+        consensus_group_id:
+          type: [string, "null"]
+          description: Consensus-run tag. Set by the CP when one prompt is fanned out to N adapters.
+        consensus_member:
+          type: [string, "null"]
+          description: Member name of this task inside the consensus group (the adapter name).
+        consensus_mode:
+          type: [string, "null"]
+          enum: [solve, review]
+          description: |
+            `solve` (default) = N models solve one task, patches compared by
+            SHA. `review` = N models review one diff, verdicts compared.
+        review_of:
+          type: [string, "null"]
+          description: For `consensus_mode = review`, the task id whose `changes.patch` this group judges.
+        max_tokens:
+          type: [integer, "null"]
+          minimum: 0
+          description: |
+            Per-task token ceiling. The attempt is killed with
+            `error_code = "budget_exceeded"` once reported usage passes it.
+            Zero means zero tolerance; null means unbounded.
+        max_cost_cents:
+          type: [integer, "null"]
+          minimum: 0
+          description: Per-task cost ceiling in cents (same semantics as `max_tokens`).
+        network_mode:
+          type: [string, "null"]
+          enum: [none, restricted, unrestricted]
+          description: Requested network mode; must not exceed the node's maximum allowed mode.
+        security_profile:
+          type: [string, "null"]
+          description: |
+            Security profile name. A profile ending in `-strict` restricts
+            assignment to nodes with structured permission interception.
+        group_id:
+          type: [string, "null"]
+          description: Shared-context task group; parallel tasks in a group share `shared_context` notes and get `AG_GROUP_ID`.
+        agent_id:
+          type: [string, "null"]
+          description: Org-agent attribution. The task counts against that agent's budget (409 when exhausted).
+        opencode_override:
+          anyOf:
+            - $ref: "#/components/schemas/OpencodeOverride"
+            - type: "null"
+        github_push:
+          type: boolean
+          default: false
+          description: |
+            Push the agent branch, open a PR and (with `github_issue`) comment
+            on the issue after a successful attempt. Best-effort: a write-back
+            failure never fails the task.
+        github_repo:
+          type: [string, "null"]
+          description: GitHub repository `owner/name` for write-back.
+        github_issue:
+          type: [integer, "null"]
+          description: Issue number to comment on after a successful write-back.
+        github_base_ref:
+          type: [string, "null"]
+          description: Base ref the PR targets; falls back to the repository default branch.
+        github_create:
+          type: boolean
+          default: false
+          description: With `github_push` + `github_repo`, create the remote repository if it does not exist yet.
+        max_attempts:
+          type: integer
+          default: 1
+          minimum: 1
+          description: |
+            Total attempts allowed. `1` = no auto-retry. When an attempt fails
+            (never on cancel) and fewer than `max_attempts` have run, the task
+            is re-queued instead of staying failed.
+        retry_on_node_loss:
+          type: [boolean, "null"]
+          default: true
+          description: |
+            Whether losing the node may spend the `max_attempts` budget. A lost
+            attempt is the one failure the control plane has no evidence about
+            — the node died mid-run and never reported what the agent did — so
+            retrying is only safe when the work is idempotent. `false` keeps
+            node loss terminal (`failed` / `node_lost`). The retry is steered
+            onto a *different* node: the one that lost the attempt is skipped
+            while another node is online.
+    TaskView:
+      type: object
+      description: A task as returned by the control plane.
+      required: [id, repository, prompt, adapter, status, created_at]
+      properties:
+        id: { type: string }
+        repository: { type: string }
+        prompt: { type: string }
+        adapter: { type: string }
+        status:
+          type: string
+          enum: [queued, assigned, running, validating, succeeded, failed, cancelled]
+        created_at: { type: string }
+        finished_at: { type: [string, "null"] }
+        assigned_attempt_id: { type: [string, "null"] }
+        validation_command: { type: [string, "null"] }
+        error_code:
+          type: [string, "null"]
+          description: |
+            Failure category when the task did not end cleanly — `agent_failed`,
+            `validation_failed`, `timeout`, `node_lost`, `budget_exceeded`. Null
+            on success or a clean cancel.
+        requested_node_id: { type: [string, "null"] }
+        base_commit: { type: [string, "null"] }
+        parent_acp_session_id: { type: [string, "null"] }
+        network_mode:
+          type: [string, "null"]
+          enum: [none, restricted, unrestricted]
+        security_profile:
+          type: [string, "null"]
+          description: Security profile of the latest attempt, echoed so operators can see the policy the agent ran under.
+        group_id: { type: [string, "null"] }
+        agent_id: { type: [string, "null"] }
+        consensus_group_id: { type: [string, "null"] }
+        consensus_member: { type: [string, "null"] }
+        consensus_mode:
+          type: [string, "null"]
+          enum: [solve, review]
+        review_of: { type: [string, "null"] }
+        opencode_override:
+          anyOf:
+            - $ref: "#/components/schemas/OpencodeOverride"
+            - type: "null"
+        github_repo: { type: [string, "null"] }
+        github_issue: { type: [integer, "null"] }
+        github_base_ref: { type: [string, "null"] }
+        github_create: { type: boolean }
+        rework_of:
+          type: [string, "null"]
+          description: Attempt id this task was created from via `POST /v1/attempts/{id}/rework`; null for original tasks.
+        max_attempts:
+          type: integer
+          minimum: 1
+          description: Total attempts allowed (echoed from the request; `1` = no auto-retry).
+        max_tokens: { type: [integer, "null"] }
+        max_cost_cents: { type: [integer, "null"] }
+  responses:
+    Unauthorized:
+      description: |
+        Missing, malformed or expired credential. Body follows the error
+        envelope with `code = "unauthorized"`.
+      headers:
+        X-Request-Id:
+          schema: { type: string }
+          description: Correlation id, echoed from or minted for the request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   securitySchemes:
-    bearerAuth:
+    userAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
-    nodeCred:
+      description: User JWT from `/v1/auth/setup` (first user) or `/v1/auth/login`.
+    nodeAuth:
       type: http
       scheme: bearer
       description: Node credential issued at enrollment.
