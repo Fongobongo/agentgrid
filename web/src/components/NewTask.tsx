@@ -32,6 +32,10 @@ export default function NewTask({
   const [networkMode, setNetworkMode] = useState("");
   const [securityProfile, setSecurityProfile] = useState("");
   const [maxAttempts, setMaxAttempts] = useState("");
+  // Node-loss policy: on by default (mirrors CreateTaskRequest's default).
+  // Only meaningful when max_attempts > 1 — a loss spends one attempt of that
+  // budget, so with the default 1 there is nothing to spend.
+  const [retryOnNodeLoss, setRetryOnNodeLoss] = useState(true);
   const [maxTokens, setMaxTokens] = useState("");
   const [maxCostCents, setMaxCostCents] = useState("");
   const [parentSessionId, setParentSessionId] = useState("");
@@ -73,6 +77,7 @@ export default function NewTask({
     network_mode: networkMode || undefined,
     security_profile: securityProfile.trim() || undefined,
     max_attempts: maxAttempts.trim() ? Number(maxAttempts) : 1,
+    retry_on_node_loss: retryOnNodeLoss,
     max_tokens: maxTokens.trim() ? Number(maxTokens) : undefined,
     max_cost_cents: maxCostCents.trim() ? Number(maxCostCents) : undefined,
     parent_acp_session_id: parentSessionId.trim() || undefined,
@@ -254,6 +259,18 @@ export default function NewTask({
               onChange={(e) => setMaxAttempts(e.target.value)}
               placeholder="1"
             />
+          </label>
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={retryOnNodeLoss}
+              onChange={(e) => setRetryOnNodeLoss(e.target.checked)}
+            />
+            Retry on node loss{" "}
+            <span className="muted">
+              (needs Max attempts &gt; 1; re-runs the task on another node when
+              this one disappears mid-run, leaving no completion report)
+            </span>
           </label>
           <label>
             Max tokens <span className="muted">(kill with budget_exceeded over)</span>

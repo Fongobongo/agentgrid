@@ -146,6 +146,12 @@
   now go through `Store::write_one`. e2e:
   `tests/e2e/run-ha-incremental.sh` (async/sync, no snapshots cut, `kill -9`
   leader keeps the acknowledged task).
+- **The web UI can opt out of node-loss retry.** The new-task form had no way
+  to set `retry_on_node_loss`, so the policy shipped below was CLI- and
+  API-only: an operator who wanted a loss to stay terminal had to leave the UI.
+  It is now a checkbox in the Advanced section (on by default, mirroring the
+  server default) next to `Max attempts`, which it needs to be above 1 to
+  matter — a loss spends one attempt of that budget.
 
 ### Changed
 
