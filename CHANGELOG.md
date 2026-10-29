@@ -152,6 +152,18 @@
   It is now a checkbox in the Advanced section (on by default, mirroring the
   server default) next to `Max attempts`, which it needs to be above 1 to
   matter — a loss spends one attempt of that budget.
+- **`redocly lint` runs in CI, so the OpenAPI document cannot rot again.**
+  `docs/openapi.yaml` is the contract with the hand-written TS client, and the
+  Rust contract test covers syntax, `$ref`s, security-scheme names and DTO
+  parity — but it cannot express the style rules that were quietly broken:
+  58 operations that never declared the path parameters their own template
+  requires, 52 `nullable: true` keywords OpenAPI 3.1 ignores, an unused
+  component, an operation documenting no 4xx. The new `openapi` job in
+  `ci.yml` runs the pinned CLI (2.72.1) with `redocly.yaml`, where the only
+  rule turned off is `operation-operationId` (the client addresses routes by
+  path, so ids would be identifiers nobody reads). With it off the document
+  reports **zero** problems, so any new one fails the job.
+
 
 ### Changed
 
@@ -220,7 +232,12 @@
   batch leaves the node, one starts `flush` and `drain_outbox` together
   against a slow handler and asserts no two POSTs are ever in flight (without
   the gate it observes `[4,5,6]` delivered before `[1,2,3,4,5,6]`).
-
+- **`docs/openapi.yaml`'s `info.version` tracks the workspace version.** It
+  said `0.1.0` while the crates were at `0.5.3` — four minor releases of drift
+  nobody noticed, because nothing read the field. A generated client stamps it
+  into its own metadata, so it now has to match, and a contract test reads
+  `[workspace.package] version` from `Cargo.toml` and fails on divergence
+  (verified by setting it back to `0.1.0`).
 - **`docs/openapi.yaml` is a valid OpenAPI document again.** Nothing in the
   repo ever parsed it — the contract test only scanned lines for path keys — so
   three YAML syntax errors and a handful of dangling references sat there

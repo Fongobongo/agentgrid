@@ -142,6 +142,39 @@ fn openapi_version_is_3_1() {
     );
 }
 
+/// `info.version` is the API version a generated client stamps into its own
+/// metadata, so it has to track the release the document was written against.
+/// It sat at `0.1.0` through four minor releases because nothing read it.
+#[test]
+fn info_version_matches_the_workspace_crate_version() {
+    let doc = openapi_doc();
+    let cargo = repo_file("Cargo.toml");
+    let mut in_section = false;
+    let mut workspace_version = None;
+    for line in cargo.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_section = line == "[workspace.package]";
+            continue;
+        }
+        if in_section {
+            if let Some(v) = line.strip_prefix("version") {
+                let v = v.trim_start().trim_start_matches('=').trim();
+                workspace_version = Some(v.trim_matches('"').to_string());
+                break;
+            }
+        }
+    }
+    let workspace_version =
+        workspace_version.expect("Cargo.toml must define [workspace.package] version");
+    assert_eq!(
+        doc["info"]["version"].as_str(),
+        Some(workspace_version.as_str()),
+        "docs/openapi.yaml `info.version` must equal the workspace crate version \
+         ({workspace_version}); bump both together"
+    );
+}
+
 /// Every `$ref: "#/components/<section>/<Name>"` must land on a definition.
 ///
 /// This is what makes the document usable by a client generator: an

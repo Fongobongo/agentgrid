@@ -122,6 +122,28 @@ jobs:
       - run: npm run build
       - run: npm run lint
 
+  openapi:
+    # `docs/openapi.yaml` is the contract with the hand-written TS client. The
+    # Rust contract test parses it for syntax, dangling `$ref`s, security-scheme
+    # names and DTO parity, but it cannot express style rules — a route template
+    # without the path parameter it declares, a 3.1 `nullable` that is silently
+    # ignored, an unused component, an operation documenting no 4xx. All of
+    # those rotted invisibly once; this is the gate that keeps them from coming
+    # back. Config lives in `redocly.yaml` (which is why `operation-operationId`
+    # is off: the client is hand-written and uses no ids).
+    name: openapi lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
+      # Pinned, not `latest`: the ruleset changes between majors, so a floating
+      # tag would turn a redocly release into a red CI. Bump deliberately.
+      - name: redocly lint
+        run: npx --yes @redocly/cli@2.72.1 lint docs/openapi.yaml
+
   docker-images:
     # Plan 0.3 item: CI builds every published Docker image so a broken
     # Dockerfile/layer fails the PR, not the release. Publish (GHCR push)
