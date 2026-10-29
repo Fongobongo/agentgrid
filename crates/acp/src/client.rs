@@ -391,6 +391,7 @@ mod tests {
             EventKind::PermissionRequest
         );
         assert_eq!(map("usage", json!({})), EventKind::Usage);
+        assert_eq!(map("usage_update", json!({})), EventKind::Usage);
         assert_eq!(map("log", json!({})), EventKind::Log);
         assert_eq!(
             map("weird_new_type", json!({})),

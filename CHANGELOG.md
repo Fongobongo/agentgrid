@@ -4,6 +4,37 @@
 
 ### Added
 
+- **ACP `usage_update` now feeds both budget ceilings.** Native ACP agents
+  report usage as running session totals
+  (`{ used, size, cost: { amount, currency } }`), and the budget path never saw
+  them: only the wrapper adapters (`claude`, `codex`) emitted `progress` events
+  with per-event deltas, so a native ACP agent stayed at zero spend and zero
+  tokens no matter what it cost. `map_session_update` now maps `usage_update`
+  onto `EventKind::Usage` and normalizes both numbers:
+
+  * `cost.amount` (USD) → integer `cost_cents` flagged `cost_cumulative`.
+    `EventSink` converts it to a per-event delta before accumulating, because
+    summing a cumulative value inflates spend quadratically (5 + 12 + 20 = 37¢
+    for a 20¢ session) and trips ceilings that never fired. `saturating_sub`
+    keeps an account-rotation reset from subtracting out of the running total.
+  * `used` (context-window occupancy) → `tokens` flagged `tokens_gauge`. It is
+    a gauge, not a counter: it rises as the conversation grows and falls when
+    the agent compacts, so the node counts only positive movement. That makes
+    the token total monotone — a compaction lowers the baseline instead of
+    refunding budget, and the same tokens are never counted twice when the
+    context refills. `max_tokens` therefore now works on the ACP path, as a
+    proxy for consumption rather than an exact count.
+
+  The node also rewrites the event it stores so `tokens`/`cost_cents` hold the
+  **increment**, keeping the raw readings under `used`/`cost_cumulative_cents`.
+  The control plane aggregates these events with a plain
+  `SUM(json_extract(payload, '$.tokens'))`, so a running total left in place
+  would be summed across updates and inflate the workflow budget — a latent
+  bug for `cost_cents` as well, fixed by the same rewrite.
+
+  Non-USD currencies are left unconverted (no FX table here; passing EUR off as
+  USD would be wrong by a factor) and the original `cost` object stays in the
+  payload for inspection.
 - **HA chaos is a CI gate.** `.github/workflows/ha-chaos.yml` builds the
   cluster binaries and runs the process-based scenarios (`run-ha-3host.sh`,
   `run-ha-2pluswitness.sh`, `run-ha-partition.sh`, `run-ha-incremental.sh`)

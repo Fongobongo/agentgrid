@@ -76,7 +76,89 @@ pub struct EventSink {
     /// `WorkflowBudget::check`.
     tokens_total: AtomicU64,
     cost_total: AtomicU64,
+    /// Last *cumulative* cost (cents) an ACP `usage_update` reported. ACP
+    /// sends the running session total, not an increment, so `push` subtracts
+    /// this to keep `cost_total` a true sum. See `agentgrid_acp`'s
+    /// `normalize_usage_payload`.
+    last_cumulative_cost_cents: AtomicU64,
+    /// Last context-gauge reading (`used`) from an ACP `usage_update`. The
+    /// gauge is occupancy, not spend: it rises as the conversation grows and
+    /// falls on compaction. `push` counts only the positive movement, so the
+    /// running token total is monotone and a compaction cannot refund budget.
+    last_gauge_tokens: AtomicU64,
     budget: std::sync::Mutex<(Option<u64>, Option<u64>)>,
+}
+
+/// Split a `metric` payload into the `(tokens, cost_cents)` increment to add
+/// to the running totals.
+///
+/// Wrapper adapters (`claude`, `codex`) emit per-event deltas already and take
+/// the plain path. ACP `usage_update` instead reports running totals, flagged
+/// by `agentgrid_acp::methods::normalize_usage_payload`, and each needs its own
+/// baseline:
+///
+/// * `cost_cumulative` — a monotone session total; the increment is the
+///   difference from the last reading.
+/// * `tokens_gauge` — context occupancy, which can go **down** when the agent
+///   compacts. Only positive movement counts, so a compaction neither subtracts
+///   from the total nor re-adds the same tokens when the context grows again.
+///
+/// `saturating_sub` covers both: a reset (cost going backwards on an account
+/// rotation, occupancy dropping on compaction) yields zero instead of a
+/// negative or a double count. Under-counting a reset is the safe direction for
+/// a spend ceiling.
+fn metric_delta(
+    payload: &Value,
+    last_cumulative_cost: &AtomicU64,
+    last_gauge_tokens: &AtomicU64,
+) -> (u64, u64) {
+    let tokens = payload.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cost = payload
+        .get("cost_cents")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let tokens = if payload.get("tokens_gauge").and_then(|v| v.as_bool()) == Some(true) {
+        let prev = last_gauge_tokens.swap(tokens, Ordering::Relaxed);
+        tokens.saturating_sub(prev)
+    } else {
+        tokens
+    };
+    let cost = if payload.get("cost_cumulative").and_then(|v| v.as_bool()) == Some(true) {
+        let prev = last_cumulative_cost.swap(cost, Ordering::Relaxed);
+        cost.saturating_sub(prev)
+    } else {
+        cost
+    };
+    (tokens, cost)
+}
+
+/// Rewrite a `metric` payload so the event we store carries per-event
+/// **increments**.
+///
+/// The control plane aggregates these events with a plain
+/// `SUM(json_extract(payload, '$.tokens'))` / `'$.cost_cents'`
+/// (`workflow_tokens_cost`, `total_tokens_cost`). Leaving a running total or a
+/// gauge in those fields would be summed across updates and inflate the
+/// workflow budget — and, for tokens, would grow with the context window
+/// rather than with consumption. The raw readings are preserved under
+/// `used` / `cost_cumulative_cents` for observability.
+fn delta_payload(payload: Value, tokens: u64, cost: u64) -> Value {
+    let mut map = match payload {
+        Value::Object(map) => map,
+        other => return other,
+    };
+    let gauge = map.remove("tokens_gauge").and_then(|v| v.as_bool()) == Some(true);
+    let cumulative = map.remove("cost_cumulative").and_then(|v| v.as_bool()) == Some(true);
+    if gauge {
+        map.insert("tokens".to_string(), json!(tokens));
+    }
+    if cumulative {
+        if let Some(raw) = map.get("cost_cents").cloned() {
+            map.insert("cost_cumulative_cents".to_string(), raw);
+        }
+        map.insert("cost_cents".to_string(), json!(cost));
+    }
+    Value::Object(map)
 }
 
 impl EventSink {
@@ -107,6 +189,8 @@ impl EventSink {
             plan: std::sync::Mutex::new(None),
             tokens_total: AtomicU64::new(0),
             cost_total: AtomicU64::new(0),
+            last_cumulative_cost_cents: AtomicU64::new(0),
+            last_gauge_tokens: AtomicU64::new(0),
             budget: std::sync::Mutex::new((None, None)),
         })
     }
@@ -250,12 +334,16 @@ impl EventSink {
         // before the backpressure drop below — a dropped metric event is
         // still real spend, and the ceiling must count it (fail-closed
         // direction: count early, never under-count).
+        let mut payload = payload;
         if ty == EventType::Metric {
-            let tokens = payload.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let cost = payload
-                .get("cost_cents")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let (tokens, cost) = metric_delta(
+                &payload,
+                &self.last_cumulative_cost_cents,
+                &self.last_gauge_tokens,
+            );
+            // Store the increment, not the running total: the control plane
+            // sums these fields across events.
+            payload = delta_payload(payload, tokens, cost);
             if tokens > 0 {
                 self.tokens_total.fetch_add(tokens, Ordering::Relaxed);
             }
@@ -888,5 +976,155 @@ mod plan_capture_tests {
             err.payload.get("field").and_then(|v| v.as_str()),
             Some("max_tokens")
         );
+    }
+
+    #[tokio::test]
+    async fn cumulative_acp_cost_is_deltaed_not_summed() {
+        // ACP `usage_update` reports the running session total. Summing it on
+        // every update would report 5 + 12 + 20 = 37 cents for a 20-cent
+        // session — and trip ceilings that never fired in reality.
+        let sink = test_sink("plan-cumulative");
+        sink.set_budget(None, Some(30));
+        for cumulative in [5u64, 12, 20] {
+            sink.push(
+                EventType::Metric,
+                json!({ "cost_cents": cumulative, "cost_cumulative": true }),
+            )
+            .await;
+        }
+        assert_eq!(
+            sink.budget_breach(),
+            None,
+            "true spend is 20 cents; a naive sum (37) would trip a 30-cent ceiling"
+        );
+
+        // A session reset (account rotation) sends a lower total: the delta is
+        // zero, so it neither subtracts from nor re-adds to the running total.
+        let sink2 = test_sink("plan-cumulative-reset");
+        sink2.set_budget(None, Some(21));
+        sink2
+            .push(
+                EventType::Metric,
+                json!({ "cost_cents": 20, "cost_cumulative": true }),
+            )
+            .await;
+        sink2
+            .push(
+                EventType::Metric,
+                json!({ "cost_cents": 3, "cost_cumulative": true }),
+            )
+            .await;
+        assert_eq!(
+            sink2.budget_breach(),
+            None,
+            "a reset must not push the total past the ceiling"
+        );
+
+        // Per-event deltas (wrapper adapters) carry no flag and stay additive.
+        let sink3 = test_sink("plan-deltas");
+        sink3.set_budget(None, Some(5));
+        sink3
+            .push(EventType::Metric, json!({ "cost_cents": 6 }))
+            .await;
+        assert_eq!(sink3.budget_breach(), Some("max_cost_cents"));
+    }
+
+    #[tokio::test]
+    async fn gauge_tokens_become_monotone_increments() {
+        // ACP reports context occupancy, not spend: 1000 → 1500 → 3000 means
+        // 3000 tokens entered the context, not 5500. Summing the gauge would
+        // grow with the window rather than with consumption.
+        let sink = test_sink("plan-gauge-tokens");
+        for used in [1000u64, 1500, 3000] {
+            sink.push(
+                EventType::Metric,
+                json!({ "tokens": used, "tokens_gauge": true, "used": used }),
+            )
+            .await;
+        }
+        assert_eq!(sink.tokens_total.load(Ordering::Relaxed), 3000);
+
+        // Compaction drops occupancy to 800: no refund, and the baseline moves
+        // down so the next growth is counted from 800, not from 3000.
+        sink.push(
+            EventType::Metric,
+            json!({ "tokens": 800, "tokens_gauge": true, "used": 800 }),
+        )
+        .await;
+        assert_eq!(
+            sink.tokens_total.load(Ordering::Relaxed),
+            3000,
+            "a compaction must not subtract from tokens already spent"
+        );
+
+        sink.push(
+            EventType::Metric,
+            json!({ "tokens": 1200, "tokens_gauge": true, "used": 1200 }),
+        )
+        .await;
+        assert_eq!(
+            sink.tokens_total.load(Ordering::Relaxed),
+            3400,
+            "growth after compaction counts from the lowered baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn gauge_tokens_trip_the_token_ceiling() {
+        let sink = test_sink("plan-gauge-ceiling");
+        sink.set_budget(Some(3000), None);
+        for used in [1000u64, 1500, 3000] {
+            sink.push(
+                EventType::Metric,
+                json!({ "tokens": used, "tokens_gauge": true }),
+            )
+            .await;
+        }
+        assert_eq!(
+            sink.budget_breach(),
+            None,
+            "3000 spent against a 3000 ceiling is not a breach"
+        );
+
+        sink.push(
+            EventType::Metric,
+            json!({ "tokens": 3400, "tokens_gauge": true }),
+        )
+        .await;
+        assert_eq!(sink.budget_breach(), Some("max_tokens"));
+    }
+
+    #[test]
+    fn forwarded_metric_carries_increments_not_totals() {
+        // The control plane sums `$.tokens` / `$.cost_cents` across events, so
+        // the stored payload must hold the increment while the raw readings
+        // survive under their own keys.
+        let out = delta_payload(
+            json!({
+                "tokens": 1200,
+                "tokens_gauge": true,
+                "used": 1200,
+                "cost_cents": 5,
+                "cost_cumulative": true,
+            }),
+            300,
+            3,
+        );
+        assert_eq!(out.get("tokens"), Some(&json!(300)));
+        assert_eq!(out.get("cost_cents"), Some(&json!(3)));
+        assert_eq!(out.get("cost_cumulative_cents"), Some(&json!(5)));
+        assert_eq!(out.get("used"), Some(&json!(1200)));
+        assert!(
+            out.get("tokens_gauge").is_none(),
+            "the marker describes the raw field, which is gone"
+        );
+    }
+
+    #[test]
+    fn plain_deltas_pass_through_untouched() {
+        let out = delta_payload(json!({ "tokens": 42, "cost_cents": 7 }), 42, 7);
+        assert_eq!(out.get("tokens"), Some(&json!(42)));
+        assert_eq!(out.get("cost_cents"), Some(&json!(7)));
+        assert!(out.get("cost_cumulative_cents").is_none());
     }
 }
