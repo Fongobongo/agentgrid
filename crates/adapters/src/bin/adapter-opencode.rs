@@ -397,7 +397,8 @@ mod tests {
 
     // Real-adapter smoke test: requires the `opencode` CLI and a configured
     // model. Ignored by default; run manually or in nightly CI (spec: real-agent
-    // tests need keys, so they are `#[ignore]`).    #[test]
+    // tests need keys, so they are `#[ignore]`).
+    #[test]
     #[ignore = "needs opencode CLI + AGENTGRID_OPENCODE_MODEL"]
     fn real_opencode_emits_events() {
         let bin = std::env::var("AGENTGRID_OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
