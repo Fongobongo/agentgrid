@@ -78,7 +78,19 @@ SEQ_OK=$(python3 -c '
 import json,sys
 evs = json.load(sys.stdin)
 seqs = [e["sequence"] for e in evs]
+attempts = {e["attempt_id"] for e in evs}
 ok = len(seqs) > 0 and seqs == sorted(seqs) and len(set(seqs)) == len(seqs) and seqs == list(range(seqs[0], seqs[0]+len(seqs)))
+if not ok:
+    # "not contiguous" alone is not actionable: a page spanning two attempts
+    # (each numbering from 1) and one attempt with a hole look identical.
+    # Print the shape so the next failure explains itself.
+    print(f"  events={len(seqs)} attempts={len(attempts)}", file=sys.stderr)
+    print(f"  sorted={seqs == sorted(seqs)} unique={len(set(seqs)) == len(seqs)}", file=sys.stderr)
+    print(f"  first={seqs[:6]} last={seqs[-6:]}", file=sys.stderr)
+    for a in sorted(attempts):
+        mine = [e["sequence"] for e in evs if e["attempt_id"] == a]
+        contiguous = mine == list(range(mine[0], mine[0] + len(mine)))
+        print(f"  attempt {a}: {len(mine)} events, contiguous={contiguous}", file=sys.stderr)
 print("ok" if ok else "bad")
 ' <<<"$EVS")
 [ "$SEQ_OK" = "ok" ] || { echo "  FAILED: event stream not contiguous"; exit 1; }
