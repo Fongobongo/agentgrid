@@ -232,6 +232,12 @@
   batch leaves the node, one starts `flush` and `drain_outbox` together
   against a slow handler and asserts no two POSTs are ever in flight (without
   the gate it observes `[4,5,6]` delivered before `[1,2,3,4,5,6]`).
+- **`docs/node-ws-protocol.md` named the wrong events route.** The walkthrough
+  said `POST /v1/attempts/:id/events`; the route is
+  `/v1/node/attempts/{id}/events`, so a node implementation written from the
+  document would have 404'd on every flush. The README's event-delivery
+  section also states the per-attempt ordering guarantee now that the node
+  actually provides it.
 - **`docs/openapi.yaml`'s `info.version` tracks the workspace version.** It
   said `0.1.0` while the crates were at `0.5.3` — four minor releases of drift
   nobody noticed, because nothing read the field. A generated client stamps it

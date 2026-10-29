@@ -377,6 +377,13 @@ clients and pre-0037 servers keep working (the field serde-defaults to 0).
 page through tasks in stable `(created_at, id)` order, with a server-side
 `limit` cap.
 
+Because the cursor is arrival order, the node guarantees that arrival order is
+**ascending `sequence` within an attempt**: its three send paths (`flush`,
+`flush_quick`, `drain_outbox`) are serialised against each other and each batch
+is sorted before it is chunked. Without that, two overlapping sends could store
+`4,5,6` before `1,2,3` and a reader paging by `ingest_id` would see a gap that
+does not exist — the events are all there, just out of order.
+
 The completion path is crash-safe too: the node records the full
 `CompleteAttemptRequest` (exit code, commit, error code, resolved base, remote
 HEAD snapshots, plan, provenance, pending artifacts) into a durable

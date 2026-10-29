@@ -83,7 +83,7 @@ WS и poll дают одинаковое поведение:
 CP → узел:  {"type":"hello_ok","server_time":1786350000000}
 CP → узел:  {"type":"assignment","assignments":[{...attempt a1...},{...attempt a2...}]}
 узел → CP:  {"type":"ack","attempt_ids":["a1","a2"],"fencing_tokens":["t1","t2"],"ok":true}
-... работа, события идут по HTTP POST /v1/attempts/:id/events ...
+... работа, события идут по HTTP POST /v1/node/attempts/{id}/events ...
 CP → узел:  {"type":"cancel","attempt_id":"a2"}
 узел → CP:  {"type":"cancel_ack","attempt_id":"a2"}
 узел → CP:  {"type":"heartbeat","free_slots":1}
