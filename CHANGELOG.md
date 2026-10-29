@@ -220,7 +220,9 @@
   once per path, `security` defaults to `userAuth` at the document root with
   `[]` on the genuinely public operations (health, metrics, version, auth
   setup/login/logout, webhooks, HA peer RPC — the same list
-  `auth::user_protected` exempts) and `nodeAuth` on `/v1/node/*`, and every
+  `auth::user_protected` exempts) and `nodeAuth` on `/v1/node/*` (except
+  `/v1/node/enroll`, which issues that credential and is exempt from node auth
+  in `require_node_auth`), and every
   `nullable` became `type: [X, "null"]` (or `anyOf` with a null branch for the
   `$ref` case). `redocly lint` reports **0 errors**; the 121 warnings left are
   all missing `operationId`s, which the hand-written TS client does not use.
@@ -228,11 +230,13 @@
   loads `docs/openapi.yaml` with the workspace YAML parser (a syntax error
   fails the build), resolves every `$ref` against `components.schemas` /
   `components.responses`, checks that every `security:` requirement names a
-  defined scheme, and compares `CreateTaskRequest` / `TaskView` against the Rust
-  structs in `crates/common/src/lib.rs` field by field — both directions, plus
-  `required` (non-`Option` fields without `#[serde(default)]`). Verified by
-  renaming a documented field: the test fails with the exact missing/extra
-  pair. This is what makes a *missing* schema a build error rather than a hole.
+  defined scheme, requires `/v1/node/*` to be documented under `nodeAuth` (and
+  `enroll` under none), and compares `CreateTaskRequest` / `TaskView` against
+  the Rust structs in `crates/common/src/lib.rs` field by field — both
+  directions, plus `required` (non-`Option` fields without `#[serde(default)]`).
+  Verified by renaming a documented field: the test fails with the exact
+  missing/extra pair. This is what makes a *missing* schema a build error
+  rather than a hole.
 - **A per-task token ceiling no longer reports success when the breach lands
   after the run.** The ceiling was enforced only by a 1 s poll racing the
   child, so it could fire only if the adapter reported usage *during* the run.

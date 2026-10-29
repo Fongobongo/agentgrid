@@ -207,6 +207,57 @@ fn every_security_requirement_names_a_defined_scheme() {
     );
 }
 
+/// Effective security scheme names for one operation: its own `security`
+/// requirement, else the document-level default. An empty result means "no
+/// credential" (an explicit `security: []`).
+fn effective_schemes(doc: &Value, op: &Value) -> BTreeSet<String> {
+    op.get("security")
+        .or_else(|| doc.get("security"))
+        .and_then(|r| r.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_object())
+                .flat_map(|m| m.keys().cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `/v1/node/*` is authenticated by the node credential, except `enroll`,
+/// which issues it (see `auth::require_node_auth`). Documenting a node route
+/// under the user scheme makes a generated client send a JWT to a route that
+/// rejects it — and documenting a user route under the node scheme does the
+/// same in reverse.
+#[test]
+fn node_routes_use_the_node_scheme() {
+    let doc = openapi_doc();
+    let mut wrong = Vec::new();
+    for (path, item) in doc["paths"].as_object().expect("paths").iter() {
+        if !path.starts_with("/v1/node/") {
+            continue;
+        }
+        let enroll = path == "/v1/node/enroll";
+        for (method, op) in item.as_object().expect("path item").iter() {
+            if !matches!(method.as_str(), "get" | "post" | "put" | "delete" | "patch") {
+                continue;
+            }
+            let schemes = effective_schemes(&doc, op);
+            let ok = if enroll {
+                schemes.is_empty()
+            } else {
+                schemes.contains("nodeAuth") && !schemes.contains("userAuth")
+            };
+            if !ok {
+                wrong.push(format!("{method} {path} -> {schemes:?}"));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "node routes with the wrong security scheme: {wrong:#?}"
+    );
+}
+
 /// A field of a Rust DTO, as far as the OpenAPI schema cares: its JSON name,
 /// whether it is an `Option` (so `null` is meaningful), and whether it carries
 /// `#[serde(default)]` (so omitting it is allowed even when it is not an

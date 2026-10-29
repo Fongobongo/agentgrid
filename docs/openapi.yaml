@@ -761,7 +761,11 @@ paths:
   /v1/node/enroll:
     post:
       summary: Enroll a new node with a one-time token (node credentials)
-      security: [{ nodeAuth: [] }]
+      description: |
+        The one route under `/v1/node/` that is **not** behind `nodeAuth`: the
+        node has no credential yet, so it authenticates with the one-time
+        enrollment token instead. `require_node_auth` exempts this path.
+      security: []
   /v1/node/heartbeat:
     post:
       summary: Publish node status/load/capabilities (node credentials)
