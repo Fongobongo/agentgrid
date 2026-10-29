@@ -2559,6 +2559,93 @@ mod workflow_tests {
     }
 
     #[tokio::test]
+    async fn budget_max_cost_cents_breach_cancels_running_step_task() {
+        // 1.4 mirror of the tokens case: `max_cost_cents` is a separate ceiling
+        // and must fire on its own. A run that stays under `max_tokens` but
+        // burns money has to be parked just the same — an expensive agent is
+        // exactly the failure mode the cost ceiling exists for.
+        let s = temp_store().await;
+        let steps = vec![step("a", &[], WorkflowRole::Worker)];
+        let budget = WorkflowBudget {
+            max_cost_cents: Some(3),
+            ..Default::default()
+        };
+        let tpl = s
+            .create_workflow_template("costed", &steps, &Some(budget))
+            .await
+            .unwrap();
+        let run = s
+            .create_workflow_run(&tpl.id, None, None, None)
+            .await
+            .unwrap();
+        let created = s.tick_workflow_run(&run.id).await.unwrap();
+        assert_eq!(created.len(), 1, "step task created on first tick");
+        let task_id = created[0].clone();
+
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: "n".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 2,
+                agent_version: "test".into(),
+                protocol_version: None,
+                permission_interception: "wrapper".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id;
+        sqlx::query(
+            "INSERT INTO attempts (id, task_id, number, node_id, status, lease_expires_at, ack_deadline, started_at) \
+             VALUES ('att-cost-budget', ?, 1, ?, 'running', ?, ?, ?)",
+        )
+        .bind(&task_id)
+        .bind(&node_id)
+        .bind(now_iso())
+        .bind(now_iso())
+        .bind(now_iso())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        // Tokens stay far below any token ceiling (none is set); only cost
+        // exceeds its limit: 5 > 3.
+        s.ingest_events(
+            "att-cost-budget",
+            &IngestEventsRequest {
+                events: vec![IncomingEvent {
+                    sequence: 1,
+                    r#type: EventType::Metric,
+                    payload: serde_json::json!({"tokens": 100, "cost_cents": 5}),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        s.tick_workflow_run(&run.id).await.unwrap();
+        let r = s.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(r.status, WorkflowRunStatus::Blocked, "breach parks Blocked");
+        let status = s.get_task_status(&task_id).await.unwrap().unwrap();
+        assert_eq!(
+            status,
+            TaskStatus::Cancelled,
+            "over-cost step task is cancelled, not left running"
+        );
+        let snap = s
+            .get_workflow_run_projection(&run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .budget
+            .expect("budget snapshot present");
+        assert_eq!(snap.usage.cost_cents, 5);
+        assert_eq!(snap.breach.unwrap().field, "max_cost_cents");
+    }
+
+    #[tokio::test]
     async fn total_tokens_cost_sums_metric_events_fleet_wide() {
         // Cost tracking (/metrics): fleet totals sum every metric event,
         // not just workflow runs; events without the fields count as 0.
