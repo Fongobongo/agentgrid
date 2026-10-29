@@ -154,6 +154,20 @@
 
 ### Fixed
 
+- **A per-task token ceiling no longer reports success when the breach lands
+  after the run.** The ceiling was enforced only by a 1 s poll racing the
+  child, so it could fire only if the adapter reported usage *during* the run.
+  A short single-step run reports its usage as it exits — opencode emits one
+  `step_finish` — so `tokens_total` was still 0 when the poll window closed,
+  the run exited 0, and the task was recorded `succeeded` with 7 830 tokens
+  spent against a declared `max_tokens` of 300. Both supervisors now re-check
+  the ceiling after the adapter's streams are drained (the point where the last
+  usage report has been accounted) and report `budget_exceeded`, which the
+  control plane already treats as a failure even at exit 0. The attempt loop
+  also stops on a budget kill instead of running a validation round — and its
+  feedback retry — against a ceiling already declared breached. Verified on the
+  two-host stand against real `opencode` 2.2.1 and 1.19.5: the same task that
+  reported `succeeded` now reports `failed` / `budget_exceeded`.
 - **Failover recovery went from ~133 s to ~50 s.** Three separate waits stacked
   up in `run-ha-partition.sh` after the leader was frozen, and only the first
   was visible in the logs:

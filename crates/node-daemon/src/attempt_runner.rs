@@ -1051,6 +1051,13 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         last_code = code;
         last_kill_reason = kill_reason;
 
+        // A budget kill is terminal whatever the exit code: the post-exit path
+        // in `supervise_adapter` reports the breach with code 0, and a
+        // validation round (or its feedback retry) would keep spending against
+        // a ceiling already declared breached.
+        if last_kill_reason.as_deref() == Some("budget_exceeded") {
+            break false;
+        }
         // Agent failed (non-zero exit): no fixable validation to feed back; stop.
         if code != 0 {
             break false;
@@ -1209,6 +1216,11 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         Some(v.into())
     } else if sink.spool_full() {
         Some("spool_full".into())
+    } else if last_kill_reason.as_deref() == Some("budget_exceeded") {
+        // Outranks both the exit code and the validation verdict: the spend
+        // already breached the declared ceiling, so the attempt is over budget
+        // whatever else happened (the loop above stops before validating).
+        Some("budget_exceeded".into())
     } else if code == 0 {
         if validation_passed {
             None

@@ -175,6 +175,24 @@ pub async fn supervise_adapter(
 
     let _ = r1.await;
     let _ = r2.await;
+    // The in-run budget poll only fires when the adapter reports usage *during*
+    // the run. A short single-step run (opencode emits one `step_finish`, at the
+    // end) finishes before the first metric lands, so the breach only becomes
+    // visible after the streams are drained — here. The spend did exceed the
+    // ceiling, and reporting a natural exit would tell the operator the budget
+    // held when it did not.
+    let mut kill_reason = kill_reason;
+    if kill_reason.is_none() {
+        if let Some(field) = sink.budget_breach() {
+            sink.emit_budget_exceeded_error(field).await;
+            tracing::warn!(
+                attempt_id,
+                field,
+                "per-task cost ceiling breached after the agent exited; marking the run over budget"
+            );
+            kill_reason = Some("budget_exceeded".to_string());
+        }
+    }
     // Plan 6.3 (#534): report the agent subprocess peak RSS (daemon RSS is
     // already in the heartbeat as `active_rss_mib`). Best-effort: a missing
     // sample only skips the event.

@@ -541,6 +541,28 @@ async fn drive_acp_session(
         sink.push(agentgrid_common::EventKind::Log.to_event_type(), payload)
             .await;
     }
+    // Per-task cost ceilings: the in-run poll above only fires when the adapter
+    // reports usage *during* the run. A short single-step session reports its
+    // usage as it exits, so the poll can never see that breach — it becomes
+    // visible only now that the stream has drained. The spend did exceed the
+    // ceiling the task declared, so reporting `success` would tell the operator
+    // the budget held when it did not.
+    let outcome = match (outcome.success, sink.budget_breach()) {
+        (true, Some(field)) => {
+            sink.emit_budget_exceeded_error(field).await;
+            tracing::warn!(
+                attempt_id = %assignment.attempt_id,
+                field,
+                "per-task cost ceiling breached after the session ended; marking the attempt over budget"
+            );
+            AcpResult {
+                success: false,
+                error_code: Some("budget_exceeded".into()),
+                ..outcome
+            }
+        }
+        _ => outcome,
+    };
     Ok(outcome)
 }
 
