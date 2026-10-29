@@ -147,7 +147,6 @@
   `tests/e2e/run-ha-incremental.sh` (async/sync, no snapshots cut, `kill -9`
   leader keeps the acknowledged task).
 
-
 ### Changed
 
 - **A refused assignment retries the task on another node instead of killing
@@ -191,6 +190,30 @@
   to make, not a reason to stay unelectable forever.
 
 ### Fixed
+
+- **A node delivers an attempt's events in ascending sequence order.** This is
+  the root cause of the `event stream not contiguous` failure the `filesystem
+  compat` e2e job hit once on `d07cb24` and never reproduced. Nothing was lost
+  or duplicated — the events were all stored — but the *order* was wrong, and
+  the test read that as a gap.
+
+  Three things combined. `EventSink::push` allocates the sequence with an
+  atomic `fetch_add` and appends to the RAM buffer only afterwards, so two
+  producers (the adapter-output reader and the attempt lifecycle) can put a
+  higher sequence into the buffer first. Then `flush` and `drain_outbox` —
+  which both run at attempt end — could POST concurrently, so whole batches
+  arrived in either order. And the control plane stamps `ingest_id` on
+  arrival and `get_events` pages by it, so arrival order *is* the order a
+  client sees: a task whose events arrive as `4,5,6` then `1,2,3,4,5,6`
+  reads back as `4,5,6,1,2,3`, which is neither sorted nor a contiguous
+  range from 1 — exactly the failure the e2e reported, with no data missing.
+
+  `EventSink` now holds a `send_gate` for the duration of each send path, and
+  every batch is sorted by sequence before it is chunked. Both are pinned by
+  tests: one seeds the buffer out of order and asserts a single ascending
+  batch leaves the node, one starts `flush` and `drain_outbox` together
+  against a slow handler and asserts no two POSTs are ever in flight (without
+  the gate it observes `[4,5,6]` delivered before `[1,2,3,4,5,6]`).
 
 - **`docs/openapi.yaml` is a valid OpenAPI document again.** Nothing in the
   repo ever parsed it — the contract test only scanned lines for path keys — so

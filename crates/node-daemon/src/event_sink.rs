@@ -87,6 +87,33 @@ pub struct EventSink {
     /// running token total is monotone and a compaction cannot refund budget.
     last_gauge_tokens: AtomicU64,
     budget: std::sync::Mutex<(Option<u64>, Option<u64>)>,
+    /// Serialises the three send paths (`flush`, `flush_quick`, `drain_outbox`)
+    /// against each other.
+    ///
+    /// They all drain the same buffer/outbox, and two sends in flight deliver an
+    /// attempt's events to the CP in whatever order the network resolves them.
+    /// The CP stamps `ingest_id` at insert and pages by it, so the reader would
+    /// see sequence 57 before 56 — which is exactly the "event stream not
+    /// contiguous" the fs-compat e2e hit. One sender at a time, and each send
+    /// ascending by sequence (`in_sequence_order`), keeps the stored stream
+    /// monotone.
+    send_gate: tokio::sync::Mutex<()>,
+}
+
+/// Put a drained buffer back into sequence order.
+///
+/// `push` allocates the sequence with an atomic `fetch_add` and only then
+/// appends to the RAM buffer, so two producers — the adapter-output reader and
+/// the attempt lifecycle — interleave freely: the higher sequence can reach the
+/// buffer first. The buffer is therefore *not* sorted, and the CP preserves send
+/// order in `ingest_id`, which is the cursor the read path pages by.
+///
+/// Sorting here (once per send, `O(n log n)`) rather than inserting in order on
+/// every event (`O(n)` per push, which is quadratic for a 20k-event flush) is
+/// what makes the delivered stream ascending.
+fn in_sequence_order(mut events: Vec<IncomingEvent>) -> Vec<IncomingEvent> {
+    events.sort_by_key(|e| e.sequence);
+    events
 }
 
 /// Split a `metric` payload into the `(tokens, cost_cents)` increment to add
@@ -192,6 +219,7 @@ impl EventSink {
             last_cumulative_cost_cents: AtomicU64::new(0),
             last_gauge_tokens: AtomicU64::new(0),
             budget: std::sync::Mutex::new((None, None)),
+            send_gate: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -493,9 +521,14 @@ impl EventSink {
     /// Flush the RAM buffer to the CP; on partial failure the unacked tail is
     /// pushed back to the buffer front for the next flush.
     pub async fn flush(&self) {
-        let batch: Vec<IncomingEvent> = std::mem::take(&mut *self.buf.lock().await)
-            .into_iter()
-            .collect();
+        // One sender at a time, and ascending: see `send_gate` /
+        // `in_sequence_order`.
+        let _gate = self.send_gate.lock().await;
+        let batch: Vec<IncomingEvent> = in_sequence_order(
+            std::mem::take(&mut *self.buf.lock().await)
+                .into_iter()
+                .collect(),
+        );
         if batch.is_empty() {
             return;
         }
@@ -588,9 +621,12 @@ impl EventSink {
     /// recording for tens of seconds; the durable outbox retains the events
     /// and the flusher loop (while it lives) keeps retrying.
     pub async fn flush_quick(&self) {
-        let batch: Vec<IncomingEvent> = std::mem::take(&mut *self.buf.lock().await)
-            .into_iter()
-            .collect();
+        let _gate = self.send_gate.lock().await;
+        let batch: Vec<IncomingEvent> = in_sequence_order(
+            std::mem::take(&mut *self.buf.lock().await)
+                .into_iter()
+                .collect(),
+        );
         if batch.is_empty() {
             return;
         }
@@ -634,6 +670,9 @@ impl EventSink {
     }
 
     pub async fn drain_outbox(&self, deadline: tokio::time::Instant) {
+        // The flusher may be mid-send when this runs at attempt end; without
+        // the gate the two would race and interleave their batches.
+        let _gate = self.send_gate.lock().await;
         let url = format!(
             "{}/v1/node/attempts/{}/events",
             self.server, self.attempt_id
@@ -659,7 +698,7 @@ impl EventSink {
             // Hardening P1 item 34: never hold the whole pending spool in RAM
             // or POST it as one oversized batch — chunk at the CP batch cap and
             // deliver chunk-by-chunk, acking each.
-            for chunk in split_batch(pending.into_iter().collect()) {
+            for chunk in split_batch(in_sequence_order(pending.into_iter().collect())) {
                 let seqs: Vec<u64> = chunk.iter().map(|e| e.sequence).collect();
                 let req = IngestEventsRequest { events: chunk };
                 let mut post = self.client.post(&url).json(&req);
@@ -1126,5 +1165,262 @@ mod plan_capture_tests {
         assert_eq!(out.get("tokens"), Some(&json!(42)));
         assert_eq!(out.get("cost_cents"), Some(&json!(7)));
         assert!(out.get("cost_cumulative_cents").is_none());
+    }
+
+    fn ev(sequence: u64) -> IncomingEvent {
+        IncomingEvent {
+            sequence,
+            r#type: EventType::Stdout,
+            payload: json!({ "text": "x" }),
+        }
+    }
+
+    /// The RAM buffer is not sorted: `push` allocates the sequence atomically
+    /// but appends afterwards, so two producers can interleave. Restoring order
+    /// at the send boundary is what keeps the stored stream monotone.
+    #[test]
+    fn sequence_order_is_restored_before_sending() {
+        let scrambled = vec![ev(3), ev(1), ev(2), ev(5), ev(4)];
+        let ordered: Vec<u64> = in_sequence_order(scrambled)
+            .iter()
+            .map(|e| e.sequence)
+            .collect();
+        assert_eq!(ordered, vec![1, 2, 3, 4, 5]);
+    }
+
+    /// The invariant the wire actually depends on: the CP stamps `ingest_id` in
+    /// arrival order and `get_events` pages by it, so a buffer that is out of
+    /// sequence order must still be *sent* ascending.
+    ///
+    /// The buffer is seeded directly rather than raced for: two producers
+    /// interleaving (`next.fetch_add` then an awaited append) can produce this
+    /// state, but not reliably enough to assert on — a test that only sometimes
+    /// scrambles proves nothing.
+    #[tokio::test]
+    async fn delivered_batches_ascend_even_when_the_buffer_does_not() {
+        use axum::{extract::State, routing::post, Json, Router};
+
+        type Seen = Arc<std::sync::Mutex<Vec<Vec<u64>>>>;
+        let seen: Seen = Arc::default();
+        let app = Router::new()
+            .route(
+                "/v1/node/attempts/{id}/events",
+                post(
+                    |State(seen): State<Seen>,
+                     Json(req): Json<agentgrid_common::IngestEventsRequest>| async move {
+                        seen.lock()
+                            .unwrap()
+                            .push(req.events.iter().map(|e| e.sequence).collect());
+                        Json(json!({ "accepted": req.events.len() }))
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "ag-sink-order-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ob = EventOutbox::open(&dir, "order").expect("open test outbox");
+        let sink = EventSink::new(
+            "order".into(),
+            Client::new(),
+            format!("http://{addr}"),
+            String::new(),
+            Arc::new(ob),
+        );
+
+        // Exactly what concurrent producers leave behind: the buffer holds every
+        // event, in an order that is not the sequence order.
+        {
+            let mut buf = sink.buf.lock().await;
+            for seq in [3u64, 1, 5, 2, 4] {
+                buf.push_back(ev(seq));
+            }
+        }
+
+        sink.flush().await;
+        server.abort();
+
+        let batches = seen.lock().unwrap().clone();
+        assert_eq!(
+            batches,
+            vec![vec![1u64, 2, 3, 4, 5]],
+            "one ascending batch, not the buffer order"
+        );
+    }
+
+    /// `flush` (RAM buffer) and `drain_outbox` (durable spool) both run at
+    /// attempt end and both POST. Overlapping them is what reorders whole
+    /// batches — the CP stamps `ingest_id` on arrival, so the later batch can be
+    /// stored first. `send_gate` serialises them; this asserts no two POSTs are
+    /// ever in flight at once.
+    #[tokio::test]
+    async fn the_send_paths_never_overlap() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering as O};
+
+        struct Ctl {
+            in_flight: AtomicUsize,
+            max_in_flight: AtomicUsize,
+            batches: std::sync::Mutex<Vec<Vec<u64>>>,
+        }
+        let ctl = Arc::new(Ctl {
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+            batches: std::sync::Mutex::new(Vec::new()),
+        });
+        let app = Router::new()
+            .route(
+                "/v1/node/attempts/{id}/events",
+                post(
+                    |State(ctl): State<Arc<Ctl>>,
+                     Json(req): Json<agentgrid_common::IngestEventsRequest>| async move {
+                        let now = ctl.in_flight.fetch_add(1, O::SeqCst) + 1;
+                        ctl.max_in_flight.fetch_max(now, O::SeqCst);
+                        // Long enough that a second, ungated send would overlap.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        ctl.batches
+                            .lock()
+                            .unwrap()
+                            .push(req.events.iter().map(|e| e.sequence).collect());
+                        ctl.in_flight.fetch_sub(1, O::SeqCst);
+                        Json(json!({ "accepted": req.events.len() }))
+                    },
+                ),
+            )
+            .with_state(ctl.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "ag-sink-gate-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ob = EventOutbox::open(&dir, "gate").expect("open test outbox");
+        let sink = EventSink::new(
+            "gate".into(),
+            Client::new(),
+            format!("http://{addr}"),
+            String::new(),
+            Arc::new(ob),
+        );
+
+        // First run: three events land in both the RAM buffer and the spool.
+        for _ in 0..3 {
+            sink.push(EventType::Stdout, json!({ "text": "a" })).await;
+        }
+        // Simulate a flusher that already drained the buffer: the spool still
+        // holds all six, the buffer only the three pushed after this point — so
+        // both send paths have real work and would overlap if not gated.
+        sink.buf.lock().await.clear();
+        for _ in 0..3 {
+            sink.push(EventType::Stdout, json!({ "text": "b" })).await;
+        }
+
+        let a = {
+            let s = sink.clone();
+            tokio::spawn(async move { s.flush().await })
+        };
+        let b = {
+            let s = sink.clone();
+            tokio::spawn(async move {
+                s.drain_outbox(tokio::time::Instant::now() + Duration::from_secs(5))
+                    .await
+            })
+        };
+        a.await.unwrap();
+        b.await.unwrap();
+        server.abort();
+
+        assert_eq!(
+            ctl.max_in_flight.load(O::SeqCst),
+            1,
+            "flush and drain_outbox must not be in flight together: {:?}",
+            ctl.batches.lock().unwrap()
+        );
+    }
+
+    /// Two producers pushing concurrently (as an attempt does — adapter output
+    /// and lifecycle events) must lose and duplicate nothing. Order is asserted
+    /// too, but the race that reorders them is not forced here; the test above
+    /// pins that invariant deterministically.
+    #[tokio::test]
+    async fn concurrent_producers_are_delivered_in_sequence_order() {
+        use axum::{extract::State, routing::post, Json, Router};
+
+        type Seen = Arc<std::sync::Mutex<Vec<Vec<u64>>>>;
+        let seen: Seen = Arc::default();
+        let app = Router::new()
+            .route(
+                "/v1/node/attempts/{id}/events",
+                post(
+                    |State(seen): State<Seen>,
+                     Json(req): Json<agentgrid_common::IngestEventsRequest>| async move {
+                        seen.lock()
+                            .unwrap()
+                            .push(req.events.iter().map(|e| e.sequence).collect());
+                        Json(json!({ "accepted": req.events.len() }))
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "ag-sink-order-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ob = EventOutbox::open(&dir, "order").expect("open test outbox");
+        let sink = EventSink::new(
+            "order".into(),
+            Client::new(),
+            format!("http://{addr}"),
+            String::new(),
+            Arc::new(ob),
+        );
+
+        let mut handles = Vec::new();
+        for producer in 0..2 {
+            let sink = sink.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..25 {
+                    sink.push(
+                        EventType::Stdout,
+                        json!({ "text": format!("{producer}-{i}") }),
+                    )
+                    .await;
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        sink.flush().await;
+        server.abort();
+
+        let batches = seen.lock().unwrap().clone();
+        let flat: Vec<u64> = batches.iter().flatten().copied().collect();
+        assert_eq!(
+            flat,
+            (1..=50).collect::<Vec<u64>>(),
+            "each delivered batch must ascend, in one call: {batches:?}"
+        );
     }
 }
