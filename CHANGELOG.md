@@ -12,7 +12,7 @@
   auto-retry for reported failures lives in `complete_attempt` — which a dead
   node never calls. The two paths now agree: `lose_node_attempts` spends the
   same `max_attempts` budget, puts the task back in `queued`, and writes an
-  audit row (`task.retry.auto_node_lost`) naming the node and the lost attempt.
+  audit row (`task.retry.auto`) naming the node and the lost attempt.
 
   The retry is steered onto a **different** node. `avoid_node_id` is set when
   an attempt is lost and cleared when the next attempt is assigned, and the
@@ -150,6 +150,20 @@
 
 ### Changed
 
+- **A refused assignment retries the task on another node instead of killing
+  it.** An `ack` with `ok=false` used to fail the task outright, because a
+  requeue would hot-loop: the refusal frees a slot, the scheduler refills it
+  immediately, and the same node refuses again. `avoid_node_id` removes that
+  reason — the retry is steered off the refusing node — so a refusal now spends
+  the task's `max_attempts` budget through the same helper as a node loss
+  (`requeue_lost_attempt`), and the attempt still ends `lost` immediately,
+  which is what the node protocol promises. A refusal is cheaper to retry than
+  a mid-run loss (the attempt never ran, so there are no side effects to
+  duplicate) but it is the same budget question, so it reads the same
+  `retry_on_node_loss` knob: `false` keeps the task terminal. The old path
+  called `complete_attempt` with a Fail transition on an `assigned` attempt —
+  an invalid transition the handler swallowed, leaving the attempt assigned for
+  the 30 s reaper and cycling forever.
 - **A demoted leader undoes its own un-replicated writes instead of restoring a
   snapshot.** The old rule was "it may hold writes nobody else saw, so condemn
   the database and restore the new leader's snapshot". That is correct but

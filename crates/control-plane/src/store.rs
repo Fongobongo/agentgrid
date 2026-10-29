@@ -806,6 +806,107 @@ async fn mark_offline_nodes(
     Ok(())
 }
 
+/// Per-task policy for spending retry budget on a lost attempt, read off the
+/// `tasks` row (`max_attempts` + `retry_on_node_loss`).
+///
+/// Bundled into one value on purpose: both loss causes (node death, assignment
+/// refusal) used to read these two columns with their own `unwrap_or`
+/// defaults, which is exactly how the two paths could drift apart.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LossRetryPolicy {
+    /// Total attempts the task may run (`tasks.max_attempts`).
+    pub max_attempts: i64,
+    /// Whether a node loss may spend that budget (`tasks.retry_on_node_loss`).
+    pub retry_allowed: bool,
+}
+
+impl LossRetryPolicy {
+    /// Policy from the two columns, falling back to the schema defaults
+    /// (`max_attempts = 1`, `retry_on_node_loss = 1`) when a column is missing.
+    pub(crate) fn from_columns(max_attempts: i64, retry_on_node_loss: i64) -> Self {
+        Self {
+            max_attempts,
+            retry_allowed: retry_on_node_loss != 0,
+        }
+    }
+
+    /// No budget and no permission: a lost attempt fails the task.
+    pub(crate) fn terminal() -> Self {
+        Self {
+            max_attempts: 1,
+            retry_allowed: false,
+        }
+    }
+}
+
+/// Apply the task-level retry decision after one of its attempts was lost —
+/// the node died mid-run, or it refused the assignment. Returns `true` when
+/// the task went back to the queue.
+///
+/// Both causes share this path on purpose: the question "may this failure
+/// spend another attempt?" is the same one, and the answer is the task's
+/// `retry_on_node_loss` policy plus the `max_attempts` budget.
+/// `complete_attempt` applies the identical rule to a *reported* failure;
+/// this is the branch for the failures that arrive without a report.
+///
+/// The requeued task carries `avoid_node_id = node_id`, so the scheduler puts
+/// the retry on another node. That is also why a refused assignment no longer
+/// has to be terminal to avoid a hot-loop: the refusing node is skipped.
+pub(crate) async fn requeue_lost_attempt(
+    tx: &mut sqlx::SqliteConnection,
+    task_id: &str,
+    attempt_id: &str,
+    node_id: &str,
+    now: &str,
+    reason: &str,
+    policy: LossRetryPolicy,
+) -> Result<bool> {
+    if !policy.retry_allowed {
+        return Ok(false);
+    }
+    let attempt_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attempts WHERE task_id = ?")
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if attempt_count >= policy.max_attempts {
+        return Ok(false);
+    }
+    // The task lands in the state the legal `(Failed, Retry) -> Queued` pair
+    // names, written directly inside the transaction rather than through
+    // `next_task_status` (the terminal guard is what makes the write safe). A
+    // task that raced to `succeeded` on a late completion is not resurrected.
+    let affected = sqlx::query(
+        "UPDATE tasks SET status = 'queued', finished_at = NULL, error_code = NULL, \
+         assigned_attempt_id = NULL, avoid_node_id = ? \
+         WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'cancelled')",
+    )
+    .bind(node_id)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Ok(false);
+    }
+    let payload = serde_json::json!({
+        "reason": reason,
+        "node_id": node_id,
+        "attempt_id": attempt_id,
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO audit_events (id, actor_type, actor_id, action, subject, payload, created_at) \
+         VALUES (?, 'system', NULL, 'task.retry.auto', ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(task_id)
+    .bind(&payload)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    Ok(true)
+}
+
 /// Atomically mark a node's non-terminal attempts as `lost`, free its
 /// concurrency capacity, and either retry the owning task on another node or
 /// fail it with `error_code = node_lost`.
@@ -847,52 +948,11 @@ async fn lose_node_attempts(tx: &mut sqlx::SqliteConnection, node_id: &str) -> R
         // task may run, so the comparison counts the attempt just lost. This
         // is the same rule `complete_attempt` applies to a reported failure —
         // a node loss is simply the failure that arrives without a report.
-        let max_attempts: i64 = r.try_get("max_attempts").unwrap_or(1);
-        let allowed: i64 = r.try_get("retry_on_node_loss").unwrap_or(1);
-        let mut retry = false;
-        if allowed != 0 {
-            let attempt_count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM attempts WHERE task_id = ?")
-                    .bind(&tid)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            retry = attempt_count < max_attempts;
-        }
-        if retry {
-            // Same shape as the auto-retry in `complete_attempt`: the task
-            // lands in the state the legal `(Failed, Retry) -> Queued` pair
-            // names, written directly inside the transaction rather than
-            // through `next_task_status` (the terminal guard below is what
-            // makes the write safe). A task that raced to `succeeded` on a
-            // late completion is not resurrected — the guard excludes it.
-            let affected = sqlx::query(
-                "UPDATE tasks SET status = 'queued', finished_at = NULL, error_code = NULL, \
-                 assigned_attempt_id = NULL, avoid_node_id = ? \
-                 WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'cancelled')",
-            )
-            .bind(node_id)
-            .bind(&tid)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if affected == 1 {
-                let payload = serde_json::json!({
-                    "reason": "node_lost",
-                    "node_id": node_id,
-                    "attempt_id": aid,
-                })
-                .to_string();
-                sqlx::query(
-                    "INSERT INTO audit_events (id, actor_type, actor_id, action, subject, payload, created_at) \
-                     VALUES (?, 'system', NULL, 'task.retry.auto_node_lost', ?, ?, ?)",
-                )
-                .bind(uuid::Uuid::new_v4().to_string())
-                .bind(&tid)
-                .bind(&payload)
-                .bind(&now)
-                .execute(&mut *tx)
-                .await?;
-            }
+        let policy = LossRetryPolicy::from_columns(
+            r.try_get("max_attempts").unwrap_or(1),
+            r.try_get("retry_on_node_loss").unwrap_or(1),
+        );
+        if requeue_lost_attempt(&mut *tx, &tid, &aid, node_id, &now, "node_lost", policy).await? {
             continue;
         }
         // Fail the task only if it has not already reached a terminal state.

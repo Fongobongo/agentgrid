@@ -1041,7 +1041,7 @@ async fn node_loss_retries_the_task_on_a_different_node() {
             .unwrap();
     assert_eq!(lost, 1, "the lost attempt stays for the audit trail");
     let audited: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_events WHERE action = 'task.retry.auto_node_lost' AND subject = ?",
+        "SELECT COUNT(*) FROM audit_events WHERE action = 'task.retry.auto' AND subject = ?",
     )
     .bind(&task_id)
     .fetch_one(&state.store.pool)
@@ -1224,4 +1224,83 @@ async fn eligibility_explains_the_avoided_node() {
         el.nodes.iter().any(|n| n.node_id != a_id && n.eligible),
         "the other node remains eligible"
     );
+}
+
+/// A node that refuses an assignment (`ack ok=false`) never ran the work, so
+/// there is nothing to be ambiguous about — with budget left the task must
+/// retry, and on a different node. This path used to be terminal outright
+/// because a requeue would have hot-looped on the refusing node; the
+/// avoidance marker removes that reason.
+#[tokio::test]
+async fn rejected_assignment_retries_on_another_node() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (a_id, a_cred) = enroll(&app, "node-ra", vec!["mock".into()], vec!["*".into()]).await;
+    let (b_id, b_cred) = enroll(&app, "node-rb", vec!["mock".into()], vec!["*".into()]).await;
+
+    let task_id = create_task_with(&app, "write:hello.txt:hi", 2, None).await;
+    let first = poll_assign(&app, &a_id, &a_cred)
+        .await
+        .expect("node-ra takes the first attempt");
+
+    // The node refuses before acking: attempt lost, task back in the queue.
+    assert!(state
+        .store
+        .reject_assignment(&first.attempt_id, "adapter_missing")
+        .await
+        .unwrap());
+
+    let tv = show_task_view(&app, &task_id).await;
+    assert_eq!(
+        tv.status,
+        TaskStatus::Queued,
+        "a refusal with budget left must re-queue the task"
+    );
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE action = 'task.retry.auto' AND subject = ?",
+    )
+    .bind(&task_id)
+    .fetch_one(&state.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+
+    // The refusing node does not get it back; the other one does.
+    assert!(
+        poll_assign(&app, &a_id, &a_cred).await.is_none(),
+        "the refusing node must not be handed the retry"
+    );
+    let retry = poll_assign(&app, &b_id, &b_cred)
+        .await
+        .expect("node-rb takes the retry");
+    assert_ne!(retry.attempt_id, first.attempt_id);
+}
+
+/// Without budget, a refusal stays what it was: the task fails.
+#[tokio::test]
+async fn rejected_assignment_is_terminal_without_budget() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-rt", vec!["mock".into()], vec!["*".into()]).await;
+
+    let task_id = create_task_with(&app, "write:hello.txt:hi", 1, None).await;
+    let first = poll_assign(&app, &node_id, &cred)
+        .await
+        .expect("node takes the attempt");
+    assert!(state
+        .store
+        .reject_assignment(&first.attempt_id, "adapter_missing")
+        .await
+        .unwrap());
+
+    assert_eq!(
+        show_task_view(&app, &task_id).await.status,
+        TaskStatus::Failed
+    );
+    let attempts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attempts WHERE task_id = ?")
+        .bind(&task_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1, "no budget means no second attempt");
 }

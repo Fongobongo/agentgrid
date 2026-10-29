@@ -795,14 +795,20 @@ impl Store {
     }
 
     /// A node explicitly refused an assignment (ws ack `ok=false`): the
-    /// attempt dies terminal (`lost`) and the task `failed` — the legal
-    /// NodeLost pairing from `assigned`. Terminal, NOT a requeue: a requeue
-    /// would hot-loop assign→reject on the same node (the scheduler refills
-    /// the freed slot immediately), and the node-protocol doc promises
-    /// "ok=false → attempt immediately failed". The old path called
-    /// `complete_attempt` with a Fail transition on an `assigned` attempt —
-    /// an invalid transition the handler swallowed, leaving the attempt
-    /// assigned for the 30s reaper and cycling forever.
+    /// attempt dies (`lost`) and the task either retries on another node or
+    /// fails — the legal NodeLost pairing from `assigned`.
+    ///
+    /// The attempt itself is terminal either way, which is what the node
+    /// protocol promises ("ok=false → attempt immediately failed"). What
+    /// changed is the task: a refusal used to kill it outright, because a
+    /// requeue would hot-loop assign→reject on the same node (the scheduler
+    /// refills the freed slot immediately). `avoid_node_id` removes that
+    /// reason — the retry is steered off the refusing node — so a refusal now
+    /// spends the task's retry budget like any other failure, through
+    /// [`super::requeue_lost_attempt`]. The old path called `complete_attempt`
+    /// with a Fail transition on an `assigned` attempt — an invalid
+    /// transition the handler swallowed, leaving the attempt assigned for the
+    /// 30s reaper and cycling forever.
     pub async fn reject_assignment(&self, attempt_id: &str, reason: &str) -> Result<bool> {
         let mut tx = self.write_txn().await?;
         let row = sqlx::query("SELECT task_id, node_id, status FROM attempts WHERE id = ?")
@@ -834,15 +840,43 @@ impl Store {
             let _ = tx.rollback().await;
             return Ok(false);
         }
-        sqlx::query(
-            "UPDATE tasks SET status = 'failed', finished_at = ?, \
-             assigned_attempt_id = NULL \
-             WHERE id = ? AND status = 'assigned'",
+        // Same budget rule as a lost node: a refusal is a failure the node
+        // reported, but one that arrives with no work done — the attempt
+        // never ran, so retrying it elsewhere carries none of the side-effect
+        // risk that makes a mid-run node loss a product decision.
+        let policy_row =
+            sqlx::query("SELECT max_attempts, retry_on_node_loss FROM tasks WHERE id = ?")
+                .bind(&task_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let policy = match &policy_row {
+            Some(p) => super::LossRetryPolicy::from_columns(
+                p.try_get::<i64, _>("max_attempts").unwrap_or(1),
+                p.try_get::<i64, _>("retry_on_node_loss").unwrap_or(1),
+            ),
+            None => super::LossRetryPolicy::terminal(),
+        };
+        let requeued = super::requeue_lost_attempt(
+            &mut tx,
+            &task_id,
+            attempt_id,
+            &node_id,
+            &now,
+            "node_rejected",
+            policy,
         )
-        .bind(&now)
-        .bind(&task_id)
-        .execute(&mut *tx)
         .await?;
+        if !requeued {
+            sqlx::query(
+                "UPDATE tasks SET status = 'failed', finished_at = ?, \
+                 assigned_attempt_id = NULL \
+                 WHERE id = ? AND status = 'assigned'",
+            )
+            .bind(&now)
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query("UPDATE nodes SET active_attempts = MAX(0, active_attempts - 1) WHERE id = ?")
             .bind(&node_id)
             .execute(&mut *tx)
