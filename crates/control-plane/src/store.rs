@@ -807,13 +807,26 @@ async fn mark_offline_nodes(
 }
 
 /// Atomically mark a node's non-terminal attempts as `lost`, free its
-/// concurrency capacity, and fail the owning tasks with `error_code =
-/// node_lost`. Idempotent: a node with no in-flight attempts is a no-op.
-/// Runs inside the caller's `BEGIN IMMEDIATE` transaction (no cascade races).
+/// concurrency capacity, and either retry the owning task on another node or
+/// fail it with `error_code = node_lost`.
+///
+/// A lost attempt is the one failure the control plane has no evidence about:
+/// the node died mid-run, so there is no completion report and nothing is
+/// known about what the agent already did. Whether that spends the task's
+/// retry budget is a per-task decision (`retry_on_node_loss`), because the
+/// answer depends on whether the work is idempotent. When it does retry, the
+/// node that lost the attempt is written to `avoid_node_id` so the scheduler
+/// steers the new attempt elsewhere — "retry" here means a *different* node,
+/// not the same one getting another go.
+///
+/// Idempotent: a node with no in-flight attempts is a no-op. Runs inside the
+/// caller's `BEGIN IMMEDIATE` transaction (no cascade races).
 async fn lose_node_attempts(tx: &mut sqlx::SqliteConnection, node_id: &str) -> Result<()> {
     let now = now_iso();
     let rows = sqlx::query(
-        "SELECT id, task_id FROM attempts WHERE node_id = ? AND status IN ('assigned', 'running', 'validating')",
+        "SELECT a.id, a.task_id, t.max_attempts, t.retry_on_node_loss \
+         FROM attempts a JOIN tasks t ON t.id = a.task_id \
+         WHERE a.node_id = ? AND a.status IN ('assigned', 'running', 'validating')",
     )
     .bind(node_id)
     .fetch_all(&mut *tx)
@@ -830,6 +843,58 @@ async fn lose_node_attempts(tx: &mut sqlx::SqliteConnection, node_id: &str) -> R
             .bind(&aid)
             .execute(&mut *tx)
             .await?;
+        // Retry budget: `max_attempts` is the total number of attempts the
+        // task may run, so the comparison counts the attempt just lost. This
+        // is the same rule `complete_attempt` applies to a reported failure —
+        // a node loss is simply the failure that arrives without a report.
+        let max_attempts: i64 = r.try_get("max_attempts").unwrap_or(1);
+        let allowed: i64 = r.try_get("retry_on_node_loss").unwrap_or(1);
+        let mut retry = false;
+        if allowed != 0 {
+            let attempt_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM attempts WHERE task_id = ?")
+                    .bind(&tid)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            retry = attempt_count < max_attempts;
+        }
+        if retry {
+            // Same shape as the auto-retry in `complete_attempt`: the task
+            // lands in the state the legal `(Failed, Retry) -> Queued` pair
+            // names, written directly inside the transaction rather than
+            // through `next_task_status` (the terminal guard below is what
+            // makes the write safe). A task that raced to `succeeded` on a
+            // late completion is not resurrected — the guard excludes it.
+            let affected = sqlx::query(
+                "UPDATE tasks SET status = 'queued', finished_at = NULL, error_code = NULL, \
+                 assigned_attempt_id = NULL, avoid_node_id = ? \
+                 WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'cancelled')",
+            )
+            .bind(node_id)
+            .bind(&tid)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if affected == 1 {
+                let payload = serde_json::json!({
+                    "reason": "node_lost",
+                    "node_id": node_id,
+                    "attempt_id": aid,
+                })
+                .to_string();
+                sqlx::query(
+                    "INSERT INTO audit_events (id, actor_type, actor_id, action, subject, payload, created_at) \
+                     VALUES (?, 'system', NULL, 'task.retry.auto_node_lost', ?, ?, ?)",
+                )
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(&tid)
+                .bind(&payload)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            }
+            continue;
+        }
         // Fail the task only if it has not already reached a terminal state.
         // Hardening P1 item 13: clear assigned_attempt_id so a terminal task
         // has no active attempt.

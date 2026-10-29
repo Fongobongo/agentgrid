@@ -26,6 +26,7 @@ async fn cancel_queued_marks_cancelled() {
         github_base_ref: None,
         github_create: false,
         max_attempts: 1,
+        retry_on_node_loss: None,
         consensus_mode: None,
         review_of: None,
         max_tokens: None,
@@ -1245,6 +1246,7 @@ async fn task_auto_retry_requeues_until_budget_exhausted() {
             repository: "demo".into(),
             adapter: "mock".into(),
             max_attempts: 2,
+            retry_on_node_loss: None,
             ..Default::default()
         })
         .await

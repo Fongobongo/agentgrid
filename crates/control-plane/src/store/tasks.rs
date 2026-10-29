@@ -36,8 +36,8 @@ impl Store {
         let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
         self.write_one(
             sqlx::query(
-                "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents, retry_on_node_loss) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&req.repository)
@@ -65,7 +65,8 @@ impl Store {
             .bind(req.consensus_mode.as_deref().unwrap_or("solve"))
             .bind(&req.review_of)
             .bind(req.max_tokens.map(|v| v as i64))
-            .bind(req.max_cost_cents.map(|v| v as i64)),
+            .bind(req.max_cost_cents.map(|v| v as i64))
+            .bind(req.retry_on_node_loss.unwrap_or(true)),
         )
         .await?;
         Ok(TaskView {
@@ -477,8 +478,8 @@ pub(crate) async fn insert_task_tx(
     let now = now_iso();
     let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
     sqlx::query(
-            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents, retry_on_node_loss) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
     .bind(&id)
     .bind(&req.repository)
@@ -506,6 +507,7 @@ pub(crate) async fn insert_task_tx(
         .bind(&req.review_of)
         .bind(req.max_tokens.map(|v| v as i64))
         .bind(req.max_cost_cents.map(|v| v as i64))
+        .bind(req.retry_on_node_loss.unwrap_or(true))
         .execute(tx)
         .await?;
     Ok(TaskView {

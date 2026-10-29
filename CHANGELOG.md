@@ -4,6 +4,30 @@
 
 ### Added
 
+- **A lost attempt can be retried automatically, on a different node.** A node
+  that disappears mid-run is the one failure the control plane has no evidence
+  about: the attempt ends `lost`, no completion report ever arrives, and
+  nothing is known about what the agent already did. That used to be terminal
+  (`failed` / `node_lost`) even with `max_attempts` budget left, because the
+  auto-retry for reported failures lives in `complete_attempt` — which a dead
+  node never calls. The two paths now agree: `lose_node_attempts` spends the
+  same `max_attempts` budget, puts the task back in `queued`, and writes an
+  audit row (`task.retry.auto_node_lost`) naming the node and the lost attempt.
+
+  The retry is steered onto a **different** node. `avoid_node_id` is set when
+  an attempt is lost and cleared when the next attempt is assigned, and the
+  scheduler skips that node — otherwise "retry" would mean the same node
+  getting another go at the work that just killed it. Avoidance is a
+  preference, not a lock: when the avoided node is the only one online the skip
+  is lifted, because retrying there beats parking the task in `queued` forever.
+  `GET /v1/tasks/{id}/eligibility` reports the skipped node with that reason, so
+  a task held back by avoidance does not read like a scheduler bug.
+
+  Repeating side effects is a product decision, not a technical one — the lost
+  attempt may already have pushed a branch or called out to the world — so it
+  is per task: `retry_on_node_loss` (default `true`) and
+  `--no-retry-on-node-loss` on the CLI. A default task (`max_attempts = 1`) is
+  unaffected either way: there is no budget to spend.
 - **ACP `usage_update` now feeds both budget ceilings.** Native ACP agents
   report usage as running session totals
   (`{ used, size, cost: { amount, currency } }`), and the budget path never saw

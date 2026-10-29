@@ -198,21 +198,15 @@ pub(crate) async fn enroll(
     (er.node_id, er.credential)
 }
 
-/// Register a node via long-poll, create a task, and return its assignment.
-pub(crate) async fn create_and_assign(
+/// Create a queued task and return its id, without assigning it. Tests that
+/// care which node picks the work up (retry placement) drive the polls
+/// themselves; `create_and_assign` is the shortcut for tests that do not.
+pub(crate) async fn create_task_with(
     app: &Router,
-    node_id: &str,
-    cred: &str,
     prompt: &str,
-) -> Assignment {
-    let poll_req = PollRequest {
-        node_id: node_id.into(),
-        name: "n".into(),
-        adapters: vec!["mock".into()],
-        repositories: vec!["*".into()],
-        max_concurrency: 2,
-        protocol_version: None,
-    };
+    max_attempts: u32,
+    retry_on_node_loss: Option<bool>,
+) -> String {
     let req = CreateTaskRequest {
         prompt: prompt.into(),
         repository: "demo".into(),
@@ -234,11 +228,12 @@ pub(crate) async fn create_and_assign(
         github_issue: None,
         github_base_ref: None,
         github_create: false,
-        max_attempts: 1,
+        max_attempts,
         consensus_mode: None,
         review_of: None,
         max_tokens: None,
         max_cost_cents: None,
+        retry_on_node_loss,
     };
     // Task creation is a user route; tests bootstrap a `test`/`test` user
     // (hardening P0 closed the open bootstrap window).
@@ -255,20 +250,47 @@ pub(crate) async fn create_and_assign(
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
+    let tv: TaskView =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    tv.id
+}
+
+/// One poll from a node's point of view. `None` = the scheduler had nothing
+/// this node was allowed to take.
+pub(crate) async fn poll_assign(app: &Router, node_id: &str, cred: &str) -> Option<Assignment> {
+    let poll_req = PollRequest {
+        node_id: node_id.into(),
+        name: "n".into(),
+        adapters: vec!["mock".into()],
+        repositories: vec!["*".into()],
+        max_concurrency: 2,
+        protocol_version: None,
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/poll",
+            serde_json::to_string(&poll_req).unwrap(),
+            cred,
+        ))
+        .await
+        .unwrap();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let pr: PollResponse = serde_json::from_slice(&body).unwrap();
+    pr.assignment
+}
+
+/// Register a node via long-poll, create a task, and return its assignment.
+pub(crate) async fn create_and_assign(
+    app: &Router,
+    node_id: &str,
+    cred: &str,
+    prompt: &str,
+) -> Assignment {
+    let _task_id = create_task_with(app, prompt, 1, None).await;
     // Long-poll until the queued task is assigned, mirroring the node daemon.
     for _ in 0..50 {
-        let resp = app
-            .clone()
-            .oneshot(post_auth(
-                "/v1/node/poll",
-                serde_json::to_string(&poll_req).unwrap(),
-                cred,
-            ))
-            .await
-            .unwrap();
-        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let pr: PollResponse = serde_json::from_slice(&body).unwrap();
-        if let Some(a) = pr.assignment {
+        if let Some(a) = poll_assign(app, node_id, cred).await {
             return a;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -388,6 +410,7 @@ pub(crate) async fn create_task_only(
         github_base_ref: None,
         github_create: false,
         max_attempts: 1,
+        retry_on_node_loss: None,
         consensus_mode: None,
         review_of: None,
         max_tokens: None,
@@ -462,6 +485,7 @@ pub(crate) async fn setup_two_nodes(
         github_base_ref: None,
         github_create: false,
         max_attempts: 1,
+        retry_on_node_loss: None,
         consensus_mode: None,
         review_of: None,
         max_tokens: None,
@@ -577,6 +601,7 @@ pub(crate) async fn create_task(
         github_base_ref: None,
         github_create: false,
         max_attempts: 1,
+        retry_on_node_loss: None,
         consensus_mode: None,
         review_of: None,
         max_tokens: None,

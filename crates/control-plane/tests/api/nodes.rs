@@ -918,6 +918,7 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
             github_base_ref: None,
             github_create: false,
             max_attempts: 1,
+            retry_on_node_loss: None,
             consensus_mode: None,
             review_of: None,
             max_tokens: None,
@@ -986,5 +987,241 @@ async fn node_drain_blocks_new_assignments_until_undrained() {
     assert!(
         got.is_some(),
         "undrained node must receive the queued assignment"
+    );
+}
+
+/// A lost attempt is the one failure the control plane has no evidence about:
+/// the node died mid-run, so nothing is known about what the agent did. With
+/// retry budget left, the task must go back to the queue and the retry must
+/// land on a *different* node — that is the whole point of the feature, and
+/// it is why `avoid_node_id` exists rather than just re-queueing.
+#[tokio::test]
+async fn node_loss_retries_the_task_on_a_different_node() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (a_id, a_cred) = enroll(&app, "node-a", vec!["mock".into()], vec!["*".into()]).await;
+    let (b_id, b_cred) = enroll(&app, "node-b", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Budget of two attempts, default policy (node loss spends it).
+    let task_id = create_task_with(&app, "write:hello.txt:hi", 2, None).await;
+    let first = poll_assign(&app, &a_id, &a_cred)
+        .await
+        .expect("node-a takes the first attempt");
+    assert_eq!(
+        ack_attempt(&app, &first.attempt_id, &a_cred, &first.fencing_token).await,
+        StatusCode::OK
+    );
+
+    // node-a dies with the attempt in flight.
+    sqlx::query("UPDATE nodes SET status = 'offline' WHERE id = ?")
+        .bind(&a_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    state
+        .store
+        .lose_node_attempts_if_offline(&a_id)
+        .await
+        .unwrap();
+
+    // Re-queued rather than failed, and the lost attempt is kept as the
+    // audit trail (it is what tells an operator what may have happened).
+    let tv = show_task_view(&app, &task_id).await;
+    assert_eq!(
+        tv.status,
+        TaskStatus::Queued,
+        "node loss with budget left must re-queue, not fail"
+    );
+    assert_eq!(tv.error_code, None);
+    let lost: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM attempts WHERE task_id = ? AND status = 'lost'")
+            .bind(&task_id)
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(lost, 1, "the lost attempt stays for the audit trail");
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE action = 'task.retry.auto_node_lost' AND subject = ?",
+    )
+    .bind(&task_id)
+    .fetch_one(&state.store.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1, "the automatic retry is recorded");
+
+    // Even back online, node-a must not get the retry.
+    sqlx::query("UPDATE nodes SET status = 'online' WHERE id = ?")
+        .bind(&a_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    assert!(
+        poll_assign(&app, &a_id, &a_cred).await.is_none(),
+        "the node that lost the attempt must not receive the retry"
+    );
+
+    let retry = poll_assign(&app, &b_id, &b_cred)
+        .await
+        .expect("node-b takes the retry");
+    assert_eq!(retry.task_id, task_id);
+    assert_ne!(
+        retry.attempt_id, first.attempt_id,
+        "a new attempt, not a resume"
+    );
+
+    // The avoidance marker is consumed by the assignment it steered.
+    let avoid: Option<String> = sqlx::query_scalar("SELECT avoid_node_id FROM tasks WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        avoid, None,
+        "avoid_node_id is cleared once the retry is placed"
+    );
+}
+
+/// The opt-out: tasks whose side effects must not be repeated keep the old
+/// terminal behaviour, even with retry budget to spare.
+#[tokio::test]
+async fn node_loss_is_terminal_when_retry_on_node_loss_is_off() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-x", vec!["mock".into()], vec!["*".into()]).await;
+
+    // Budget of three, but node loss is not allowed to spend it.
+    let task_id = create_task_with(&app, "write:hello.txt:hi", 3, Some(false)).await;
+    let first = poll_assign(&app, &node_id, &cred)
+        .await
+        .expect("node takes the attempt");
+    assert_eq!(
+        ack_attempt(&app, &first.attempt_id, &cred, &first.fencing_token).await,
+        StatusCode::OK
+    );
+
+    sqlx::query("UPDATE nodes SET status = 'offline' WHERE id = ?")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    state
+        .store
+        .lose_node_attempts_if_offline(&node_id)
+        .await
+        .unwrap();
+
+    let tv = show_task_view(&app, &task_id).await;
+    assert_eq!(tv.status, TaskStatus::Failed);
+    assert_eq!(tv.error_code.as_deref(), Some("node_lost"));
+    let attempts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attempts WHERE task_id = ?")
+        .bind(&task_id)
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1, "the opt-out must not spawn a second attempt");
+}
+
+/// Avoidance is a preference, not a lock. On a single-node install there is
+/// nowhere else to go, so the skip is lifted — retrying on the same node beats
+/// leaving the task queued forever.
+#[tokio::test]
+async fn node_loss_retry_falls_back_to_the_only_node() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (node_id, cred) = enroll(&app, "node-only", vec!["mock".into()], vec!["*".into()]).await;
+
+    let task_id = create_task_with(&app, "write:hello.txt:hi", 2, None).await;
+    let first = poll_assign(&app, &node_id, &cred)
+        .await
+        .expect("the only node takes the attempt");
+    assert_eq!(
+        ack_attempt(&app, &first.attempt_id, &cred, &first.fencing_token).await,
+        StatusCode::OK
+    );
+
+    sqlx::query("UPDATE nodes SET status = 'offline' WHERE id = ?")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    state
+        .store
+        .lose_node_attempts_if_offline(&node_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        show_task_view(&app, &task_id).await.status,
+        TaskStatus::Queued
+    );
+
+    // Node returns; it is the only candidate, so the skip must not deadlock.
+    sqlx::query("UPDATE nodes SET status = 'online' WHERE id = ?")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    let retry = poll_assign(&app, &node_id, &cred)
+        .await
+        .expect("the only node gets the retry back");
+    assert_eq!(retry.task_id, task_id);
+    assert_ne!(retry.attempt_id, first.attempt_id);
+}
+
+/// Eligibility has to explain the skip, or a task parked by avoidance looks
+/// like a scheduler bug from the outside.
+#[tokio::test]
+async fn eligibility_explains_the_avoided_node() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (a_id, a_cred) = enroll(&app, "node-ea", vec!["mock".into()], vec!["*".into()]).await;
+    let (_b_id, _b_cred) = enroll(&app, "node-eb", vec!["mock".into()], vec!["*".into()]).await;
+
+    let task_id = create_task_with(&app, "write:hello.txt:hi", 2, None).await;
+    let first = poll_assign(&app, &a_id, &a_cred)
+        .await
+        .expect("node-ea takes the first attempt");
+    assert_eq!(
+        ack_attempt(&app, &first.attempt_id, &a_cred, &first.fencing_token).await,
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE nodes SET status = 'offline' WHERE id = ?")
+        .bind(&a_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+    state
+        .store
+        .lose_node_attempts_if_offline(&a_id)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE nodes SET status = 'online' WHERE id = ?")
+        .bind(&a_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+
+    let el = state
+        .store
+        .task_eligibility(&task_id)
+        .await
+        .unwrap()
+        .expect("task exists");
+    let avoided = el
+        .nodes
+        .iter()
+        .find(|n| n.node_id == a_id)
+        .expect("the avoided node is listed");
+    assert!(!avoided.eligible, "the avoided node is not a candidate");
+    assert!(
+        avoided
+            .reasons
+            .iter()
+            .any(|r| r.contains("lost the previous attempt")),
+        "the reason must say why: {:?}",
+        avoided.reasons
+    );
+    assert!(
+        el.nodes.iter().any(|n| n.node_id != a_id && n.eligible),
+        "the other node remains eligible"
     );
 }

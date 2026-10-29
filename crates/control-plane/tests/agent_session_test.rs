@@ -131,6 +131,7 @@ async fn create_and_assign(app: &Router, node_id: &str, cred: &str, prompt: &str
         github_base_ref: None,
         github_create: false,
         max_attempts: 1,
+        retry_on_node_loss: None,
         consensus_mode: None,
         review_of: None,
         max_tokens: None,

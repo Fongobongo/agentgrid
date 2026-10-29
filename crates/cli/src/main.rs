@@ -351,6 +351,13 @@ struct RunArgs {
     /// until the budget is exhausted.
     #[arg(long, default_value_t = 1)]
     max_attempts: u32,
+    /// Opt out of retrying after the node running the task disappears. By
+    /// default a lost attempt spends the `--max-attempts` budget like any
+    /// other failure, and the retry is placed on a *different* node. Pass
+    /// this for tasks whose side effects must not be repeated — a lost
+    /// attempt leaves no evidence of what the agent already did.
+    #[arg(long)]
+    no_retry_on_node_loss: bool,
     /// Plan 1.9 (#17): path to a `.agentgrid/workflows/*.yaml` file to run as
     /// a workflow. When `--workflow` is a directory, the first `*.yaml` inside
     /// it is used. Setting this ignores `prompt`/`adapter`.
@@ -856,6 +863,7 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
         github_base_ref: None,
         github_create: false,
         max_attempts: 1,
+        retry_on_node_loss: None,
         consensus_mode: None,
         review_of: None,
         max_tokens: None,
@@ -1026,6 +1034,7 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 github_base_ref: None,
                 github_create: false,
                 max_attempts: 1,
+                retry_on_node_loss: None,
                 consensus_mode: None,
                 review_of: None,
                 max_tokens: None,
@@ -1093,6 +1102,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
                 github_base_ref: None,
                 github_create: a.github_create,
                 max_attempts: 1,
+                retry_on_node_loss: None,
                 consensus_mode: None,
                 review_of: None,
                 max_tokens: a.max_tokens,
@@ -1150,6 +1160,7 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         review_of: None,
         max_tokens: a.max_tokens,
         max_cost_cents: a.max_cost_cents,
+        retry_on_node_loss: Some(!a.no_retry_on_node_loss),
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))

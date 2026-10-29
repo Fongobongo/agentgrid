@@ -395,6 +395,20 @@ pub struct CreateTaskRequest {
     /// instead of staying failed — same semantics as a manual `retry_task`.
     #[serde(default = "default_task_max_attempts")]
     pub max_attempts: u32,
+    /// Whether losing the node counts as a failure that may spend the
+    /// `max_attempts` budget. `None` (default) = yes.
+    ///
+    /// A lost attempt is the one failure the control plane has no evidence
+    /// about: the node died mid-run, so it never reported what the agent did.
+    /// Retrying is safe when the work is idempotent, and unsafe when the agent
+    /// may already have pushed a branch or called out to the world. This knob
+    /// is where that call gets made, per task; `Some(false)` keeps node loss
+    /// terminal (`failed` / `node_lost`), which is the pre-existing behaviour.
+    ///
+    /// The retry is steered onto a *different* node: the node that lost the
+    /// attempt is skipped while another node is online.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on_node_loss: Option<bool>,
 }
 
 fn default_task_max_attempts() -> u32 {
@@ -1905,6 +1919,7 @@ mod tests {
             github_base_ref: None,
             github_create: false,
             max_attempts: 1,
+            retry_on_node_loss: None,
             consensus_mode: None,
             review_of: None,
             max_tokens: None,

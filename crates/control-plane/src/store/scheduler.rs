@@ -4,7 +4,7 @@ use super::{
     iso_plus_secs, node_ineligibility, now_iso, row_to_node_view, Store, ACK_DEADLINE_SECS,
     ASSIGNMENT_LEASE_SECS,
 };
-use agentgrid_common::{Assignment, NodeEligibility, NodeView, TaskEligibility};
+use agentgrid_common::{Assignment, NodeEligibility, NodeStatus, NodeView, TaskEligibility};
 use anyhow::Result;
 use sqlx::Row;
 use uuid::Uuid;
@@ -229,12 +229,27 @@ impl Store {
             return Ok(Vec::new());
         }
         let mut tx = self.write_txn().await?;
+        // "Retry on a new node": a task whose last attempt was lost carries
+        // `avoid_node_id` — the node it died on — and that node must not get
+        // the retry. The skip is lifted when it is the only node online, or
+        // the task would sit in `queued` forever on a single-node install;
+        // retrying on the same node beats never retrying.
+        let other_online: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM nodes WHERE id != ? AND status = 'online' AND drained = 0",
+        )
+        .bind(node_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let avoid_exempt: i64 = i64::from(other_online == 0);
         let cands = sqlx::query(
             "SELECT id, prompt, adapter, repository, timeout_secs, validation_command, base_commit, parent_acp_session_id, created_at, security_profile, network_mode, group_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_tokens, max_cost_cents FROM tasks \
              WHERE status = 'queued' AND (requested_node_id IS NULL OR requested_node_id = ?) \
+               AND (avoid_node_id IS NULL OR avoid_node_id != ? OR ? = 1) \
              ORDER BY created_at ASC",
         )
         .bind(node_id)
+        .bind(node_id)
+        .bind(avoid_exempt)
         .fetch_all(&mut *tx)
         .await?;
 
@@ -650,7 +665,7 @@ impl Store {
             let now = now_iso();
 
             let affected = sqlx::query(
-            "UPDATE tasks SET status = 'assigned', assigned_attempt_id = ? WHERE id = ? AND status = 'queued'",
+            "UPDATE tasks SET status = 'assigned', assigned_attempt_id = ?, avoid_node_id = NULL WHERE id = ? AND status = 'queued'",
         )
         .bind(&attempt_id)
         .bind(&task_id)
@@ -794,7 +809,7 @@ impl Store {
     /// summary (why it stays queued). Returns None if the task does not exist.
     pub async fn task_eligibility(&self, task_id: &str) -> Result<Option<TaskEligibility>> {
         let row =
-            sqlx::query("SELECT repository, adapter, requested_node_id, security_profile, network_mode FROM tasks WHERE id = ?")
+            sqlx::query("SELECT repository, adapter, requested_node_id, security_profile, network_mode, avoid_node_id FROM tasks WHERE id = ?")
                 .bind(task_id)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -806,8 +821,19 @@ impl Store {
         let requested: Option<String> = row.try_get("requested_node_id")?;
         let security_profile: Option<String> = row.try_get("security_profile").ok().flatten();
         let network_mode: Option<String> = row.try_get("network_mode").ok().flatten();
+        let avoided: Option<String> = row.try_get("avoid_node_id").ok().flatten();
 
         let all = self.list_nodes(None, None).await?;
+        // Same condition the assignment path applies: the avoided node is
+        // skipped only while another node is online. Reporting it as blocked
+        // in any other case would contradict what the scheduler does.
+        let avoid_blocked = avoided
+            .as_ref()
+            .map(|id| {
+                all.iter()
+                    .any(|n| &n.id != id && n.status == NodeStatus::Online)
+            })
+            .unwrap_or(false);
         let considered: Vec<NodeView> = match &requested {
             Some(id) => all.into_iter().filter(|n| &n.id == id).collect(),
             None => all,
@@ -829,7 +855,7 @@ impl Store {
 
         let mut nodes = Vec::new();
         for n in &considered {
-            let reasons = node_ineligibility(
+            let mut reasons = node_ineligibility(
                 n,
                 &repository,
                 &adapter,
@@ -837,6 +863,13 @@ impl Store {
                 network_mode.as_deref(),
                 repo_requirements.as_ref(),
             );
+            if avoid_blocked && avoided.as_deref() == Some(n.id.as_str()) {
+                reasons.push(
+                    "lost the previous attempt; retrying on a different node (this one is \
+                     skipped while another node is online)"
+                        .to_string(),
+                );
+            }
             nodes.push(NodeEligibility {
                 node_id: n.id.clone(),
                 status: n.status,
