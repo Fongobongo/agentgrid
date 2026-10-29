@@ -54,7 +54,14 @@ esac
 # Optional extra env for the adapter child (e.g. provider keys that opencode
 # resolves via its own env like NVIDIA_API_KEY, or AGENTGRID_OPENCODE_MODEL).
 # Space-separated K=V pairs, appended verbatim.
-ADAPTER_ENV="${ADAPTER_ENV} ${AG_REAL_EXTRA_ENV:-}"
+#
+# `AGENTGRID_UNSAFE_UNATTENDED` has to travel through here, not just on the
+# node: the node spawns the adapter with a cleared environment, so a flag set
+# in its own env never reaches the adapter and `--auto` /
+# `--dangerously-skip-permissions` is silently left off. opencode v2 still
+# auto-approves in non-interactive `run`, so the task passes either way, but an
+# adapter that honours the flag would block on its first permission prompt.
+ADAPTER_ENV="${ADAPTER_ENV} AGENTGRID_UNSAFE_UNATTENDED=1 ${AG_REAL_EXTRA_ENV:-}"
 
 command -v "$AGENT_BIN" >/dev/null 2>&1 || skip "$AGENT_BIN CLI not on PATH"
 [ -x "$BIN/agentgrid-control-plane" ] || { echo "build debug binaries first"; exit 1; }
