@@ -1,10 +1,17 @@
 # Gitleaks allowlist — known false positives (format: <commit>:<file>:<rule>:<line>).
 #
 # Prefer inline `# gitleaks:allow` comments on the fixture line itself: the
-# scanner runs with `--log-opts=-1`, so a commit-scoped fingerprint goes stale
-# the moment anyone edits the line, and every later push touching that file
-# turns red again. Fingerprints below are kept only for commits already in
-# history.
+# push gate runs with `--log-opts=-1`, so a commit-scoped fingerprint goes
+# stale the moment anyone edits the line, and every later push touching that
+# file turns red again.
+#
+# Fingerprints below are kept only for commits already in history. They are
+# not redundant with the inline allows: the nightly run walks the whole log,
+# and an inline allow added today cannot retroactively cover the revision
+# that introduced the fixture. So both mechanisms are needed — inline allows
+# keep the push gate honest, fingerprints keep the nightly run honest. Adding
+# a fixture means adding an inline allow; a nightly failure means adding a
+# fingerprint for the old blob (the run prints the exact one to paste).
 #
 # tests/e2e/rm-rss-test.sh: the "secret" is a hardcoded JWT signing key for a
 # throwaway local control-plane instance the RSS e2e script boots on
@@ -28,3 +35,13 @@ e0279261e4583268854cd5ab0df4adccb4ae72a6:crates/node-daemon/src/main.rs:generic-
 # HA failover e2e fixtures (commit 8bb124d): throwaway cluster token and JWT
 # signing key for local test processes on 127.0.0.1, never real credentials.
 8bb124dd66ac6f0e0668d75fba03f0fc8cc46819:tests/e2e/run-ha-failover.sh:generic-api-key:22
+# HA fixtures from before the inline allows landed (commits 834e472, a7fbf55,
+# 141d584). Same throwaway material as above: the dummy cluster token
+# `0123456789abcdef…` and the `e2e-ha-*` token/JWT pair that the scripts hand
+# to control-plane processes booted on 127.0.0.1. Current revisions of these
+# files carry inline allows; these entries cover the older blobs that only
+# the full-history (nightly) scan still walks.
+834e472525d2f1a22a63c6a2e3b544f6e0128b18:crates/control-plane/src/ha/tests.rs:generic-api-key:41
+a7fbf554b85d42e38e247106ac858926b88b5613:crates/control-plane/src/ha/tests.rs:generic-api-key:308
+a7fbf554b85d42e38e247106ac858926b88b5613:tests/e2e/run-ha-incremental.sh:generic-api-key:24
+141d58446d213a18e9ab330e4df2b0c8672f25be:tests/e2e/run-ha-2pluswitness.sh:generic-api-key:22

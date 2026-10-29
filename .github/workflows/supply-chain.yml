@@ -9,6 +9,11 @@ on:
   pull_request:
   schedule:
     - cron: "0 6 * * *"
+  # The push gate scans only the last commit, so a full-history finding (a
+  # fixture committed long ago) surfaces to the nightly run alone. Dispatching
+  # re-runs that same full-history scan on demand instead of waiting for
+  # 06:00 UTC — that is how a `.gitleaksignore` change gets verified.
+  workflow_dispatch:
 
 permissions:
   # audit-check reports its findings as a CheckRun (checks: write) and files
