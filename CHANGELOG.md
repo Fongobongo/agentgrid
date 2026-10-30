@@ -164,6 +164,32 @@
     real attempt, `git notes` in the node's mirror, and a second attempt with
     the variable unset proving the default).
 
+- **OTLP trace export (backlog 6b, `--features opentelemetry`).** ADR 0025
+  deferred this because there was no collector to verify against, and
+  "unverified telemetry is worse than none". The objection was to *unverified*,
+  not to the exporter — so the verification came first and the feature followed.
+  With `OTEL_EXPORTER_OTLP_ENDPOINT` set, the control plane ships spans to a
+  collector; unset, nothing is built, nothing runs, and the default binary keeps
+  its dependency graph.
+  - **`main` now composes a `Registry`** (`registry().with(env_filter)
+    .with(fmt_layer).with(otel_layer)`) instead of `fmt().init()`, which installs
+    a subscriber nothing can be added to. The otel layer is an `Option`, so the
+    unconfigured path is free.
+  - **`shutdown()` is called on the way out of `main`** — dropping the provider
+    discards queued spans, which would make export look like it works most of
+    the time.
+  - The exporter is HTTP/protobuf over the **blocking** reqwest client: the
+    batch processor flushes from its own thread, outside the tokio runtime.
+  - **Verified without a collector:**
+    `otel::tests::a_span_reaches_an_otlp_endpoint` starts a one-shot HTTP
+    receiver on a loopback port, emits a span, flushes, and asserts a non-empty
+    protobuf body arrived on `/v1/traces`. It caught two bugs before a
+    deployment did — `with_endpoint` takes the URL verbatim (so the base URL
+    posted to `/`, a 404 from any collector), and the async client had no
+    runtime on the batch thread.
+  - CI now runs `clippy --features opentelemetry` plus that test: the feature is
+    opt-in, and before this nothing in CI compiled it at all.
+
 ### Changed
 
 - **The index packet's symbols are richer and the digest is capped per file.**

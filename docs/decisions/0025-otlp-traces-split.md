@@ -1,6 +1,8 @@
 # ADR 0025: OTLP traces — split into phase timings (now) and export (deferred)
 
-Status: spike evaluated (backlog item 6) — **6a accepted, 6b deferred**
+Status: spike evaluated (backlog item 6) — **6a accepted and shipped;
+6b deferred here, then shipped on 2026-10-30 once its verification story
+existed (see "Update" at the end)**
 
 ## Context
 
@@ -54,3 +56,40 @@ Two facts change what "add OTLP" costs:
 
 A collector exists in the deployment (`deploy/` has no otel-collector today),
 or a user reports wanting to ship spans to an existing APM.
+
+## Update (2026-10-30): 6b shipped
+
+The revisit trigger was "a collector exists to verify against". It turned out
+that trigger was answering the wrong question: the objection was to
+**unverified** telemetry, not to the exporter, and a receiver can be built in a
+test. So the verification story came first.
+
+What the spike left open, now answered:
+
+- **Version pairing.** `tracing-opentelemetry` 0.34 *does* pair with
+  `opentelemetry` 0.33 (verified by compiling and by a passing export test);
+  the "versioned one apart by convention" worry was unfounded.
+- **The restructure.** `main` now builds `registry().with(env_filter)
+  .with(fmt_layer).with(otel_layer)` instead of `fmt().init()`. The otel layer
+  is an `Option`, so the "no endpoint configured" path costs nothing.
+- **Feature flag.** `opentelemetry` stays opt-in: the default binary keeps its
+  dependency graph, which is what the musl/static release targets need. The cost
+  of opt-in used to be rot — nothing in CI compiled the feature. CI now runs
+  `clippy --features opentelemetry` and the export test, so it cannot rot
+  silently again.
+- **Verification.** `otel::tests::a_span_reaches_an_otlp_endpoint` starts a
+  one-shot HTTP receiver on a loopback port, emits a span, flushes, and asserts a
+  non-empty protobuf body arrived on `/v1/traces`.
+
+Two bugs the test caught before a deployment did:
+
+1. `with_endpoint` takes the URL **verbatim** — it does not append the signal
+   path the way the `OTEL_EXPORTER_OTLP_ENDPOINT` env var does. Passing the base
+   URL made the exporter POST to `/`, which a collector answers with 404.
+2. The batch processor exports from its own thread, which is not inside the
+   tokio runtime, so the client is `reqwest-blocking-client` rather than the
+   async one.
+
+`shutdown()` is called on the way out of `main`: dropping the provider discards
+queued spans, which would make export look like it works most of the time.
+

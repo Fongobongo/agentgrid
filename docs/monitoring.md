@@ -93,7 +93,37 @@ ag tasks events <task-id> --json \
 
 `ms` is a duration, not an increment: the control plane sums only `tokens` and
 `cost_cents` from a metric payload, so a phase can never inflate a budget.
-OTLP span export is a separate, deferred decision (ADR 0025).
+
+## OTLP traces (opt-in, build-time feature)
+
+The phase timings above answer "where did the time go" without any
+infrastructure. If you already run a collector, the same spans can be shipped
+to it instead of read out of the API:
+
+```bash
+# build with the feature (off by default: the default binary keeps its
+# dependency graph), then point it at a collector
+cargo build -p agentgrid-control-plane --features opentelemetry
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+OTEL_SERVICE_NAME=agentgrid-cp \
+  ./agentgrid-control-plane
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` is the collector **base** URL — the exporter posts
+to `<base>/v1/traces`. Unset means no export and no extra work, so a deployment
+without a collector is unaffected.
+
+The exporter is HTTP/protobuf over the blocking reqwest client: the batch
+processor flushes from its own thread, outside the tokio runtime, so an async
+client there would need a runtime it does not have. `shutdown()` is called on
+the way out of `main` — dropping the provider instead would discard whatever is
+still queued, which is the difference between "traces are exported" and "traces
+are usually exported".
+
+This is verified in CI without a collector: `otel::tests::a_span_reaches_an_otlp_endpoint`
+starts a one-shot HTTP receiver on a loopback port, emits a span, and asserts a
+non-empty protobuf body arrived on `/v1/traces`. ADR 0025 deferred this feature
+precisely because "it compiles" is not evidence; that test is the evidence.
 
 ## Alerting suggestions
 

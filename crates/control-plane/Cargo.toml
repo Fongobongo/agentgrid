@@ -53,6 +53,12 @@ opentelemetry = { version = "0.33", optional = true }
 opentelemetry_sdk = { version = "0.33", optional = true }
 opentelemetry-prometheus = { version = "0.33", optional = true }
 prometheus = { version = "0.14", optional = true }
+# OTLP trace export (ADR 0025 / 6b). http-proto + the blocking reqwest client:
+# the batch processor exports from its own thread, which is not inside the tokio
+# runtime, so an async client there would need a runtime it does not have.
+# reqwest is already in the graph, so no tonic and no extra TLS stack.
+opentelemetry-otlp = { version = "0.33", optional = true, default-features = false, features = ["http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "0.34", optional = true }
 
 # Static file serving (tower-http ServeDir)
 tower-http = { version = "0.7", features = ["fs", "compression-br"] }
@@ -65,7 +71,14 @@ zstd = "0.14"
 
 [features]
 default = []
-opentelemetry = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-prometheus", "dep:prometheus"]
+opentelemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-prometheus",
+    "dep:prometheus",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 # Incremental SQLite changeset replication (RPO async/sync). Off by default so
 # single-mode and musl builds keep the current dependency graph.
 ha-incremental = []

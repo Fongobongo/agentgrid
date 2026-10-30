@@ -66,23 +66,56 @@ fn tokio_runtime() -> tokio::runtime::Runtime {
 fn main() -> Result<()> {
     // OpenTelemetry metrics (optional feature)
     #[cfg(feature = "opentelemetry")]
-    {
+    let trace_provider = {
         agentgrid_control_plane::otel::init_otel()?;
-    }
+        agentgrid_control_plane::otel::init_traces()?
+    };
 
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+
+    // A `Registry` rather than `fmt().init()`: an OpenTelemetry layer has to be
+    // composed with the formatter, and `fmt().init()` installs a subscriber of
+    // its own that nothing can be added to (ADR 0025).
+    #[cfg(feature = "opentelemetry")]
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let trace_layer = trace_provider
+            .as_ref()
+            .map(agentgrid_control_plane::otel::trace_layer);
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .with(trace_layer)
+            .init();
+    }
+    #[cfg(not(feature = "opentelemetry"))]
+    {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(env_filter)
+            .init();
+    }
 
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("agentgrid-control-plane {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
-    tokio_runtime().block_on(amain())
+    let result = tokio_runtime().block_on(amain());
+
+    // Flush the batch processor: dropping the provider discards whatever spans
+    // are still queued, which would make export look like it works most of the
+    // time.
+    #[cfg(feature = "opentelemetry")]
+    if let Some(provider) = trace_provider {
+        if let Err(e) = provider.shutdown() {
+            eprintln!("otel trace shutdown failed: {e}");
+        }
+    }
+
+    result
 }
 
 async fn amain() -> Result<()> {
