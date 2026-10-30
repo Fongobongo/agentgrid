@@ -25,7 +25,7 @@ jobs:
           - workflow_template_yaml
           - handoff_package_json
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       # cargo-fuzz builds with -Zsanitizer=-Zbuild-std, which requires the
       # nightly toolchain plus the rust-src component.
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4

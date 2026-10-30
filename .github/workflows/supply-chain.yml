@@ -29,7 +29,7 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -43,7 +43,7 @@ jobs:
     # Hardening P2 item 29: enforce license + banned-crate + source policy on
     # top of the advisory check above.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - name: install cargo-deny
         run: cargo install cargo-deny --locked
@@ -57,7 +57,7 @@ jobs:
     # misconfig) with trivy — no image build needed. Catches leaked secrets /
     # policy-as-code issues that cargo-audit/deny (Rust-crate only) miss.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           fetch-depth: 0
       - name: trivy fs scan
@@ -79,7 +79,7 @@ jobs:
     # secret committed-and-removed still fails the gate).
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           fetch-depth: 0
       - name: gitleaks scan
@@ -94,7 +94,7 @@ jobs:
     # Hardening P2 item 29: generate a CycloneDX SBOM of the Rust workspace
     # dependencies and upload it as a build artifact for audit / compliance.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: generate SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
         with:
