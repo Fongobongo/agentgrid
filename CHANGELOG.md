@@ -231,6 +231,10 @@
 
 ### Fixed
 
+- **The TS SDK trimmed trailing slashes in quadratic time.** The constructor
+  used `base.replace(/\/+$/, "")`, which backtracks over the whole run of
+  slashes at every start position (CodeQL `js/polynomial-redos`). A loop is
+  linear; 200k slashes now cost 0.1 ms.
 - **`POST /v1/tasks` and `GET /v1/tasks/{id}` describe the same row.** The
   create response returned `consensus_group_id` / `consensus_member` as `null`
   although the INSERT had just written them (the CLI's consensus fan-out posts

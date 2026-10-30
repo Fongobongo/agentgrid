@@ -132,9 +132,14 @@ export class Agentgrid {
     base: string | string[],
     token?: string,
   ) {
-    this.bases = (Array.isArray(base) ? base : [base]).map((b) =>
-      b.replace(/\/+$/, ""),
-    );
+    // `replace(/\/+$/, "")` backtracks quadratically on a long run of
+    // trailing slashes (CodeQL js/polynomial-redos); trimming in a loop is
+    // linear in the length of the input.
+    this.bases = (Array.isArray(base) ? base : [base]).map((b) => {
+      let s = b;
+      while (s.endsWith("/")) s = s.slice(0, -1);
+      return s;
+    });
     const env: Record<string, string | undefined> =
       (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ??
       {};
