@@ -168,6 +168,49 @@ async fn finalize_or_fail(
 }
 
 /// Run one task attempt assigned by the control plane.
+/// Phase timings (ADR 0025, backlog item 6a).
+///
+/// The only timing that existed before this was `agentgrid_task_duration_seconds`
+/// over whole task durations, so "this attempt took 40 minutes" could not be
+/// decomposed into the phases an operator can act on. `close()` records the
+/// elapsed time under a phase name; `flush()` emits each one as a `Metric`
+/// event `{phase, ms}`. Buffered, because the workspace phase completes before
+/// the event sink exists.
+///
+/// `ms` is not an aggregate: the control plane sums only the `tokens` /
+/// `cost_cents` keys, so a phase duration can never inflate a budget.
+struct PhaseClock {
+    last: std::time::Instant,
+    pending: Vec<(&'static str, u64)>,
+}
+
+impl PhaseClock {
+    fn new() -> Self {
+        Self {
+            last: std::time::Instant::now(),
+            pending: Vec::new(),
+        }
+    }
+
+    /// Close the current phase and buffer it.
+    fn close(&mut self, phase: &'static str) {
+        self.pending
+            .push((phase, self.last.elapsed().as_millis() as u64));
+        self.last = std::time::Instant::now();
+    }
+
+    /// Emit every buffered phase as a metric event.
+    async fn flush(&mut self, sink: &EventSink) {
+        for (phase, ms) in self.pending.drain(..) {
+            sink.push(
+                agentgrid_common::EventType::Metric,
+                json!({ "phase": phase, "ms": ms }),
+            )
+            .await;
+        }
+    }
+}
+
 pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) -> Result<()> {
     /// Reclaim the worktree + branch on an early exit AFTER prepare_workspace
     /// but BEFORE the normal finalize path (ack-rejected / adapter-missing).
@@ -189,6 +232,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // WS Cancel messages wake the supervisor via this notifier (plan 0.3 2.3);
     // unregistered automatically when the attempt finishes.
     let _cancel_guard = crate::completion::CancelGuard::new(&assignment.attempt_id);
+    // ADR 0025: phase timings; the workspace phase closes before a sink exists.
+    let mut clock = PhaseClock::new();
     let repo_root = cfg.repository_root.clone();
     let ws_root = cfg.workspace_root.clone();
     let prep_assignment = assignment.clone();
@@ -231,6 +276,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     })
     .await??;
     tracing::info!(attempt_id = %assignment.attempt_id, git = ws.is_git, "starting attempt");
+    clock.close("workspace");
 
     // Hardening P1 item 32 / audit X-B9: capture the remote HEAD at attempt
     // *start* — the capture used to sit after the agent finished, making it
@@ -766,6 +812,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // Per-task cost ceilings ride the sink: the supervisor races the run
     // against a budget poll and kills with `budget_exceeded` on breach.
     sink.set_budget(assignment.max_tokens, assignment.max_cost_cents);
+    clock.flush(&sink).await;
     let workdir = ws.path.clone();
     let validation_log = workdir.join("validation.log");
     let mut prompt = assignment.prompt.clone();
@@ -1064,6 +1111,10 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         }
         // Validate; if it passes we're done. If it fails and a retry is left,
         // feed the validation error back into the prompt and re-spawn.
+        // ADR 0025: everything since the last mark (or the loop start) is the
+        // agent's turn; the validation run below is measured separately.
+        clock.close("agent");
+        clock.flush(&sink).await;
         if let Some(cmd) = &assignment.validation_command {
             let vto =
                 std::time::Duration::from_secs(assignment.validation_timeout_secs.unwrap_or(300));
@@ -1085,6 +1136,8 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 &cfg.secrets,
             )
             .await;
+            clock.close("validation");
+            clock.flush(&sink).await;
             let fail = match &v {
                 Ok(o) => {
                     // Timeout/cancel are terminal — no feedback retry loop.
@@ -1300,6 +1353,9 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         github_writeback(&cfg, &assignment, &sink, &cleanup_repo, &cleanup_branch).await;
     }
 
+    // ADR 0025: artifact upload + GitHub write-back are the last phase.
+    clock.close("publish");
+    clock.flush(&sink).await;
     tracing::info!(attempt_id = %assignment.attempt_id, exit_code = code, "attempt finished");
     // Stage 2.1: drain all pending events from the durable outbox BEFORE the
     // completion so the CP sees the full event stream before marking the task
@@ -1551,6 +1607,28 @@ async fn github_writeback(
                 .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::PhaseClock;
+
+    /// ADR 0025: a phase is buffered with a duration and the clock resets, so
+    /// consecutive phases never overlap or double-count.
+    #[test]
+    fn phase_clock_buffers_one_entry_per_phase() {
+        let mut c = PhaseClock::new();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        c.close("workspace");
+        c.close("agent");
+        let names: Vec<&str> = c.pending.iter().map(|(p, _)| *p).collect();
+        assert_eq!(names, vec!["workspace", "agent"]);
+        assert!(
+            c.pending[0].1 >= 2,
+            "elapsed must be measured: {:?}",
+            c.pending
+        );
     }
 }
 

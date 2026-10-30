@@ -30,6 +30,17 @@
   - The eval probe now keys its clean-env decision off
     `SandboxKind::inherits_daemon_env()` — a bwrap child runs on the host, so
     it must not inherit the daemon's secrets.
+- **Attempts report where their time went.** The only timing that existed was
+  `agentgrid_task_duration_seconds` over whole task durations, so "this attempt
+  took 40 minutes" could not be decomposed. Each attempt now emits one `metric`
+  event per phase — `workspace` (repo cache, worktree, upstream patches),
+  `agent` (the adapter run, per feedback round), `validation` (the
+  `validation_command`, per round) and `publish` (artifact upload + GitHub
+  write-back) — carrying `{phase, ms}`. They are events rather than metrics, so
+  they cost nothing per scrape and travel with the attempt:
+  `ag tasks events <id> --json | jq 'select(.payload.phase)'`. `ms` is a
+  duration, not an increment: the CP sums only `tokens`/`cost_cents`, so a
+  phase can never inflate a budget. OTLP span export stays deferred (ADR 0025).
 - **The approvals queue can show the task's diff inline.** A pending
   patch-review approval ("Review required") is decided on exactly the
   `changes.patch` text, and reading it meant leaving the queue for the task

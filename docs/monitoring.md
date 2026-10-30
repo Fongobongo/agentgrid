@@ -70,6 +70,31 @@ that clients are seeing `503`; `upstream_timeouts_total` growing means the
 cached leader stopped answering and the edge is burning its retry budget
 (`AGENTGRID_EDGE_UPSTREAM_TIMEOUT_SECS`, default 10).
 
+## Attempt phase timings (events, not metrics)
+
+`agentgrid_task_duration_seconds` answers "how long did the task take"; it
+cannot answer "where did the time go". Each attempt therefore emits one
+`metric` event per phase with `{ "phase": …, "ms": … }`:
+
+| phase | covers |
+|---|---|
+| `workspace` | repo cache update, worktree creation, upstream patch application |
+| `agent` | the adapter run (one event per feedback round) |
+| `validation` | the `validation_command` run (one event per round, when configured) |
+| `publish` | artifact upload + GitHub write-back, before completion |
+
+They are events, not Prometheus metrics, so they cost nothing per scrape and
+travel with the attempt:
+
+```bash
+ag tasks events <task-id> --json \
+  | jq -r 'select(.type=="metric" and .payload.phase) | "\(.payload.phase) \(.payload.ms)ms"'
+```
+
+`ms` is a duration, not an increment: the control plane sums only `tokens` and
+`cost_cents` from a metric payload, so a phase can never inflate a budget.
+OTLP span export is a separate, deferred decision (ADR 0025).
+
 ## Alerting suggestions
 
 ```yaml
