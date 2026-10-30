@@ -111,6 +111,31 @@ pub struct EventSink {
 /// Sorting here (once per send, `O(n log n)`) rather than inserting in order on
 /// every event (`O(n)` per push, which is quadratic for a 20k-event flush) is
 /// what makes the delivered stream ascending.
+///
+/// # The other ways a stream can look non-contiguous, and why they are not this
+///
+/// The `filesystem compat` e2e reports "event stream not contiguous" for a gap,
+/// a duplicate or a reordering alike, so the ways to get a *gap* — plus the one
+/// replay path that could reorder — are worth ruling out before suspecting the
+/// send path:
+///
+/// * **Backpressure drops.** `push` decides to drop a `Stdout`/`Stderr`/`Metric`
+///   event *before* `next.fetch_add`, so a dropped event never owns a sequence
+///   number. Drop as much as you like; the numbering stays dense.
+/// * **`SpoolFull` after allocation.** This one *does* leave a real hole: the
+///   sequence is allocated before `outbox_push`, and a `SpoolFull` return
+///   abandons the event. That is why the sink latches `spool_full` and fails the
+///   attempt — a hole here only ever belongs to a `spool_full` attempt, never to
+///   a `succeeded` one.
+/// * **Sequence re-init on resume.** `requeue` seeds `next` with
+///   `fetch_max(max_seq + 1)` over the pending outbox, so a resumed attempt
+///   numbers above whatever the CP may already hold instead of colliding with it
+///   (a collision is not a gap — `ON CONFLICT DO NOTHING` would silently swallow
+///   the *new* events, which is worse). An outbox that is empty while the CP
+///   holds events would restart at 1, but that needs a resumed attempt whose
+///   outbox was fully acked, which no path produces.
+/// * **Outbox replay.** `drain_outbox` sorts its pending set the same way, so a
+///   replay cannot deliver a lower sequence after a higher one.
 fn in_sequence_order(mut events: Vec<IncomingEvent>) -> Vec<IncomingEvent> {
     events.sort_by_key(|e| e.sequence);
     events
