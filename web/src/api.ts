@@ -216,7 +216,59 @@ export function logout() {
   }).finally(() => markUnauthed());
 }
 
-export function createTask(body: unknown) {
+/**
+ * Body of `POST /v1/tasks`, mirroring `CreateTaskRequest` in
+ * `crates/common/src/lib.rs` and the `CreateTaskRequest` schema in
+ * `docs/openapi.yaml`. Only `prompt`, `repository` and `adapter` are mandatory.
+ *
+ * Every optional field is `?:` and must be **omitted** rather than sent as
+ * `null`: the control plane's serde sees the two as the same `None` for most
+ * fields, but `retry_on_node_loss` is a real tri-state — absent/`null` means
+ * "retry on node loss" while `false` means "node loss is terminal" — so a
+ * `null` there would be indistinguishable from the default and the UI could
+ * never turn the retry off.
+ */
+export interface CreateTaskInput {
+  prompt: string;
+  repository: string;
+  adapter: string;
+  requested_node_id?: string;
+  timeout_secs?: number;
+  validation_command?: string;
+  base_commit?: string;
+  parent_acp_session_id?: string;
+  consensus_group_id?: string;
+  consensus_member?: string;
+  consensus_mode?: "solve" | "review";
+  review_of?: string;
+  max_tokens?: number;
+  max_cost_cents?: number;
+  network_mode?: "none" | "restricted" | "unrestricted";
+  security_profile?: string;
+  group_id?: string;
+  agent_id?: string;
+  opencode_override?: { model?: string; small_model?: string };
+  github_push?: boolean;
+  github_repo?: string;
+  github_issue?: number;
+  github_base_ref?: string;
+  github_create?: boolean;
+  /** Total attempts; `1` (the default) means no auto-retry. */
+  max_attempts?: number;
+  /**
+   * Whether losing the node may spend the `max_attempts` budget. Omitted or
+   * `true` = yes (the default); `false` keeps node loss terminal
+   * (`failed` / `node_lost`). A lost attempt is the one failure the control
+   * plane has no evidence about — the node died mid-run and never reported
+   * what the agent did — so turning this off is the safe choice when the
+   * agent may already have pushed a branch or called out to the world. Only
+   * meaningful with `max_attempts > 1`; the retry is steered onto a
+   * *different* node.
+   */
+  retry_on_node_loss?: boolean;
+}
+
+export function createTask(body: CreateTaskInput) {
   return postJson<TaskView>("/v1/tasks", body);
 }
 

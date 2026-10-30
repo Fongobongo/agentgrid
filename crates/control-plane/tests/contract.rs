@@ -501,16 +501,16 @@ fn python_typed_dict_fields(src: &str, name: &str) -> BTreeSet<String> {
     out
 }
 
-/// Fields of `export interface <name> { ... }` in the TS SDK.
-fn ts_interface_fields(src: &str, name: &str) -> BTreeSet<String> {
+/// Fields of `export interface <name> { ... }` in a TS source file.
+fn ts_interface_fields(src: &str, name: &str, path: &str) -> BTreeSet<String> {
     let marker = format!("export interface {name} {{");
     let start = src
         .find(&marker)
-        .unwrap_or_else(|| panic!("no `{marker}` in sdks/ts/index.ts"));
+        .unwrap_or_else(|| panic!("no `{marker}` in {path}"));
     let body = &src[start + marker.len()..];
     let end = body
         .find("\n}")
-        .unwrap_or_else(|| panic!("`interface {name}` must be closed by a `}}` line"));
+        .unwrap_or_else(|| panic!("`interface {name}` in {path} must be closed by a `}}` line"));
     let mut out = BTreeSet::new();
     for line in body[..end].lines() {
         let t = line.trim();
@@ -532,7 +532,7 @@ fn ts_interface_fields(src: &str, name: &str) -> BTreeSet<String> {
     }
     assert!(
         !out.is_empty(),
-        "parsed zero fields from `interface {name}` in the TS SDK"
+        "parsed zero fields from `interface {name}` in {path}"
     );
     out
 }
@@ -560,9 +560,21 @@ fn python_sdk_run_covers_create_task_request() {
 #[test]
 fn ts_sdk_run_covers_create_task_request() {
     let src = repo_file("sdks/ts/index.ts");
-    let mut fields = ts_interface_fields(&src, "CreateTaskInput");
+    let mut fields = ts_interface_fields(&src, "CreateTaskInput", "sdks/ts/index.ts");
     fields.extend(positional_run_args());
     assert_sdk_covers("CreateTaskRequest", "TS `CreateTaskInput`", &fields);
+}
+
+/// The web client is the third hand-written copy of `CreateTaskRequest`, and
+/// the one that drifts most quietly: nothing type-checks it against the schema,
+/// and a field it forgets is a feature the UI simply cannot reach — the task
+/// still succeeds, so no test notices. `retry_on_node_loss` arrived in the CP
+/// and the CLI and was reachable from the form only because someone remembered.
+#[test]
+fn web_client_create_task_input_covers_create_task_request() {
+    let src = repo_file("web/src/api.ts");
+    let fields = ts_interface_fields(&src, "CreateTaskInput", "web/src/api.ts");
+    assert_sdk_covers("CreateTaskRequest", "web `CreateTaskInput`", &fields);
 }
 
 #[test]
@@ -575,7 +587,7 @@ fn python_sdk_task_covers_task_view() {
 #[test]
 fn ts_sdk_task_covers_task_view() {
     let src = repo_file("sdks/ts/index.ts");
-    let fields = ts_interface_fields(&src, "Task");
+    let fields = ts_interface_fields(&src, "Task", "sdks/ts/index.ts");
     assert_sdk_covers("TaskView", "TS `Task`", &fields);
 }
 

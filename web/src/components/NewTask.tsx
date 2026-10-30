@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ApiError,
+  CreateTaskInput,
   createTask,
   listNodes,
   listRepos,
@@ -66,7 +67,10 @@ export default function NewTask({
     new Set(nodes.flatMap((n) => n.adapters)),
   );
 
-  const buildBody = (overrides: Record<string, unknown> = {}) => ({
+  // Every optional field is omitted, never `null` — see CreateTaskInput.
+  const buildBody = (
+    overrides: Partial<CreateTaskInput> = {},
+  ): CreateTaskInput => ({
     repository: repository.trim(),
     prompt: prompt.trim(),
     adapter: adapter.trim(),
@@ -74,10 +78,14 @@ export default function NewTask({
     requested_node_id: node === "auto" ? undefined : node,
     timeout_secs: timeout.trim() ? Number(timeout) : undefined,
     base_commit: baseCommit.trim() || undefined,
-    network_mode: networkMode || undefined,
+    network_mode: networkMode
+      ? (networkMode as CreateTaskInput["network_mode"])
+      : undefined,
     security_profile: securityProfile.trim() || undefined,
     max_attempts: maxAttempts.trim() ? Number(maxAttempts) : 1,
-    retry_on_node_loss: retryOnNodeLoss,
+    // The CP default is `true`, so an unchecked box is the only thing worth
+    // sending; sending `true` would pin this client to today's default.
+    retry_on_node_loss: retryOnNodeLoss ? undefined : false,
     max_tokens: maxTokens.trim() ? Number(maxTokens) : undefined,
     max_cost_cents: maxCostCents.trim() ? Number(maxCostCents) : undefined,
     parent_acp_session_id: parentSessionId.trim() || undefined,

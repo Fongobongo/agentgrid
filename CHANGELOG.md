@@ -32,6 +32,21 @@
     relay that silently never ran.
   - One hop only; chaining relays is not supported (ADR 0026).
 
+### Changed
+
+- **The web client's task body is typed, and a contract test keeps it honest.**
+  `POST /v1/tasks` is hand-written in three places — `crates/common` is the
+  schema, the two SDKs and `web/src/api.ts` are copies — and only the SDKs were
+  checked against `docs/openapi.yaml`. The web copy took `body: unknown`, so a
+  field the form forgot was a feature the UI simply could not reach while every
+  task still succeeded: `retry_on_node_loss` reached the control plane and the
+  CLI, and the form had it only because someone remembered. `CreateTaskInput`
+  now mirrors the schema field for field, and the contract test parses it the
+  same way it parses the SDKs — failing with the exact name of anything missing
+  or invented. The form sends the node-loss field only when the box is
+  unchecked, so an opt-out reaches the control plane as `false` while the
+  default defers to it.
+
 ### Fixed
 
 - **The release page now says which tarball to download.** The
