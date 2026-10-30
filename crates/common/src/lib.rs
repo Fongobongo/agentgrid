@@ -449,7 +449,9 @@ pub struct TaskView {
     pub network_mode: Option<String>,
     /// Hardening P2 item 36: the security profile of the LATEST attempt
     /// (from `attempts.provenance.security_profile`). Surfaced so operators can
-    /// see which policy the agent ran under.
+    /// see which policy the agent ran under. Before any attempt records
+    /// provenance this falls back to the profile the task requested, so a
+    /// queued task does not read back as unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_profile: Option<String>,
     /// Plan 1.12 (#7): shared-context task group id, if the creator set one.

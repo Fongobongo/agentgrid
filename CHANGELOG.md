@@ -164,6 +164,22 @@
   path, so ids would be identifiers nobody reads). With it off the document
   reports **zero** problems, so any new one fails the job.
 
+- **Both SDKs expose the whole `CreateTaskRequest`, not a hand-picked
+  subset.** `run()` accepted 7 of the 26 fields, so `max_attempts`, both budget
+  ceilings, `retry_on_node_loss`, the consensus tags and the GitHub write-back
+  options were unreachable from Python and TypeScript — a feature gap with no
+  error attached to it. `run()` now takes every field the API takes, and unset
+  ones are **omitted** rather than sent as `null` (an explicit `null` is a 400
+  for the non-`Option` fields `max_attempts` / `github_push` / `github_create`,
+  not a default). Responses are typed against `TaskView` as well (`Task`, all
+  30 fields, in both languages). New contract tests parse the declared field
+  lists out of `sdks/python/agentgrid.py` and `sdks/ts/index.ts` and compare
+  them with the OpenAPI schemas, so adding an API field without plumbing it
+  through both SDKs fails `cargo test` instead of surfacing in a user's script;
+  the SDK package versions are pinned to the workspace version for the same
+  reason.
+
+
 
 ### Changed
 
@@ -207,8 +223,33 @@
   that leaves it behind, the data voters refuse it a vote, which is their call
   to make, not a reason to stay unelectable forever.
 
+- **`adapter` is a required argument of `run()` in both SDKs.** It defaulted to
+  `mock`, which meant a caller who forgot it got a task that "succeeded" without
+  doing anything — the one default that could produce a silent false green. The
+  API requires the field, so the SDKs do too: TypeScript fails to compile,
+  Python raises `TypeError`.
+
 ### Fixed
 
+- **`POST /v1/tasks` and `GET /v1/tasks/{id}` describe the same row.** The
+  create response returned `consensus_group_id` / `consensus_member` as `null`
+  although the INSERT had just written them (the CLI's consensus fan-out posts
+  exactly those fields), and `security_profile` only appeared on a read once an
+  attempt had recorded provenance — so an SDK that hands back the create body
+  (both do) reported state the server did not have. The create response now
+  echoes what it stored, the task SELECTs carry `security_profile`, and a queued
+  task reports the profile it asked for. `consensus_mode` is deliberately left
+  alone: the read path filters the `solve` column default out, and echoing the
+  raw request is what keeps the two views equal.
+- **The TypeScript SDK's `cancel()` threw after cancelling the task.**
+  `POST /v1/tasks/{id}/cancel` answers `200` with no body, and the client parsed
+  every non-204 response as JSON — so a successful cancel raised
+  `Unexpected end of JSON input` and the caller was left believing it failed.
+  An empty body now means "no payload" (what the Python SDK already did). The
+  gap survived because nothing ever *ran* the TS SDK: the e2e called itself a
+  round-trip for both clients while only driving Python. `sdk-parity.mts` now
+  replays the Python block's payload through the TS SDK against the same
+  control plane, so both are executed on every build.
 - **A node delivers an attempt's events in ascending sequence order.** This is
   the root cause of the `event stream not contiguous` failure the `filesystem
   compat` e2e job hit once on `d07cb24` and never reproduced. Nothing was lost

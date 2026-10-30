@@ -1007,7 +1007,15 @@ fn row_to_task_view(r: &sqlx::sqlite::SqliteRow) -> TaskView {
         base_commit: r.try_get("base_commit").unwrap_or_default(),
         parent_acp_session_id: r.try_get("parent_acp_session_id").unwrap_or_default(),
         network_mode: r.try_get("network_mode").unwrap_or_default(),
-        security_profile,
+        // Fall back to the profile the task *requested* while no attempt has
+        // recorded provenance: without it a queued task reads back as "no
+        // profile" even though `POST /v1/tasks` just echoed one, and the
+        // create response and the next GET disagree about the same row.
+        security_profile: security_profile.or_else(|| {
+            r.try_get::<Option<String>, _>("security_profile")
+                .ok()
+                .flatten()
+        }),
         group_id: r.try_get("group_id").unwrap_or_default(),
         agent_id: r.try_get("agent_id").unwrap_or_default(),
         // Plan 2.9 (#20): consensus-run tag (None when this task is not part

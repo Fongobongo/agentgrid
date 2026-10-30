@@ -1391,6 +1391,78 @@ async fn task_view_surfaces_security_profile() {
     );
 }
 
+/// The create response and the next read must describe the same row. Both
+/// SDKs hand the caller the `POST /v1/tasks` body, so a field the handler
+/// echoes wrongly is a field the client sees wrongly — `consensus_group_id` /
+/// `consensus_member` were written by the INSERT and echoed as `None`, and
+/// `security_profile` only appeared on a read once an attempt had recorded
+/// provenance.
+#[tokio::test]
+async fn create_task_response_matches_the_stored_row() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+    let req = CreateTaskRequest {
+        prompt: "echo every field".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        requested_node_id: Some("node-echo".into()),
+        timeout_secs: Some(4242),
+        validation_command: Some("true".into()),
+        base_commit: Some("0".repeat(40)),
+        parent_acp_session_id: Some("sess-echo".into()),
+        security_profile: Some("default-strict".into()),
+        network_mode: Some("none".into()),
+        group_id: Some("g-echo".into()),
+        agent_id: Some("agent-echo".into()),
+        consensus_group_id: Some("grp-echo".into()),
+        consensus_member: Some("mock".into()),
+        opencode_override: Some(agentgrid_common::OpencodeOverride {
+            model: Some("x/y".into()),
+            small_model: Some("x/z".into()),
+            config: Some(json!({ "theme": "dark" })),
+        }),
+        github_push: false,
+        github_repo: Some("owner/name".into()),
+        github_issue: Some(7),
+        github_base_ref: Some("main".into()),
+        github_create: false,
+        max_attempts: 3,
+        retry_on_node_loss: Some(false),
+        consensus_mode: Some("review".into()),
+        review_of: Some("task-echo".into()),
+        max_tokens: Some(1234),
+        max_cost_cents: Some(56),
+    };
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/tasks",
+            serde_json::to_string(&req).unwrap(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created: TaskView =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(created.consensus_group_id.as_deref(), Some("grp-echo"));
+    assert_eq!(created.consensus_member.as_deref(), Some("mock"));
+    assert_eq!(created.security_profile.as_deref(), Some("default-strict"));
+
+    let stored = show_task_view(&app, &created.id).await;
+    assert_eq!(
+        created, stored,
+        "POST /v1/tasks and GET /v1/tasks/{{id}} must describe the same row"
+    );
+
+    // A plain task (no consensus mode requested) must not gain one: the read
+    // path filters the `solve` column default out, and the create response has
+    // to agree with it.
+    let minimal = create_task(&app, "mock", None).await;
+    assert_eq!(show_task_view(&app, &minimal).await.consensus_mode, None);
+}
+
 /// Hardening P2 item 20: keyset cursor pagination for `GET /v1/approvals`
 /// (`after_created_at` + `after_id`, stable `(created_at, id)` order).
 #[tokio::test]

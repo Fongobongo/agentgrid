@@ -1477,7 +1477,11 @@ components:
           enum: [none, restricted, unrestricted]
         security_profile:
           type: [string, "null"]
-          description: Security profile of the latest attempt, echoed so operators can see the policy the agent ran under.
+          description: |
+            Security profile of the latest attempt, echoed so operators can see
+            the policy the agent ran under. Before an attempt records
+            provenance this falls back to the profile the task requested, so
+            a queued task does not read back as unset.
         group_id: { type: [string, "null"] }
         agent_id: { type: [string, "null"] }
         consensus_group_id: { type: [string, "null"] }

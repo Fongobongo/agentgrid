@@ -6,32 +6,124 @@
 //
 //   import { Agentgrid } from "@agentgrid/sdk";
 //   const ag = new Agentgrid("http://127.0.0.1:7800", process.env.AGENTGRID_TOKEN!);
-//   const task = await ag.run("fix the flaky test", "my-org/my-repo");
+//   const task = await ag.run("fix the flaky test", "my-org/my-repo", { adapter: "opencode" });
 //   await ag.wait(task.id);                 // poll until terminal
 //   const arts = await ag.artifacts(task.id);
 //   console.log(await ag.artifact(task.id, arts[0].name));
 //
-// Minimal surface: run | wait | cancel | artifacts | artifact | status.
+// Surface: run | wait | cancel | artifacts | artifact | status.
+//
+// `run()` takes every field of `CreateTaskRequest` (docs/openapi.yaml), not a
+// hand-picked subset: a thin client that silently drops `max_attempts` or
+// `retry_on_node_loss` cannot express what the API can. Unset (`undefined`)
+// fields are *omitted* from the body so the server's own default applies —
+// sending an explicit null for a non-Option field (`max_attempts`,
+// `github_push`, `github_create`) is a 400, not a default.
 
+export interface OpencodeOverride {
+  model?: string;
+  small_model?: string;
+  /** Partial opencode config object; override keys win over the node profile. */
+  config?: Record<string, unknown>;
+}
+
+export type TaskStatus =
+  | "queued"
+  | "assigned"
+  | "running"
+  | "validating"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+/**
+ * A task as the control plane returns it (`TaskView`).
+ *
+ * Fields marked `?` are omitted from the JSON when unset (`skip_serializing_if`
+ * on the Rust side), so absent and `null` both mean "unset". The rest are
+ * always present, nullable ones as an explicit `null`.
+ */
 export interface Task {
   id: string;
   repository: string;
   prompt: string;
   adapter: string;
-  status: string;
+  status: TaskStatus;
   created_at: string;
   finished_at: string | null;
   assigned_attempt_id: string | null;
+  validation_command: string | null;
+  error_code: string | null;
+  requested_node_id: string | null;
+  base_commit: string | null;
+  parent_acp_session_id: string | null;
+  network_mode?: string | null;
+  security_profile?: string | null;
+  group_id?: string | null;
+  agent_id?: string | null;
+  consensus_group_id?: string | null;
+  consensus_member?: string | null;
+  consensus_mode?: string | null;
+  review_of?: string | null;
+  opencode_override?: OpencodeOverride | null;
+  github_repo?: string | null;
+  github_issue?: number | null;
+  github_base_ref?: string | null;
+  github_create: boolean;
+  rework_of?: string | null;
+  max_attempts: number;
+  max_tokens?: number | null;
+  max_cost_cents?: number | null;
+}
+
+/** Body of `POST /v1/tasks` (`CreateTaskRequest`), minus the two positional
+ * arguments of `run()`. Only `adapter` is required here — `prompt` and
+ * `repository` are the positional parameters. */
+export interface CreateTaskInput {
+  /** Adapter to run (`opencode`, `claude-code`, `mock`, ...). */
+  adapter: string;
+  requested_node_id?: string;
+  timeout_secs?: number;
+  validation_command?: string;
+  base_commit?: string;
+  parent_acp_session_id?: string;
+  /** Consensus fan-out tags — normally stamped by the CP, accepted for parity. */
+  consensus_group_id?: string;
+  consensus_member?: string;
+  consensus_mode?: "solve" | "review";
+  review_of?: string;
+  /** Per-task ceilings; the attempt is killed with `budget_exceeded` past them. */
+  max_tokens?: number;
+  max_cost_cents?: number;
+  network_mode?: "none" | "restricted" | "unrestricted";
+  security_profile?: string;
+  group_id?: string;
+  agent_id?: string;
+  opencode_override?: OpencodeOverride;
+  github_push?: boolean;
+  github_repo?: string;
+  github_issue?: number;
+  github_base_ref?: string;
+  github_create?: boolean;
+  /** Total attempts allowed; 1 (server default) = no auto-retry. */
+  max_attempts?: number;
+  /** Whether losing the node may spend the `max_attempts` budget (default true). */
+  retry_on_node_loss?: boolean;
 }
 
 export interface ArtifactMeta {
   name: string;
   size_bytes: number;
-  media_type: string | null;
-  sha256: string | null;
+  media_type?: string | null;
+  sha256?: string | null;
 }
 
-const TERMINAL = new Set(["succeeded", "failed", "cancelled", "blocked"]);
+const TERMINAL: ReadonlySet<string> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "blocked",
+]);
 
 export class Agentgrid {
   private token: string;
@@ -97,7 +189,12 @@ export class Agentgrid {
         throw new Error(`agentgrid ${method} ${path} -> ${resp.status} ${await resp.text()}`);
       }
       if (resp.status === 204) return undefined;
-      return resp.json();
+      // A 200 with an empty body is a normal success here — `POST
+      // /v1/tasks/{id}/cancel` answers `200` and no payload. `resp.json()`
+      // throws "Unexpected end of JSON input" on that, which made `cancel()`
+      // fail after it had already cancelled the task.
+      const text = await resp.text();
+      return text.length === 0 ? undefined : JSON.parse(text);
     }
     throw lastError;
   }
@@ -109,27 +206,18 @@ export class Agentgrid {
     return r.token;
   }
 
-  /** Run a task: `run(prompt, repository, opts?) -> Task`. */
+  /** Run a task: `run(prompt, repository, opts) -> Task`. */
   async run(
     prompt: string,
     repository: string,
-    opts: {
-      adapter?: string;
-      requested_node_id?: string;
-      timeout_secs?: number;
-      validation_command?: string;
-      base_commit?: string;
-    } = {},
+    opts: CreateTaskInput,
   ): Promise<Task> {
-    return this.req("post", "/v1/tasks", {
-      prompt,
-      repository,
-      adapter: opts.adapter ?? "mock",
-      requested_node_id: opts.requested_node_id ?? null,
-      timeout_secs: opts.timeout_secs ?? null,
-      validation_command: opts.validation_command ?? null,
-      base_commit: opts.base_commit ?? null,
-    });
+    const body: Record<string, unknown> = { prompt, repository };
+    for (const [k, v] of Object.entries(opts)) {
+      // `undefined` means "server default" — omit, never null (see header).
+      if (v !== undefined) body[k] = v;
+    }
+    return this.req("post", "/v1/tasks", body);
   }
 
   /** Current task status. */
