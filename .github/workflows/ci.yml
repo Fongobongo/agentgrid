@@ -53,9 +53,10 @@ jobs:
       # CI compiles it — it rotted unnoticed before. The test brings its own
       # receiver and asserts a span reaches /v1/traces.
       - name: clippy (opentelemetry)
-        run: cargo clippy -p agentgrid-control-plane --all-targets --features opentelemetry -- -D warnings
+        run: "cargo clippy -p agentgrid-control-plane --all-targets --features opentelemetry -- -D warnings"
+      # Quoted: `otel::` would otherwise be read as a YAML mapping value.
       - name: test (opentelemetry, OTLP traces reach a receiver)
-        run: cargo test -p agentgrid-control-plane --features opentelemetry --lib otel::
+        run: "cargo test -p agentgrid-control-plane --features opentelemetry --lib otel::"
       - name: build
         run: cargo build --workspace
       # Plan 1.9 (#17): workflows are code — validate every committed
