@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The release workflow refuses a tag that disagrees with the crate version.**
+  A `v9.9.9` tag on a `0.6.0` tree used to publish happily: the binaries report
+  `0.6.0`, the release is named `9.9.9`, and the GHCR image goes out as `:9.9.9`
+  and `:latest` — three different answers to "what is this?". The `build` job
+  now compares `${GITHUB_REF_NAME#v}` with `[workspace.package] version` before
+  anything is compiled, and fails with both values in the message.
+  `cargo test --workspace` already covers the other three pins (`info.version`,
+  both SDK package versions) through `contract.rs`, so the tag only has to
+  agree with the crate. A pre-release tag therefore needs the crate version to
+  carry the same suffix (`0.6.0-rc1`) — the tag is the claim, the tree is the
+  evidence.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added

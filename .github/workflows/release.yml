@@ -34,6 +34,29 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
+      # The tag is the input to everything below: a `v9.9.9` tag on a 0.6.0 tree
+      # publishes binaries that report 0.6.0 under a 9.9.9 release, and the GHCR
+      # image carries :9.9.9. Checking the crate version here is enough — the
+      # `cargo test --workspace` step below runs `contract.rs`, which already
+      # pins `info.version` and both SDK package versions to it. Inline in this
+      # matrix job rather than a job of its own on purpose: a skipped `needs:`
+      # dependency would also skip the build on `workflow_dispatch`, where
+      # there is no tag to compare.
+      - name: tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version[[:space:]]*=/{gsub(/["]/,""); print $3; exit}' Cargo.toml)
+          if [ -z "$crate" ]; then
+            echo "could not read [workspace.package] version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "$tag" != "$crate" ]; then
+            echo "tag ${GITHUB_REF_NAME} disagrees with Cargo.toml (${crate}): bump every version pin, or move the tag" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches Cargo.toml (${crate})"
+
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           targets: ${{ matrix.target }}
