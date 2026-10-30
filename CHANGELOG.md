@@ -30,6 +30,15 @@
   - **Fail-loud:** an allowlist without a listen address, a relay pointed at
     itself, or a busy port stops the daemon at startup instead of leaving a
     relay that silently never ran.
+  - **Redundancy is a list, not discovery.** `AGENTGRID_SERVERS=relay-a,relay-b`
+    makes the node's existing endpoint rotation carry it onto the second hop
+    when the first stops answering — nothing finds relay B on its own. Asserted
+    end to end: `run-relay.sh` now starts two relays, kills the one the node is
+    using, and requires the next pinned task to land through the other. Rotation
+    fires on connect/timeout, on 503 and on demotion, **not** on 502 — so a relay
+    that is alive but has lost its own route to the control plane pins the node
+    where it is, and so does any egress proxy in front (a proxy answers a refused
+    connection with 502, which is how this was found).
   - One hop only; chaining relays is not supported (ADR 0026).
 
 ### Changed

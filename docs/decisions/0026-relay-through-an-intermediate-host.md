@@ -117,6 +117,17 @@ feature of this daemon. The relay is deliberately not a step towards one.
   control plane still authenticates the peer's own node credential.
 - One hop only. A relay forwards to its own control plane, not to another
   relay.
+- **Redundancy comes from the node's endpoint list, not from discovery.**
+  `AGENTGRID_SERVERS=relay-a,relay-b` reuses the rotation that already exists for
+  HA replicas, so a node moves onto the second relay when the first stops
+  answering. Nothing discovers a relay, and a node configured with a single
+  `AGENTGRID_SERVER` has nowhere to go — which is why the e2e asserts both
+  outcomes (cut off with one relay, carried on with two). The rotation triggers
+  on a connect/timeout error, on `503` and on demotion, **not** on `502`: a relay
+  that is alive but has lost its own route answers `502`, and so does any egress
+  proxy in front of a dead one, so those cases stay pinned. Making `502` rotate
+  is a change to HA semantics (it would also move nodes off a CP replica that
+  merely had a bad gateway) and is deliberately not made here.
 - The relay's `/metrics` and `/health/*` shadow the control plane's paths on
   that port (the same trade the standalone edge already makes).
 - `agentgrid-node-daemon` now links `axum` (through the edge library). The rest

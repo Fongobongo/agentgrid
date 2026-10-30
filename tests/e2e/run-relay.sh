@@ -13,12 +13,17 @@
 #   3. the relay's counters move (it really carried the requests);
 #   4. the WebSocket transport also works through the relay (the edge bridges
 #      /v1/node/ws; nothing in the node had to change for this);
-#   5. the relay is the only path: kill A and B starts failing its polls.
+#   5. the relay is the only path: kill A and B starts failing its polls;
+#   6. given *two* relays (`AGENTGRID_SERVERS`), killing the first does not cut
+#      B off: it rotates onto the second and keeps running tasks. This is the
+#      redundancy answer to "what if the middle host dies" — it is configuration,
+#      not discovery, and without the list there is nothing to rotate to (5).
 #
 # Honest limit: every process here is on 127.0.0.1, so "B cannot reach the
-# control plane" is expressed by B's configuration (it is told only A's
-# address) rather than by a real firewall. That is the part a unit test cannot
-# cover anyway — the wiring from `AGENTGRID_SERVER` through a real HTTP hop.
+# control plane" is expressed by B's configuration (it is told only the relays'
+# addresses) rather than by a real firewall. That is the part a unit test cannot
+# cover anyway — the wiring from `AGENTGRID_SERVER`/`AGENTGRID_SERVERS` through a
+# real HTTP hop.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -29,13 +34,24 @@ BASE="${AGENTGRID_BASE:-http://127.0.0.1:7830}"
 PORT="${AGENTGRID_PORT:-7830}"
 RELAY_PORT="${AGENTGRID_RELAY_PORT:-7832}"
 RELAY="http://127.0.0.1:$RELAY_PORT"
+RELAY2_PORT="${AGENTGRID_RELAY2_PORT:-7833}"
+RELAY2="http://127.0.0.1:$RELAY2_PORT"
 USER="admin"
 PASS="changeme"
 E2E_JWT_SECRET="e2e-relay-secret"
 E2E_CONCURRENCY=2
 
+# A dev box may export HTTP_PROXY (this one does). reqwest honours it, so a dead
+# relay port answers `502 Bad Gateway` from the proxy instead of refusing the
+# connection — and the node rotates endpoints only on a connect/timeout error, so
+# it would sit on the dead relay forever and this script would blame the product.
+# The premise here is direct localhost traffic, so pin it for every child (and for
+# curl, which reads the same variables).
+export NO_PROXY="127.0.0.1,localhost"
+export no_proxy="127.0.0.1,localhost"
+
 TMP="$(mktemp -d -t ag-e2e-relay-XXXXXX)"
-for d in a b work-a work-b repos-a repos-b; do mkdir -p "$TMP/$d"; done
+for d in a b c work-a work-b work-c repos-a repos-b repos-c; do mkdir -p "$TMP/$d"; done
 
 source "$ROOT/tests/e2e/lib-e2e.sh"
 trap e2e_cleanup EXIT
@@ -58,9 +74,13 @@ submit_pinned() {  # $1 = prompt, $2 = node id
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'
 }
 
-metric() {  # $1 = metric name on the relay; prints the value (0 if absent)
-  curl -fsS "$RELAY/metrics" 2>/dev/null \
-    | awk -v m="$1" '$1==m {print $2; found=1} END{if(!found) print 0}' || echo 0
+metric_at() {  # $1 = relay base url, $2 = metric name; prints the value (0 if absent)
+  curl -fsS "$1/metrics" 2>/dev/null \
+    | awk -v m="$2" '$1==m {print $2; found=1} END{if(!found) print 0}' || echo 0
+}
+
+metric() {  # $1 = metric name on relay A; prints the value (0 if absent)
+  metric_at "$RELAY" "$1"
 }
 
 echo ">> relay E2E: a node that cannot reach the control plane, carried by a peer"
@@ -153,5 +173,73 @@ grep -qi "poll failed\|websocket\|reconnect\|transport" "$TMP/b.log" \
   || { echo "B logged no transport failure after the relay died"; tail -30 "$TMP/b.log"; exit 1; }
 echo "   B reports the loss of its only route"
 
+# --- 6. two relays: the second one keeps B connected ----------------------
+# The question this answers: "if the middle host dies but another node could
+# carry the traffic, does it happen by itself?" Not by itself — the node has no
+# discovery — but `AGENTGRID_SERVERS` lists the hops and the existing endpoint
+# rotation moves onto the next one on a connect/timeout failure.
+echo ">> with two relays configured, killing the first must not cut B off"
+
+# A is dead from section 5. Restart it (same data dir, so no fresh token) and
+# add C as a second relay on its own port, so the list has two live hops.
+ENROLL_TOKEN=""
+e2e_start_node a "relay-a" "mock" "$TMP/work-a" "$TMP/repos-a" "$TMP/a" \
+  AGENTGRID_RELAY_LISTEN="127.0.0.1:$RELAY_PORT" \
+  AGENTGRID_RELAY_ALLOW="127.0.0.1/32"
+A_PID=$NODE_PID
+
+e2e_mint_token
+e2e_start_node c "relay-c" "mock" "$TMP/work-c" "$TMP/repos-c" "$TMP/c" \
+  AGENTGRID_RELAY_LISTEN="127.0.0.1:$RELAY2_PORT" \
+  AGENTGRID_RELAY_ALLOW="127.0.0.1/32"
+ENROLL_TOKEN=""
+
+e2e_wait_nodes_online 3 || { echo "A/B/C are not all online"; tail -20 "$TMP/c.log"; exit 1; }
+echo "   relays A and C are both up"
+
+# Restart B against the list, A first — so it starts on A and has to rotate.
+kill -9 "$B_PID" 2>/dev/null || true
+wait "$B_PID" 2>/dev/null || true
+e2e_forget_pid "$B_PID"
+e2e_start_node b "relay-b" "mock" "$TMP/work-b" "$TMP/repos-b" "$TMP/b" \
+  AGENTGRID_SERVERS="$RELAY,$RELAY2" \
+  AGENTGRID_TRANSPORT=poll
+B_PID=$NODE_PID
+e2e_wait_nodes_online 3 || { echo "B did not come back on the relay list"; tail -30 "$TMP/b.log"; exit 1; }
+
+BID=$(node_id_by_name "relay-b")
+[ -n "$BID" ] || { echo "relay-b is not in /v1/nodes"; exit 1; }
+TID=$(submit_pinned "write:relay-list-a.txt:hi" "$BID")
+e2e_wait_terminal 120 "$TID" || { echo "task through the first relay never finished"; tail -30 "$TMP/b.log"; exit 1; }
+[ "$STATUS" = "succeeded" ] || { echo "task status=$STATUS"; tail -30 "$TMP/b.log"; exit 1; }
+echo "   B is on the first relay and ran $TID"
+
+# Kill the relay B is actually using. Nothing reconfigures B: the rotation on a
+# failed connect is what has to carry it to C.
+kill -9 "$A_PID" 2>/dev/null || true
+wait "$A_PID" 2>/dev/null || true
+e2e_forget_pid "$A_PID"
+
+for _ in $(seq 1 80); do
+  grep -q "rotating control-plane endpoint to $RELAY2" "$TMP/b.log" 2>/dev/null && break
+  sleep 0.5
+done
+grep -q "rotating control-plane endpoint to $RELAY2" "$TMP/b.log" \
+  || { echo "B never rotated onto the second relay"; tail -40 "$TMP/b.log"; exit 1; }
+echo "   B rotated onto the second relay by itself"
+
+e2e_wait_nodes_online 2 120 || { echo "B never came back online through the second relay"; tail -40 "$TMP/b.log"; exit 1; }
+
+# The proof that it is really the second relay: a task pinned to B still
+# succeeds, and C's own request counter moved.
+BEFORE=$(metric_at "$RELAY2" agentgrid_edge_requests_total)
+TID=$(submit_pinned "write:relay-list-b.txt:hi" "$BID")
+e2e_wait_terminal 120 "$TID" || { echo "task through the second relay never finished"; tail -40 "$TMP/b.log"; exit 1; }
+[ "$STATUS" = "succeeded" ] || { echo "task status=$STATUS"; tail -40 "$TMP/b.log"; exit 1; }
+AFTER=$(metric_at "$RELAY2" agentgrid_edge_requests_total)
+[ "${AFTER:-0}" -gt "${BEFORE:-0}" ] \
+  || { echo "second relay handled no new requests ($BEFORE -> $AFTER) — B did not move"; exit 1; }
+echo "   task $TID pinned to relay-b: $STATUS, carried by the second relay ($BEFORE -> $AFTER requests)"
+
 echo "PASS: a node reached the control plane through a peer's relay, over poll and ws,"
-echo "      and the relay's allowlist and counters both did their job"
+echo "      and with two relays configured it survived the loss of the first one"
