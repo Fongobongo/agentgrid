@@ -124,6 +124,30 @@
     (two mock cases, exact token/cost assertions, a self-baseline and a lost
     pass).
 
+- **Sessions in git — the attempt transcript now travels with its commit.**
+  The event stream lives in the control-plane DB, which is the right place for
+  the full log and the wrong place to look while reading a diff: "why did this
+  line change" is asked *at the commit*. `AGENTGRID_NOTES=off|local|push`
+  (default `off`) attaches a git note to the commit the attempt produced — the
+  prompt, the adapter, the exit status, the validation verdict, a budget
+  breach, and a pointer to the full transcript.
+  - Notes go to **`refs/notes/agentgrid`**, not `refs/notes/commits`, so a
+    user's own notes are never touched. Read with
+    `git notes --ref=agentgrid show <sha>`.
+  - **The note contains the prompt**, which is whatever an operator typed.
+    Hence the default, and why `push` needs two opt-ins: `push` mode *and* a
+    task that already has `github_push`. An unrecognised value is read as
+    `off` — a typo must not start publishing prompts.
+  - **A note does not keep its commit reachable** (`git fsck` still reports an
+    unpushed commit as unreachable while the note exists). The sha is repeated
+    inside the note so it stays readable after the object is pruned.
+  - **Never fails an attempt.** Every outcome is a `session_note` /
+    `session_note_failed` log event, and a non-fast-forward push — the expected
+    result when another node noted the same commit first — is a log line.
+  - `github::push_branch` was split into `push_branch` + `push_ref` so a
+    non-branch refspec uses the same askpass path (token in a 0600 helper, not
+    in `git`'s argv).
+
 ### Changed
 
 - **The index packet's symbols are richer and the digest is capped per file.**

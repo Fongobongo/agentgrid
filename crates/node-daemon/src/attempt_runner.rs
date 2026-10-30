@@ -1369,6 +1369,20 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         github_writeback(&cfg, &assignment, &sink, &cleanup_repo, &cleanup_branch).await;
     }
 
+    // Backlog item 9: the transcript travels with the code. Runs for any git
+    // task (not only `github_push`) and is a no-op unless AGENTGRID_NOTES is set.
+    record_session_note(
+        &cfg,
+        &assignment,
+        &sink,
+        &cleanup_repo,
+        &commit_sha,
+        code,
+        error_code.as_deref(),
+        validation_passed,
+    )
+    .await;
+
     // ADR 0025: artifact upload + GitHub write-back are the last phase.
     clock.close("publish");
     clock.flush(&sink).await;
@@ -1444,6 +1458,113 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     .await
     .ok();
     Ok(())
+}
+
+/// Backlog item 9 (sessions in git): attach the attempt's transcript to the
+/// commit it produced, as a git note.
+///
+/// Best-effort in every direction: `AGENTGRID_NOTES` defaults to `off`, a git
+/// failure is logged and nothing else happens, and the push (only in `push`
+/// mode, only when the task already has `github_push`) never fails the
+/// attempt. The note lives in the node's repo mirror, so it survives the
+/// worktree cleanup. It does **not** keep the commit reachable once the
+/// attempt branch is deleted — a note path is a tree entry, not a reference —
+/// which is exactly why the sha is repeated inside the note's own text.
+#[allow(clippy::too_many_arguments)] // cfg + assignment + sink are the ambient three
+async fn record_session_note(
+    cfg: &Config,
+    assignment: &Assignment,
+    sink: &EventSink,
+    repo_dir: &Option<std::path::PathBuf>,
+    commit_sha: &Option<String>,
+    code: i32,
+    error_code: Option<&str>,
+    validation_passed: bool,
+) {
+    let log = |kind: &'static str, text: String| async move {
+        sink.push(
+            EventKind::Log.to_event_type(),
+            json!({ "kind": kind.to_string(), "text": text }),
+        )
+        .await;
+    };
+    let mode = crate::notes::NotesMode::from_env();
+    if !mode.is_enabled() {
+        return;
+    }
+    let (Some(repo_dir), Some(commit)) = (repo_dir.as_deref(), commit_sha.as_deref()) else {
+        // Plain-directory task: no commit, no note.
+        return;
+    };
+    let status = match error_code {
+        None => "succeeded",
+        Some("validation_cancelled") => "cancelled",
+        Some(_) => "failed",
+    };
+    let validation = assignment.validation_command.as_deref().map(|cmd| {
+        if validation_passed {
+            format!("passed — {cmd}")
+        } else {
+            format!("failed — {cmd}")
+        }
+    });
+    let text = crate::notes::render(&crate::notes::NoteMeta {
+        task_id: &assignment.task_id,
+        attempt_id: &assignment.attempt_id,
+        commit,
+        repository: &assignment.repository,
+        adapter: &assignment.adapter,
+        prompt: &assignment.prompt,
+        status,
+        exit_code: code,
+        error_code,
+        validation: validation.as_deref(),
+        budget_breach: sink.budget_breach(),
+        control_plane: &cfg.base(),
+    });
+    let (dir, sha) = (repo_dir.to_path_buf(), commit.to_string());
+    let written = tokio::task::spawn_blocking(move || crate::notes::attach(&dir, &sha, &text))
+        .await
+        .map_err(|e| format!("note task join failed: {e}"))
+        .and_then(|r| r.map_err(|e| format!("{e}")));
+    match written {
+        Ok(()) => log("session_note", format!("note attached to {commit}")).await,
+        Err(e) => log("session_note_failed", e).await,
+    }
+
+    // Pushing a note writes to the operator's repository, so it needs the same
+    // opt-in as the branch itself: `push` mode *and* `github_push` on the task.
+    if mode != crate::notes::NotesMode::Push || !assignment.github_push {
+        return;
+    }
+    let (Some(token), Some(repo)) = (
+        cfg.github_token.as_deref(),
+        assignment.github_repo.as_deref(),
+    ) else {
+        return;
+    };
+    let url = format!("https://github.com/{repo}.git");
+    let dir = repo_dir.to_path_buf();
+    let token = token.to_string();
+    let pushed = tokio::task::spawn_blocking(move || {
+        crate::github::push_ref(&dir, &url, "refs/notes/agentgrid", &token)
+    })
+    .await
+    .map_err(|e| format!("note push task join failed: {e}"))
+    .and_then(|r| r.map_err(|e| format!("{e}")));
+    match pushed {
+        // Non-fast-forward is the expected outcome when another node pushed a
+        // note first; the note is still on this node, so it is a log line, not
+        // an error worth escalating.
+        Ok(()) => {
+            log(
+                "session_note_pushed",
+                format!("refs/notes/agentgrid -> {repo}"),
+            )
+            .await
+        }
+        Err(e) => log("session_note_push_failed", e).await,
+    }
 }
 
 /// Competitor-gap feature (GitHub write-back): push the agent branch, open a

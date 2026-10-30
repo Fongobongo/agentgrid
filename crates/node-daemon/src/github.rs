@@ -34,6 +34,18 @@ fn gh_client(proxy: Option<&str>) -> Result<reqwest::Client> {
 /// git's own error text).
 pub fn push_branch(repo_dir: &Path, github_repo: &str, branch: &str, token: &str) -> Result<()> {
     validate_push_target(github_repo, branch)?;
+    let url = format!("https://github.com/{github_repo}.git");
+    push_ref(repo_dir, &url, branch, token)
+}
+
+/// Push any refspec to `url` with the token fed through a 0600 askpass helper.
+///
+/// The helper exists because `https://x-access-token:<token>@…` in the URL puts
+/// the token in `git`'s argv, visible to any co-tenant reading
+/// `/proc/<pid>/cmdline`. `refspec` may be a branch or a full ref
+/// (`refs/notes/agentgrid`); it is the caller's job to have validated anything
+/// that came from task data.
+pub fn push_ref(repo_dir: &Path, url: &str, refspec: &str, token: &str) -> Result<()> {
     let ask_dir = std::env::temp_dir().join(format!(
         "ag-askpass-{}-{}",
         std::process::id(),
@@ -56,9 +68,8 @@ pub fn push_branch(repo_dir: &Path, github_repo: &str, branch: &str, token: &str
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o600))?;
     }
-    let url = format!("https://github.com/{github_repo}.git");
     let out = Command::new("git")
-        .args(["push", &url, branch])
+        .args(["push", url, refspec])
         .current_dir(repo_dir)
         .env("GIT_ASKPASS", &helper)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -451,5 +462,64 @@ mod tests {
                 .any(|l| l.starts_with("POST /orgs/other/repos ")),
             "org-repo create posted:\n{log}"
         );
+    }
+
+    /// `push_ref` exists so a notes ref can travel the same way a branch does.
+    /// A `file://` remote exercises the whole path (askpass helper, argv, ref
+    /// creation) without a GitHub token; git ignores the credentials.
+    #[test]
+    fn push_ref_carries_a_notes_ref_to_the_remote() {
+        let dir = std::env::temp_dir().join(format!("ag-pushref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        let Ok(_) = std::process::Command::new("git").arg("--version").output() else {
+            eprintln!("skip: git not available");
+            return;
+        };
+        let remote = dir.join("remote.git");
+        let work = dir.join("work");
+        git(&dir, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        git(&dir, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        std::fs::write(work.join("a.txt"), "x").unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-qm", "init"]);
+        let sha = git(&work, &["rev-parse", "HEAD"]).trim().to_string();
+        crate::notes::attach(&work, &sha, "why").expect("attach");
+
+        let url = format!("file:///{}", remote.display()).replace('\\', "/");
+        push_ref(&work, &url, "refs/notes/agentgrid", "unused-token").expect("push notes ref");
+
+        // The remote now has the note ref, pointing at a commit that carries
+        // the note — that is the whole point of pushing it.
+        let remote_sha = git(&remote, &["rev-parse", "refs/notes/agentgrid"])
+            .trim()
+            .to_string();
+        assert_eq!(remote_sha.len(), 40, "notes ref missing on remote");
+        assert_eq!(
+            git(&remote, &["notes", "--ref", "agentgrid", "show", &sha]).trim(),
+            "why"
+        );
+
+        // A refspec the remote cannot accept must surface git's own error, not
+        // report success.
+        assert!(push_ref(&work, &url, "refs/notes/nope", "tok").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

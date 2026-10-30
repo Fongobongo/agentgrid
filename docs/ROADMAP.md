@@ -56,7 +56,7 @@ item is finished — this table is the single place the queue lives.
 | 6 | Attempt phase timings (6a) / OTLP export (6b) | 6a ✅ shipped (phase events, unreleased) · 6b deferred (ADR 0025) | only `agentgrid_task_duration_seconds` existed (whole task), so a slow attempt could not be decomposed; `otel.rs` is metrics-only and the `opentelemetry` feature is off by default, with no `Registry` in the tracing init for a layer to attach to | openllmetry | `crates/node-daemon/src/attempt_runner.rs` (6a), `crates/control-plane/src/otel.rs` (6b) | M |
 | 7 | Eval harness (pass rate / tokens / cost) | ✅ shipped (`ag eval` + `tests/e2e/run-eval.sh`, unreleased) | `evals.rs` is a *self-healing validation* loop (pinned commands, tamper-checked), not a measurement harness: no fixture repo, no score, no regression baseline | workshop, nitpicker, deepteam | `crates/cli/src/eval.rs` + `tests/e2e` | M |
 | 8 | Diff review inside approvals | ✅ shipped (`PatchView` + row toggle, unreleased) | `Approvals.tsx` showed the pending tool call only; the diff lived in `TaskDetails.tsx`, so approving a push meant leaving the queue | plannotator | `web/src/components/Approvals.tsx` | S |
-| 9 | Sessions in git | queued | attempt transcripts live in the CP DB only; nothing writes them next to the code they explain | entireio/cli (git notes) | `crates/node-daemon/src/github.rs` | S |
+| 9 | Sessions in git | ✅ shipped (`AGENTGRID_NOTES`, unreleased) | attempt transcripts live in the CP DB only; nothing writes them next to the code they explain | entireio/cli (git notes) | `crates/node-daemon/src/notes.rs` + `github.rs` | S |
 
 Deliberately **not** taking (evaluated, rejected): durable-execution engines
 (a workflow already survives a node loss and the CP is the durable store),

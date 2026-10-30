@@ -181,6 +181,53 @@ Cost is one parse per file, paid once per attempt (~1 s for a 200-file repo
 built with `opt-level = "s"`). If the node runs many short attempts on a large
 repo, leave the digest off and let the agent search.
 
+## Why did this line change? (`AGENTGRID_NOTES`)
+
+The full transcript of an attempt lives in the control-plane DB, which is the
+right place for the event stream and the wrong place to look while reading a
+diff. `AGENTGRID_NOTES` attaches a compact summary to the commit the attempt
+produced, as a git note:
+
+```bash
+AGENTGRID_NOTES=local ag-node-daemon    # notes in the node's repo mirror
+AGENTGRID_NOTES=push  ag-node-daemon    # …and push them with github_push tasks
+```
+
+```
+agentgrid attempt 7626e5b6 (task df0c9d39)
+commit: 7031ad67de608ef9a31d408eca03d458caf0b9d4
+adapter: mock · status: succeeded · exit 0
+repository: demo
+
+prompt:
+  write:hello.txt:hi
+
+full transcript: ag events df0c9d39-… (control plane http://127.0.0.1:7824)
+```
+
+Notes go to `refs/notes/agentgrid`, never `refs/notes/commits`, so your own
+notes are untouched. Read them with
+`git notes --ref=agentgrid show <sha>` or `git log --notes=agentgrid`.
+
+Four things worth knowing before turning it on:
+
+- **The note contains the prompt.** A prompt is whatever an operator typed and
+  can include a customer name or a pasted token. That is why the default is
+  `off`, why `local` never leaves the host, and why `push` is gated twice: it
+  needs `push` *mode* and a task that already has `github_push`. A typo in the
+  variable is read as `off` — a typo must not start publishing prompts.
+- **A note does not keep its commit reachable.** The note is keyed by the sha,
+  and a note path is a tree entry, not a reference, so `git gc` may prune an
+  unpushed commit while the note survives. The sha is repeated inside the note
+  for exactly that case: the note stays readable when the object it names is
+  gone.
+- **A failed note never fails an attempt.** Every outcome is a `session_note` /
+  `session_note_failed` log event. A missing note is a smaller problem than a
+  lost run.
+- **Pushing is best-effort.** A non-fast-forward is the *expected* result when
+  another node pushed a note for the same commit first; the note stays on this
+  node and the push failure is a log line, not an error.
+
 ## Troubleshooting (learned the hard way)
 
 | Symptom | Cause / fix |

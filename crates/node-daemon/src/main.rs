@@ -33,6 +33,7 @@ mod git;
 mod github;
 mod heartbeat;
 mod mcp;
+mod notes;
 mod opencode_config;
 mod outbox;
 mod polling;
