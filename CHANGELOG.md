@@ -4,6 +4,11 @@
 
 ### Changed
 
+- **A failed build no longer publishes the node-daemon image.** `node-image`
+  had no `needs: build`, so it pushed `:vX.Y.Z`, `:X.Y` and `:latest` to GHCR
+  whether or not the binaries built — `docker pull ...:latest` could hand out a
+  node daemon from a release that never shipped. It now depends on `build`,
+  like the GitHub Release job already did.
 - **The release workflow refuses a tag that disagrees with the crate version.**
   A `v9.9.9` tag on a `0.6.0` tree used to publish happily: the binaries report
   `0.6.0`, the release is named `9.9.9`, and the GHCR image goes out as `:9.9.9`

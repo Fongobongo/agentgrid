@@ -210,6 +210,12 @@ jobs:
     name: publish node-daemon base image
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    # Without this the image published independently of the binary matrix: a
+    # build that failed (or a tag the version gate rejected) still moved
+    # `:latest` in GHCR, so `docker pull ...:latest` could hand out a node
+    # daemon from a release that never shipped. The image is only worth
+    # publishing for a release that actually built.
+    needs: build
     permissions:
       contents: read
       packages: write
