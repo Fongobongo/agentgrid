@@ -23,6 +23,7 @@ agentgrid-common.workspace = true
 agentgrid-adapters.workspace = true
 agentgrid-acp.workspace = true
 agentgrid-skills.workspace = true
+agentgrid-edge.workspace = true
 chrono.workspace = true
 rand.workspace = true
 tokio-tungstenite.workspace = true

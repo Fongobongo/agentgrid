@@ -41,6 +41,7 @@ mod process_supervisor;
 mod profiles;
 mod proxy;
 mod recovery;
+mod relay;
 mod sandbox;
 mod secret_redactor;
 pub(crate) mod skills;
@@ -977,6 +978,16 @@ async fn amain() -> Result<()> {
     let cred = load_or_enroll(&cfg).await?;
     crate::config::stash_credential(&cred);
     sandbox::set_node_id(&cred.node_id);
+
+    // Peer relay (opt-in, `AGENTGRID_RELAY_LISTEN`): this node carries other
+    // nodes' control-plane traffic, for peers that cannot reach the control
+    // plane but can reach this host. Started before the transport so a peer
+    // can already use it while this node is still enrolling. Fatal on a bad
+    // config or a busy port — the operator asked for a relay, and one that
+    // silently never ran breaks peers hours later instead of now.
+    if let Some(relay_cfg) = relay::RelayConfig::from_env()? {
+        relay::start(&cfg, relay_cfg).await?;
+    }
 
     // Feature "opencode profiles": initial application at startup, so a node
     // that came online during a CP outage converges to the profiled state.

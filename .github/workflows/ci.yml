@@ -407,6 +407,11 @@ jobs:
       # with AGENTGRID_NOTES unset leaves none. Process-based, no docker, no LLM.
       - name: sessions in git (attempt transcript as a git note)
         run: bash tests/e2e/run-notes.sh
+      # Peer relay: a node that is told only a sibling node's address reaches
+      # the control plane through it — poll and ws, with the allowlist gate and
+      # the relay counters asserted. Proves the wiring, not just the argv.
+      - name: peer relay (a node carried by another node)
+        run: bash tests/e2e/run-relay.sh
       # One-button assembly: POST /v1/assembly with a goal → plan-stub
       # architect → auto-approve → workers → system collector. No LLM.
       - name: one-button assembly (goal in, merged project out)

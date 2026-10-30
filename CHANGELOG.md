@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- **A node can carry another node's traffic (`AGENTGRID_RELAY_LISTEN`).** When
+  two hosts cannot talk directly but a third one reaches both — a node behind a
+  firewall or a NAT, a replica across a segment that was never peered — the
+  reachable node can now be the middle hop. `AGENTGRID_RELAY_LISTEN=0.0.0.0:7900`
+  starts an HTTP/SSE/WS forwarder inside the daemon; the stranded peer sets
+  `AGENTGRID_SERVER=http://that-node:7900` and nothing else. No second binary,
+  no cluster token.
+  - **No discovery, no token.** The standalone `agentgrid-cp-edge` finds the
+    leader via `/v1/ha/status` with the cluster token, which a single-CP
+    deployment does not have. A node does not need one: its transport already
+    follows `X-AgentGrid-Leader` hints, so the relay forwards to `base()` — the
+    control plane it would talk to right now — and follows a leader move on the
+    next request.
+  - **`poll`, `ws` and `auto` all survive the hop.** The forwarder proxies
+    HTTP, streams SSE and artifacts, and bridges `/v1/node/ws`, so the client
+    side needed no change. This is the gap the egress proxy pool (ADR 0012)
+    could not close: `tokio-tungstenite` has no proxy support, so a proxied
+    node silently fell back to polling.
+  - **`AGENTGRID_RELAY_ALLOW=10.0.0.0/8,…`** bounds which peers may use it,
+    checked against the connection address before any body is read. Empty means
+    any source, and the daemon warns about it at startup — a relay widens who
+    can reach the control plane. It does not bypass authentication: the peer's
+    own `Authorization` is forwarded verbatim.
+  - **Fail-loud:** an allowlist without a listen address, a relay pointed at
+    itself, or a busy port stops the daemon at startup instead of leaving a
+    relay that silently never ran.
+  - One hop only; chaining relays is not supported (ADR 0026).
+
 ### Fixed
 
 - **The release page now says which tarball to download.** The

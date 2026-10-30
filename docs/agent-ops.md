@@ -295,6 +295,14 @@ differs from the fleet default). Caveat: the WS transport itself is not
 proxied (no CONNECT support) — proxied nodes should run
 `AGENTGRID_TRANSPORT=poll` or `auto` (auto falls back to poll).
 
+A proxy is the right tool when the node needs egress *somewhere*. When it has
+**no route to the control plane at all** but does reach a sibling node, that
+sibling can carry its traffic instead — `AGENTGRID_RELAY_LISTEN` on the
+reachable node, `AGENTGRID_SERVER=http://that-node:7900` on the stranded one.
+Unlike the proxy pool this carries the WebSocket transport too, and it needs
+no cluster token. See "Связь через промежуточный хост" in
+`docs/runbook-transport.md` and ADR 0026.
+
 ## Two-host smoke test
 
 A minimal end-to-end check that both nodes actually work:

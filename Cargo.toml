@@ -64,6 +64,7 @@ agentgrid-adapters = { path = "crates/adapters" }
 agentgrid-acp = { path = "crates/acp" }
 agentgrid-skills = { path = "crates/skills" }
 agentgrid-index = { path = "crates/index" }
+agentgrid-edge = { path = "crates/edge" }
 
 # Stage 6.2: release profile tuned for small static binaries.
 [profile.release]

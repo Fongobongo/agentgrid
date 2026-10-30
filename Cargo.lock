@@ -168,6 +168,7 @@ dependencies = [
  "agentgrid-adapters",
  "agentgrid-common",
  "agentgrid-control-plane",
+ "agentgrid-edge",
  "agentgrid-skills",
  "anyhow",
  "axum",
