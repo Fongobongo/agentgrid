@@ -49,6 +49,18 @@
 
 ### Fixed
 
+- **The OpenAPI lint now fails on the two things it only warned about.**
+  `redocly lint` exits 0 when its only complaints are warnings, and the
+  `recommended` ruleset marks `no-unused-components` and
+  `operation-4xx-response` as warnings — so a doc with an unused component, or
+  an operation with no 4xx, printed "Woohoo! Your API description is valid."
+  and passed the job. Both are `error` now, and both were checked against
+  minimal documents that exited 0 before the change and 1 after; the real
+  `docs/openapi.yaml` still passes. The other two classes the contract test
+  cannot express were already errors in `recommended`:
+  `path-parameters-defined` and `struct` (OpenAPI 3.0's `nullable:` under 3.1,
+  where it is silently ignored).
+
 - **The release page now says which tarball to download.** The
   `x86_64-unknown-linux-gnu` build is compiled on `ubuntu-latest` and links
   that runner's glibc, so it needs 2.38+ — on Debian 12 (glibc 2.36)

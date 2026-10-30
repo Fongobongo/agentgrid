@@ -156,6 +156,12 @@ jobs:
           node-version: "20"
       # Pinned, not `latest`: the ruleset changes between majors, so a floating
       # tag would turn a redocly release into a red CI. Bump deliberately.
+      #
+      # `redocly.yaml` promotes `no-unused-components` and `operation-4xx-response`
+      # to `error`. Under the `recommended` ruleset they are warnings, and a
+      # warning does not fail this step — a doc with an unused component or an
+      # operation with no 4xx printed "Woohoo! Your API description is valid."
+      # and exited 0. Both were verified to exit 1 with the overrides in place.
       - name: redocly lint
         run: npx --yes @redocly/cli@2.72.1 lint docs/openapi.yaml
 

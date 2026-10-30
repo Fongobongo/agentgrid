@@ -1,13 +1,22 @@
-# Config for `redocly lint docs/openapi.yaml` (CI job "openapi" in ci.yml).
+# Config for `redocly lint docs/openapi.yaml` (CI job "openapi lint" in ci.yml).
 #
 # `operation-operationId` is off on purpose. The TypeScript client in
 # `web/src/api.ts` is hand-written and addresses routes by path, so operation
 # ids would be identifiers nobody consumes — 121 warnings that drowned out the
-# ones that matter. With the rule off, ANY problem fails the job, which is the
-# point: the rules the contract test cannot express (path parameters declared
-# for every `{placeholder}`, OpenAPI 3.1 nullable, unused components, a 4xx on
-# every operation) are exactly the ones that silently rotted before.
+# ones that matter.
+#
+# Two rules are promoted from `warn` to `error` because the `recommended`
+# severity is a suggestion, and `redocly lint` exits 0 when it only has
+# suggestions: a doc with an unused component or an operation with no 4xx
+# reported "Woohoo! Your API description is valid." and passed the job. Verified
+# against minimal documents — with `recommended` alone both exited 0, and with
+# these two overrides both exit 1. The other two classes the contract test
+# cannot express are already errors in `recommended`: `path-parameters-defined`
+# (a `{placeholder}` with no declared parameter) and `struct` (OpenAPI 3.0's
+# `nullable:` under 3.1, where it is ignored).
 extends:
   - recommended
 rules:
   operation-operationId: off
+  no-unused-components: error
+  operation-4xx-response: error
