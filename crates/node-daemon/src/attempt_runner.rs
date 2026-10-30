@@ -108,6 +108,18 @@ fn maybe_with_repo_digest(profile_text: &str, worktree: &std::path::Path) -> Str
         Ok(v) => v,
         Err(_) => return profile_text.to_string(),
     };
+    let digest = render_digest(&v);
+    format!("{digest}\n---\n\n{profile_text}")
+}
+
+/// Render the compact digest spliced above the profile text.
+///
+/// Two caps, both about token cost: 20 files, and 12 names per file. The
+/// packet now includes methods, so a single large module can hold a hundred
+/// names — without the per-file cap one file would spend the whole digest.
+/// Elided names are counted, not dropped silently: an agent that sees
+/// "(+90 more)" knows to open `.idx.json` instead of assuming the list is all.
+fn render_digest(v: &serde_json::Value) -> String {
     let commit = v.get("commit").and_then(|x| x.as_str()).unwrap_or("");
     let total_files = v
         .get("summary")
@@ -121,27 +133,31 @@ fn maybe_with_repo_digest(profile_text: &str, worktree: &std::path::Path) -> Str
         .unwrap_or(0);
     let mut digest = format!(
         "## Repo index (commit {commit})\n\
-         Top-level entry points across {total_files} files ({total_syms} symbols).\
+         {total_files} files, {total_syms} symbols.\
          See `.idx.json` for the full packet.\n"
     );
     if let Some(files) = v.get("files").and_then(|f| f.as_array()) {
-        // ponytail: cap at 20 files in the digest — keeps the token cost modest
-        // and avoids dumping the whole index into every system prompt. The
-        // full packet is on disk at `.idx.json` if the agent wants to read it.
         for f in files.iter().take(20) {
             let path = f.get("path").and_then(|x| x.as_str()).unwrap_or("");
             if let Some(syms) = f.get("symbols").and_then(|s| s.as_array()) {
                 let names: Vec<&str> = syms
                     .iter()
                     .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
+                    .take(12)
                     .collect();
                 if !names.is_empty() {
-                    digest.push_str(&format!("\n- `{path}`: {}\n", names.join(" · ")));
+                    let more = syms.len().saturating_sub(names.len());
+                    let tail = if more > 0 {
+                        format!(" (+{more} more)")
+                    } else {
+                        String::new()
+                    };
+                    digest.push_str(&format!("\n- `{path}`: {}{tail}\n", names.join(" · ")));
                 }
             }
         }
     }
-    format!("{digest}\n---\n\n{profile_text}")
+    digest
 }
 
 /// Audit ND-3: finalize the workspace without `?`-aborting the attempt. A
@@ -1635,6 +1651,54 @@ mod phase_tests {
 #[cfg(test)]
 mod digest_tests {
     use super::maybe_with_repo_digest;
+    use super::render_digest;
+
+    /// A packet with `files` files, each carrying `per_file` symbols.
+    fn packet(files: usize, per_file: usize) -> serde_json::Value {
+        let files: Vec<serde_json::Value> = (0..files)
+            .map(|f| {
+                let symbols: Vec<serde_json::Value> = (0..per_file)
+                    .map(|s| serde_json::json!({ "kind": "function", "name": format!("s{s}"), "line": s + 1 }))
+                    .collect();
+                serde_json::json!({ "path": format!("src/f{f}.rs"), "symbols": symbols })
+            })
+            .collect();
+        serde_json::json!({
+            "commit": "abc123",
+            "summary": { "total_files": files.len(), "total_symbols": files.len() * per_file },
+            "files": files,
+        })
+    }
+
+    #[test]
+    fn digest_caps_files_and_names_per_file() {
+        // Both caps exist for token cost: 30 files × 40 names would be a wall
+        // of text in every system prompt.
+        let d = render_digest(&packet(30, 40));
+        assert_eq!(d.lines().filter(|l| l.starts_with("- `")).count(), 20);
+        assert!(d.contains("src/f0.rs"), "{d}");
+        assert!(!d.contains("src/f25.rs"), "file cap not applied: {d}");
+        // 12 names listed, the other 28 counted.
+        assert!(d.contains("s11"), "{d}");
+        assert!(!d.contains("s12 "), "name cap not applied: {d}");
+        assert!(d.contains("(+28 more)"), "{d}");
+    }
+
+    #[test]
+    fn digest_does_not_claim_more_when_nothing_was_elided() {
+        let d = render_digest(&packet(1, 3));
+        assert!(d.contains("- `src/f0.rs`: s0 · s1 · s2"), "{d}");
+        assert!(!d.contains("more)"), "{d}");
+    }
+
+    #[test]
+    fn digest_survives_a_packet_missing_every_optional_field() {
+        // The packet shape is written by another binary; a version skew must
+        // degrade the digest, not panic the attempt.
+        let d = render_digest(&serde_json::json!({}));
+        assert!(d.starts_with("## Repo index"), "{d}");
+        assert!(!d.contains("- `"), "{d}");
+    }
     use std::sync::Mutex;
 
     // Both tests mutate `AGENTGRID_REPO_INDEX`, which is a process-global env
@@ -1657,7 +1721,7 @@ mod digest_tests {
     }
 
     #[test]
-    fn digest_inlines_top_level_symbols_when_ag_present() {
+    fn digest_inlines_symbols_when_ag_present() {
         let _g = ENV_GUARD.lock().unwrap();
         // The harness runs the live debug `ag` binary from this workspace's
         // `target/debug/ag`; gating via `AGENTGRID_INDEX_BIN` lets the test

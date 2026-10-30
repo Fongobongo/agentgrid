@@ -1,12 +1,14 @@
-//! Plan 1.13: `ag index` — offline ctags-like extraction so an agent without
-//! built-in codebase awareness can see top-level symbols and imports for a
-//! repo before its first attempt. Output is a commit-scoped JSON packet.
+//! Plan 1.13: `ag index` — offline symbol extraction so an agent without
+//! built-in codebase awareness can see what a repo contains before its first
+//! attempt. Output is a commit-scoped JSON packet.
 //!
-//! Lazy by design: line-prefix detection (no AST), top-level signatures only.
-//! ponytail: nested defs/inline structs are skipped — the agent needs entry
-//! points (fns, types, imports) to orient, not every inner block. Upgrade to
-//! tree-sitter only if this heuristic demonstrably falls short on real repos.
+//! Symbols come from `agentgrid-index` (tree-sitter), not from line prefixes:
+//! the heuristic this replaced only saw column-0 signatures, so every method
+//! inside a Rust `impl` block — the most common answer to "where is this
+//! defined" — was missing. Imports stay line-based; they are already a prefix
+//! grammar and a parser buys nothing there.
 
+use agentgrid_index::{symbols, Lang};
 use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
@@ -22,6 +24,13 @@ pub struct IndexArgs {
     /// cache/disk writer (plan 1.13 follow-up) for node-daemon digest inject.
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Where is this symbol defined? Prints matches instead of the packet and
+    /// exits 1 when nothing matches (grep semantics, so it can gate a script).
+    #[arg(long, value_name = "NAME")]
+    find: Option<String>,
+    /// Cap the number of `--find` matches.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,9 +52,12 @@ pub struct FileIndex {
 
 #[derive(Debug, Serialize)]
 pub struct Sym {
-    pub kind: &'static str, // "fn" | "type" | "const"
+    pub kind: &'static str, // see `SymbolKind::as_str`
     pub name: String,
     pub line: usize,
+    /// Enclosing type/module, when the definition is nested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,28 +102,6 @@ pub fn index_repo(root: &Path) -> Result<IndexPacket> {
     })
 }
 
-/// Map extension to a language tag, or None for un-indexable files.
-fn lang_of(p: &Path) -> Option<&'static str> {
-    match p
-        .extension()
-        .and_then(|e| e.to_str())?
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "rs" => Some("rust"),
-        "ts" => Some("typescript"),
-        "tsx" => Some("tsx"),
-        "js" | "mjs" | "cjs" => Some("javascript"),
-        "jsx" => Some("jsx"),
-        "py" | "pyi" => Some("python"),
-        "go" => Some("go"),
-        "java" | "kt" => Some("java"),
-        "c" | "h" => Some("c"),
-        "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some("cpp"),
-        _ => None,
-    }
-}
-
 /// Skip list — VCS/build dirs/materialized deps that bloat the index without
 /// telling the agent anything about the human-written code.
 fn is_pruned(name: &str) -> bool {
@@ -147,19 +137,17 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<FileIndex>) -> Result<()> {
             walk(root, &entry.path(), out)?;
         } else if ft.is_file() {
             let path = entry.path();
-            if let Some(lang) = lang_of(&path) {
+            if let Some(lang) = Lang::of_path(&path) {
                 if let Ok(src) = fs::read_to_string(&path) {
                     let (symbols, imports) = scan(lang, &src);
                     let rel = path
                         .strip_prefix(root)
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|_| path.display().to_string());
-                    let file_indexed =
-                        !symbols.is_empty() || !imports.is_empty() || !is_likely_binary_name(&name);
-                    if file_indexed {
+                    if !symbols.is_empty() || !imports.is_empty() {
                         out.push(FileIndex {
                             path: rel,
-                            lang,
+                            lang: lang.tag(),
                             symbols,
                             imports,
                         });
@@ -171,311 +159,182 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<FileIndex>) -> Result<()> {
     Ok(())
 }
 
-fn is_likely_binary_name(_name: &str) -> bool {
-    false
+/// Symbols from the parser, imports from the line prefix.
+fn scan(lang: Lang, src: &str) -> (Vec<Sym>, Vec<String>) {
+    let syms = symbols(lang, src)
+        .into_iter()
+        .map(|s| Sym {
+            kind: s.kind.as_str(),
+            name: s.name,
+            line: s.line,
+            container: s.container,
+        })
+        .collect();
+    (syms, imports(lang, src))
 }
 
-/// Line-prefix regex-free extraction: split off signature by leading keyword.
-/// Avoids a regex dependency; pattern-table is small and auditable. Only top-
-/// level (col 0) signatures are indexed, since indent already implies nested.
-fn scan(lang: &'static str, src: &str) -> (Vec<Sym>, Vec<String>) {
-    let mut syms = Vec::new();
-    let mut imps = Vec::new();
-    for (i, line) in src.lines().enumerate() {
+/// Import/include statements. Still line-prefixed on purpose: an import is a
+/// fixed leading keyword, so a parser would add a dependency-sized cost to
+/// every file for a result a `strip_prefix` already gives exactly.
+fn imports(lang: Lang, src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
         let l = line.trim_start();
-        let line_no = i + 1;
-        // Top-level only: original line must not be indented.
-        let top = !line.starts_with(' ') && !line.starts_with('\t');
         match lang {
-            "rust" => scan_rust(line, l, top, line_no, &mut syms, &mut imps),
-            "typescript" | "tsx" | "javascript" | "jsx" => {
-                scan_js(line, l, top, line_no, &mut syms, &mut imps)
+            Lang::Rust => {
+                if let Some(rest) = l.strip_prefix("use ") {
+                    let path = rest.split(';').next().unwrap_or(rest).trim();
+                    if !path.is_empty() {
+                        out.push(path.to_string());
+                    }
+                }
             }
-            "python" => scan_python(line, l, top, line_no, &mut syms, &mut imps),
-            "go" => scan_go(line, l, top, line_no, &mut syms, &mut imps),
-            "java" | "c" | "cpp" => scan_c_family(line, l, top, line_no, &mut syms, &mut imps),
-            _ => {}
-        }
-    }
-    (syms, imps)
-}
-
-fn take_after_kw<'a>(l: &'a str, kw: &str) -> Option<&'a str> {
-    let rest = l.strip_prefix(kw)?.trim_start();
-    Some(rest)
-}
-
-/// Pull identifier (alphanumeric/underscore, leading alpha/_). Returns ("") on
-/// none. Generic params stripped at `<`.
-fn ident_of(s: &str) -> String {
-    s.split(|c: char| c == '<' || c == '(' || c == ':' || c == '=' || c.is_whitespace())
-        .next()
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect()
-}
-
-fn ident_after(l: &str, kw: &str) -> Option<String> {
-    let rest = take_after_kw(l, kw)?;
-    let id = ident_of(rest);
-    if id.is_empty() {
-        None
-    } else {
-        Some(id)
-    }
-}
-
-fn scan_rust(
-    _line: &str,
-    l: &str,
-    top: bool,
-    line_no: usize,
-    syms: &mut Vec<Sym>,
-    imps: &mut Vec<String>,
-) {
-    if !top {
-        // Still harvest imports below top-level (rare but possible after
-        // conditional compile) — uncommon enough that pruning them is fine.
-        return;
-    }
-    if let Some(n) = ident_after(l, "pub async fn").or_else(|| ident_after(l, "async fn")) {
-        syms.push(Sym {
-            kind: "fn",
-            name: n,
-            line: line_no,
-        });
-    } else if let Some(n) = ident_after(l, "pub fn").or_else(|| ident_after(l, "fn")) {
-        syms.push(Sym {
-            kind: "fn",
-            name: n,
-            line: line_no,
-        });
-    } else if let Some(n) = ident_after(l, "pub struct").or_else(|| ident_after(l, "struct")) {
-        syms.push(Sym {
-            kind: "type",
-            name: n,
-            line: line_no,
-        });
-    } else if let Some(n) = ident_after(l, "pub enum").or_else(|| ident_after(l, "enum")) {
-        syms.push(Sym {
-            kind: "type",
-            name: n,
-            line: line_no,
-        });
-    } else if let Some(n) = ident_after(l, "pub trait").or_else(|| ident_after(l, "trait")) {
-        syms.push(Sym {
-            kind: "trait",
-            name: n,
-            line: line_no,
-        });
-    } else if let Some(n) = ident_after(l, "pub const").or_else(|| ident_after(l, "const")) {
-        let _ = n; // consts noisy — keep types/fns only
-    } else if let Some(rest) = l.strip_prefix("use ") {
-        let after = rest;
-        let path = after.split(';').next().unwrap_or(after).trim();
-        if !path.is_empty() {
-            imps.push(path.to_string());
-        }
-    }
-}
-
-fn scan_js(
-    _line: &str,
-    l: &str,
-    top: bool,
-    line_no: usize,
-    syms: &mut Vec<Sym>,
-    imps: &mut Vec<String>,
-) {
-    if top {
-        if let Some(n) =
-            ident_after(l, "export async function").or_else(|| ident_after(l, "async function"))
-        {
-            syms.push(Sym {
-                kind: "fn",
-                name: n,
-                line: line_no,
-            });
-        } else if let Some(n) =
-            ident_after(l, "export function").or_else(|| ident_after(l, "function"))
-        {
-            syms.push(Sym {
-                kind: "fn",
-                name: n,
-                line: line_no,
-            });
-        } else if let Some(n) = ident_after(l, "export class").or_else(|| ident_after(l, "class")) {
-            syms.push(Sym {
-                kind: "type",
-                name: n,
-                line: line_no,
-            });
-        } else if let Some(n) = ident_after(l, "export const").or_else(|| ident_after(l, "const")) {
-            // Only index top-level named consts in TS (.d.ts-like surface),
-            // since const = noise in JS apps. Still skipped here: piggy on
-            // fn/class/type for cross-lang consistency.
-            let _ = n;
-        }
-    }
-    if l.starts_with("import ") {
-        // Best-effort: capture source path (`from "..."`)
-        let from = l.find("from ");
-        if let Some(i) = from {
-            let rest = &l[i + 5..].trim_start();
-            let src = rest
-                .trim_start_matches(['"', '\''])
-                .split(['"', '\''])
-                .next()
-                .unwrap_or("");
-            if !src.is_empty() {
-                imps.push(src.to_string());
+            Lang::TypeScript | Lang::Tsx | Lang::JavaScript | Lang::Jsx => {
+                if !l.starts_with("import ") && !l.starts_with("import{") {
+                    continue;
+                }
+                // `import x from "y"` and bare `import "./y"` both name a
+                // source; `import * as ns from "y"` is the former.
+                let rest = if let Some(k) = l.find("from ") {
+                    &l[k + 5..]
+                } else {
+                    l.trim_start_matches("import").trim_start()
+                };
+                let src = rest
+                    .trim_start()
+                    .trim_start_matches(['"', '\''])
+                    .split(['"', '\''])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !src.is_empty() {
+                    out.push(src.to_string());
+                }
             }
-        } else {
-            // bare side-effect import `import "./x"` or `import * as ns`
-            let rest = l.trim_start_matches("import").trim_start();
-            let src = rest
-                .trim_start_matches(['"', '\''])
-                .split(['"', '\''])
-                .next()
-                .unwrap_or("");
-            if !src.is_empty() {
-                imps.push(src.to_string());
+            Lang::Python => {
+                if let Some(rest) = l.strip_prefix("from ") {
+                    let module = rest.split_whitespace().next().unwrap_or("");
+                    if !module.is_empty() {
+                        out.push(module.to_string());
+                    }
+                } else if let Some(rest) = l.strip_prefix("import ") {
+                    for n in rest.split(',') {
+                        let n = n.split_whitespace().next().unwrap_or("");
+                        if !n.is_empty() {
+                            out.push(n.to_string());
+                        }
+                    }
+                }
             }
-        }
-    }
-}
-
-fn scan_python(
-    _line: &str,
-    l: &str,
-    top: bool,
-    line_no: usize,
-    syms: &mut Vec<Sym>,
-    imps: &mut Vec<String>,
-) {
-    if !top {
-        return;
-    }
-    if let Some(n) = ident_after(l, "async def").or_else(|| ident_after(l, "def")) {
-        syms.push(Sym {
-            kind: "fn",
-            name: n,
-            line: line_no,
-        });
-    } else if let Some(n) = ident_after(l, "class") {
-        syms.push(Sym {
-            kind: "type",
-            name: n,
-            line: line_no,
-        });
-    } else if l.starts_with("import ") || l.starts_with("from ") {
-        // from X import Y → "X"; import A, B → "A", "B"
-        if let Some(rest) = l.strip_prefix("from ") {
-            let modname = rest.split_whitespace().next().unwrap_or("");
-            if !modname.is_empty() {
-                imps.push(modname.to_string());
+            Lang::Go => {
+                // `import "x"` plus the quoted lines of a grouped block.
+                let candidate = if let Some(rest) = l.strip_prefix("import ") {
+                    Some(rest)
+                } else if l.starts_with('"') {
+                    Some(l)
+                } else {
+                    None
+                };
+                if let Some(rest) = candidate {
+                    let src = rest
+                        .trim()
+                        .trim_start_matches('"')
+                        .split('"')
+                        .next()
+                        .unwrap_or("");
+                    if !src.is_empty() {
+                        out.push(src.to_string());
+                    }
+                }
             }
-        } else if let Some(rest) = l.strip_prefix("import ") {
-            for n in rest.split(',') {
-                let n = n.split_whitespace().next().unwrap_or("");
-                if !n.is_empty() {
-                    imps.push(n.to_string());
+            Lang::Java => {
+                if let Some(rest) = l.strip_prefix("import ") {
+                    let path = rest
+                        .trim_start_matches("static ")
+                        .split(';')
+                        .next()
+                        .unwrap_or(rest)
+                        .trim();
+                    if !path.is_empty() {
+                        out.push(path.to_string());
+                    }
+                }
+            }
+            Lang::C | Lang::Cpp => {
+                if let Some(rest) = l
+                    .strip_prefix("#include ")
+                    .or_else(|| l.strip_prefix("#import "))
+                {
+                    let src = rest
+                        .trim()
+                        .trim_start_matches(['<', '"'])
+                        .split(['>', '"'])
+                        .next()
+                        .unwrap_or("")
+                        .trim();
+                    if !src.is_empty() {
+                        out.push(src.to_string());
+                    }
                 }
             }
         }
     }
+    out
 }
 
-fn scan_go(
-    _line: &str,
-    l: &str,
-    top: bool,
-    line_no: usize,
-    syms: &mut Vec<Sym>,
-    imps: &mut Vec<String>,
-) {
-    if top {
-        if let Some(rest) = l.strip_prefix("func ") {
-            // func Name(...) or func (recv) Name(...)
-            let after_recv = if rest.starts_with('(') {
-                // skip receiver: find matching ')'
-                let close = rest.find(')').map(|i| i + 1).unwrap_or(rest.len());
-                rest[close..].trim_start()
-            } else {
-                rest
+/// A `--find` match and why it ranked where it did.
+#[derive(Debug, Serialize)]
+struct Hit<'a> {
+    path: &'a str,
+    line: usize,
+    kind: &'static str,
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    container: Option<&'a str>,
+    /// 0 = exact name, 1 = prefix, 2 = substring.
+    rank: u8,
+}
+
+/// Rank symbols against a query.
+///
+/// Three tiers, because "where is `new`" and "where is something with `new` in
+/// it" are different questions: an exact hit must not be buried under a dozen
+/// near-misses. `Container::name` is matched too, so `SandboxKind::from_env`
+/// works without knowing that the container is stored separately.
+fn find_symbols<'a>(packet: &'a IndexPacket, query: &str, limit: usize) -> Vec<Hit<'a>> {
+    let q = query.trim();
+    let lq = q.to_lowercase();
+    let mut hits = Vec::new();
+    for file in &packet.files {
+        for sym in &file.symbols {
+            let qualified = match &sym.container {
+                Some(c) => format!("{c}::{}", sym.name),
+                None => sym.name.clone(),
             };
-            let name = ident_of(after_recv);
-            if !name.is_empty() {
-                syms.push(Sym {
-                    kind: "fn",
-                    name,
-                    line: line_no,
-                });
-            }
-        } else if let Some(n) = ident_after(l, "type") {
-            syms.push(Sym {
-                kind: "type",
-                name: n,
-                line: line_no,
+            let rank = if qualified == q || sym.name == q {
+                0
+            } else if qualified.to_lowercase().starts_with(&lq) {
+                1
+            } else if qualified.to_lowercase().contains(&lq) {
+                2
+            } else {
+                continue;
+            };
+            hits.push(Hit {
+                path: &file.path,
+                line: sym.line,
+                kind: sym.kind,
+                name: &sym.name,
+                container: sym.container.as_deref(),
+                rank,
             });
         }
     }
-    if l.starts_with("import ") {
-        // import "x" | import (\nmulti\n)
-        let rest = l.strip_prefix("import").unwrap_or(l).trim_start();
-        let s = rest.trim_start_matches(['"', '\'']);
-        let src = s.split(['"', '\'']).next().unwrap_or("");
-        if !src.is_empty() {
-            imps.push(src.to_string());
-        }
-    } else if l.starts_with("\t\"") || l.starts_with("    \"") {
-        // Inside a grouped import block.
-        let s = l.trim_start();
-        let src = s.trim_start_matches('"').split('"').next().unwrap_or("");
-        if !src.is_empty() {
-            imps.push(src.to_string());
-        }
-    }
-}
-
-fn scan_c_family(
-    _line: &str,
-    l: &str,
-    top: bool,
-    line_no: usize,
-    syms: &mut Vec<Sym>,
-    imps: &mut Vec<String>,
-) {
-    if top {
-        // Best-effort: function-name then arg-list on line-ending-`;` or `{`.
-        if let Some(n) = ident_after(l, "static") {
-            if !(n == "const" || n == "void") {
-                let _ = n; // skip — too noisy in C-family
-            }
-        }
-    }
-    // include "x.h"
-    if l.starts_with("#include ") || l.starts_with("#import ") {
-        let rest = l
-            .trim_start_matches(|c: char| c == '#' || c.is_whitespace())
-            .trim_start_matches("include")
-            .trim_start()
-            .trim_start_matches("import")
-            .trim_start();
-        // Strip <...> or "..." paths
-        let src = rest
-            .trim_start_matches(['<', '"', '\''])
-            .split(['>', '"', '\''])
-            .next()
-            .unwrap_or("")
-            .trim();
-        if !src.is_empty() {
-            imps.push(src.to_string());
-        }
-    }
-    let _ = (top, line_no, syms);
+    // Ties break by path then line so the output is stable across runs (an
+    // unstable answer makes a script that consumes it flaky).
+    hits.sort_by(|a, b| (a.rank, a.path, a.line, &a.name).cmp(&(b.rank, b.path, b.line, &b.name)));
+    hits.truncate(limit);
+    hits
 }
 
 /// Read HEAD sha via `git rev-parse HEAD` at root. Empty on any failure (no
@@ -495,6 +354,30 @@ fn head_sha(root: &Path) -> String {
 
 pub fn cmd_index(args: IndexArgs, json: bool) -> Result<()> {
     let packet = index_repo(&args.path)?;
+    if let Some(query) = &args.find {
+        let hits = find_symbols(&packet, query, args.limit);
+        if hits.is_empty() {
+            anyhow::bail!("no symbol matching {query:?} under {}", packet.root);
+        }
+        if json {
+            println!("{}", serde_json::to_string_pretty(&hits)?);
+            return Ok(());
+        }
+        for h in &hits {
+            let qualified = match h.container {
+                Some(c) => format!("{c}::{}", h.name),
+                None => h.name.to_string(),
+            };
+            println!("{}:{}  {:<9} {}", h.path, h.line, h.kind, qualified);
+        }
+        if hits.len() == args.limit {
+            println!(
+                "\n(limit {} reached — narrow the query or raise --limit)",
+                args.limit
+            );
+        }
+        return Ok(());
+    }
     // Plan 1.13 follow-up: `--out <path>` writes the JSON packet to a file
     // (cache/disk writer for the node-daemon digest-injector), bypassing the
     // stdout pretty-printer.
@@ -678,6 +561,80 @@ mod tests {
         let packet = index_repo(root).expect("index");
         assert_eq!(packet.files.len(), 1);
         assert_eq!(packet.files[0].path, "lib.rs");
+    }
+
+    #[test]
+    fn rust_methods_reach_the_packet_with_their_container() {
+        // The gap this closes: a method inside `impl` was invisible to the
+        // column-0 scanner, so the digest listed types but none of their API.
+        let dir = tmp_repo();
+        let root = dir.path();
+        std::fs::write(
+            root.join("lib.rs"),
+            "pub struct Server { port: u16 }\n\nimpl Server {\n    pub fn new(port: u16) -> Self { Self { port } }\n    fn handle(&self) {}\n}\n",
+        )
+        .unwrap();
+        let packet = index_repo(root).expect("index");
+        let lib = &packet.files[0];
+        let new = lib
+            .symbols
+            .iter()
+            .find(|s| s.name == "new")
+            .unwrap_or_else(|| panic!("new missing: {:?}", lib.symbols));
+        assert_eq!(new.kind, "method");
+        assert_eq!(new.container.as_deref(), Some("Server"));
+        assert_eq!(new.line, 4);
+        assert!(lib.symbols.iter().any(|s| s.name == "handle"));
+    }
+
+    #[test]
+    fn find_ranks_exact_before_prefix_before_substring() {
+        let dir = tmp_repo();
+        let root = dir.path();
+        std::fs::write(
+            root.join("lib.rs"),
+            "fn parse() {}\nfn parse_cidr() {}\nfn parse_cidr_strict() {}\nstruct Parser;\n",
+        )
+        .unwrap();
+        let packet = index_repo(root).expect("index");
+        let hits = find_symbols(&packet, "parse", 10);
+        let names: Vec<&str> = hits.iter().map(|h| h.name).collect();
+        assert_eq!(
+            names.first(),
+            Some(&"parse"),
+            "exact match must lead: {names:?}"
+        );
+        // Prefix matches come before the substring-only `Parser`.
+        let parser_at = names.iter().position(|n| *n == "Parser").expect("Parser");
+        let strict_at = names
+            .iter()
+            .position(|n| *n == "parse_cidr_strict")
+            .expect("strict");
+        assert!(strict_at < parser_at, "{names:?}");
+        assert!(hits.iter().all(|h| h.rank <= 2));
+        assert_eq!(hits[0].rank, 0);
+    }
+
+    #[test]
+    fn find_matches_a_qualified_name_and_respects_the_limit() {
+        let dir = tmp_repo();
+        let root = dir.path();
+        std::fs::write(
+            root.join("lib.rs"),
+            "struct Sandbox;\nimpl Sandbox {\n    fn from_env() {}\n}\nfn from_env() {}\n",
+        )
+        .unwrap();
+        let packet = index_repo(root).expect("index");
+        // `Type::method` resolves even though the packet stores them apart.
+        let hits = find_symbols(&packet, "Sandbox::from_env", 10);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].container, Some("Sandbox"));
+        // The free function of the same name is not a qualified match.
+        let all = find_symbols(&packet, "from_env", 10);
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert_eq!(find_symbols(&packet, "from_env", 1).len(), 1);
+        // A miss is an empty result, which `cmd_index` turns into exit 1.
+        assert!(find_symbols(&packet, "nowhere", 10).is_empty());
     }
 
     #[test]

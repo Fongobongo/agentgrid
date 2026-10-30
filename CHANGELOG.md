@@ -4,6 +4,25 @@
 
 ### Added
 
+- **`ag index` parses instead of guessing, and answers "where is this defined".**
+  The old scanner detected symbols by line prefix and only at column 0, so on
+  Rust it reported a file's types and free functions and *nothing inside an
+  `impl` block* — the most common answer to "where is this defined" was
+  missing, and the digest spliced into the attempt prompt
+  (`AGENTGRID_REPO_INDEX=1`) described an API the code did not have. A new
+  `agentgrid-index` crate parses with tree-sitter (rust, typescript/tsx,
+  javascript, python, go, java, c, cpp) and reports every definition with its
+  enclosing type or module.
+  - **`ag index --find <name>`** answers the question directly, ranked exact →
+    prefix → substring, so `SandboxKind::from_env` resolves even though the
+    packet stores the container separately. A miss exits 1 (grep semantics, so
+    it can gate a script).
+  - A file that does not parse contributes no symbols rather than an error — a
+    broken tree is the normal state of a repo an agent is mid-edit on.
+  - Imports stay line-based: an import is a fixed leading keyword, so a parser
+    buys nothing there. Cost is one parse per file (~1 s for this 226-file repo
+    at `opt-level = "s"`), paid once per attempt and only when opted in.
+
 - **`AGENTGRID_SANDBOX=bwrap` — an unprivileged namespace backend** (ADR 0022).
   Both existing backends have a prerequisite: `docker` needs a runtime, and a
   `systemd` scope needs a user manager plus root for `runuser`. A node with
@@ -106,6 +125,17 @@
     pass).
 
 ### Changed
+
+- **The index packet's symbols are richer and the digest is capped per file.**
+  `files[].symbols[]` gains `container` (the enclosing type or module) and its
+  `kind` values become the language-neutral names (`function`, `method`,
+  `struct`, `class`, `interface`, …) instead of the coarse `fn` / `type`. A
+  method is now `method`, not `function`, so a reader can tell whether it is
+  callable on its own. The digest spliced above the profile text also caps names
+  per file (12, files stay at 20) and counts what it elided as `(+N more)`:
+  with methods indexed one large module would otherwise spend the whole digest,
+  which is a token cost on every attempt. Consumers that only read symbol names
+  — the digest injector — are unaffected.
 
 - **A failed build no longer publishes the node-daemon image.** `node-image`
   had no `needs: build`, so it pushed `:vX.Y.Z`, `:X.Y` and `:latest` to GHCR

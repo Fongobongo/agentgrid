@@ -142,6 +142,45 @@ known limitation so a fixture records it instead of quietly dropping it.
 Fixture JSON is the input format — nothing in a fixture can execute code on the
 control plane.
 
+## Where is this defined? (`ag index --find`)
+
+`ag index` parses a repository with tree-sitter (rust, typescript/tsx,
+javascript, python, go, java, c, cpp) and reports every definition with the
+type or module that encloses it:
+
+```bash
+ag index . --find parse_cidr
+# crates/node-daemon/src/sandbox.rs:720  function  parse_cidr
+
+ag index . --find SandboxKind::from_env
+# crates/node-daemon/src/sandbox.rs:58   method    SandboxKind::from_env
+
+ag index . --find bwrap --limit 5          # prefix matches
+ag index . --json > symbols.json           # the whole packet
+```
+
+Matching is ranked — exact name, then prefix, then substring — so an exact hit
+is never buried under near-misses, and a miss exits 1 (grep semantics, so it
+can gate a script). Methods report their container, which is what disambiguates
+two `new`s. Definitions only: an index of every identifier is a grep with extra
+steps, and the question is where to *look*.
+
+Two knobs matter in production:
+
+- **`AGENTGRID_REPO_INDEX=1`** splices a compact digest of the packet above the
+  profile text of every attempt (20 files, 12 names each, `(+N more)` for the
+  rest — the full packet is at `<worktree>/.idx.json`). Off by default: it costs
+  tokens on every attempt, so opt in when the adapter has no codebase awareness
+  of its own.
+- **`AGENTGRID_INDEX_BIN`** is the binary to run (default `ag`); it must be on
+  the node's `PATH`. Any failure — missing binary, bad packet — leaves the
+  profile text untouched, so a broken indexer degrades the prompt, never the
+  attempt.
+
+Cost is one parse per file, paid once per attempt (~1 s for a 200-file repo
+built with `opt-level = "s"`). If the node runs many short attempts on a large
+repo, leave the digest off and let the agent search.
+
 ## Troubleshooting (learned the hard way)
 
 | Symptom | Cause / fix |

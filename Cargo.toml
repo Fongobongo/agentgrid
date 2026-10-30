@@ -10,6 +10,7 @@ members = [
     "crates/acp",
     "crates/gateway",
     "crates/edge",
+    "crates/index",
 ]
 # cargo-fuzz crate: its own workspace (libfuzzer needs nightly + sanitizer
 # flags that must not leak into the stable CI/test builds).
@@ -62,6 +63,7 @@ agentgrid-common = { path = "crates/common" }
 agentgrid-adapters = { path = "crates/adapters" }
 agentgrid-acp = { path = "crates/acp" }
 agentgrid-skills = { path = "crates/skills" }
+agentgrid-index = { path = "crates/index" }
 
 # Stage 6.2: release profile tuned for small static binaries.
 [profile.release]

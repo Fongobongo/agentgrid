@@ -41,7 +41,7 @@ fills.
 | auth (JWT, setup-token bootstrap), CLI (`ag`), web UI | **beta** | usable, APIs still settling pre-1.0; UI embedded in the control-plane binary |
 | WebSocket node transport (default), long-poll fallback | **stable** | `AGENTGRID_TRANSPORT=ws\|poll\|auto`; see runbook |
 | opencode profiles (revisions, TTL, A/B, pinned skills, drift auto-heal) | **beta** | CP-hosted config + WS push apply; UI + CLI surface stable |
-| `ag index` knowledge-graph packet + digest injector | **beta** | offline ctags-like extraction; opt-in via `AGENTGRID_REPO_INDEX` |
+| `ag index` symbol index + digest injector | **beta** | tree-sitter extraction (rust/ts/tsx/js/python/go/java/c/cpp), `--find` lookup; digest opt-in via `AGENTGRID_REPO_INDEX` |
 | workflows (DAG / schedule / run projection) | **beta** | contract frozen by ADR 0013; additive-only evolution |
 | ACP gateway / Telegram gateway | **experimental** | separate binaries, not in the minimal release by default |
 | skills / MCP registry | **beta** | contract frozen by ADR 0013; server is source of truth |
@@ -62,8 +62,8 @@ Untrusted agents must run under the Docker/Podman sandbox with `permission_inter
 - **adapters**: `mock` (no LLM), `claude`, `codex`, `opencode`, `aider`, `pi` — translate the agent's
   JSON events into the agentgrid contract.
 - **cli** (`ag`): submit/inspect tasks, list nodes, mint tokens, run server,
-  index a repo into a knowledge-graph packet for system-prompt injection
-  (`ag index`).
+  index a repo into a symbol packet for system-prompt injection
+  (`ag index`, `ag index --find <name>`).
 - **web**: TypeScript UI (Vite + React) served by the control plane.
 
 ## Quickstart: single binary
