@@ -394,6 +394,11 @@ jobs:
       # used to pass now fails the run. Process-based, no docker, no LLM.
       - name: eval harness (fixture in, score + baseline diff out)
         run: bash tests/e2e/run-eval.sh
+      # Sessions in git: a real attempt on a real (file://) remote leaves a git
+      # note on the commit it produced, in refs/notes/agentgrid, and an attempt
+      # with AGENTGRID_NOTES unset leaves none. Process-based, no docker, no LLM.
+      - name: sessions in git (attempt transcript as a git note)
+        run: bash tests/e2e/run-notes.sh
       # One-button assembly: POST /v1/assembly with a goal → plan-stub
       # architect → auto-approve → workers → system collector. No LLM.
       - name: one-button assembly (goal in, merged project out)

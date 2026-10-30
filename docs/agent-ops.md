@@ -209,7 +209,7 @@ Notes go to `refs/notes/agentgrid`, never `refs/notes/commits`, so your own
 notes are untouched. Read them with
 `git notes --ref=agentgrid show <sha>` or `git log --notes=agentgrid`.
 
-Four things worth knowing before turning it on:
+Five things worth knowing before turning it on:
 
 - **The note contains the prompt.** A prompt is whatever an operator typed and
   can include a customer name or a pasted token. That is why the default is
@@ -221,6 +221,14 @@ Four things worth knowing before turning it on:
   unpushed commit while the note survives. The sha is repeated inside the note
   for exactly that case: the note stays readable when the object it names is
   gone.
+- **The node protects its notes from its own fetches.** The repository mirror is
+  a `--mirror` clone, so its fetch refspec is `+refs/*:refs/*` and the fetch
+  runs `--prune` — a `local` note exists only on that node, so the next attempt
+  on the same repository used to delete it (verified: one note before
+  `fetch --prune`, zero after). Writing a note now adds
+  `^refs/notes/agentgrid` to `remote.origin.fetch`, which carves the ref out of
+  the fetch and protects it from the prune. `tests/e2e/run-notes.sh` pins this
+  by running a second attempt after the first.
 - **A failed note never fails an attempt.** Every outcome is a `session_note` /
   `session_note_failed` log event. A missing note is a smaller problem than a
   lost run.

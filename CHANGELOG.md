@@ -145,12 +145,24 @@
   - **A note does not keep its commit reachable** (`git fsck` still reports an
     unpushed commit as unreachable while the note exists). The sha is repeated
     inside the note so it stays readable after the object is pruned.
+  - **A local note is protected from the node's own fetches.** The repository
+    mirror is a `--mirror` clone, so its fetch refspec is `+refs/*:refs/*` and
+    the fetch runs `--prune`; a note written in `local` mode exists only on that
+    node, so the *next* attempt on the same repository deleted it (verified on a
+    scratch mirror: one note before `fetch --prune`, zero after — the feature
+    would have looked right in a one-shot test and lost every note in
+    production). Writing a note adds `^refs/notes/agentgrid` to
+    `remote.origin.fetch`, which carves the ref out of the fetch and protects
+    it from the prune.
   - **Never fails an attempt.** Every outcome is a `session_note` /
     `session_note_failed` log event, and a non-fast-forward push — the expected
     result when another node noted the same commit first — is a log line.
   - `github::push_branch` was split into `push_branch` + `push_ref` so a
     non-branch refspec uses the same askpass path (token in a 0600 helper, not
     in `git`'s argv).
+  - Covered end to end by `tests/e2e/run-notes.sh` (a real `file://` remote, a
+    real attempt, `git notes` in the node's mirror, and a second attempt with
+    the variable unset proving the default).
 
 ### Changed
 

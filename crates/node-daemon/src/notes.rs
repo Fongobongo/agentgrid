@@ -34,6 +34,10 @@ pub const NOTES_REF: &str = "agentgrid";
 /// short enough that the note stays a note.
 const PROMPT_LIMIT: usize = 1200;
 
+/// Carves `refs/notes/agentgrid` out of the mirror's `+refs/*:refs/*` fetch, so
+/// `fetch --prune` cannot delete a note that exists only on this node.
+const NEGATIVE_REFSPEC: &str = "^refs/notes/agentgrid";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotesMode {
     /// Write nothing (default).
@@ -133,6 +137,47 @@ fn clip(text: &str, limit: usize) -> String {
     format!("{head}\n… (truncated)")
 }
 
+/// Keep `fetch --prune` from deleting our notes ref.
+///
+/// The node's repository is a `--mirror` clone, whose fetch refspec is
+/// `+refs/*:refs/*` and whose fetch runs with `--prune`. A note written in
+/// `local` mode exists only here, so the *next* attempt on the same repository
+/// pruned it away — verified on a scratch mirror: one note before
+/// `fetch --prune`, zero after. The feature would have looked correct in a
+/// one-shot smoke test and lost every note in production.
+///
+/// A negative refspec is the documented way to carve a ref out of the fetch,
+/// and it protects from the prune too: with `^refs/notes/agentgrid` in
+/// `remote.origin.fetch`, the note survives. Idempotent, and a no-op for a
+/// repository without a remote (nothing fetches it, so nothing prunes it).
+fn protect_from_prune(repo_dir: &Path) -> Result<()> {
+    let configured = Command::new("git")
+        .args(["config", "--get-all", "remote.origin.fetch"])
+        .current_dir(repo_dir)
+        .output()
+        .context("read remote.origin.fetch")?;
+    if !configured.status.success() {
+        // No such key (plain repo, or no remote): nothing to protect.
+        return Ok(());
+    }
+    let current = String::from_utf8_lossy(&configured.stdout);
+    if current.lines().any(|l| l.trim() == NEGATIVE_REFSPEC) {
+        return Ok(());
+    }
+    let added = Command::new("git")
+        .args(["config", "--add", "remote.origin.fetch", NEGATIVE_REFSPEC])
+        .current_dir(repo_dir)
+        .output()
+        .context("add the notes exclusion to remote.origin.fetch")?;
+    if !added.status.success() {
+        bail!(
+            "git config failed: {}",
+            String::from_utf8_lossy(&added.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// Attach `text` to `commit` as a note in `repo_dir`.
 ///
 /// The message goes in over stdin rather than a temp file: the note contains
@@ -149,6 +194,7 @@ pub fn attach(repo_dir: &Path, commit: &str, text: &str) -> Result<()> {
     if commit.is_empty() {
         bail!("empty commit");
     }
+    protect_from_prune(repo_dir)?;
     let mut child = Command::new("git")
         .args([
             "-c",
@@ -319,6 +365,86 @@ mod tests {
         );
 
         assert!(attach(&dir, "", "x").is_err(), "empty sha must be refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The node's repository is a `--mirror` clone, so its fetch refspec is
+    /// `+refs/*:refs/*` and the fetch runs `--prune`. A `local` note exists
+    /// only on this node, which made the next attempt on the same repository
+    /// delete it — the e2e caught it, this pins it.
+    #[test]
+    fn a_local_note_survives_the_next_fetch_prune() {
+        let Ok(_) = std::process::Command::new("git").arg("--version").output() else {
+            eprintln!("skip: git not available");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("ag-notes-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        let remote = dir.join("remote.git");
+        let seed = dir.join("seed");
+        let mirror = dir.join("mirror.git");
+        git(&dir, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        git(
+            &dir,
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(seed.join("a.txt"), "x").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-qm", "init"]);
+        git(&seed, &["branch", "-M", "main"]);
+        git(&seed, &["push", "-q", "origin", "main"]);
+        git(
+            &dir,
+            &[
+                "clone",
+                "-q",
+                "--mirror",
+                remote.to_str().unwrap(),
+                mirror.to_str().unwrap(),
+            ],
+        );
+        let sha = git(&seed, &["rev-parse", "HEAD"]).trim().to_string();
+
+        attach(&mirror, &sha, "why").expect("attach");
+        // Idempotent: a second attempt must not stack duplicate refspecs.
+        attach(&mirror, &sha, "why again").expect("reattach");
+        let refspecs = git(&mirror, &["config", "--get-all", "remote.origin.fetch"]);
+        let exclusions = refspecs
+            .lines()
+            .filter(|l| l.trim() == NEGATIVE_REFSPEC)
+            .count();
+        assert_eq!(exclusions, 1, "refspec added twice:\n{refspecs}");
+
+        git(&mirror, &["fetch", "--prune", "-q"]);
+        assert_eq!(
+            git(&mirror, &["notes", "--ref", NOTES_REF, "show", &sha]).trim(),
+            "why again",
+            "fetch --prune deleted the local note"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
