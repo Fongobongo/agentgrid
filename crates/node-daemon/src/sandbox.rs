@@ -471,11 +471,18 @@ fn bwrap_rebind_if_masked(prefix: &mut Vec<String>, program: &str) {
     if !std::path::Path::new(program).is_file() {
         return;
     }
-    prefix.extend([
-        "--ro-bind".to_string(),
-        program.to_string(),
-        program.to_string(),
-    ]);
+    let bind = ["--ro-bind", program, program];
+    // `bwrap_head` ends with `--`, after which bwrap reads the next argument
+    // as the program: appending here made it exec `--ro-bind`. Insert before
+    // the terminator instead.
+    match prefix.iter().rposition(|a| a == "--") {
+        Some(pos) => {
+            for (offset, arg) in bind.iter().enumerate() {
+                prefix.insert(pos + offset, arg.to_string());
+            }
+        }
+        None => prefix.extend(bind.iter().map(|a| a.to_string())),
+    }
 }
 
 /// True when `net` is an `allowlist:` spec and every CIDR in it parses.
@@ -2641,6 +2648,16 @@ mod tests {
                     real.display().to_string()
                 ]
             );
+        }
+
+        // `bwrap_head` ends with `--`; a bind appended after it became the
+        // program ("bwrap: execvp --ro-bind"). It has to go before.
+        let mut v = vec!["--tmpfs".to_string(), "--".to_string()];
+        bwrap_rebind_if_masked(&mut v, &real.display().to_string());
+        if real.display().to_string().starts_with("/tmp/") {
+            assert_eq!(v.last().map(String::as_str), Some("--"));
+            assert_eq!(v[1], "--ro-bind");
+            assert_eq!(v.len(), 5);
         }
         let _ = std::fs::remove_file(&real);
     }
