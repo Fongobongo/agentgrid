@@ -879,20 +879,58 @@ async fn amain() -> Result<()> {
             Err(e) => tracing::warn!(error = %e, "container runtime probe failed"),
         }
     }
+    // ADR 0022: bubblewrap is the backend for hosts with no container runtime
+    // and no root. It needs only unprivileged user namespaces, so the probe
+    // actually creates one — a kernel with `unprivileged_userns_clone=0` or a
+    // seccomp policy blocking `unshare` fails here instead of on every attempt.
+    // Fail-closed: an operator who asked for a sandbox must never silently get
+    // none.
+    if matches!(cfg.sandbox, sandbox::SandboxKind::Bwrap) {
+        let net = std::env::var("AGENTGRID_SANDBOX_NETWORK").unwrap_or_else(|_| "none".to_string());
+        sandbox::validate_network_mode(&net)?;
+        match sandbox::probe_bwrap().await {
+            Ok(Some(v)) => tracing::info!(runtime = %v, "bubblewrap ready"),
+            Ok(None) => anyhow::bail!(
+                "AGENTGRID_SANDBOX=bwrap but bwrap is not installed (apt install bubblewrap) — \
+                 refusing to start rather than running attempts unsandboxed"
+            ),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "AGENTGRID_SANDBOX=bwrap: namespace probe failed: {e:#}"
+                ))
+            }
+        }
+        #[cfg(unix)]
+        if unsafe { libc::getuid() } == 0 && sandbox::run_as_spec().is_none() {
+            tracing::warn!(
+                "AGENTGRID_SANDBOX=bwrap on a root daemon: the namespaces still confine the \
+                 agent (mount/pid/net/ipc), but bwrap does not drop privileges by itself — set \
+                 AGENTGRID_RUN_AS_USER=<uid>[:<gid>] for uid separation"
+            );
+        }
+    }
     // Plan 6.11: separate Unix user for the attempt subprocess. The spec is
     // validated for every backend; the native/systemd paths additionally need
     // privilege (`runuser`), so a non-root daemon with the var set refuses to
     // start instead of silently running the agent as the daemon user. The
-    // docker path needs no privilege (`--user` is enforced by the runtime).
+    // docker path needs no privilege (`--user` is enforced by the runtime) and
+    // the bwrap path maps the uid inside its own user namespace (`--uid`).
     if let Some(spec) = sandbox::run_as_spec() {
-        sandbox::validate_run_as_user(&spec)?;
-        // No `runuser` without privilege (and none on Windows at all);
-        // the docker path needs none (`--user` is enforced by the runtime).
+        match cfg.sandbox {
+            sandbox::SandboxKind::Bwrap => sandbox::validate_bwrap_run_as(&spec)?,
+            _ => sandbox::validate_run_as_user(&spec)?,
+        }
+        // No `runuser` without privilege (and none on Windows at all).
         #[cfg(unix)]
-        let need_privilege =
-            !matches!(cfg.sandbox, sandbox::SandboxKind::Docker) && unsafe { libc::getuid() } != 0;
+        let need_privilege = matches!(
+            cfg.sandbox,
+            sandbox::SandboxKind::None | sandbox::SandboxKind::Systemd
+        ) && unsafe { libc::getuid() } != 0;
         #[cfg(not(unix))]
-        let need_privilege = !matches!(cfg.sandbox, sandbox::SandboxKind::Docker);
+        let need_privilege = matches!(
+            cfg.sandbox,
+            sandbox::SandboxKind::None | sandbox::SandboxKind::Systemd
+        );
         if need_privilege {
             anyhow::bail!(
                 "AGENTGRID_RUN_AS_USER={spec} needs AGENTGRID_SANDBOX=docker or a Unix root \

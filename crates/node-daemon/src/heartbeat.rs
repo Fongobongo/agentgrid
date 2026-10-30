@@ -439,6 +439,10 @@ pub fn spawn_heartbeat(
                     sandbox::SandboxKind::None => "none".to_string(),
                     sandbox::SandboxKind::Docker => "docker".to_string(),
                     sandbox::SandboxKind::Systemd => "systemd".to_string(),
+                    // ADR 0022: namespace confinement without a runtime or
+                    // root — the CP stores the string verbatim, so the UI can
+                    // tell this apart from an unsandboxed node.
+                    sandbox::SandboxKind::Bwrap => "bwrap".to_string(),
                 },
                 // Plan 960: report exactly what is applied. Docker always
                 // applies cap-drop + no-new-privileges; `enforced_limits` is
@@ -467,6 +471,11 @@ pub fn spawn_heartbeat(
                             || std::env::var("AGENTGRID_SANDBOX_CPUS").is_ok()
                     }
                     sandbox::SandboxKind::None => false,
+                    // ADR 0022: bwrap unshares the mount/pid/net/ipc
+                    // namespaces but has no cgroup knobs, so no resource
+                    // limit is enforced. Reported honestly as false: the
+                    // attempt is still bounded by the supervisor's RSS poll.
+                    sandbox::SandboxKind::Bwrap => false,
                 },
                 // Plan 6.11: advertise whether systemd transient scopes are
                 // usable at all, so the UI/eligibility can distinguish

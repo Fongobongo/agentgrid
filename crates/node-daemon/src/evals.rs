@@ -237,14 +237,14 @@ pub async fn probe_evals(
         // tree (POSIX only; Windows dev hosts degrade to child-only kill).
         #[cfg(unix)]
         cmd.process_group(0);
-        // Parity with `ProcessBackend::spawn` (adapters/src/backend.rs): the
-        // eval `sh -c` runs in the daemon's security context when the node is
-        // unsandboxed, so it must NOT inherit the daemon's environment — a
-        // daemon-held secret (git credential, CP token) must never be visible
-        // to agent-influenced shell. Clean env + the process-locating basics.
-        // When sandboxed, the child is contained (docker/systemd) and its CLI
-        // may need DOCKER_HOST/DBUS from our env, so inheritance stays.
-        if kind == SandboxKind::None {
+        // When the sandbox is a container/scope (docker/systemd), its CLI may
+        // need DOCKER_HOST/DBUS from our env, so inheritance stays. For an
+        // unsandboxed OR bwrap run the `sh -c` executes on the host in the
+        // daemon's security context, so it must NOT inherit the daemon's
+        // environment — a daemon-held secret (git credential, CP token) must
+        // never be visible to agent-influenced shell. Clean env + the
+        // process-locating basics.
+        if !kind.inherits_daemon_env() {
             cmd.env_clear();
             if let Ok(path) = std::env::var("PATH") {
                 cmd.env("PATH", path);

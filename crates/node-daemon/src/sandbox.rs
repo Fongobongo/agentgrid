@@ -1,11 +1,12 @@
 //! Agent isolation (idea: sandcastle-style sandbox abstraction).
 //!
 //! A `Sandbox` wraps the command the node would run the agent as, so an agent
-//! can be confined to a container (Docker/Podman/microVM) or a systemd
-//! transient scope (cgroups v2) instead of sharing the node's full
-//! environment. The default `NoSandbox` runs the agent directly in the
-//! worktree (legacy behavior). Configured via `AGENTGRID_SANDBOX`
-//! (`none` | `docker` | `systemd`) and `AGENTGRID_SANDBOX_IMAGE`.
+//! can be confined to a container (Docker/Podman/microVM), a systemd
+//! transient scope (cgroups v2) or an unprivileged user namespace
+//! (bubblewrap, ADR 0022) instead of sharing the node's full environment. The
+//! default `NoSandbox` runs the agent directly in the worktree (legacy
+//! behavior). Configured via `AGENTGRID_SANDBOX`
+//! (`none` | `docker` | `systemd` | `bwrap`) and `AGENTGRID_SANDBOX_IMAGE`.
 //!
 //! `sandbox_command` returns the `(program, args)` to spawn: either the raw
 //! command, a hardened
@@ -40,6 +41,17 @@ pub enum SandboxKind {
     /// cgroup and the kernel enforces MemoryMax / CPUQuota / TasksMax. No
     /// container runtime required — the native Tier-1 isolation backend.
     Systemd,
+    /// Unprivileged namespace confinement via bubblewrap (ADR 0022).
+    ///
+    /// The two backends above have a hard prerequisite: docker needs a
+    /// container runtime, and a systemd scope needs a user manager plus root
+    /// for `runuser`. A node with neither — a plain VPS, a CI runner, Termux —
+    /// used to fall back to `None` and run the agent as a direct child of the
+    /// daemon with the host's filesystem, pid space and network. bwrap needs
+    /// only unprivileged user namespaces (default on Debian 12), so it gives
+    /// those hosts a mount/pid/net/ipc boundary without a runtime and without
+    /// privilege.
+    Bwrap,
 }
 
 impl SandboxKind {
@@ -52,8 +64,18 @@ impl SandboxKind {
         {
             "docker" | "podman" => SandboxKind::Docker,
             "systemd" | "systemd-scope" | "cgroups" => SandboxKind::Systemd,
+            "bwrap" | "bubblewrap" | "userns" => SandboxKind::Bwrap,
             _ => SandboxKind::None,
         }
+    }
+
+    /// True when the sandboxed child is a container/scope that starts from a
+    /// different environment and therefore needs the daemon's env forwarded
+    /// explicitly. `None` and `Bwrap` children run on the host and inherit the
+    /// spawn environment, so callers that build a clean env themselves
+    /// (`ProcessBackend::spawn`, the eval probe) must do so for them too.
+    pub fn inherits_daemon_env(self) -> bool {
+        matches!(self, SandboxKind::Docker | SandboxKind::Systemd)
     }
 }
 
@@ -410,6 +432,14 @@ pub fn sandbox_prefix(
             prefix.push(program.into());
             ("systemd-run".into(), prefix)
         }
+        // ADR 0022: bwrap already runs on the host, so `container_env` is
+        // inherited through the spawn environment (the backend hands it a
+        // clean env); only the egress-proxy URL is passed explicitly.
+        SandboxKind::Bwrap => {
+            let mut prefix = bwrap_head(workdir, network_mode, read_only_worktree);
+            prefix.push(program.into());
+            ("bwrap".into(), prefix)
+        }
     }
 }
 
@@ -481,6 +511,200 @@ pub fn effective_egress_isolated(mode: &str) -> bool {
         },
         other => other == "none",
     }
+}
+
+/// True when a bwrap attempt keeps the host network namespace.
+///
+/// bwrap can only do all-or-nothing networking (`--unshare-net`), so the
+/// mapping is coarser than docker's: `none` (and anything unrecognised, i.e.
+/// a task-supplied mode that is not one of the three documented ones) keeps
+/// the namespace unshared — strictly more isolated than promised, never less.
+/// `restricted` shares the host network ONLY when an egress-proxy URL is
+/// configured, because that proxy is then the filter; a host process reaches
+/// it by URL, not through a docker network, so `AGENTGRID_SANDBOX_EGRESS_NETWORK`
+/// is not required here. `unrestricted` (and the docker-flavoured operator
+/// spellings `bridge`/`host`) shares it.
+pub fn bwrap_shares_network(mode: &str) -> bool {
+    match mode {
+        "restricted" => egress_proxy_url().is_some(),
+        "unrestricted" | "bridge" | "host" => true,
+        _ => false,
+    }
+}
+
+/// The `bwrap … --` argv head for [`SandboxKind::Bwrap`]. `--unshare-all`
+/// gives a private user/pid/ipc/uts/cgroup namespace; the host root is bound
+/// read-only and the worktree is bound writable on top of it (bwrap applies
+/// binds in order, so the later bind shadows the read-only root).
+///
+/// No cgroup limits: `limits` and the `AGENTGRID_SANDBOX_{PIDS_LIMIT,MEMORY,
+/// CPUS}` knobs are docker/systemd-only, and the RSS budget poll in the
+/// supervisor still bounds the attempt. This is recorded in the heartbeat
+/// (`enforced_limits = false` for bwrap) rather than silently claimed.
+fn bwrap_head(
+    workdir: &std::path::Path,
+    network_mode: Option<&str>,
+    read_only_worktree: bool,
+) -> Vec<String> {
+    let raw = network_mode
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("AGENTGRID_SANDBOX_NETWORK").ok())
+        .unwrap_or_else(|| "none".to_string());
+    // Fail closed for TASK-supplied modes only (same rule as
+    // `docker_run_head`): an unknown string from an assignment payload must
+    // never widen egress. The operator env fallback stays trusted.
+    let net = if network_mode.is_some()
+        && !matches!(raw.as_str(), "none" | "restricted" | "unrestricted")
+    {
+        tracing::warn!(mode = %raw, "unknown task network_mode clamped to none");
+        "none".to_string()
+    } else {
+        raw
+    };
+    let wd = workdir.display().to_string();
+    let mut v = vec![
+        // No orphaned agent tree if the daemon dies, and no TIOCSTI injection
+        // back into the daemon's terminal.
+        "--die-with-parent".to_string(),
+        "--new-session".to_string(),
+        "--unshare-all".to_string(),
+    ];
+    if bwrap_shares_network(&net) {
+        v.push("--share-net".to_string());
+    }
+    v.extend(["--ro-bind".to_string(), "/".to_string(), "/".to_string()]);
+    v.extend([
+        "--dev".to_string(),
+        "/dev".to_string(),
+        "--proc".to_string(),
+        "/proc".to_string(),
+        "--tmpfs".to_string(),
+        "/tmp".to_string(),
+    ]);
+    // Plan 2.4 (#22a): a verifier's worktree is read-only — same mount, ro.
+    // Emitted AFTER the /tmp tmpfs so a worktree that happens to live under
+    // /tmp is not hidden by it (later binds win).
+    v.push(if read_only_worktree { "--ro-bind" } else { "--bind" }.to_string());
+    v.push(wd.clone());
+    v.push(wd.clone());
+    v.extend(["--chdir".to_string(), wd]);
+    v.extend(bwrap_run_as_prefix());
+    // Egress firewall parity with docker: a restricted attempt that kept the
+    // host network gets the proxy URL injected so the proxy's allowlist is
+    // what the agent actually talks to.
+    if net == "restricted" {
+        if let Some(proxy) = egress_proxy_url() {
+            for key in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
+                v.extend(["--setenv".to_string(), key.to_string(), proxy.clone()]);
+            }
+        }
+    }
+    v.push("--".to_string());
+    v
+}
+
+/// bwrap counterpart of [`valid_run_as_prefix`]: `bwrap --uid` takes numbers
+/// only (names are not resolved inside a fresh user namespace), so a named
+/// spec is refused at startup by [`validate_bwrap_run_as`] and simply never
+/// reaches here. Emitting `--uid` inside `--unshare-user` maps the calling
+/// user onto the target id, which is exactly the separation `runuser` gives
+/// the docker/systemd paths — without needing root.
+fn bwrap_run_as_prefix() -> Vec<String> {
+    let Some(spec) = run_as_spec().filter(|s| validate_bwrap_run_as(s).is_ok()) else {
+        return Vec::new();
+    };
+    let (uid, gid) = match spec.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (spec.as_str(), None),
+    };
+    let mut v = vec!["--uid".to_string(), uid.to_string()];
+    if let Some(g) = gid {
+        v.push("--gid".to_string());
+        v.push(g.to_string());
+    }
+    v
+}
+
+/// bwrap's form of `AGENTGRID_RUN_AS_USER`: `<uid>[:<gid>]`, numeric only,
+/// never 0. A named user (`agentgrid-worker`) is refused instead of being
+/// ignored — the daemon must not start believing it separated identities when
+/// it did not.
+pub fn validate_bwrap_run_as(spec: &str) -> anyhow::Result<()> {
+    let (uid, gid) = match spec.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (spec, None),
+    };
+    let uid: u32 = uid.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "AGENTGRID_RUN_AS_USER={spec:?}: AGENTGRID_SANDBOX=bwrap can only switch to a \
+             NUMERIC uid (bwrap --uid does not resolve names), e.g. 1001:1001 — use \
+             AGENTGRID_SANDBOX=docker or systemd for a named user"
+        )
+    })?;
+    if uid == 0 {
+        anyhow::bail!(
+            "AGENTGRID_RUN_AS_USER={spec:?}: running the attempt as uid 0 is not user \
+             separation — refusing"
+        );
+    }
+    if let Some(g) = gid {
+        g.parse::<u32>().map_err(|_| {
+            anyhow::anyhow!(
+                "AGENTGRID_RUN_AS_USER={spec:?}: group {g:?} must be numeric for \
+                 AGENTGRID_SANDBOX=bwrap"
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Startup probe for [`SandboxKind::Bwrap`]: the binary must resolve AND a
+/// trivial namespace must actually be creatable. `kernel.unprivileged_userns_clone=0`
+/// (some hardened kernels) or a seccomp policy that blocks `unshare` makes
+/// bwrap fail at exec time, which would otherwise surface as a per-attempt
+/// spawn error on every task. Returns the `bwrap --version` line on success.
+pub async fn probe_bwrap() -> anyhow::Result<Option<String>> {
+    if resolve_binary("bwrap").is_none() {
+        return Ok(None);
+    }
+    let out = tokio::process::Command::new("bwrap")
+        .args([
+            "--die-with-parent",
+            "--unshare-all",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "true",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "bwrap is installed but cannot create a user namespace ({}): enable \
+             unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1) or \
+             use AGENTGRID_SANDBOX=docker",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let v = tokio::process::Command::new("bwrap")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Ok(Some(v.unwrap_or_else(|| "unknown".to_string())))
 }
 
 /// Accepts `IP/len` (v4 or v6) and returns the parsed network address + prefix
@@ -807,6 +1031,14 @@ pub fn sandbox_command(
             out.extend(args.iter().cloned());
             ("systemd-run".into(), out)
         }
+        // ADR 0022: same builder as `sandbox_prefix`; the args follow the
+        // `--` terminator so a program name can never be read as a bwrap flag.
+        SandboxKind::Bwrap => {
+            let mut out = bwrap_head(workdir, network_mode, read_only_worktree);
+            out.push(program.to_string());
+            out.extend(args.iter().cloned());
+            ("bwrap".into(), out)
+        }
     }
 }
 
@@ -949,7 +1181,10 @@ pub fn validate_network_mode(net: &str) -> anyhow::Result<()> {
             );
         }
         anyhow::bail!(
-            "AGENTGRID_SANDBOX_NETWORK={net}: egress allowlist is not enforceable via the              docker CLI (no native per-CIDR egress filter); refusing to run with a silently              unenforced allowlist. Use none/bridge/host, or wire an egress proxy and pass              its network"
+            "AGENTGRID_SANDBOX_NETWORK={net}: egress allowlist is not enforceable by the \
+             sandbox backends (docker has no native per-CIDR egress filter; bwrap can only \
+             unshare the whole netns); refusing to run with a silently unenforced allowlist. \
+             Use none/bridge/host, or wire an egress proxy and pass its network"
         );
     }
     Ok(())
@@ -2115,5 +2350,225 @@ mod tests {
             );
         }
         std::env::remove_var("AGENTGRID_SANDBOX");
+    }
+
+    // ---- ADR 0022: bubblewrap backend -------------------------------------
+
+    #[test]
+    fn sandbox_kind_parses_bwrap_aliases() {
+        let _g = ENV_LOCK.lock().unwrap();
+        for v in ["bwrap", "BWRAP", " bubblewrap ", "userns"] {
+            std::env::set_var("AGENTGRID_SANDBOX", v);
+            assert_eq!(SandboxKind::from_env(), SandboxKind::Bwrap, "{v}");
+        }
+        std::env::remove_var("AGENTGRID_SANDBOX");
+    }
+
+    /// The namespace flags are the whole point of the backend: without
+    /// `--unshare-all` the agent shares the host pid/ipc/uts namespaces and
+    /// the "sandbox" is a bind-mount decoration.
+    #[test]
+    fn bwrap_unshares_every_namespace_and_binds_the_worktree() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        let (prog, args) = sandbox_command(
+            SandboxKind::Bwrap,
+            "claude",
+            &["--acp".into()],
+            std::path::Path::new("/w"),
+            Some("none"),
+            false,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(prog, "bwrap");
+        for flag in ["--die-with-parent", "--new-session", "--unshare-all"] {
+            assert!(args.contains(&flag.to_string()), "missing {flag}: {args:?}");
+        }
+        // Read-only host root, writable worktree shadowing it, then the
+        // private /tmp, /dev and /proc.
+        let root = args.windows(3).position(|w| w[0] == "--ro-bind").unwrap();
+        assert_eq!(&args[root..root + 3], ["--ro-bind", "/", "/"]);
+        let wd = args.windows(3).position(|w| w[0] == "--bind").unwrap();
+        assert_eq!(&args[wd..wd + 3], ["--bind", "/w", "/w"]);
+        assert!(wd > root, "the worktree bind must come after the ro root");
+        assert!(args.windows(2).any(|w| w == ["--chdir", "/w"]));
+        assert!(args.windows(2).any(|w| w == ["--proc", "/proc"]));
+        assert!(args.windows(2).any(|w| w == ["--dev", "/dev"]));
+        assert!(args.windows(2).any(|w| w == ["--tmpfs", "/tmp"]));
+        // `--` terminates flag parsing; program + args follow it verbatim.
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(&args[sep + 1..], ["claude", "--acp"]);
+    }
+
+    #[test]
+    fn bwrap_network_mode_decides_whether_net_is_shared() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        let shared = |mode: &str| {
+            let (_, a) = sandbox_prefix(
+                SandboxKind::Bwrap,
+                std::path::Path::new("/w"),
+                "c",
+                Some(mode),
+                false,
+                None,
+                &[],
+                None,
+            );
+            a.contains(&"--share-net".to_string())
+        };
+        // `none` keeps the netns unshared; `unrestricted` shares it.
+        assert!(!shared("none"));
+        assert!(shared("unrestricted"));
+        // `restricted` shares only when a filtering proxy is configured —
+        // a shared net with no filter is unfiltered internet, not a sandbox.
+        assert!(!shared("restricted"));
+        std::env::set_var("AGENTGRID_SANDBOX_EGRESS_PROXY", "http://egress:3128");
+        assert!(shared("restricted"));
+        std::env::remove_var("AGENTGRID_SANDBOX_EGRESS_PROXY");
+        // An unknown TASK mode must never widen egress.
+        assert!(!shared("host"));
+    }
+
+    #[test]
+    fn bwrap_restricted_mode_injects_the_proxy_url() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_EGRESS_PROXY", "http://egress:3128");
+        let (_, a) = sandbox_prefix(
+            SandboxKind::Bwrap,
+            std::path::Path::new("/w"),
+            "c",
+            Some("restricted"),
+            false,
+            None,
+            &[],
+            None,
+        );
+        assert!(a.windows(3).any(|w| w == ["--setenv", "HTTPS_PROXY", "http://egress:3128"]));
+        // ... and never for a `none` attempt.
+        let (_, a) = sandbox_prefix(
+            SandboxKind::Bwrap,
+            std::path::Path::new("/w"),
+            "c",
+            Some("none"),
+            false,
+            None,
+            &[],
+            None,
+        );
+        assert!(!a.iter().any(|x| x == "--setenv"));
+    }
+
+    #[test]
+    fn bwrap_read_only_worktree_uses_a_ro_bind() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        let (_, a) = sandbox_prefix(
+            SandboxKind::Bwrap,
+            std::path::Path::new("/w"),
+            "c",
+            Some("none"),
+            true,
+            None,
+            &[],
+            None,
+        );
+        // Two ro-binds now: the host root and the worktree.
+        let ro: Vec<usize> = a
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.as_str() == "--ro-bind")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(ro.len(), 2, "{a:?}");
+        assert_eq!(&a[ro[1]..ro[1] + 3], ["--ro-bind", "/w", "/w"]);
+        assert!(!a.iter().any(|x| x == "--bind"));
+    }
+
+    #[test]
+    fn bwrap_prefix_and_command_agree() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        let (p1, a1) = sandbox_prefix(
+            SandboxKind::Bwrap,
+            std::path::Path::new("/w"),
+            "claude",
+            Some("none"),
+            false,
+            None,
+            &[],
+            None,
+        );
+        let (p2, a2) = sandbox_command(
+            SandboxKind::Bwrap,
+            "claude",
+            &["--acp".into()],
+            std::path::Path::new("/w"),
+            Some("none"),
+            false,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(p1, p2);
+        // `sandbox_prefix` ends with the program; `sandbox_command` continues
+        // with the args after it — so the heads must be identical.
+        assert_eq!(a1.last().map(String::as_str), Some("claude"));
+        assert_eq!(a2[..a2.len() - 2], a1[..a1.len() - 1]);
+        assert_eq!(&a2[a2.len() - 2..], ["claude", "--acp"]);
+    }
+
+    #[test]
+    fn bwrap_run_as_accepts_numbers_and_refuses_names_and_root() {
+        assert!(validate_bwrap_run_as("1001").is_ok());
+        assert!(validate_bwrap_run_as("1001:1001").is_ok());
+        for bad in ["worker", "worker:worker", "0", "0:0", "1001:x", ""] {
+            assert!(
+                validate_bwrap_run_as(bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_RUN_AS_USER", "1001:1002");
+        let (_, a) = sandbox_prefix(
+            SandboxKind::Bwrap,
+            std::path::Path::new("/w"),
+            "c",
+            Some("none"),
+            false,
+            None,
+            &[],
+            None,
+        );
+        assert!(a.windows(2).any(|w| w == ["--uid", "1001"]));
+        assert!(a.windows(2).any(|w| w == ["--gid", "1002"]));
+        // A named spec never reaches the argv (startup refuses it instead).
+        std::env::set_var("AGENTGRID_RUN_AS_USER", "worker");
+        let (_, a) = sandbox_prefix(
+            SandboxKind::Bwrap,
+            std::path::Path::new("/w"),
+            "c",
+            Some("none"),
+            false,
+            None,
+            &[],
+            None,
+        );
+        assert!(!a.iter().any(|x| x == "--uid"));
+    }
+
+    #[test]
+    fn only_container_backends_inherit_the_daemon_env() {
+        // The eval probe and `ProcessBackend::spawn` key the clean-env
+        // decision off this: a bwrap child runs on the host, so inheriting
+        // the daemon's secrets would defeat the sandbox.
+        assert!(!SandboxKind::None.inherits_daemon_env());
+        assert!(!SandboxKind::Bwrap.inherits_daemon_env());
+        assert!(SandboxKind::Docker.inherits_daemon_env());
+        assert!(SandboxKind::Systemd.inherits_daemon_env());
     }
 }

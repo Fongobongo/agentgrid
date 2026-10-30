@@ -47,7 +47,9 @@ AGENTGRID_UNSAFE_UNATTENDED=1 AGENTGRID_I_UNDERSTAND_UNSAFE=1
 
 With the ack present, `adapter-opencode` adds `--auto`; without it, the node
 runs in safe mode and the UI flags it (`unsafe_active` badge). Prefer a
-sandbox (Docker/landlock) for anything but throwaway prompts.
+sandbox for anything but throwaway prompts: `AGENTGRID_SANDBOX=docker` (or
+`systemd` for a cgroup scope, or `bwrap` on a host with no runtime and no root
+— ADR 0022).
 
 ## Concurrency: one opencode per host
 

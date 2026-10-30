@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`AGENTGRID_SANDBOX=bwrap` — an unprivileged namespace backend** (ADR 0022).
+  Both existing backends have a prerequisite: `docker` needs a runtime, and a
+  `systemd` scope needs a user manager plus root for `runuser`. A node with
+  neither silently ran the agent as a plain child of the daemon, with the
+  host's filesystem, pid space and network — the fallback was "no boundary at
+  all". bubblewrap needs only unprivileged user namespaces, so
+  `apt install bubblewrap` now buys a mount/pid/ipc/net boundary on a VPS, a CI
+  runner or a dev box. The agent runs under `--unshare-all`, the host root is
+  bind-mounted read-only with the worktree writable on top, `/tmp` is a tmpfs,
+  and `--die-with-parent` means a hard daemon crash leaves nothing behind.
+  - **Network is all-or-nothing:** `none` keeps the netns unshared,
+    `unrestricted` shares it, `restricted` shares it **only** when an egress
+    proxy URL is configured (the proxy is the filter) and then gets
+    `HTTP(S)_PROXY` injected; an unknown task-supplied mode clamps to unshared.
+  - **`AGENTGRID_RUN_AS_USER` must be numeric** (`1001:1001`) — `bwrap --uid`
+    does not resolve names, so a named spec is refused at startup instead of
+    being silently ignored.
+  - **No cgroup limits** (`ResourceLimits` stays docker/systemd); the heartbeat
+    reports `sandbox_backend = "bwrap"` with `enforced_limits = false` rather
+    than over-claiming, and the RSS budget poll still bounds the attempt.
+  - **Fail-closed startup:** the probe creates a real namespace, so a kernel
+    with `unprivileged_userns_clone=0` (or a seccomp policy blocking `unshare`)
+    stops the daemon at boot instead of failing every attempt.
+  - The eval probe now keys its clean-env decision off
+    `SandboxKind::inherits_daemon_env()` — a bwrap child runs on the host, so
+    it must not inherit the daemon's secrets.
+- **The skill scanner sees through encoded payloads** (ADR 0024).
+  `scan_content` was a regex catalog over the literal text, so a `SKILL.md`
+  that shipped its payload as a bare base64/hex/percent blob produced "no
+  findings" — while the agent, or any tool the skill drives, decoded it at run
+  time. The scanner now decodes every encoded-looking run and runs the same
+  catalog over the decoded text, reporting `<pattern>_encoded` at the offset of
+  the blob in the original document (a reviewer is pointed at something they
+  can find in the file). Bounded on purpose, since this runs on the
+  registration path: ≥ 24-byte runs, ≤ 64 KiB per blob, ≤ 32 blobs, 2 layers,
+  and decoded bytes must read as text — a benign encoded example still reports
+  nothing.
+
 ### Changed
 
 - **A failed build no longer publishes the node-daemon image.** `node-image`
