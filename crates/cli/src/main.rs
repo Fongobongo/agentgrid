@@ -13,6 +13,7 @@ use index::IndexArgs;
 
 mod autopilot;
 mod cluster;
+mod eval;
 mod index;
 mod nodes;
 mod phase;
@@ -83,6 +84,8 @@ enum AgCommand {
     },
     /// Manage the CP-managed egress proxy pool pushed to nodes.
     Proxy(registry::ProxyArgs),
+    /// Run a fixture of eval cases and report pass rate / tokens / cost.
+    Eval(eval::EvalArgs),
     /// CP-managed adapter env (custom endpoints/keys, pushed to nodes).
     AdapterEnv(registry::AdapterEnvArgs),
     /// Start the control plane (standalone binary).
@@ -645,6 +648,7 @@ async fn main() -> Result<()> {
         AgCommand::Profiles(a) => registry::cmd_profiles(&client, &base, a).await,
         AgCommand::Watch { interval, tasks } => cmd_watch(&client, &base, interval, tasks).await,
         AgCommand::Proxy(a) => registry::cmd_proxy(&client, &base, a).await,
+        AgCommand::Eval(a) => eval::cmd_eval(&client, &base, a, cli.json).await,
         AgCommand::AdapterEnv(a) => registry::cmd_adapter_env(&client, &base, a).await,
         AgCommand::Server(a) => cmd_server_start(a),
         AgCommand::Cluster(a) => cluster::cmd_cluster(&client, &base, cli.json, a).await,

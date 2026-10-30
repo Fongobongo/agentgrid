@@ -81,6 +81,30 @@
   and decoded bytes must read as text — a benign encoded example still reports
   nothing.
 
+- **`ag eval` measures an agent change instead of describing it.** `evals.rs`
+  is a self-healing *validation* loop (pinned commands, tamper-checked) and
+  produced no score, so "did this change make the agent worse, or just
+  different?" had no answer. A fixture of cases now runs as ordinary tasks —
+  same `POST /v1/tasks`, so retries, budgets and validation feedback apply
+  unchanged — and reports pass rate, tokens and cost.
+  - **A case is a task:** the score cannot be better than production because
+    the harness took a shortcut.
+  - **`adapter` is required** (fixture level, per-case override). Defaulting it
+    to `mock` would report a pass rate for a run that never happened.
+  - **Tokens and cost are the budget's own numbers** — summed from the
+    per-event `metric` increments, paged by `ingest_id` so a chatty attempt is
+    not truncated at one page and under-billed on exactly the runs that cost
+    the most.
+  - **`--baseline` diffs a previous run:** a lost pass, a case dropped from the
+    fixture (the cheapest way to "improve" a pass rate) and a cost rise above
+    25 % are each a non-zero exit. `--json` prints one document that doubles as
+    the next `--baseline`, and progress goes to stderr so stdout stays
+    parseable.
+  - `expect: "fail"` pins a known limitation, so a fixture records it instead
+    of quietly dropping the case. Covered by `tests/e2e/run-eval.sh`
+    (two mock cases, exact token/cost assertions, a self-baseline and a lost
+    pass).
+
 ### Changed
 
 - **A failed build no longer publishes the node-daemon image.** `node-image`

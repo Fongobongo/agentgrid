@@ -389,6 +389,11 @@ jobs:
       # identical uncapped twin succeeds. Process-based, no docker, no LLM.
       - name: per-task cost ceilings
         run: bash tests/e2e/run-task-budget.sh
+      # Eval harness: a fixture of two mock cases scores 2/2 with exact
+      # tokens/cost, a self-baseline reports no regression, and a case that
+      # used to pass now fails the run. Process-based, no docker, no LLM.
+      - name: eval harness (fixture in, score + baseline diff out)
+        run: bash tests/e2e/run-eval.sh
       # One-button assembly: POST /v1/assembly with a goal → plan-stub
       # architect → auto-approve → workers → system collector. No LLM.
       - name: one-button assembly (goal in, merged project out)

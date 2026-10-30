@@ -99,6 +99,49 @@ is idempotent (`unchanged` / `replaced`). Exits 1 when anything was rejected.
 Importing is onboarding, not a trust decision: the skill still needs
 `ag skills trust <name> --source user` before an attempt will load it.
 
+## Measuring an agent change (`ag eval`)
+
+`crates/node-daemon/src/evals.rs` validates an attempt against pinned commands;
+it does not tell you whether a change made the agent *better*. `ag eval` does:
+a fixture of cases runs as ordinary tasks and comes back as a score.
+
+```json
+{
+  "adapter": "opencode",
+  "cases": [
+    { "name": "rename-helper", "repository": "demo",
+      "prompt": "Rename parse_cidr to parse_network in net.rs",
+      "base_commit": "abc1234", "validation_command": "cargo test",
+      "expect": "pass" },
+    { "name": "known-limitation", "repository": "demo",
+      "prompt": "…", "expect": "fail" }
+  ]
+}
+```
+
+```bash
+ag eval fixture.json                      # PASS/FAIL per case + totals
+ag eval fixture.json --json > base.json    # also a valid --baseline input
+ag eval fixture.json --baseline base.json  # exit 1 on a regression
+```
+
+Three things are deliberate:
+
+- **A case *is* a task.** It goes through `POST /v1/tasks`, so retries,
+  budgets, validation feedback and the scheduler apply unchanged — a score
+  cannot be better than production because it took a shortcut.
+- **`adapter` is required** (fixture level, overridable per case). Defaulting
+  it — to `mock`, say — would report a pass rate for something that never ran.
+- **Tokens and cost are the budget's own numbers**: `metric` events carry
+  per-event increments, so an eval cannot disagree with the bill.
+
+`--baseline` reports a lost pass, a case that disappeared from the run, and a
+cost increase above 25 % (below that is run-to-run noise). Each is a non-zero
+exit; the JSON document also carries a `diffs` array. `expect: "fail"` pins a
+known limitation so a fixture records it instead of quietly dropping it.
+Fixture JSON is the input format — nothing in a fixture can execute code on the
+control plane.
+
 ## Troubleshooting (learned the hard way)
 
 | Symptom | Cause / fix |
