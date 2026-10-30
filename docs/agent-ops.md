@@ -79,6 +79,26 @@ remote can reach the CP's listen address, and launch detached
 (`setsid nohup … </dev/null &`). Use `AGENTGRID_ALLOW_ROOT=1` when running
 as root.
 
+## Skills: importing a pack
+
+The node discovers `SKILL.md` files under `<worktree>/.agents/skills` (project
+tier), `~/.agents/skills` (user tier) and its managed root, then keeps only the
+ones the control plane trusts (`ag skills list`). To install a pack — a repo
+checkout, a published collection — into the user tier:
+
+```bash
+ag skills import ./some-skill-pack            # -> ~/.agents/skills/<name>/SKILL.md
+ag skills import ./pack --dest /srv/skills    # explicit root
+ag skills import ./pack --force               # install despite a Critical finding
+```
+
+The scanner gates the import (a skill with a `Critical` finding is refused, and
+the findings are printed), the skill name is restricted to `[A-Za-z0-9._-]` so
+the frontmatter cannot steer the write outside the destination, and re-running
+is idempotent (`unchanged` / `replaced`). Exits 1 when anything was rejected.
+Importing is onboarding, not a trust decision: the skill still needs
+`ag skills trust <name> --source user` before an attempt will load it.
+
 ## Troubleshooting (learned the hard way)
 
 | Symptom | Cause / fix |

@@ -369,6 +369,9 @@ pub fn swarms_to_template(
 mod bundle;
 pub use bundle::*;
 
+mod import;
+pub use import::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;

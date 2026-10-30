@@ -30,6 +30,24 @@
   - The eval probe now keys its clean-env decision off
     `SandboxKind::inherits_daemon_env()` — a bwrap child runs on the host, so
     it must not inherit the daemon's secrets.
+- **`ag skills import` installs a pack of `SKILL.md` files.** Discovery already
+  read `<root>/<name>/SKILL.md` and the control plane already had a trust
+  ledger, but nothing in between turned a directory of skills (a repo checkout,
+  a published pack) into that layout — onboarding meant copying directories by
+  hand and hoping the frontmatter was right. Three properties matter more than
+  convenience here:
+  - **the scanner gates the import**: a skill with a `Critical` finding is
+    refused and the findings are printed; `--force` is the explicit override,
+    and skills are instructions an agent follows, so "install first, review
+    later" is the wrong default;
+  - **the name cannot escape the destination**: it comes from the imported
+    file's own frontmatter (untrusted input), so it is restricted to
+    `[A-Za-z0-9._-]` — `../../etc` is refused, not joined;
+  - **re-running is idempotent**: unchanged content writes nothing and reports
+    `unchanged`, changed content reports `replaced`, so a provisioning script
+    can run it every boot.
+  Local-only (no control plane): the node discovers the installed skills on its
+  next attempt and the trust ledger still decides whether they activate.
 - **The skill scanner sees through encoded payloads** (ADR 0024).
   `scan_content` was a regex catalog over the literal text, so a `SKILL.md`
   that shipped its payload as a bare base64/hex/percent blob produced "no

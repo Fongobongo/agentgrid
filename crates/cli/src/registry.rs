@@ -111,6 +111,22 @@ pub(crate) enum SkillsAction {
         /// Path to a SKILL.md file or a skill directory to scan.
         path: String,
     },
+    /// Install a directory of `SKILL.md` files into a discovery root.
+    ///
+    /// The scanner gates the import: a skill with a Critical finding is
+    /// refused unless `--force`, and the destination never leaves the root
+    /// (names are restricted to [A-Za-z0-9._-]). Re-running is idempotent.
+    Import {
+        /// Pack root, a single skill directory, or one SKILL.md file.
+        path: String,
+        /// Discovery root to install into [default: $AGENTGRID_SKILLS_DIR or
+        /// ~/.agents/skills — the "user" tier the node already scans].
+        #[arg(long)]
+        dest: Option<String>,
+        /// Install even when the scanner reports a Critical finding.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Args)]
@@ -496,10 +512,81 @@ pub(crate) async fn cmd_skills(client: &reqwest::Client, base: &str, a: SkillsAr
             set_skill_trust(client, base, &a.name, &a.source, "untrust").await
         }
         SkillsAction::Scan { path } => cmd_skill_scan(&path).await,
+        SkillsAction::Import { path, dest, force } => cmd_skill_import(&path, dest, force),
     }
 }
 
-/// Plan 2.2 (#5): `ag skill scan <path>` — dry-run static scan of a skill
+/// `ag skills import <path> [--dest DIR] [--force]` — install a pack of
+/// `SKILL.md` files into a discovery root.
+///
+/// Local-only (no control plane involved): the node discovers the installed
+/// skills on its next attempt and the trust ledger decides whether they
+/// activate, so an import is an *onboarding* step, not a trust decision.
+/// Exits 1 when anything was rejected, so a provisioning script notices.
+pub(crate) fn cmd_skill_import(path: &str, dest: Option<String>, force: bool) -> Result<()> {
+    let src = std::path::Path::new(path);
+    if !src.exists() {
+        anyhow::bail!("path not found: {path}");
+    }
+    let dest = match dest {
+        Some(d) => std::path::PathBuf::from(d),
+        None => default_skills_root()?,
+    };
+    let report =
+        agentgrid_skills::import_skills(src, &dest, force).context("skill import failed")?;
+    println!("imported into {}", dest.display());
+    for s in &report.imported {
+        println!(
+            "  {} {:<24} {}",
+            if s.replaced { "replaced" } else { "installed" },
+            s.name,
+            &s.hash[..12.min(s.hash.len())]
+        );
+    }
+    for s in &report.unchanged {
+        println!(
+            "  unchanged {:<23} {}",
+            s.name,
+            &s.hash[..12.min(s.hash.len())]
+        );
+    }
+    for s in &report.rejected {
+        println!("  REJECTED {}: {}", s.path.display(), s.reason);
+    }
+    for d in &report.diagnostics {
+        println!("  note: {d}");
+    }
+    if report.imported.is_empty() && report.unchanged.is_empty() && report.rejected.is_empty() {
+        println!("  nothing to import");
+    }
+    if !report.is_clean() {
+        anyhow::bail!(
+            "{} skill(s) rejected; nothing was installed for them",
+            report.rejected.len()
+        );
+    }
+    Ok(())
+}
+
+/// Where `ag skill import` installs by default: `$AGENTGRID_SKILLS_DIR`, else
+/// the user tier the node already scans (`~/.agents/skills`). The project tier
+/// is deliberately not the default — importing into a repo would make the
+/// skills part of someone else's checkout.
+fn default_skills_root() -> Result<std::path::PathBuf> {
+    if let Some(d) = std::env::var_os("AGENTGRID_SKILLS_DIR") {
+        if !d.is_empty() {
+            return Ok(std::path::PathBuf::from(d));
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("no HOME/USERPROFILE; pass --dest explicitly"))?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".agents")
+        .join("skills"))
+}
+
+/// Plan 2.2 (#5): `ag skills scan <path>` — dry-run static scan of a skill
 /// file or directory. Walks `SKILL.md` files (or scans the given file
 /// directly) and prints findings; exits 1 when any critical pattern trips.
 pub(crate) async fn cmd_skill_scan(path: &str) -> Result<()> {
