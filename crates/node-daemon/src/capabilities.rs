@@ -115,20 +115,28 @@ pub async fn probe_cluster_adapter(executor_bin: &str, runtime_bin: &str) -> Ada
     let runtime_present = resolve_in_path(runtime_bin).is_some();
     let executor_present = resolve_in_path(executor_bin).is_some();
     let executor_version = if executor_present {
-        tokio::process::Command::new(executor_bin)
+        // Audit X-B10 applies here too: the simple probe above is bounded, and
+        // an unbounded `--version` on a wedged executor stalls the sequential
+        // heartbeat loop just as effectively. `sh`/`cmd` under a Windows test
+        // harness were the reproduction — the whole suite sat on this call.
+        let probe = tokio::process::Command::new(executor_bin)
             .arg("--version")
-            .output()
-            .await
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
+            .output();
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
+            Ok(o) => o.ok(),
+            Err(_) => {
+                tracing::warn!(bin = %executor_bin, "executor --version probe timed out");
+                None
+            }
+        };
+        output.filter(|o| o.status.success()).map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
     } else {
         None
     };

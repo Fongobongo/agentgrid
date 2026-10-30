@@ -154,6 +154,15 @@
   carry the same suffix (`0.6.0-rc1`) — the tag is the claim, the tree is the
   evidence.
 
+### Fixed
+
+- **The cluster-executor capability probe is bounded, like the simple one.**
+  `probe_cluster_adapter` ran the executor's `--version` with no timeout, so a
+  wedged binary stalled the sequential heartbeat loop — the exact failure Audit
+  X-B10 fixed for `probe_adapter`, which is why the two now look alike. On a
+  Windows dev host the unbounded call made the node-daemon suite sit on
+  `capabilities::tests` for over a minute per test.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added
