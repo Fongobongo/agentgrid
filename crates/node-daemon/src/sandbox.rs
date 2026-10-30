@@ -437,7 +437,16 @@ pub fn sandbox_prefix(
         // clean env); only the egress-proxy URL is passed explicitly.
         SandboxKind::Bwrap => {
             let mut prefix = bwrap_head(workdir, network_mode, read_only_worktree);
-            prefix.push(program.into());
+            // The child runs with a curated environment, so a bare program
+            // name has no PATH to resolve against *inside* the namespace:
+            // `bwrap: execvp adapter-mock: No such file or directory`. Resolve
+            // it on the host, where PATH is the daemon's, and hand bwrap the
+            // path. Found on a real Debian node — the unit tests build the
+            // argument vector and never execute it.
+            let program = crate::capabilities::resolve_in_path(program)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| program.to_string());
+            prefix.push(program);
             ("bwrap".into(), prefix)
         }
     }
@@ -1042,7 +1051,14 @@ pub fn sandbox_command(
         // `--` terminator so a program name can never be read as a bwrap flag.
         SandboxKind::Bwrap => {
             let mut out = bwrap_head(workdir, network_mode, read_only_worktree);
-            out.push(program.to_string());
+            // Same reason as `sandbox_command`: the child's PATH is the
+            // curated one, so a bare name does not resolve inside the
+            // namespace. Resolve it here, where the daemon's PATH applies.
+            out.push(
+                crate::capabilities::resolve_in_path(program)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| program.to_string()),
+            );
             out.extend(args.iter().cloned());
             ("bwrap".into(), out)
         }
@@ -2579,5 +2595,36 @@ mod tests {
         assert!(!SandboxKind::Bwrap.inherits_daemon_env());
         assert!(SandboxKind::Docker.inherits_daemon_env());
         assert!(SandboxKind::Systemd.inherits_daemon_env());
+    }
+
+    /// A bwrap child gets the curated environment, not the daemon's, so a bare
+    /// program name has no PATH to resolve against inside the namespace. On a
+    /// real Debian node the first bwrap attempt died with
+    /// `bwrap: execvp adapter-mock: No such file or directory` — the argument
+    /// vector looked right, which is why the unit tests never saw it.
+    #[test]
+    fn bwrap_hands_over_the_host_path_not_a_bare_name() {
+        let known = if cfg!(windows) { "cmd" } else { "sh" };
+        let (bin, args) = sandbox_command(
+            SandboxKind::Bwrap,
+            known,
+            &[],
+            std::path::Path::new("/work"),
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(bin, "bwrap");
+        let program = args.last().expect("program missing");
+        assert!(
+            std::path::Path::new(program).is_absolute(),
+            "program {program:?} is not absolute — execvp inside the sandbox has no PATH"
+        );
+        assert!(
+            !args.iter().any(|a| a == known),
+            "bare name {known:?} still in the argument vector"
+        );
     }
 }
