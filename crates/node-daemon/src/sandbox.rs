@@ -446,10 +446,36 @@ pub fn sandbox_prefix(
             let program = crate::capabilities::resolve_in_path(program)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| program.to_string());
+            bwrap_rebind_if_masked(&mut prefix, &program);
             prefix.push(program);
             ("bwrap".into(), prefix)
         }
     }
+}
+
+/// Re-expose `program` when the sandbox's own mounts would hide it.
+///
+/// `bwrap_head` replaces `/tmp` with a tmpfs, so an adapter that lives under
+/// `/tmp` exists on the host and is invisible inside the namespace — the
+/// symptom is `execvp /tmp/…/adapter-mock: No such file or directory` for a
+/// file that is right there. A later bind wins over the tmpfs, so binding the
+/// binary back (read-only) is enough, and it costs nothing when the adapter
+/// sits in a normal install prefix.
+fn bwrap_rebind_if_masked(prefix: &mut Vec<String>, program: &str) {
+    let masked = ["/tmp/", "/dev/", "/proc/"];
+    if !masked.iter().any(|m| program.starts_with(m)) {
+        return;
+    }
+    // Only a real file can be bound; a bare name or a missing path is left to
+    // fail with bwrap's own message.
+    if !std::path::Path::new(program).is_file() {
+        return;
+    }
+    prefix.extend([
+        "--ro-bind".to_string(),
+        program.to_string(),
+        program.to_string(),
+    ]);
 }
 
 /// True when `net` is an `allowlist:` spec and every CIDR in it parses.
@@ -1054,11 +1080,11 @@ pub fn sandbox_command(
             // Same reason as `sandbox_command`: the child's PATH is the
             // curated one, so a bare name does not resolve inside the
             // namespace. Resolve it here, where the daemon's PATH applies.
-            out.push(
-                crate::capabilities::resolve_in_path(program)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| program.to_string()),
-            );
+            let program = crate::capabilities::resolve_in_path(program)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| program.to_string());
+            bwrap_rebind_if_masked(&mut out, &program);
+            out.push(program);
             out.extend(args.iter().cloned());
             ("bwrap".into(), out)
         }
@@ -2584,6 +2610,39 @@ mod tests {
             None,
         );
         assert!(!a.iter().any(|x| x == "--uid"));
+    }
+
+    /// The second half of the bwrap path bug: `bwrap_head` replaces `/tmp`
+    /// with a tmpfs, so an adapter installed under `/tmp` is present on the
+    /// host and gone inside the namespace. The rebind is only emitted for a
+    /// real file under a masked path — everything else keeps the plain vector.
+    #[test]
+    fn bwrap_rebinds_only_a_real_program_under_a_masked_path() {
+        let mut v = Vec::new();
+        bwrap_rebind_if_masked(&mut v, "/usr/local/bin/adapter-mock");
+        assert!(v.is_empty(), "unexpected bind for an unmasked path: {v:?}");
+
+        let mut v = Vec::new();
+        bwrap_rebind_if_masked(&mut v, "/tmp/nope/not-a-file");
+        assert!(v.is_empty(), "bound a path that does not exist: {v:?}");
+
+        let dir = std::env::temp_dir();
+        let real = dir.join("agentgrid-rebind-probe");
+        std::fs::write(&real, b"x").expect("write probe");
+        let mut v = Vec::new();
+        bwrap_rebind_if_masked(&mut v, &real.display().to_string());
+        // Windows temp is not under /tmp, so this only asserts on unix.
+        if real.display().to_string().starts_with("/tmp/") {
+            assert_eq!(
+                v,
+                vec![
+                    "--ro-bind".to_string(),
+                    real.display().to_string(),
+                    real.display().to_string()
+                ]
+            );
+        }
+        let _ = std::fs::remove_file(&real);
     }
 
     #[test]
