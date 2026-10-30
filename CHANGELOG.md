@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-30
+
 ### Added
 
 - **A lost attempt can be retried automatically, on a different node.** A node
@@ -183,6 +185,14 @@
 
 ### Changed
 
+- **`actions/checkout` moved from v4 to v5.** v4 targets the Node 20 action
+  runtime, which GitHub now force-runs on Node 24 and warns about on every job
+  that uses it, so the pin only worked by grace of that override. v5 is the
+  same action compiled for Node 24 (needs runner >= 2.327.1, which every
+  GitHub-hosted image has). v6 — credentials persisted to a separate file —
+  and v7 — fork checkouts blocked under `pull_request_target` /
+  `workflow_run`, ESM rewrite — are behaviour changes and stay with
+  Dependabot rather than riding along in a release commit.
 - **A refused assignment retries the task on another node instead of killing
   it.** An `ack` with `ok=false` used to fail the task outright, because a
   requeue would hot-loop: the refusal frees a slot, the scheduler refills it
