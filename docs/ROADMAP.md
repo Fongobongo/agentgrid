@@ -55,7 +55,7 @@ item is finished — this table is the single place the queue lives.
 | 5 | Symbol index | queued | no `tree-sitter` dependency; retrieval is BM25 over logs and `FTS5` over events, so "where is `foo` defined" is unanswerable | codegraph, codebase-memory-mcp | new `crates/index` | L |
 | 6 | OTLP traces | queued | `otel.rs` exports Prometheus metrics only and says OTLP is "intentionally omitted"; there is no span per attempt/step, so a slow attempt cannot be decomposed | openllmetry | `crates/control-plane/src/otel.rs` | M |
 | 7 | Eval harness (pass rate / tokens / cost) | queued | `evals.rs` is a *self-healing validation* loop (pinned commands, tamper-checked), not a measurement harness: no fixture repo, no score, no regression baseline | workshop, nitpicker, deepteam | `crates/cli` + `tests/e2e` | M |
-| 8 | Diff review inside approvals | queued | `Approvals.tsx` shows the pending tool call only; the diff lives in `TaskDetails.tsx`, so approving a push means leaving the queue | plannotator | `web/src/components/Approvals.tsx` | S |
+| 8 | Diff review inside approvals | ✅ shipped (`PatchView` + row toggle, unreleased) | `Approvals.tsx` showed the pending tool call only; the diff lived in `TaskDetails.tsx`, so approving a push meant leaving the queue | plannotator | `web/src/components/Approvals.tsx` | S |
 | 9 | Sessions in git | queued | attempt transcripts live in the CP DB only; nothing writes them next to the code they explain | entireio/cli (git notes) | `crates/node-daemon/src/github.rs` | S |
 
 Deliberately **not** taking (evaluated, rejected): durable-execution engines

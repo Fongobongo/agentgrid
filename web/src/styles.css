@@ -650,6 +650,17 @@ a.link {
   }
 }
 
+/* Backlog item 8: an approvals row can expand into the task's diff, so a
+   pending patch review is decided on the text itself instead of a detour to
+   the task page. The patch block keeps its own max-height + scroll. */
+.approvals-table .diff-row td {
+  background: var(--panel);
+  padding: 8px 10px;
+}
+.approvals-table .diff-row .patch {
+  margin-top: 6px;
+}
+
 /* Plan 2.11 (#23a): approve-on-go (mobile-first). The approvals table
    reflows into a stacked card grid below 480 px so thumbs reach the
    Allow/Deny buttons without horizontal scroll. Focus rings are thicker;

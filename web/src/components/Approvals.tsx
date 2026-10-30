@@ -1,6 +1,14 @@
-import { useEffect, useState } from 'react';
-import { answerApproval, ApprovalView, listApprovals, reqOk } from '../api';
+import { Fragment, useEffect, useState } from 'react';
+import {
+  answerApproval,
+  ApprovalView,
+  ArtifactDownload,
+  getArtifact,
+  listApprovals,
+  reqOk,
+} from '../api';
 import { ConfirmModal, PromptModal } from './Modal';
+import PatchView from './PatchView';
 import { ErrorBox, Loading, StatusBadge, TimeAgo, useLiveRefresh } from './util';
 import { toast } from './Toast';
 
@@ -9,6 +17,13 @@ import { toast } from './Toast';
 // request_permission surfaces without an operator refresh and idle pages
 // make no requests; terminal approvals (allowed/denied/expired) are shown
 // briefly for context then hidden on next fetch.
+//
+// Backlog item 8: a row can show the task's `changes.patch` inline. A pending
+// patch-review approval ("Review required") is decided on exactly that diff, and
+// leaving the queue to read it was the step operators skipped — so approving a
+// push meant approving something they had not looked at. The diff is fetched on
+// demand (one request per task, cached for the page's lifetime) and rendered
+// read-only: annotations live on the task page, where the rework flow is.
 
 export default function Approvals({ filter = 'pending' }: { filter?: string }) {
   const [items, setItems] = useState<ApprovalView[] | null>(null);
@@ -17,6 +32,10 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkConfirm, setBulkConfirm] = useState(false);
   const [pending, setPending] = useState<{ a: ApprovalView; decision: 'allow' | 'deny' } | null>(null);
+  // Which approval's diff is open, and the fetched patches by task id.
+  // `undefined` = not fetched yet, `null` = no artifact (attempt still running).
+  const [openDiff, setOpenDiff] = useState<string | null>(null);
+  const [diffs, setDiffs] = useState<Record<string, ArtifactDownload | null>>({});
 
   const load = () => {
     listApprovals(filter === 'all' ? undefined : filter)
@@ -28,6 +47,22 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
   };
   useEffect(load, [filter]);
   useLiveRefresh(load);
+
+  const toggleDiff = async (a: ApprovalView) => {
+    if (openDiff === a.id) {
+      setOpenDiff(null);
+      return;
+    }
+    setOpenDiff(a.id);
+    if (a.task_id in diffs) return;
+    try {
+      const patch = await getArtifact(a.task_id, 'changes.patch');
+      setDiffs((d) => ({ ...d, [a.task_id]: patch }));
+    } catch (e) {
+      toast.error(e, 'Failed to load the diff');
+      setDiffs((d) => ({ ...d, [a.task_id]: null }));
+    }
+  };
 
   const submit = async (reason: string) => {
     if (!pending) return;
@@ -102,34 +137,81 @@ export default function Approvals({ filter = 'pending' }: { filter?: string }) {
           </thead>
           <tbody>
             {items.map((a) => (
-              <tr key={a.id}>
-                <td data-h="Status"><StatusBadge status={a.status} /></td>
-                <td data-h="Scope">{a.scope}</td>
-                <td data-h="Permission" className="mono">{a.permission}</td>
-                <td data-h="Task" className="mono"><a href={`#/task/${a.task_id}`}>{a.task_id.slice(0, 8)}</a></td>
-                <td data-h="Attempt" className="mono">{a.attempt_id.slice(0, 8)}</td>
-                <td data-h="Created"><TimeAgo s={a.created_at} /></td>
-                <td data-h="Expires"><TimeAgo s={a.expires_at} /></td>
-                <td data-h="Reason">{a.reason || '—'}</td>
-                <td data-h="Action">
-                  {a.status === 'pending' && (
+              <Fragment key={a.id}>
+                <tr>
+                  <td data-h="Status"><StatusBadge status={a.status} /></td>
+                  <td data-h="Scope">{a.scope}</td>
+                  <td data-h="Permission" className="mono">{a.permission}</td>
+                  <td data-h="Task" className="mono"><a href={`#/task/${a.task_id}`}>{a.task_id.slice(0, 8)}</a></td>
+                  <td data-h="Attempt" className="mono">{a.attempt_id.slice(0, 8)}</td>
+                  <td data-h="Created"><TimeAgo s={a.created_at} /></td>
+                  <td data-h="Expires"><TimeAgo s={a.expires_at} /></td>
+                  <td data-h="Reason">{a.reason || '—'}</td>
+                  <td data-h="Action">
                     <div className="approvals-actions">
                       <button
-                        className="ok"
                         disabled={busy === a.id}
-                        aria-label={`Allow ${a.permission}`}
-                        onClick={() => setPending({ a, decision: 'allow' })}
-                      >Allow</button>{' '}
-                      <button
-                        className="danger"
-                        disabled={busy === a.id}
-                        aria-label={`Deny ${a.permission}`}
-                        onClick={() => setPending({ a, decision: 'deny' })}
-                      >Deny</button>
+                        aria-label={`Show the diff for task ${a.task_id}`}
+                        aria-expanded={openDiff === a.id}
+                        onClick={() => toggleDiff(a)}
+                      >{openDiff === a.id ? 'Hide diff' : 'Diff'}</button>{' '}
+                      {a.status === 'pending' && (
+                        <>
+                          <button
+                            className="ok"
+                            disabled={busy === a.id}
+                            aria-label={`Allow ${a.permission}`}
+                            onClick={() => setPending({ a, decision: 'allow' })}
+                          >Allow</button>{' '}
+                          <button
+                            className="danger"
+                            disabled={busy === a.id}
+                            aria-label={`Deny ${a.permission}`}
+                            onClick={() => setPending({ a, decision: 'deny' })}
+                          >Deny</button>
+                        </>
+                      )}
                     </div>
-                  )}
-                </td>
-              </tr>
+                  </td>
+                </tr>
+                {openDiff === a.id && (
+                  <tr className="diff-row">
+                    <td colSpan={9} data-h="Diff">
+                      {(() => {
+                        const p = diffs[a.task_id];
+                        if (p === undefined) return <Loading />;
+                        if (p === null) {
+                          return (
+                            <p className="muted">
+                              No <code>changes.patch</code> for this task yet — the
+                              attempt may still be running. Open the{' '}
+                              <a href={`#/task/${a.task_id}`}>task</a> for its live
+                              event trail.
+                            </p>
+                          );
+                        }
+                        return (
+                          <>
+                            {p.sha256 && (
+                              <p className="muted mono">
+                                sha256: {p.sha256.slice(0, 16)}…{' '}
+                                <a
+                                  className="link"
+                                  href={`/v1/tasks/${a.task_id}/artifacts/changes.patch`}
+                                  download
+                                >Download</a>
+                              </p>
+                            )}
+                            <pre className="patch">
+                              <PatchView text={p.text} />
+                            </pre>
+                          </>
+                        );
+                      })()}
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>

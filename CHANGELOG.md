@@ -30,6 +30,16 @@
   - The eval probe now keys its clean-env decision off
     `SandboxKind::inherits_daemon_env()` — a bwrap child runs on the host, so
     it must not inherit the daemon's secrets.
+- **The approvals queue can show the task's diff inline.** A pending
+  patch-review approval ("Review required") is decided on exactly the
+  `changes.patch` text, and reading it meant leaving the queue for the task
+  page — so approving a push could mean approving something that was never
+  looked at. Each row now has a `Diff` toggle that fetches the patch on demand
+  (one request per task, cached for the page's lifetime) and renders it
+  read-only; when the artifact does not exist yet it says so and links to the
+  task instead of showing an empty box. The renderer moved out of
+  `TaskDetails.tsx` into `PatchView.tsx`, shared by both, with annotation
+  click-through still only on the task page (where the rework flow lives).
 - **`ag skills import` installs a pack of `SKILL.md` files.** Discovery already
   read `<root>/<name>/SKILL.md` and the control plane already had a trust
   ledger, but nothing in between turned a directory of skills (a repo checkout,

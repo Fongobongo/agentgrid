@@ -26,9 +26,9 @@ import {
   TaskEvent,
   TaskView,
 } from "../api";
-import { parsePatchLines } from "../patch";
 import { ErrorBox, Loading, StatusBadge, fmtTime } from "./util";
 import { TextAreaModal } from "./Modal";
+import PatchView from "./PatchView";
 
 function eventText(e: TaskEvent): string {
   const p = e.payload ?? {};
@@ -583,7 +583,7 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
                     </div>
                   )}
                   <pre className="patch">
-                    {renderPatch(patch.text, setAnnotating)}
+                    <PatchView text={patch.text} onAnnotate={setAnnotating} />
                   </pre>
                 </>
               )}
@@ -621,40 +621,3 @@ export default function TaskDetails({ taskId }: { taskId: string }) {
   );
 }
 
-function renderPatch(
-  patch: string,
-  onAnnotate: (loc: { file: string; line: number }) => void,
-) {
-  const lines = parsePatchLines(patch);
-  return lines.map((l, i) => {
-    let cls = "pl";
-    if (l.kind === "file" || l.kind === "hunk") cls = "ph";
-    else if (l.kind === "add") cls = "pa";
-    else if (l.kind === "del") cls = "pd";
-    else if (l.kind === "meta") cls = "ph";
-    const canComment =
-      (l.kind === "add" || l.kind === "ctx") &&
-      l.newLine !== null &&
-      l.file !== "";
-    return (
-      <div
-        key={i}
-        className={cls + (canComment ? " annotatable" : "")}
-        title={canComment ? "Click to comment on this line" : undefined}
-        onClick={
-          canComment
-            ? () => onAnnotate({ file: l.file, line: l.newLine as number })
-            : undefined
-        }
-      >
-        <span className="ln">{l.newLine ?? ""}</span>
-        <span className="lt">
-          {l.kind === "hunk" || l.kind === "file" || l.kind === "meta"
-            ? l.text
-            : (l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ") +
-              (l.text || " ")}
-        </span>
-      </div>
-    );
-  });
-}
