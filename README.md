@@ -74,6 +74,12 @@ The control plane ships as a static musl binary with the web UI embedded:
     tar xzf agentgrid-*.tar.gz
     ./agentgrid-control-plane            # listens on 127.0.0.1:7800, logs a one-time setup token
 
+Pick the `musl` tarball. It is statically linked and runs on any distro. The
+`x86_64-unknown-linux-gnu` tarball is built on `ubuntu-latest` and links that
+runner's glibc (2.38+), so on Debian 12 or Ubuntu 22.04 it dies with
+`version 'GLIBC_2.38' not found` — use it only on a distro at least as new as
+the runner.
+
 Open http://127.0.0.1:7800, switch to **setup**, paste the setup token from
 the server log, and create the first admin. Then `ag login` from the bundled
 CLI (`./ag login admin <password>`) and submit a task. The binary keeps all state in `./control-plane.db` plus an
@@ -437,7 +443,7 @@ See `docs/decisions/0001-mvp-scope.md` (ADR) and `docs/decisions/threat-model.md
 | Rust | edition 2021, stable toolchain. | enforced |
 | Transport (node channel) | WebSocket default with long-poll fallback (`AGENTGRID_TRANSPORT=ws\|poll\|auto`); data plane over HTTP `/v1`. | as documented |
 | Migrations | forward-only; downgrades fail loud against a newer-DB. | enforced |
-| Release targets | `x86_64`/`aarch64`-`unknown-linux-musl` (+ `x86_64-gnu` fallback). | in `release.yml` |
+| Release targets | `x86_64`/`aarch64`-`unknown-linux-musl` (statically linked — any distro) + `x86_64-gnu`, which links the CI runner's glibc and needs 2.38+; on Debian 12 / Ubuntu 22.04 it does not start. | in `release.yml` |
 
 OpenAPI is not yet auto-generated; the `/v1` HTTP surface is documented inline in
 `crates/control-plane/src/lib.rs` route declarations and `docs/decisions/`. A

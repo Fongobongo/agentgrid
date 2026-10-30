@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release page now says which tarball to download.** The
+  `x86_64-unknown-linux-gnu` build is compiled on `ubuntu-latest` and links
+  that runner's glibc, so it needs 2.38+ — on Debian 12 (glibc 2.36)
+  `agentgrid-control-plane` refuses to start with `version 'GLIBC_2.38' not
+  found`, verified on the v0.6.1 assets. The README called it a "fallback" and
+  the release body said nothing, so the one artifact that cannot run on a
+  common server was the one a reader would pick after musl failed for some
+  other reason. `release.yml` now prepends a "which binary should I download"
+  block to every release body and the README states the requirement. (`ag`
+  only prints `weak version 'GLIBC_2.39' not found` and keeps working — that
+  symbol is weak, so the warning is not a failure.)
+
 ## [0.6.1] - 2026-10-30
 
 ### Added

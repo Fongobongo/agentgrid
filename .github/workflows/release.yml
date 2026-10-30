@@ -399,6 +399,25 @@ jobs:
           if [ ! -s "$notes" ]; then
             echo "_No changelog entries for ${GITHUB_REF_NAME}._" > "$notes"
           fi
+          # Verified on v0.6.1: the gnu tarball is built on ubuntu-latest and
+          # links that runner's glibc (2.38+), so it refuses to start on
+          # Debian 12 / Ubuntu 22.04 with "version `GLIBC_2.38' not found".
+          # Nothing in the asset name says so, and the release page is where
+          # people choose — so the answer goes above the changelog, not in a
+          # wiki nobody opens. Kept to printf rather than a heredoc: a YAML
+          # block scalar indents every line, and a heredoc terminator cannot
+          # be indented without `<<-` (tabs only).
+          {
+            printf '## Which binary should I download?\n\n'
+            printf 'The `*-musl` tarballs are **statically linked** — any Linux, any distro, no\n'
+            printf 'libc. Use them unless you have a reason not to.\n\n'
+            printf '`x86_64-unknown-linux-gnu` links the CI runner'"'"'s glibc (2.38+), so it does\n'
+            printf '**not** start on Debian 12 or Ubuntu 22.04: ``version `GLIBC_2.38'"'"' not found``.\n\n'
+            printf 'Check what you downloaded:\n\n'
+            printf '    ./agentgrid-control-plane --version   # -> agentgrid-control-plane %s\n\n' "${GITHUB_REF_NAME#v}"
+            cat "$notes"
+          } > "$notes.new"
+          mv "$notes.new" "$notes"
           gh release create "${GITHUB_REF_NAME}" release-assets/* \
             --title "${GITHUB_REF_NAME}" \
             --notes-file "$notes"
