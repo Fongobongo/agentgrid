@@ -175,11 +175,22 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
+        // The clock alone is not unique. `SystemTime::now()` steps in 100 ns
+        // increments on Windows — measured on one host: 949 of 2000
+        // back-to-back readings were byte-identical — and six tests in this
+        // module share the `src` tag, so two of them could get the same
+        // directory and run inside each other. That is not hypothetical:
+        // `an_empty_directory_is_reported_not_silent` failed on
+        // `windows-latest` because its "empty" source held another test's
+        // `tricky/SKILL.md`. The counter is unique within the process, which is
+        // all the tests need; the nanos keep separate `cargo test` runs apart.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let d = std::env::temp_dir().join(format!("ag-skill-import-{tag}-{n}"));
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("ag-skill-import-{tag}-{n}-{seq}"));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -192,6 +203,40 @@ mod tests {
             format!("---\nname: {name}\ndescription: test skill\n---\n\n{body}\n"),
         )
         .unwrap();
+    }
+
+    /// Guards the collision that made `an_empty_directory_is_reported_not_silent`
+    /// fail on `windows-latest`: `tmp` named its directory from the clock, which
+    /// steps in 100 ns increments there.
+    ///
+    /// The threads synchronise on a barrier and only then call `tmp`, because
+    /// `tmp` does filesystem work: a sequential loop drifts past the clock tick
+    /// between calls and never collides, so the bug hides. Release them together
+    /// and several land in the same tick, which is exactly what six tests
+    /// sharing the `src` tag did on a loaded runner.
+    #[test]
+    fn tmp_directories_are_unique() {
+        let threads = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
+        let paths: Vec<PathBuf> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let b = std::sync::Arc::clone(&barrier);
+                    s.spawn(move || {
+                        b.wait();
+                        tmp("uniq")
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let unique: std::collections::HashSet<&PathBuf> = paths.iter().collect();
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "tmp() handed out the same directory twice — it is naming from the \
+             clock, whose resolution is coarser than the call rate"
+        );
     }
 
     #[test]
