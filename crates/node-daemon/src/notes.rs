@@ -138,12 +138,32 @@ fn clip(text: &str, limit: usize) -> String {
 /// The message goes in over stdin rather than a temp file: the note contains
 /// the prompt, and a stray file in `/tmp` is exactly the kind of copy that gets
 /// forgotten.
+///
+/// The committer identity is passed explicitly. Writing a note creates a commit
+/// object, so git needs an author — and a fresh node (or CI) has no global
+/// `user.name`, which made this fail with "Author identity unknown" on every
+/// host where nobody had ever run `git config`. The identity is the daemon's,
+/// not the operator's: the note is authored by agentgrid, same as the commits
+/// the integrator makes (`git.rs`).
 pub fn attach(repo_dir: &Path, commit: &str, text: &str) -> Result<()> {
     if commit.is_empty() {
         bail!("empty commit");
     }
     let mut child = Command::new("git")
-        .args(["notes", "--ref", NOTES_REF, "add", "-f", "-F", "-", commit])
+        .args([
+            "-c",
+            "user.name=agentgrid",
+            "-c",
+            "user.email=agentgrid@agentgrid",
+            "notes",
+            "--ref",
+            NOTES_REF,
+            "add",
+            "-f",
+            "-F",
+            "-",
+            commit,
+        ])
         .current_dir(repo_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -274,6 +294,22 @@ mod tests {
         attach(&dir, &sha, "why this change").expect("attach");
         let shown = git(&["notes", "--ref", NOTES_REF, "show", &sha]);
         assert_eq!(shown.trim(), "why this change");
+
+        // Writing a note creates a commit, so git needs an identity. It must be
+        // the daemon's and it must be explicit: CI and a fresh node have no
+        // global `user.name`, and relying on one made this fail with
+        // "Author identity unknown" on every host where nobody had run
+        // `git config`. Asserting the author catches a removed `-c` flag.
+        assert_eq!(
+            git(&[
+                "log",
+                "--no-walk",
+                "--format=%an <%ae>",
+                "refs/notes/agentgrid"
+            ])
+            .trim(),
+            "agentgrid <agentgrid@agentgrid>"
+        );
 
         // A retry on the same commit overwrites rather than stacking.
         attach(&dir, &sha, "second take").expect("reattach");

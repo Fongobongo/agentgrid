@@ -134,6 +134,10 @@
   - Notes go to **`refs/notes/agentgrid`**, not `refs/notes/commits`, so a
     user's own notes are never touched. Read with
     `git notes --ref=agentgrid show <sha>`.
+  - **The note is authored by `agentgrid <agentgrid@agentgrid>`, explicitly.**
+    Writing a note creates a commit, so git needs an identity — and a fresh
+    node (or CI) has no global `user.name`, which failed every note with
+    "Author identity unknown" on any host where nobody had run `git config`.
   - **The note contains the prompt**, which is whatever an operator typed.
     Hence the default, and why `push` needs two opt-ins: `push` mode *and* a
     task that already has `github_push`. An unrecognised value is read as
