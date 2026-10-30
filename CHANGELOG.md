@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-30
+
 ### Added
 
 - **`ag index` parses instead of guessing, and answers "where is this defined".**
