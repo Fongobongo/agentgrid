@@ -584,7 +584,14 @@ fn bwrap_head(
     // Plan 2.4 (#22a): a verifier's worktree is read-only — same mount, ro.
     // Emitted AFTER the /tmp tmpfs so a worktree that happens to live under
     // /tmp is not hidden by it (later binds win).
-    v.push(if read_only_worktree { "--ro-bind" } else { "--bind" }.to_string());
+    v.push(
+        if read_only_worktree {
+            "--ro-bind"
+        } else {
+            "--bind"
+        }
+        .to_string(),
+    );
     v.push(wd.clone());
     v.push(wd.clone());
     v.extend(["--chdir".to_string(), wd]);
@@ -2447,7 +2454,9 @@ mod tests {
             &[],
             None,
         );
-        assert!(a.windows(3).any(|w| w == ["--setenv", "HTTPS_PROXY", "http://egress:3128"]));
+        assert!(a
+            .windows(3)
+            .any(|w| w == ["--setenv", "HTTPS_PROXY", "http://egress:3128"]));
         // ... and never for a `none` attempt.
         let (_, a) = sandbox_prefix(
             SandboxKind::Bwrap,
