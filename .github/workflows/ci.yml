@@ -112,7 +112,7 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "20"
           cache: npm
@@ -143,7 +143,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "20"
       # Pinned, not `latest`: the ruleset changes between majors, so a floating
@@ -326,7 +326,7 @@ jobs:
       # `node --experimental-strip-types` (>= 22.6): the runner's preinstalled
       # Node is 20, and the SDK is dependency-free by design, so there is no
       # tsx/ts-node to fall back on.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "22"
       - name: outbox durability (kill -9, CP outage, lost/retry)
