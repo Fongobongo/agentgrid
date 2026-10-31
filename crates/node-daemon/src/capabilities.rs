@@ -88,8 +88,24 @@ pub async fn probe_adapter(bin: &str) -> AdapterProbe {
     // Try to get version via `--version` flag.
     // Audit X-B10: bounded probe — a wedged binary used to hang the
     // sequential heartbeat loop and sweep the node offline.
+    //
+    // `kill_on_drop` is the other half of that fix and was missing. A timeout
+    // only stops *waiting*: tokio leaves the child running unless told
+    // otherwise, so every probe of a wedged binary leaked a process — one per
+    // heartbeat, forever.
+    //
+    // Observed, not inferred: the leak also wedged the *next* probe. On
+    // Windows, running this module's `probe_adapter_finds_real_binary_and_
+    // reports_missing` before `probe_cluster_adapter_reports_missing` left
+    // `cmd --version` alive (`cmd` reads the flag as a command line, not a
+    // version query) and the second test then hung with no child of its own —
+    // instrumenting the two probes showed the second one never returning from
+    // `Command::output()`, so its 10 s timeout never got to start its clock.
+    // The mechanism inside `CreateProcess` was not diagnosed further; killing
+    // the child removes the precondition and the pair passes in ~10 s.
     let probe = tokio::process::Command::new(&path)
         .arg("--version")
+        .kill_on_drop(true)
         .output();
     let output = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
         Ok(o) => o.ok(),
@@ -119,8 +135,10 @@ pub async fn probe_cluster_adapter(executor_bin: &str, runtime_bin: &str) -> Ada
         // an unbounded `--version` on a wedged executor stalls the sequential
         // heartbeat loop just as effectively. `sh`/`cmd` under a Windows test
         // harness were the reproduction — the whole suite sat on this call.
+        // `kill_on_drop` for the reason spelled out in `probe_adapter`.
         let probe = tokio::process::Command::new(executor_bin)
             .arg("--version")
+            .kill_on_drop(true)
             .output();
         let output = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
             Ok(o) => o.ok(),
@@ -168,6 +186,7 @@ pub async fn probe_git_lfs() -> AdapterProbe {
     };
     let probe = tokio::process::Command::new("git-lfs")
         .arg("version")
+        .kill_on_drop(true)
         .output();
     let output = match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
         Ok(o) => o.ok(),
@@ -213,6 +232,12 @@ mod tests {
     async fn probe_adapter_finds_real_binary_and_reports_missing() {
         // A binary that exists on every host: `cmd` on Windows, `sh` on
         // unix (the previous `sh`-only probe failed on a Windows dev host).
+        //
+        // `cmd --version` is not a version query — cmd opens a shell and does
+        // not exit — so on Windows this case also covers the bounded-probe
+        // path: it must return after the 10 s timeout *and* leave no child
+        // behind. It did not, and the leak was the whole reason the suite hung
+        // (see the `kill_on_drop` note in `probe_adapter`).
         let known = if cfg!(windows) { "cmd" } else { "sh" };
         let good = probe_adapter(known).await;
         assert!(good.found);

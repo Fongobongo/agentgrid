@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A capability probe that timed out left its process running.** `probe_adapter`
+  (and the cluster/`git-lfs` variants) bound the *wait* at 10 s after audit
+  X-B10 — a wedged adapter used to hang the sequential heartbeat loop and sweep
+  the node offline — but nothing stopped the *child*. `tokio::process` only
+  kills on drop when asked, so every probe of a wedged binary leaked a process:
+  one per heartbeat, indefinitely. The second half is worse than the leak —
+  the orphan also wedged the **next** probe, which hung inside
+  `Command::output()` before its own 10 s timeout could start its clock. That
+  is what made
+  `cargo test -p agentgrid-node-daemon` hang forever on Windows rather than
+  fail, and why the suite has been run with
+  `--skip capabilities::tests --skip git::git_tests` ever since. All three
+  probes now set `kill_on_drop(true)`; the whole suite runs unskipped,
+  **230 passed in 53 s** (it was 174 with both modules excluded). Reproduced
+  deterministically before the fix by running the two capability tests that
+  spawn a process, in order: the first leaves `cmd --version` alive (`cmd`
+  reads the flag as a command line, not a version query) and the second hangs
+  with no child of its own. The mechanism inside `CreateProcess` was not
+  diagnosed further; killing the child removes the precondition.
+
 ## [0.7.0] - 2026-10-31
 
 ### Added
