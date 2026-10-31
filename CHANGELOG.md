@@ -4,6 +4,30 @@
 
 ### Added
 
+- **The WebSocket transport now goes through the egress proxy pool.** ADR 0012
+  gave the node a proxy pool for its HTTP egress, with one documented blind
+  spot: `tokio-tungstenite` has no proxy support, so a proxied node silently
+  degraded to polling — and under `AGENTGRID_TRANSPORT=ws`, which has no
+  fallback, it failed outright. The node now dials the proxy, sends
+  `CONNECT <cp-host>:<port>`, and hands the tunnel to tungstenite, which does
+  the upgrade (and TLS, for an `https` control plane) inside it.
+  - The proxy comes from the same pool the HTTP client uses, so `mark_dead`
+    moves both surfaces together.
+  - `http://proxy-host` without a port means **3128** (squid's default);
+    credentials in the URL become `Proxy-Authorization: Basic`.
+  - A refused `CONNECT` says so — `proxy refused CONNECT cp:7800: 403 …` —
+    instead of surfacing as a bare connection failure, because a proxy that
+    only allows plain forwarding and a proxy that is down look identical
+    otherwise.
+  - Three already-present crates became reachable (`rustls`, `webpki-roots`,
+    `base64`); no new dependency was added and no version moved. The rustls
+    provider is named explicitly because `ring` and `aws-lc-rs` are both in the
+    graph and the ambiguous default panics at the first handshake.
+  - `tests/e2e/run-ws-proxy.sh` (CI) plus a `CONNECT` handler in the e2e proxy:
+    a node on `ws` through the proxy comes online, a task succeeds, and the
+    proxy's own hit log must contain the `CONNECT` — the only assertion that
+    distinguishes "used the proxy" from "ignored it", since both come online
+    on localhost.
 - **Relays chain, and a chain that loops is cut with `508`.** A node's relay
   forwards to the control plane that node would use — which, for a stranded
   node, is already the relay carrying it. So relays chain with no new

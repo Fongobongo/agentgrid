@@ -57,6 +57,161 @@ fn ws_url(server: &str) -> String {
     }
 }
 
+/// Where the upgrade has to be dialled, and whether TLS comes after the dial.
+struct WsTarget {
+    host: String,
+    port: u16,
+    tls: bool,
+}
+
+fn ws_target(url: &str) -> std::result::Result<WsTarget, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("ws url {url:?}: {e}"))?;
+    let tls = match parsed.scheme() {
+        "wss" | "https" => true,
+        "ws" | "http" => false,
+        other => return Err(format!("ws url {url:?} has unsupported scheme {other:?}")),
+    };
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("ws url {url:?} has no host"))?
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| format!("ws url {url:?} has no port and no known default"))?;
+    Ok(WsTarget { host, port, tls })
+}
+
+fn as_io_error(msg: String) -> tokio_tungstenite::tungstenite::Error {
+    tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(msg))
+}
+
+/// Open a tunnel to `host:port` through an HTTP proxy (`CONNECT`).
+///
+/// Returns the raw tunnel; TLS, if any, is applied by tungstenite afterwards.
+/// Nothing after the `\r\n\r\n` of the proxy's answer is read, because a proxy
+/// that speaks `CONNECT` sends nothing else until the tunnelled protocol
+/// starts — the control plane's own handshake is the next thing on the wire.
+async fn tunnel_through_proxy(
+    proxy: &str,
+    host: &str,
+    port: u16,
+) -> std::result::Result<tokio::net::TcpStream, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let p = reqwest::Url::parse(proxy).map_err(|e| format!("proxy url {proxy:?}: {e}"))?;
+    let p_host = p
+        .host_str()
+        .ok_or_else(|| format!("proxy url {proxy:?} has no host"))?;
+    // 3128 is squid's default and the most common value for a bare
+    // `http://proxy-host` entry; guessing 80 would fail on the setup this
+    // feature exists for.
+    let p_port = p.port_or_known_default().unwrap_or(3128);
+
+    let mut stream = tokio::net::TcpStream::connect((p_host, p_port))
+        .await
+        .map_err(|e| format!("connect to proxy {p_host}:{p_port}: {e}"))?;
+
+    let mut head = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+    if !p.username().is_empty() {
+        use base64::Engine;
+        let cred = format!("{}:{}", p.username(), p.password().unwrap_or(""));
+        head.push_str(&format!(
+            "Proxy-Authorization: Basic {}\r\n",
+            base64::engine::general_purpose::STANDARD.encode(cred)
+        ));
+    }
+    head.push_str("\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(|e| format!("write CONNECT to proxy: {e}"))?;
+
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("read CONNECT answer: {e}"))?;
+        if n == 0 {
+            return Err("proxy closed the connection before answering CONNECT".to_string());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 8192 {
+            return Err("proxy CONNECT answer exceeds 8 KiB".to_string());
+        }
+    }
+
+    let answer = String::from_utf8_lossy(&buf);
+    let status = answer.lines().next().unwrap_or_default().trim().to_string();
+    let code: u16 = status
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .ok_or_else(|| format!("proxy CONNECT answer is not an HTTP status line: {status:?}"))?;
+    if !(200..300).contains(&code) {
+        return Err(format!(
+            "proxy refused CONNECT {host}:{port}: {status} (the node needs a proxy that \
+             allows CONNECT to the control plane, not only plain HTTP forwarding)"
+        ));
+    }
+    Ok(stream)
+}
+
+/// A rustls config for the tunnelled TLS handshake.
+///
+/// The provider is named explicitly: `ring` and `aws-lc-rs` are both in the
+/// dependency graph, and `ClientConfig::builder()` with an ambiguous process
+/// default panics at the first handshake — a failure that would only appear on
+/// an https control plane behind a proxy, i.e. exactly where nobody looks.
+fn tls_connector() -> tokio_tungstenite::Connector {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("aws-lc-rs supports the default TLS versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tokio_tungstenite::Connector::Rustls(Arc::new(cfg))
+}
+
+/// Do the upgrade, over a direct socket or through the egress proxy.
+///
+/// `connect_async` is a convenience over "dial, then upgrade on that socket";
+/// `client_async_tls_with_config` takes the socket from the caller. That is the
+/// whole trick behind proxy support: tokio-tungstenite has no proxy of its own,
+/// but it does not need one — the node dials through `CONNECT` and tungstenite
+/// still performs the HTTP upgrade (and TLS, when the control plane is https).
+async fn upgrade(
+    req: tokio_tungstenite::tungstenite::handshake::client::Request,
+    url: &str,
+    proxy: Option<&str>,
+) -> std::result::Result<UpgradeOk, tokio_tungstenite::tungstenite::Error> {
+    let Some(proxy) = proxy else {
+        return tokio_tungstenite::connect_async(req).await;
+    };
+    let target = ws_target(url).map_err(as_io_error)?;
+    let tunnel = tunnel_through_proxy(proxy, &target.host, target.port)
+        .await
+        .map_err(as_io_error)?;
+    let connector = if target.tls {
+        Some(tls_connector())
+    } else {
+        None
+    };
+    tokio_tungstenite::client_async_tls_with_config(req, tunnel, None, connector).await
+}
+
+type UpgradeOk = (
+    WsStream,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+);
+
 /// A failed connect attempt, plus what it learned about the endpoint. The
 /// reconnect loops must not rotate after a followed leader hint: rotating steps
 /// *off* the leader they were just told about, so the failover never lands (see
@@ -96,14 +251,15 @@ async fn connect_inner(
     probe: &mut ConnectProbe,
 ) -> Result<WsStream> {
     let url = format!("{}/v1/node/ws", ws_url(&cfg.base()));
-    let mut req = url.into_client_request()?;
+    let mut req = url.clone().into_client_request()?;
     req.headers_mut().insert(
         "authorization",
         format!("Bearer {}", cred.credential).parse()?,
     );
+    let proxy = cfg.proxies.current();
     let connected = tokio::time::timeout(
         std::time::Duration::from_secs(WS_HANDSHAKE_TIMEOUT_SECS),
-        tokio_tungstenite::connect_async(req),
+        upgrade(req, &url, proxy.as_deref()),
     )
     .await
     .map_err(|_| anyhow::anyhow!("ws handshake timed out"))?;
@@ -781,5 +937,184 @@ mod tests {
 
         node_task.abort();
         std::env::set_var("PATH", old_path);
+    }
+}
+
+// The proxy path: a real CONNECT tunnel, a real WebSocket handshake on top of
+// it, and a real echo through the socket. The unit tests above pin the failover
+// bookkeeping; these pin the transport, which is the part that silently
+// degrades to polling when it does not work.
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// A minimal HTTP proxy: answers `CONNECT` with 200 and then shovels bytes
+    /// in both directions. `refuse` makes it answer 403 instead, which is what a
+    /// proxy with a host allowlist does to a control plane it was not told
+    /// about.
+    async fn start_connect_proxy(refuse: bool) -> (String, Arc<AtomicU64>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+        let addr = listener.local_addr().expect("proxy addr");
+        let tunnels = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&tunnels);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    return;
+                };
+                let counter = Arc::clone(&counter);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 256];
+                    loop {
+                        let n = client.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).to_string();
+                    let target = head
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or_default()
+                        .to_string();
+                    if refuse {
+                        let _ = client
+                            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                    let Ok(mut upstream) = TcpStream::connect(&target).await else {
+                        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                        return;
+                    };
+                    if client
+                        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), tunnels)
+    }
+
+    /// A WebSocket server that echoes every frame back.
+    async fn start_ws_echo() -> String {
+        use axum::extract::ws::WebSocketUpgrade;
+        use axum::routing::get;
+
+        let app = axum::Router::new().route(
+            "/v1/node/ws",
+            get(|ws: WebSocketUpgrade| async move {
+                ws.on_upgrade(|mut socket| async move {
+                    while let Some(Ok(msg)) = socket.recv().await {
+                        if socket.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ws");
+        let addr = listener.local_addr().expect("ws addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn ws_request(url: &str) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+        url.into_client_request().expect("ws request")
+    }
+
+    #[test]
+    fn ws_urls_resolve_to_a_dial_target() {
+        let t = ws_target("ws://cp.internal:7800/v1/node/ws").expect("ws");
+        assert_eq!(
+            (t.host.as_str(), t.port, t.tls),
+            ("cp.internal", 7800, false)
+        );
+
+        // No explicit port: ws/wss have known defaults, so a missing port is
+        // not an error.
+        let t = ws_target("wss://cp.internal/v1/node/ws").expect("wss");
+        assert_eq!((t.host.as_str(), t.port, t.tls), ("cp.internal", 443, true));
+        let t = ws_target("ws://cp.internal/v1/node/ws").expect("ws");
+        assert_eq!(t.port, 80);
+
+        // https is accepted because `ws_url` is not the only caller.
+        assert!(ws_target("https://cp.internal/x").expect("https").tls);
+        assert!(!ws_target("http://cp.internal/x").expect("http").tls);
+
+        assert!(ws_target("ftp://cp.internal/x").is_err());
+        assert!(ws_target("not a url").is_err());
+    }
+
+    #[tokio::test]
+    async fn the_upgrade_goes_through_the_proxy_when_one_is_configured() {
+        let (proxy, tunnels) = start_connect_proxy(false).await;
+        let base = start_ws_echo().await;
+        let url = format!("{}/v1/node/ws", base.replace("http://", "ws://"));
+
+        let (mut sock, _resp) = upgrade(ws_request(&url), &url, Some(&proxy))
+            .await
+            .expect("upgrade through the proxy");
+        assert_eq!(
+            tunnels.load(Ordering::Relaxed),
+            1,
+            "the socket must have been tunnelled, not dialled directly"
+        );
+
+        // The tunnel carries the frames, not just the handshake.
+        sock.send(Message::Text("through-the-proxy".into()))
+            .await
+            .expect("send");
+        let echoed = sock.next().await.expect("a frame").expect("frame ok");
+        assert_eq!(echoed.to_text().expect("text"), "through-the-proxy");
+    }
+
+    #[tokio::test]
+    async fn without_a_proxy_the_direct_path_still_works() {
+        let base = start_ws_echo().await;
+        let url = format!("{}/v1/node/ws", base.replace("http://", "ws://"));
+        let (mut sock, _resp) = upgrade(ws_request(&url), &url, None)
+            .await
+            .expect("direct upgrade");
+        sock.send(Message::Text("direct".into()))
+            .await
+            .expect("send");
+        let echoed = sock.next().await.expect("a frame").expect("frame ok");
+        assert_eq!(echoed.to_text().expect("text"), "direct");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_that_refuses_connect_says_so() {
+        let (proxy, tunnels) = start_connect_proxy(true).await;
+        let base = start_ws_echo().await;
+        let url = format!("{}/v1/node/ws", base.replace("http://", "ws://"));
+
+        let err = upgrade(ws_request(&url), &url, Some(&proxy))
+            .await
+            .expect_err("a refused CONNECT must fail the upgrade");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("403") && msg.contains("CONNECT"),
+            "the error must name the refusal and what was refused: {msg}"
+        );
+        assert_eq!(tunnels.load(Ordering::Relaxed), 0, "no tunnel was opened");
     }
 }

@@ -57,6 +57,16 @@ password-hash = { version = "0.6", features = ["getrandom", "phc"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 rand = "0.10"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# The node dials its control plane through an HTTP CONNECT tunnel when an egress
+# proxy is configured (ADR 0026 follow-up), and tungstenite only does the TLS
+# half if it is handed a rustls config. Both crates are already in the graph via
+# tokio-tungstenite, so these lines add no new download — they only make the
+# types reachable. `aws_lc_rs` is explicit rather than the default provider
+# because `ring` is also in the graph and an ambiguous process default panics at
+# the first handshake instead of at build time.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "tls12", "std"] }
+webpki-roots = "1"
+base64 = "0.22"
 # Stage 11.5 TUI: full-screen dashboards (ratatui + crossterm backend).
 ratatui = "0.30"
 crossterm = "0.29"

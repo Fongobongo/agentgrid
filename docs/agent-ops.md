@@ -344,9 +344,19 @@ dead proxy pool must not stop the fleet).
 
 Override per node: `AGENTGRID_PROXY_URLS=url1,url2` in the daemon env
 completely replaces the CP-pushed list (use when that node's network
-differs from the fleet default). Caveat: the WS transport itself is not
-proxied (no CONNECT support) — proxied nodes should run
-`AGENTGRID_TRANSPORT=poll` or `auto` (auto falls back to poll).
+differs from the fleet default). The WebSocket transport is proxied too: the
+node opens an HTTP `CONNECT` tunnel and performs the upgrade inside it, so
+`AGENTGRID_TRANSPORT=ws` works through the pool. Two requirements for that:
+
+- the proxy must allow `CONNECT` to the control plane (a proxy that only
+  forwards absolute-form HTTP requests carries polling and nothing else — the
+  node's error names the refusal, e.g. `proxy refused CONNECT cp:7800: 403`);
+- a proxy URL without a port is read as **3128** (squid's default) for
+  `http://` entries, and credentials in the URL (`http://user:pw@host:port`)
+  are sent as `Proxy-Authorization: Basic`.
+
+If a proxy in the pool dies, the node rotates to the next one on the next
+connection attempt, exactly as it does for polling.
 
 A proxy is the right tool when the node needs egress *somewhere*. When it has
 **no route to the control plane at all** but does reach a sibling node, that

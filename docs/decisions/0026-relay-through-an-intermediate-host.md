@@ -28,10 +28,12 @@ limits:
 There is also a consumer-side mechanism that looks like it should solve this:
 the node's egress proxy pool (ADR 0012) with CP-pushed `proxy_urls`. It does
 not, for two reasons. It is a *consumer* — someone still has to run the proxy —
-and it only covers the HTTP client: the WebSocket transport dials
-`tokio-tungstenite::connect_async` directly and has no proxy support, so a
-node told to use a proxy silently degrades to polling (or fails outright under
-`AGENTGRID_TRANSPORT=ws`).
+and at the time of writing it only covered the HTTP client: the WebSocket
+transport dialled `tokio-tungstenite::connect_async` directly and had no proxy
+support, so a node told to use a proxy silently degraded to polling (or failed
+outright under `AGENTGRID_TRANSPORT=ws`). *(The second half is no longer true —
+see the third amendment: the node now dials through a `CONNECT` tunnel and
+hands that socket to tungstenite.)*
 
 ## Decision
 
@@ -157,7 +159,10 @@ feature of this daemon. The relay is deliberately not a step towards one.
   a hop counter cuts a loop with `508`.**
 - **`tokio-tungstenite` gains proxy support**, or the node grows its own
   `CONNECT` client. Then the proxy pool could carry WS, and a relay could be
-  replaced by an ordinary HTTP proxy the operator already runs.
+  replaced by an ordinary HTTP proxy the operator already runs. *(Resolved —
+  third amendment: the node grew the `CONNECT` client, because it never needed
+  tungstenite's cooperation. A relay can now be replaced by an ordinary
+  CONNECT-capable proxy.)*
 - ~~**Three proves too few or too many in practice.**~~ **Resolved.** The
   threshold is now `AGENTGRID_GATEWAY_FAILURES_BEFORE_ROTATING`, defaulting to
   `GATEWAY_FAILURES_BEFORE_ROTATING` (3). Values below 2 are refused and fall
@@ -248,3 +253,76 @@ reach the control plane" is configuration, not a firewall — the same caveat as
 the one-hop E2E. And a relay still forwards only to its own control plane or
 to the relay that carries it; it is not a general proxy and does not accept a
 destination from the request.
+
+## Third amendment (2026-10-31): the node proxies its own WebSocket
+
+The ADR listed two blockers for carrying WS through the proxy pool: "the node
+needs a relay because `tokio-tungstenite` has no proxy support", and the
+revisit item "wait for upstream, or grow our own `CONNECT` client".
+
+**It needed neither upstream nor a second binary.** `connect_async` is a
+convenience over two steps — dial a TCP socket, then perform the HTTP upgrade
+on it — and tungstenite exposes the second step separately as
+`client_async_tls_with_config(request, stream, config, connector)`. So the node
+dials the proxy, sends `CONNECT cp:7800`, and hands the resulting socket to
+tungstenite, which does the upgrade (and the TLS, when the control plane is
+`https`) inside the tunnel. The whole change is in
+`crates/node-daemon/src/ws.rs`; nothing in the dependency graph changed except
+three lines making already-present crates reachable (`rustls`, `webpki-roots`,
+`base64`).
+
+What that buys: a proxied node no longer silently degrades to polling, and
+`AGENTGRID_TRANSPORT=ws` no longer fails outright behind a proxy — which means
+the relay from the original decision can be replaced by an ordinary HTTP proxy
+the operator already runs, on every transport.
+
+Decisions inside it:
+
+- **The proxy is the pool's current entry**, the same one the HTTP client uses,
+  so one `mark_dead` moves both surfaces to the next proxy instead of leaving
+  the WS channel pinned to a corpse.
+- **`http://proxy-host` with no port means 3128**, not 80. The bare-host form is
+  what people write for squid, and guessing 80 would fail on exactly the setup
+  this feature exists for.
+- **Credentials in the URL become `Proxy-Authorization: Basic`.** A proxy that
+  needs auth and gets none answers `407` and the node would look misconfigured
+  rather than unauthenticated.
+- **A refused `CONNECT` is a named error**, not a bare I/O failure: the message
+  says `proxy refused CONNECT cp:7800: 403 …` and names the likely cause (a
+  proxy that allows plain forwarding only). That distinction matters because
+  the two failures look identical from the outside — the node never connects.
+- **The rustls provider is named explicitly** (`aws_lc_rs`). Both `ring` and
+  `aws-lc-rs` are in the graph, and `ClientConfig::builder()` with an ambiguous
+  process default panics at the first handshake — a failure that would only
+  appear for an `https` control plane behind a proxy, i.e. the case least
+  likely to be exercised by hand.
+
+### Proof
+
+- `crates/node-daemon/src/ws.rs`, 4 new tests. One runs the whole thing against
+  a real proxy and a real WebSocket echo server: the upgrade succeeds, the
+  proxy's tunnel counter is **1** (not 0, which is what "dialled directly"
+  looks like), and a frame sent after the handshake comes back through the
+  tunnel. One pins the direct path (no proxy configured still works). One pins
+  the refusal (403 → an error containing both `403` and `CONNECT`, with the
+  tunnel counter at 0). One pins the URL→target mapping, including the
+  `wss`/`ws` default ports. With `upgrade` forced to ignore its proxy argument,
+  the two proxy tests fail and the direct/parsing ones correctly keep passing.
+- `tests/e2e/run-ws-proxy.sh`, registered in CI: a real node on
+  `AGENTGRID_TRANSPORT=ws` with `AGENTGRID_PROXY_URLS` pointed at a
+  CONNECT-capable proxy comes online, logs `ws control channel connected`, a
+  task runs to `succeeded`, and — the discriminating assertion — the proxy's
+  own hit log contains `CONNECT 127.0.0.1:7800`. Removing the proxy variable
+  makes the node connect directly: it still comes online and still logs the ws
+  channel, and the E2E fails at the hit-log assertion with a message saying the
+  proxy was decoration. That is the only assertion that can tell the two
+  worlds apart, which is why it exists.
+- `tests/e2e/mini-forward-proxy.py` grew `do_CONNECT` (a bidirectional relay
+  with an idle-tolerant `select`), so the same proxy now covers both the
+  absolute-form path the poll loop uses and the tunnel the ws transport needs.
+
+Still not claimed: the E2E's proxy is plain `http://`, so the TLS-over-tunnel
+half is covered by the unit test's plumbing (`Connector::Rustls` is passed and
+rustls does the handshake over the provided stream) but not against a real
+`https` control plane — that needs a certificate the harness can trust, which
+this E2E deliberately does not set up.

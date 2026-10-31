@@ -423,6 +423,11 @@ jobs:
       # at 2 and refused with 508 at 3.
       - name: relay chain (two relays, hop counter, 508 on a loop)
         run: bash tests/e2e/run-relay-chain.sh
+      # WS through an egress proxy: the node opens a CONNECT tunnel and the
+      # upgrade happens inside it. Asserted from the proxy's hit log, because
+      # "node came online" is also true when it ignored the proxy entirely.
+      - name: ws transport through an HTTP CONNECT proxy
+        run: bash tests/e2e/run-ws-proxy.sh
       # One-button assembly: POST /v1/assembly with a goal → plan-stub
       # architect → auto-approve → workers → system collector. No LLM.
       - name: one-button assembly (goal in, merged project out)

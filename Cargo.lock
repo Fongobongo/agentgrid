@@ -174,11 +174,13 @@ dependencies = [
  "agentgrid-skills",
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "libc",
  "rand 0.10.3",
  "reqwest 0.12.28",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -188,6 +190,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
