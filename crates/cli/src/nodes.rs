@@ -270,372 +270,75 @@ async fn cmd_node_install(client: &reqwest::Client, base: &str, a: NodeInstallAr
             "transport 'wireguard' is planned but not implemented yet; use --transport ssh-tunnel"
         );
     }
-    validate_install_args(&a)?;
-    // Hardening P0 (safe node install): verify the remote SSH host key BEFORE
-    // any further install step so a MITM cannot hijack the bootstrap.
-    // - --host-key-fingerprint pins the key: ssh-keyscan the host, compute its
-    //   SHA256 fingerprint, and bail if it does not match. The matching key is
-    //   added to the local known_hosts so subsequent SSH calls use strict.
-    // - --accept-new-host-key: accept-new at SSH level.
-    // - default: strict (an unknown key is refused).
-    verify_host_key(&a)?;
+    // The binary path is resolved here, not in the shared crate: the control
+    // plane resolves its copy from its own distribution directory instead.
+    let binary = resolve_node_binary(a.binary.as_deref())?;
     let token = create_enrollment_token(client, base).await?;
-    let bin = a
-        .binary
-        .clone()
-        .or_else(|| {
-            let candidate = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("agentgrid-node-daemon")))
-                .filter(|p| p.exists())
-                .or_else(|| {
-                    let p = std::path::PathBuf::from("agentgrid-node-daemon");
-                    if p.exists() {
-                        Some(p)
-                    } else {
-                        None
-                    }
-                })?;
-            Some(candidate.to_string_lossy().into_owned())
-        })
-        .context("no --binary given and agentgrid-node-daemon not found next to `ag`")?;
-    let data = a.data_dir.trim_end_matches('/');
-    let remote_bin = format!("{data}/agentgrid-node");
-
-    // 0. ensure the remote data dir exists (scp would fail otherwise)
-    run_remote(
-        &a,
-        false,
-        &[],
-        Some(format!("mkdir -p {data}")),
-        "prepare remote dir",
-        false,
-    )?;
-
-    // 1. copy the node binary to the remote host
-    scp_file(&a, &bin, &remote_bin)?;
-
-    // 2. resolve the control-plane URL the node will use
-    let (server_url, transport_label) = match &a.server {
-        Some(s) => (s.clone(), "direct/https"),
-        None => {
-            // persistent reverse tunnel: remote localhost:<remote_port> -> local :<local_port>
-            run_remote(
-                &a,
-                false,
-                &[
-                    "-f".into(),
-                    "-N".into(),
-                    "-R".into(),
-                    format!("{}:127.0.0.1:{}", a.remote_port, a.local_port),
-                ],
-                None,
-                "establish reverse tunnel",
-                true,
-            )?;
-            (format!("http://127.0.0.1:{}", a.remote_port), "ssh-tunnel")
-        }
-    };
-
-    // 3. write env file on remote (temp locally, scp, chmod 600), then start node
-    let env = build_node_env_file(&a, &token, &server_url);
-    let tmp = std::env::temp_dir().join(format!("ag-env-{}.env", std::process::id()));
-    std::fs::write(&tmp, env).context("write local env temp")?;
-    scp_file(&a, &tmp.to_string_lossy(), &format!("{data}/agentgrid.env"))?;
-    let _ = std::fs::remove_file(&tmp);
-    // Source the env file in a shell so the single-quoted values (and the `*`
-    // in AGENTGRID_REPOSITORIES) are parsed correctly; `env $(cat file)` would
-    // keep the literal quotes and glob the `*`.
-    let start = format!(
-        "mkdir -p {data} && chmod 600 {data}/agentgrid.env && setsid nohup bash -c 'set -a; . {data}/agentgrid.env; set +a; exec {bin}' >{data}/node.log 2>&1 </dev/null &",
-        data = data,
-        bin = remote_bin,
-    );
-    // The start command backgrounds itself on the remote; launch the ssh that
-    // delivers it detached so it doesn't block install (and survives our exit).
-    run_remote(&a, false, &[], Some(start), "start node", true)?;
-
+    let target = a.target();
+    let plan = a.plan(binary);
+    let mut say = |m: &str| println!("   {m}");
+    let outcome = agentgrid_provision::install(&target, &plan, &token, &mut say)?;
     println!(
-        "node '{}' provisioned (transport={})",
-        a.name, transport_label
+        "node '{}' provisioned (transport={}, server={})",
+        plan.name, outcome.transport, outcome.server_url
     );
     println!("check status with: ag node list");
     Ok(())
 }
 
-/// Build the remote env file (single-quoted values, safe for `env $(cat ...)`).
-fn build_node_env_file(a: &NodeInstallArgs, token: &str, server: &str) -> String {
-    let data = a.data_dir.trim_end_matches('/');
-    let mut s = format!(
-        "AGENTGRID_SERVER='{server}'\nAGENTGRID_ENROLL_TOKEN='{token}'\nAGENTGRID_NODE_NAME='{name}'\nAGENTGRID_REPOSITORIES='{repos}'\nAGENTGRID_ADAPTERS='{adapters}'\nAGENTGRID_MAX_CONCURRENCY='{mc}'\nAGENTGRID_DATA_DIR='{data}'\n",
-        server = server,
-        token = token,
-        name = a.name,
-        repos = a.repositories,
-        adapters = a.adapters,
-        mc = a.max_concurrency,
-        data = data,
-    );
-    // hardening P0 (safe node install): the node daemon refuses to run as root
-    // unless AGENTGRID_ALLOW_ROOT=1. We never set it automatically; the operator
-    // must pass --allow-root. Prefer SSH-ing as an unprivileged user and a
-    // --data-dir owned by that user.
-    if a.allow_root {
-        s.push_str("AGENTGRID_ALLOW_ROOT='1'\n");
+fn resolve_node_binary(explicit: Option<&str>) -> Result<std::path::PathBuf> {
+    if let Some(b) = explicit {
+        return Ok(std::path::PathBuf::from(b));
     }
-    s.push_str(&format!("AGENTGRID_AGENT_VERSION='{}'\n", a.agent_version));
-    s
-}
-
-/// Hardening P0 (safe node install): verify/PIN the remote SSH host key before
-/// any install step. `--host-key-fingerprint` pins the exact SHA256
-/// fingerprint (ssh-keyscan + ssh-keygen -lf compare, bailing on mismatch) and
-/// adds the trusted key to ~/.ssh/known_hosts; `--accept-new-host-key` opts
-/// into ssh's accept-new mode; default is strict refusal. Returns Ok only when
-/// the key is acceptable.
-fn verify_host_key(a: &NodeInstallArgs) -> Result<()> {
-    let (_user, host, port) = parse_host(&a.host);
-    if let Some(fp) = &a.host_key_fingerprint {
-        let fp = fp.trim();
-        let mut scan = std::process::Command::new("ssh-keyscan");
-        scan.stderr(std::process::Stdio::null());
-        if let Some(p) = port {
-            scan.arg("-p").arg(p.to_string());
-        }
-        scan.arg(&host);
-        let scan_out = scan
-            .output()
-            .with_context(|| format!("ssh-keyscan {host} failed to spawn"))?;
-        if !scan_out.status.success() || scan_out.stdout.is_empty() {
-            anyhow::bail!("could not ssh-keyscan host {host}: not reachable or no keys");
-        }
-        let mut kg = std::process::Command::new("ssh-keygen");
-        kg.arg("-lf").arg("-");
-        kg.stdin(std::process::Stdio::piped());
-        kg.stdout(std::process::Stdio::piped());
-        kg.stderr(std::process::Stdio::null());
-        let mut child = kg
-            .spawn()
-            .with_context(|| "ssh-keygen -lf - failed to spawn")?;
-        use std::io::Write;
-        child.stdin.take().unwrap().write_all(&scan_out.stdout).ok();
-        let kg_out = child
-            .wait_with_output()
-            .with_context(|| "ssh-keygen -lf - wait failed")?;
-        let text = String::from_utf8_lossy(&kg_out.stdout);
-        let mut matched = false;
-        for line in text.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 && parts[1].eq_ignore_ascii_case(fp) {
-                matched = true;
-                break;
+    let candidate = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("agentgrid-node-daemon")))
+        .filter(|p| p.exists())
+        .or_else(|| {
+            let p = std::path::PathBuf::from("agentgrid-node-daemon");
+            if p.exists() {
+                Some(p)
+            } else {
+                None
             }
-        }
-        if !matched {
-            anyhow::bail!(
-                "host {host} SSH key fingerprint does not match --host-key-fingerprint; got:\n{text}"
-            );
-        }
-        // Add the trusted key to known_hosts so subsequent ssh uses strict.
-        let home = dirs_for_known_hosts()?;
-        let kh_path = home.join(".ssh/known_hosts");
-        if let Some(parent) = kh_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut kh = std::process::Command::new("ssh-keyscan");
-        kh.stderr(std::process::Stdio::null());
-        if let Some(p) = port {
-            kh.arg("-p").arg(p.to_string());
-        }
-        kh.arg("-H").arg(&host);
-        let out = kh.output().with_context(|| "ssh-keyscan -H failed")?;
-        if out.status.success() && !out.stdout.is_empty() {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&kh_path)?;
-            f.write_all(&out.stdout)?;
-        }
-    }
-    Ok(())
+        });
+    candidate.context("no --binary given and agentgrid-node-daemon not found next to `ag`")
 }
 
-/// Resolve the per-user HOME directory for known_hosts.
-fn dirs_for_known_hosts() -> Result<std::path::PathBuf> {
-    if let Ok(h) = std::env::var("HOME") {
-        if !h.is_empty() {
-            return Ok(std::path::PathBuf::from(h));
+impl NodeInstallArgs {
+    fn target(&self) -> agentgrid_provision::Target {
+        agentgrid_provision::Target {
+            host: self.host.clone(),
+            ssh_key: self.ssh_key.clone(),
+            password: self.password.clone(),
+            accept_new_host_key: self.accept_new_host_key,
+            host_key_fingerprint: self.host_key_fingerprint.clone(),
         }
     }
-    anyhow::bail!("HOME unset: cannot resolve ~/.ssh/known_hosts for SSH host-key pinning")
-}
 
-/// Reject shell-breaking characters in user-supplied fields (trust boundary).
-fn validate_install_args(a: &NodeInstallArgs) -> Result<()> {
-    let sane = |s: &str, what: &str| {
-        if s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./@:,*".contains(c))
-        {
-            Ok(())
+    /// `--server` means "the node dials that URL itself"; without it the
+    /// historical default applies — a reverse tunnel to this machine.
+    fn plan(&self, binary: std::path::PathBuf) -> agentgrid_provision::Plan {
+        let transport = if self.server.is_some() {
+            agentgrid_provision::Transport::Direct
         } else {
-            anyhow::bail!("invalid {what}: only [A-Za-z0-9._,/@:-] allowed")
-        }
-    };
-    sane(&a.name, "name")?;
-    sane(&a.repositories, "repositories")?;
-    sane(&a.adapters, "adapters")?;
-    sane(&a.data_dir, "data-dir")?;
-    if let Some(s) = &a.server {
-        sane(s, "server")?;
-    }
-    Ok(())
-}
-
-/// Run an ssh/scp invocation against the remote host, choosing the auth wrapper:
-/// key (direct), password via `sshpass` when present, else `expect` (universally
-/// available on Linux). `extra` are program-specific args (e.g. `-f -N -R ...`);
-/// `remote_cmd` (ssh only) is the final argument (the remote shell command).
-/// `detach` launches the command in its own session (setsid) so it survives the
-/// `ag nodes install` process — used for the persistent reverse tunnel.
-fn run_remote(
-    a: &NodeInstallArgs,
-    is_scp: bool,
-    extra: &[String],
-    remote_cmd: Option<String>,
-    what: &str,
-    detach: bool,
-) -> Result<()> {
-    let prog = if is_scp { "scp" } else { "ssh" };
-    let mut base: Vec<String> = vec![prog.to_string()];
-    if let Some(key) = &a.ssh_key {
-        base.push("-i".into());
-        base.push(key.clone());
-    }
-    base.push("-o".into());
-    // Hardening P0 (safe node install): fail CLOSED on an unknown SSH host
-    // key by default (no MITM). `--accept-new-host-key` opts into accept-new;
-    // `--host-key-fingerprint` pins the key (verified via a keyscan+compare in
-    // cmd_node_install before any remote command runs).
-    if a.host_key_fingerprint.is_some() {
-        base.push("StrictHostKeyChecking=yes".into());
-    } else if a.accept_new_host_key {
-        base.push("StrictHostKeyChecking=accept-new".into());
-    } else {
-        base.push("StrictHostKeyChecking=yes".into());
-    }
-    if !is_scp && a.password.is_none() {
-        base.push("-o".into());
-        base.push("BatchMode=yes".into());
-    }
-    if let (.., Some(p)) = parse_host(&a.host) {
-        base.push((if is_scp { "-P" } else { "-p" }).into());
-        base.push(p.to_string());
-    }
-    base.extend(extra.iter().cloned());
-    let (user, host, _p) = parse_host(&a.host);
-    let target = user
-        .map(|u| format!("{u}@{host}"))
-        .unwrap_or_else(|| host.clone());
-    if !is_scp {
-        base.push(target);
-        if let Some(rc) = &remote_cmd {
-            base.push(rc.clone());
+            agentgrid_provision::Transport::SshTunnel
+        };
+        agentgrid_provision::Plan {
+            transport,
+            name: self.name.clone(),
+            repositories: self.repositories.clone(),
+            adapters: self.adapters.clone(),
+            max_concurrency: self.max_concurrency,
+            data_dir: self.data_dir.clone(),
+            server: self.server.clone(),
+            agent_version: self.agent_version.clone(),
+            allow_root: self.allow_root,
+            local_port: self.local_port,
+            remote_port: self.remote_port,
+            binary,
         }
     }
-
-    // auth wrapper -> final argv (+ optional secret passed via env, never argv)
-    let (argv, secret_env) = if let Some(pw) = &a.password {
-        if std::process::Command::new("sshpass")
-            .arg("true")
-            .status()
-            .is_ok()
-        {
-            let mut v = vec!["sshpass".to_string(), "-e".to_string()];
-            v.extend(base);
-            (v, Some(("SSHPASS", pw.clone())))
-        } else {
-            let spawn_line = format!(
-                "spawn {}",
-                base.iter()
-                    .map(|x| format!("{{{x}}}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            // The password is read from AGENTGRID_SSH_PASS at expect runtime:
-            // interpolating it into the script would expose it in `ps` (argv)
-            // and allow Tcl injection through the password text.
-            let script = format!(
-                "set timeout 600\n{spawn_line}\nexpect {{\n    -re \"(?i)password:\" {{ send \"$env(AGENTGRID_SSH_PASS)\\r\"; exp_continue }}\n    eof\n}}\n"
-            );
-            (
-                vec!["expect".to_string(), "-c".to_string(), script],
-                Some(("AGENTGRID_SSH_PASS", pw.clone())),
-            )
-        }
-    } else {
-        (base, None)
-    };
-
-    if detach {
-        let mut c = std::process::Command::new("setsid");
-        c.arg("nohup").args(&argv);
-        if let Some((var, val)) = &secret_env {
-            c.env(var, val);
-        }
-        // Detached children must NOT inherit our stdout/stderr/ stdin — the
-        // node install command would otherwise hang waiting on a pipe the
-        // detached tunnel/start ssh keeps open.
-        c.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .with_context(|| format!("failed to spawn detached ssh/scp ({what})"))?;
-        return Ok(());
-    }
-    let mut c = std::process::Command::new(&argv[0]);
-    c.args(&argv[1..]);
-    if let Some((var, val)) = &secret_env {
-        c.env(var, val);
-    }
-    let status = c
-        .status()
-        .with_context(|| format!("failed to run ssh/scp ({what})"))?;
-    if !status.success() {
-        anyhow::bail!("ssh/scp step failed ({what}): exit {status}");
-    }
-    Ok(())
-}
-
-/// user@host[:port] -> (user, host, port)
-fn parse_host(host: &str) -> (Option<String>, String, Option<u16>) {
-    let (user, rest) = match host.split_once('@') {
-        Some((u, r)) => (Some(u.to_string()), r),
-        None => (None, host),
-    };
-    match rest.rsplit_once(':') {
-        Some((h, p)) if p.parse::<u16>().is_ok() => (user, h.to_string(), p.parse().ok()),
-        _ => (user, rest.to_string(), None),
-    }
-}
-
-/// Copy a local file to the remote host.
-fn scp_file(a: &NodeInstallArgs, local: &str, remote: &str) -> Result<()> {
-    let (user, host, _p) = parse_host(&a.host);
-    let target = format!(
-        "{}:{}",
-        user.map(|u| format!("{u}@{host}"))
-            .unwrap_or_else(|| host.clone()),
-        remote
-    );
-    run_remote(
-        a,
-        true,
-        &[local.to_string(), target],
-        None,
-        "scp file",
-        false,
-    )
 }
 
 async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Result<()> {
@@ -730,6 +433,7 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
 #[cfg(test)]
 mod node_install_tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn sample() -> NodeInstallArgs {
         NodeInstallArgs {
@@ -753,74 +457,35 @@ mod node_install_tests {
         }
     }
 
+    /// `--server` selects the direct transport; without it the historical
+    /// reverse-tunnel default stands. That mapping is the only install logic
+    /// left in the CLI — the install itself lives in `agentgrid-provision`.
     #[test]
-    fn parse_host_splits_user_port() {
+    fn server_flag_selects_direct_transport() {
+        let a = sample();
         assert_eq!(
-            parse_host("u@h:22"),
-            (Some("u".into()), "h".into(), Some(22))
+            a.plan(PathBuf::from("x")).transport,
+            agentgrid_provision::Transport::SshTunnel
         );
-        assert_eq!(parse_host("h:2222"), (None, "h".into(), Some(2222)));
-        assert_eq!(parse_host("u@h"), (Some("u".into()), "h".into(), None));
-        assert_eq!(parse_host("h"), (None, "h".into(), None));
-    }
-
-    #[test]
-    fn env_file_has_server_and_token() {
-        let env = build_node_env_file(&sample(), "TOK123", "http://cp.example.com:7800");
-        assert!(env.contains("AGENTGRID_SERVER='http://cp.example.com:7800'"));
-        assert!(env.contains("AGENTGRID_ENROLL_TOKEN='TOK123'"));
-        assert!(env.contains("AGENTGRID_NODE_NAME='node-b'"));
-        // single-quoted values survive `env $(cat ...)`
-        assert!(env.lines().all(|l| l.contains('=')));
-    }
-
-    #[test]
-    fn validate_rejects_shell_meta() {
-        let mut a = sample();
-        a.name = "$(rm -rf /)".into();
-        assert!(validate_install_args(&a).is_err());
         let mut b = sample();
-        b.repositories = "a; b".into();
-        assert!(validate_install_args(&b).is_err());
-        assert!(validate_install_args(&sample()).is_ok());
+        b.server = Some("http://cp.example.com:7800".into());
+        assert_eq!(
+            b.plan(PathBuf::from("x")).transport,
+            agentgrid_provision::Transport::Direct
+        );
     }
 
+    /// The clap-level transport keeps its planned variant so `--transport
+    /// wireguard` is rejected with a message rather than an unknown-argument
+    /// error that looks like a typo.
     #[test]
     fn wireguard_transport_not_implemented() {
-        // ensured at the command layer; here we just confirm the variant exists
         let _ = Transport::Wireguard;
     }
 
-    /// Hardening P0 (safe node install): the default install does NOT bake
-    /// `AGENTGRID_ALLOW_ROOT=1` into the provisioned env — the daemon refuses
-    /// root unless the operator explicitly opts in with --allow-root.
     #[test]
-    fn build_env_no_allow_root_by_default() {
-        let a = sample();
-        assert!(!a.allow_root);
-        let env = build_node_env_file(&a, "tok", "http://127.0.0.1:7800");
-        assert!(
-            !env.contains("AGENTGRID_ALLOW_ROOT"),
-            "default env must not allow root: {env}"
-        );
-        // token is present (needed for the enroll) but root is not.
-        assert!(env.contains("AGENTGRID_ENROLL_TOKEN='tok'"));
-    }
-
-    #[test]
-    fn build_env_adds_allow_root_when_opted_in() {
-        let mut a = sample();
-        a.allow_root = true;
-        let env = build_node_env_file(&a, "tok", "http://127.0.0.1:7800");
-        assert!(env.contains("AGENTGRID_ALLOW_ROOT='1'"));
-    }
-
-    /// Hardening P0 (safe node install): host-key fingerprint + accept-new are
-    /// both OFF by default, so SSH fails closed on an unknown host key.
-    #[test]
-    fn host_key_mode_defaults_strict() {
-        let a = sample();
-        assert!(!a.accept_new_host_key);
-        assert!(a.host_key_fingerprint.is_none());
+    fn explicit_binary_wins() {
+        let p = resolve_node_binary(Some("/opt/ag/agentgrid-node-daemon")).unwrap();
+        assert_eq!(p, PathBuf::from("/opt/ag/agentgrid-node-daemon"));
     }
 }

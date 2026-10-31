@@ -21,6 +21,7 @@ tracing-subscriber.workspace = true
 agentgrid-common.workspace = true
 agentgrid-index.workspace = true
 agentgrid-skills.workspace = true
+agentgrid-provision.workspace = true
 # Plan 2.6 (#22c): autopilot timestamps
 chrono.workspace = true
 uuid = { version = "1", features = ["v4"] }

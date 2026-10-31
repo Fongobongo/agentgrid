@@ -34,6 +34,7 @@ version = "0.6.1"
 dependencies = [
  "agentgrid-common",
  "agentgrid-index",
+ "agentgrid-provision",
  "agentgrid-skills",
  "anyhow",
  "chrono",
@@ -186,6 +187,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "agentgrid-provision"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
