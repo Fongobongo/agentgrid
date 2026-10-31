@@ -426,6 +426,13 @@ jobs:
       # keyboard + deny callback (process-based, no Docker, no real Telegram).
       - name: telegram gateway (mock Bot API)
         run: bash tests/e2e/run-telegram-gateway.sh
+      # ACP northbound: the real `agentgrid-acp-agent` binary speaks JSON-RPC
+      # over stdio to a real CP + real node, and the task it mints is then
+      # found on the CP with the adapter having echoed the prompt. The binary
+      # ships in every tarball; without this step its only coverage is four
+      # in-process tests against a fake CP.
+      - name: ACP gateway (real binary, real CP, stdio JSON-RPC)
+        run: bash tests/e2e/run-acp-gateway.sh
       # NOTE (bucket placement): run-auto-retry.sh and
       # run-review-consensus.sh live in the `e2e` compose job — they bring
       # up docker-compose, not bare processes.

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- **An E2E for the ACP northbound gateway** (`tests/e2e/run-acp-gateway.sh`).
+  `agentgrid-acp-agent` is the northbound half of ACP: an external ACP client
+  speaks JSON-RPC over stdio to it, and `session/prompt` mints a task on the
+  control plane and streams that task's events back as `session/update`. The
+  binary ships in every release tarball, but its only coverage was four
+  in-process tests of `GatewayAgent` against a fake control plane — nothing had
+  ever run the real binary against a real CP. The new script drives the full
+  lifecycle (`initialize` → `session/new` → `session/prompt`) with a minimal
+  stdio client, then goes behind the gateway's own answer and asks the control
+  plane: the task exists under the prompt that was sent, it has events from a
+  real attempt, and one of those event payloads contains the prompt echoed by
+  the node's adapter — i.e. the prompt travelled client → gateway → CP → node →
+  adapter, rather than being echoed back by the gateway. Registered in the
+  `e2e-failinject` CI job. Both assertions were confirmed to fail when their
+  subject is wrong (a mismatched prompt fails the CP lookup, and a prompt that
+  was never sent fails the adapter-echo check with the payloads printed).
+
 ### Fixed
 
 - **A capability probe that timed out left its process running.** `probe_adapter`
