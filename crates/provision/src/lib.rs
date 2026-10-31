@@ -640,7 +640,17 @@ mod tests {
         let mut steps: Vec<String> = Vec::new();
         let outcome = install(&target(), &p, "tok-1", &mut |m| steps.push(m.to_string()));
         std::env::set_var("PATH", &old);
-        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        // The start step is detached (`setsid nohup ssh ...`), so its fake may
+        // still be writing when install() returns. Wait for that one line
+        // instead of racing it — the foreground steps are already on disk.
+        let mut argv = String::new();
+        for _ in 0..100 {
+            argv = std::fs::read_to_string(&log).unwrap_or_default();
+            if argv.contains("chmod 600") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let _ = std::fs::remove_dir_all(&dir);
 
         let outcome = outcome.expect("fake ssh/scp must make the install succeed");
