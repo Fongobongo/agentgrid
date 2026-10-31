@@ -40,3 +40,42 @@ if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
 else
     echo "docker: unavailable, skipped"
 fi
+
+# ADR 0022 added a fourth backend after this benchmark was written, so the
+# number that mattered most — what bwrap costs per attempt, and whether it is
+# in the same class as a container — had never been measured. The argv below
+# is `sandbox::bwrap_head` for a default task (network_mode=none, writable
+# worktree, no run-as, no egress proxy), kept in the same order on purpose: a
+# benchmark of a different argv is not a benchmark of this backend.
+#
+# The first invocation also pays for bwrap's own namespace setup; running it
+# N times is what the daemon does (one bwrap per attempt), so there is no warm
+# path to amortise.
+WD="$(mktemp -d -t ag-bwrap-bench-XXXXXX)"
+trap 'rm -rf "$WD"' EXIT
+bwrap_head() { # <share-net?>
+    printf '%s\n' --die-with-parent --new-session --unshare-all
+    if [ "$1" = "share-net" ]; then
+        printf '%s\n' --share-net
+    fi
+    printf '%s\n' --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+        --bind "$WD" "$WD" --chdir "$WD" --
+}
+
+if command -v bwrap >/dev/null 2>&1 && bwrap --version >/dev/null 2>&1; then
+    echo "# $(bwrap --version)"
+    # Fail loudly rather than printing a fast row that measured nothing: a
+    # host with user namespaces disabled would otherwise look like the
+    # cheapest backend available.
+    mapfile -t HEAD_NONE < <(bwrap_head none)
+    if ! bwrap "${HEAD_NONE[@]}" /bin/true >/dev/null 2>&1; then
+        echo "bwrap: present but cannot run (user namespaces disabled?), skipped"
+    else
+        bench "bwrap (net=none)" bwrap "${HEAD_NONE[@]}" /bin/true
+        mapfile -t HEAD_NET < <(bwrap_head share-net)
+        bench "bwrap (share-net)" bwrap "${HEAD_NET[@]}" /bin/true
+    fi
+else
+    echo "bwrap: unavailable, skipped"
+fi
+
