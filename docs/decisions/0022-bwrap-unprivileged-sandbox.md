@@ -144,7 +144,10 @@ backend either way.
 - No syscall filtering: bwrap is invoked without `--seccomp`, so the agent
   keeps the host's syscall surface. Docker's default seccomp profile is
   stricter on that axis; `bwrap` is the availability/privilege trade, not a
-  replacement for a hardened docker node.
+  replacement for a hardened docker node. Measured rather than assumed (see
+  ADR 0017): inside bwrap `/proc/self/status` reports `Seccomp: 0` and
+  `unshare -U` **succeeds**, where the same probe inside the docker backend
+  reports `Seccomp: 2` / `Seccomp_filters: 1` and is refused with `EPERM`.
 - No per-attempt naming: cancel relies on `--die-with-parent` plus the
   existing process-group kill, so there is nothing to clean up after a hard
   daemon crash (unlike orphaned containers/scopes).

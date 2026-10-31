@@ -42,6 +42,54 @@ already carries every knob a stronger profile needs.
   isolated backend + strict task gate + autonomy ≤ l2 + uid separation. No
   code changed in this spike (docs only).
 
+## Verified (2026-10-31)
+
+The spike's central claim — that docker's default seccomp profile "already
+applies inside our containers", so a stronger backend would have nothing new to
+enforce on that axis — was an assertion about flags, not a measurement. Measured
+on Debian 12 with the daemon's exact argv (`--cap-drop=ALL
+--security-opt=no-new-privileges --network none`), inside the container:
+
+```
+CapEff:            0000000000000000
+CapBnd:            0000000000000000
+NoNewPrivs:        1
+Seccomp:           2          # 2 = filtered
+Seccomp_filters:   1
+unshare -U true    → "Operation not permitted"
+```
+
+So all three flags are enforced, the filter is real (a syscall the agent would
+need for its own namespace escape is refused, not merely reported as filtered),
+and `id -u` is `0` — the container runs as root *inside* unless
+`AGENTGRID_RUN_AS_USER` is set, which is why that knob exists and why the
+Secure profile composes with it rather than replacing it.
+
+The same check under `bwrap` (ADR 0022), which is the backend most likely to be
+mistaken for an equivalent:
+
+```
+CapEff:            0000000000000000
+NoNewPrivs:        1
+Seccomp:           0          # 0 = unfiltered
+Seccomp_filters:   0
+id -u              1001       # the host user, not root
+unshare -U true    → succeeds
+```
+
+That is the trade the two ADRs describe, now as evidence rather than as prose:
+bwrap drops capabilities and gives namespaces, but the agent keeps the host's
+whole syscall surface and can create nested user namespaces. Docker is the
+opposite trade — a syscall filter and a root-inside identity, paid for in cold
+start (ADR 0022 measured ~700–1200 ms vs bwrap's ~18 ms).
+
+Consequence for this ADR: the "no-go for a new backend" decision stands and is
+now grounded in a measurement. What a microVM (CubeSandbox-class) would add
+that *neither* backend has is a separate kernel — a boundary no flag on this
+list produces — and that is the gap worth re-evaluating if such a runtime
+becomes available, rather than seccomp/userns/uid, which the existing backends
+already cover.
+
 ## Revisit when
 
 A CubeSandbox runtime with a demonstrable gap (e.g. per-agent seccomp
