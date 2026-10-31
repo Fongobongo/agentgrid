@@ -16,7 +16,7 @@ import { ErrorBox } from './util';
  * Two modes, decided by the server:
  *  - `info.enabled` — the control plane was started with
  *    `AGENTGRID_PROVISION_ENABLED=1` and can run the install itself. The form
- *    posts to `/v1/nodes/install` and the modal follows the job.
+ *    posts to `/v1/node-installs` and the modal follows the job.
  *  - otherwise — the panel cannot reach into a host, so it shows the exact
  *    `ag nodes install` command to run instead, filled in from the same form.
  *    `info.reason` says why (feature off, or no daemon binary on the CP).

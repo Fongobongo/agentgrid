@@ -57,7 +57,17 @@ export default function Nodes() {
   useEffect(() => {
     getProvisioning()
       .then(setProv)
-      .catch(() => setProv(null));
+      .catch(() =>
+        // An older control plane has no such route, and a transient failure is
+        // just as likely. Either way the modal must not sit on "checking…":
+        // fall back to the manual command, which always works.
+        setProv({
+          enabled: false,
+          node_binary: null,
+          reason:
+            'this control plane did not report its provisioning capability — use the command below',
+        }),
+      );
   }, []);
   useLiveRefresh(load);
 

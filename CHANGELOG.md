@@ -17,14 +17,14 @@
     the request, lives for the install, is never stored, audited or logged
     (`InstallRequest` has no `Debug`); the attempt is audited as
     `node.install` before it runs.
-  - **Jobs, not a blocking request.** `POST /v1/nodes/install` answers `202`
-    with a job id; `GET /v1/nodes/install/{id}` and `/v1/nodes/installs` follow
+  - **Jobs, not a blocking request.** `POST /v1/node-installs` answers `202`
+    with a job id; `GET /v1/node-installs/{id}` and `/v1/node-installs` follow
     it. The install runs on `spawn_blocking` because it spawns `ssh`/`scp`.
   - **Direct transport only.** The CLI's default reverse tunnel points at the
     machine running the command — behind a button that is the CP itself — so
     the install requires a server URL the *node* can dial (the CP, or a peer's
     relay) and defaults to `AGENTGRID_PUBLIC_URL`.
-  - `GET /v1/nodes/provisioning` reports whether installs are possible and why
+  - `GET /v1/provisioning` reports whether installs are possible and why
     not (feature off, or no `agentgrid-node-daemon` next to the CP).
 - **`crates/provision`** now owns the SSH provisioning that `ag nodes install`
   used to keep to itself, so the CLI and the control plane share one

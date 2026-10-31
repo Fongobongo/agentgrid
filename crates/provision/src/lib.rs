@@ -1,7 +1,7 @@
 //! Provisioning a remote host as an agentgrid node over SSH.
 //!
 //! This lives in its own crate because two callers do the same dangerous thing:
-//! `ag nodes install` (an operator's laptop) and `POST /v1/nodes/install` (the
+//! `ag nodes install` (an operator's laptop) and `POST /v1/node-installs` (the
 //! control plane, behind an opt-in flag). Duplicating the path would mean two
 //! places to get host-key policy, argv construction and the credential file
 //! wrong, and the threat model credits this code with failing closed on an

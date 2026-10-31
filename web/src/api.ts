@@ -1127,7 +1127,7 @@ export function removeProxy(id: number) {
   return req("DELETE", `/v1/proxies/${id}`);
 }
 
-// --- Node provisioning from the panel (POST /v1/nodes/install) -------------
+// --- Node provisioning from the panel (POST /v1/node-installs) -------------
 //
 // The control plane can only do this when it was started with
 // AGENTGRID_PROVISION_ENABLED=1; `reason` is the operator-facing explanation
@@ -1169,21 +1169,21 @@ export interface InstallNodeRequest {
 }
 
 export function getProvisioning(): Promise<ProvisioningInfo> {
-  return getJson<ProvisioningInfo>("/v1/nodes/provisioning");
+  return getJson<ProvisioningInfo>("/v1/provisioning");
 }
 
 /**
  * Start an install. The server answers with a job id; `getInstallJob` follows
  * it. A non-OK response carries `{ error }` with the reason to show — the
- * generic `postJson` message ("POST /v1/nodes/install -> 403") is useless to
+ * generic `postJson` message ("POST /v1/node-installs -> 403") is useless to
  * an operator, so read the body out of the failed response here.
  */
 export async function startNodeInstall(
   body: InstallNodeRequest,
 ): Promise<{ job_id: string; state: InstallState }> {
-  const r = await req("POST", "/v1/nodes/install", body);
+  const r = await req("POST", "/v1/node-installs", body);
   if (!r.ok) {
-    let msg = `POST /v1/nodes/install -> ${r.status}`;
+    let msg = `POST /v1/node-installs -> ${r.status}`;
     try {
       const j = await r.json();
       if (j && typeof j.error === "string") msg = j.error;
@@ -1196,9 +1196,9 @@ export async function startNodeInstall(
 }
 
 export function getInstallJob(id: string): Promise<InstallJob> {
-  return getJson<InstallJob>(`/v1/nodes/install/${id}`);
+  return getJson<InstallJob>(`/v1/node-installs/${id}`);
 }
 
 export function listInstallJobs(): Promise<InstallJob[]> {
-  return getJson<InstallJob[]>("/v1/nodes/installs");
+  return getJson<InstallJob[]>("/v1/node-installs");
 }

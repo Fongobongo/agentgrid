@@ -21,7 +21,7 @@ async fn provisioning_is_disabled_by_default_and_says_so() {
 
     let resp = app
         .clone()
-        .oneshot(get_auth("/v1/nodes/provisioning", &tok))
+        .oneshot(get_auth("/v1/provisioning", &tok))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -44,7 +44,7 @@ async fn install_is_refused_with_403_when_disabled() {
 
     let resp = app
         .oneshot(post_auth(
-            "/v1/nodes/install",
+            "/v1/node-installs",
             body_json(&serde_json::json!({
                 "host": "root@10.0.0.5",
                 "server": "http://cp.example.com:7800"
@@ -75,7 +75,7 @@ async fn unknown_install_job_is_404() {
     let tok = test_token(&app).await;
 
     let resp = app
-        .oneshot(get_auth("/v1/nodes/install/does-not-exist", &tok))
+        .oneshot(get_auth("/v1/node-installs/does-not-exist", &tok))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -90,7 +90,7 @@ async fn install_list_is_empty_and_not_an_error() {
     let tok = test_token(&app).await;
 
     let resp = app
-        .oneshot(get_auth("/v1/nodes/installs", &tok))
+        .oneshot(get_auth("/v1/node-installs", &tok))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

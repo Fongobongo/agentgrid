@@ -744,7 +744,7 @@ paths:
   /v1/nodes/enrollment-token:
     post:
       summary: Mint a one-time node enrollment token (admin)
-  /v1/nodes/provisioning:
+  /v1/provisioning:
     get:
       summary: Whether this control plane can install nodes over ssh
       description: |
@@ -756,7 +756,13 @@ paths:
         '200':
           description: Capability report (`enabled`, `node_binary`, `reason`).
         '401': { $ref: '#/components/responses/Unauthorized' }
-  /v1/nodes/install:
+  /v1/node-installs:
+    get:
+      summary: Recent node-install jobs, newest first
+      responses:
+        '200':
+          description: Jobs with their steps and terminal state.
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       summary: Provision a remote host as a node over ssh (admin)
       description: |
@@ -772,22 +778,20 @@ paths:
         Direct transport only: `server` must be an address the **node** can
         dial (this control plane, or a peer's relay) and defaults to
         `AGENTGRID_PUBLIC_URL`. Returns a job id; poll
-        `GET /v1/nodes/install/{id}` for the steps.
+        `GET /v1/node-installs/{id}` for the steps.
+
+        Its own namespace on purpose: under `/v1/nodes/…` these paths collide
+        with `/v1/nodes/{id}` and `/v1/nodes/{id}/opencode-profile`.
       responses:
         '202':
           description: Install started (`job_id`, `state`).
-        '400': { description: Invalid host/name, or no server URL. }
+        '400':
+          description: Invalid host or name, or no server URL.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { description: Provisioning is disabled on this control plane. }
         '409': { description: No `agentgrid-node-daemon` (set `AGENTGRID_NODE_DIST`). }
         '503': { description: Could not mint an enrollment token. }
-  /v1/nodes/installs:
-    get:
-      summary: Recent node-install jobs, newest first
-      responses:
-        '200': { description: Jobs with their steps and terminal state. }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-  /v1/nodes/install/{id}:
+  /v1/node-installs/{id}:
     parameters:
       - name: id
         in: path
@@ -796,9 +800,11 @@ paths:
     get:
       summary: Progress of one node-install job
       responses:
-        '200': { description: The job (state, steps, error, server_url). }
+        '200':
+          description: The job — state, steps, error, server_url.
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { description: No such job, or it was evicted from the ring. }
+        '404':
+          description: No such job — or it was evicted from the ring.
   /v1/node/skills-trust:
     get:
       summary: "Node-readable copy of the operator skill trust ledger"

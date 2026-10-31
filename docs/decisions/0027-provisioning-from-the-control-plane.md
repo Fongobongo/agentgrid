@@ -40,9 +40,9 @@ and cannot do.
    operator has to say yes to it. Without the flag the API answers `403` naming
    the variable, and the panel renders that sentence instead of a form.
 
-3. **A job, not a request.** `POST /v1/nodes/install` returns `202` and a job
+3. **A job, not a request.** `POST /v1/node-installs` returns `202` and a job
    id; the install runs on `spawn_blocking` (it spawns `ssh`/`scp`) and appends
-   one line per step. `GET /v1/nodes/install/{id}` and `GET /v1/nodes/installs`
+   one line per step. `GET /v1/node-installs/{id}` and `GET /v1/node-installs`
    follow it. Jobs live in memory, capped at 20, and a running job is never
    evicted — the panel is polling that id.
 
@@ -84,7 +84,7 @@ script — a supply-chain surface this ADR does not take on.
 - The control plane needs three things it did not need before: an `ssh` client,
   a network path to the hosts (port 22, or whatever `--host` names), and
   `agentgrid-node-daemon` next to its own binary (`AGENTGRID_NODE_DIST`). All
-  three are reported by `GET /v1/nodes/provisioning` before anyone fills in a
+  three are reported by `GET /v1/provisioning` before anyone fills in a
   form.
 - **Windows control planes cannot use it**: the start step is
   `setsid nohup bash -c …`, and the provisioning tests that spawn a fake ssh

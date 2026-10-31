@@ -1,4 +1,4 @@
-//! `POST /v1/nodes/install` — provision a remote host as a node from the panel.
+//! `POST /v1/node-installs` — provision a remote host as a node from the panel.
 //!
 //! The control plane normally never dials a node: delivery is pull (the node
 //! polls, the CP assigns). Onboarding is the one exception, and it is bounded
@@ -78,7 +78,7 @@ pub struct ProvisioningRuntime {
 impl ProvisioningRuntime {
     /// Read the environment once at startup. The binary is resolved here rather
     /// than per request so a missing distribution is visible in
-    /// `GET /v1/nodes/provisioning` before anyone fills in a form.
+    /// `GET /v1/provisioning` before anyone fills in a form.
     pub fn from_env() -> Self {
         let enabled = std::env::var("AGENTGRID_PROVISION_ENABLED")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -163,7 +163,7 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Body of `POST /v1/nodes/install`.
+/// Body of `POST /v1/node-installs`.
 ///
 /// Deliberately **not** `Debug`: it carries a password and a key path, and a
 /// stray `{:?}` in a log line is exactly how those end up in a log file.
@@ -224,7 +224,7 @@ fn bad(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ApiError>)
     (code, Json(ApiError { error: msg.into() }))
 }
 
-/// `GET /v1/nodes/provisioning` — can the panel offer the Install button, and
+/// `GET /v1/provisioning` — can the panel offer the Install button, and
 /// if not, why? Read-only, so an operator (GET-only) may call it too.
 pub async fn provisioning_info(State(state): State<Arc<AppState>>) -> Json<ProvisioningInfo> {
     let rt = &state.provisioning;
@@ -250,9 +250,9 @@ pub async fn provisioning_info(State(state): State<Arc<AppState>>) -> Json<Provi
     })
 }
 
-/// `POST /v1/nodes/install` — mint a one-shot token and provision the host in
+/// `POST /v1/node-installs` — mint a one-shot token and provision the host in
 /// the background. Returns 202 with a job id; poll
-/// `GET /v1/nodes/install/{id}` for the steps.
+/// `GET /v1/node-installs/{id}` for the steps.
 pub async fn start_install(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedUser>,
@@ -388,7 +388,7 @@ pub async fn start_install(
     ))
 }
 
-/// `GET /v1/nodes/install/{id}` — steps so far, and the terminal state.
+/// `GET /v1/node-installs/{id}` — steps so far, and the terminal state.
 pub async fn get_install(
     State(state): State<Arc<AppState>>,
     Extension(_auth): Extension<AuthedUser>,
@@ -400,7 +400,7 @@ pub async fn get_install(
     }
 }
 
-/// `GET /v1/nodes/installs` — recent jobs, newest first (the panel's list).
+/// `GET /v1/node-installs` — recent jobs, newest first (the panel's list).
 pub async fn list_installs(
     State(state): State<Arc<AppState>>,
     Extension(_auth): Extension<AuthedUser>,

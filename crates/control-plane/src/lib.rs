@@ -104,7 +104,7 @@ pub struct AppState {
     pub account_usage: std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<String, Vec<agentgrid_common::AccountUsage>>>,
     >,
-    /// Node provisioning from the panel (`POST /v1/nodes/install`). Off unless
+    /// Node provisioning from the panel (`POST /v1/node-installs`). Off unless
     /// `AGENTGRID_PROVISION_ENABLED=1`: a control plane that can ssh into
     /// hosts is a different threat model from one that cannot.
     pub provisioning: std::sync::Arc<routes::provision::ProvisioningRuntime>,
@@ -601,17 +601,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/nodes/enrollment-token",
             post(routes::nodes::create_enrollment_token),
         )
-        // Provisioning from the panel. `provisioning` reports whether the
-        // feature is available at all; `install` starts a background job and
-        // `install/{id}` follows it. Static segments win over `{id}`.
+        // Provisioning from the panel. Its own namespace on purpose: under
+        // `/v1/nodes/…` these would collide with `/v1/nodes/{id}` and
+        // `/v1/nodes/{id}/opencode-profile` — one URL, two patterns — which the
+        // OpenAPI linter calls ambiguous and matchit only settles by priority.
         .route(
-            "/v1/nodes/provisioning",
+            "/v1/provisioning",
             get(routes::provision::provisioning_info),
         )
-        .route("/v1/nodes/install", post(routes::provision::start_install))
-        .route("/v1/nodes/installs", get(routes::provision::list_installs))
         .route(
-            "/v1/nodes/install/{id}",
+            "/v1/node-installs",
+            get(routes::provision::list_installs).post(routes::provision::start_install),
+        )
+        .route(
+            "/v1/node-installs/{id}",
             get(routes::provision::get_install),
         )
         .route(
