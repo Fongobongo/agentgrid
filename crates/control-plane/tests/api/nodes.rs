@@ -64,6 +64,7 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     let resp = app
         .clone()
@@ -203,6 +204,7 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     let resp = app
         .clone()
@@ -308,6 +310,7 @@ async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     let resp = app
         .clone()
@@ -417,6 +420,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     let resp = app
         .clone()
@@ -568,6 +572,7 @@ async fn node_protocol_mismatch_marks_degraded() {
         agent_version: "t".into(),
         protocol_version: Some("0".into()),
         permission_interception: "wrapper".into(),
+        public_key: None,
     };
     let er = app
         .clone()
@@ -654,6 +659,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     let resp = app
         .clone()
@@ -771,6 +777,7 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     let resp = app
         .clone()
@@ -857,6 +864,7 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     let resp = app
         .clone()

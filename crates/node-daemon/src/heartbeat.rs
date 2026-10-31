@@ -385,6 +385,10 @@ pub fn spawn_heartbeat(
             .await
             .unwrap_or((0, 0, 0, 0, 0, 0));
             let req = HeartbeatRequest {
+                // ADR 0028: announced on every beat rather than only at
+                // enroll, so a node that predates sealing is reachable as soon
+                // as it upgrades. The store compares before writing.
+                public_key: crate::config::process_credential().and_then(|c| c.public_key()),
                 status: Some(status),
                 name: cfg.node_name.clone(),
                 adapters: cfg.adapters.iter().map(|s| s.id.clone()).collect(),

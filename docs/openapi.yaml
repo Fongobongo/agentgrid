@@ -840,6 +840,12 @@ paths:
         (capped at the node's free concurrency slots) made in one write
         transaction; without the header exactly the legacy single
         `assignment` semantics apply.
+
+        `adapter_env` carries the node's CP-managed env **sealed to its
+        X25519 key** (ADR 0028); `adapter_env_complete` marks the list as the
+        node's whole set rather than a delta, so an empty list revokes.
+        Protocol-1 nodes (no `adapter_env_complete`) are sent no adapter env
+        at all — the entries are ciphertext they would read as the value.
       security: [{ nodeAuth: [] }]
   /v1/node/ws:
     get:

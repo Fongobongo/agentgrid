@@ -485,6 +485,7 @@ mod tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
         let a = s.try_assign(&node_id).await.unwrap().expect("assign");
@@ -651,6 +652,7 @@ mod tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         s.enroll_node(&node).await.unwrap().expect("enroll");
         // Incompatible protocol version -> degraded, no assignment.
@@ -720,6 +722,7 @@ mod tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
         let assign = s.try_assign(&node_id).await.unwrap().expect("assign");
@@ -801,6 +804,7 @@ mod tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
         let assign = s.try_assign(&node_id).await.unwrap().expect("assign");

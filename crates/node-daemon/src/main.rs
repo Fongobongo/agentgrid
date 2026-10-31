@@ -43,6 +43,7 @@ mod proxy;
 mod recovery;
 mod relay;
 mod sandbox;
+mod sealed_env;
 mod secret_redactor;
 pub(crate) mod skills;
 #[cfg(test)]

@@ -1,8 +1,8 @@
 # ADR 0028: Per-host credentials — what a vault would and would not buy
 
-Status: proposed — Phase 0 is a bug fix and can ship on its own; Phase 1 has
-an open fork (A or B below) that is a threat-model decision, not an
-engineering one.
+Status: accepted — Phase 0 shipped, Phase 1 chose **B** (node-held keypair) and
+is implemented (both unreleased, 0.7.0); Phase 2 (install credentials) and
+Phase 3 (node credential rotation) are still open. See [Outcome](#outcome).
 
 ## Context
 
@@ -154,6 +154,58 @@ awkward once nodes have been enrolled for a year.
 - If the answer to Phase 1 is B, the CP's ability to "decrypt" becomes a
   property of the nodes, and a lost node key means a secret must be re-entered
   — an operational cost worth stating before it is chosen, not after.
+
+## Outcome
+
+**Phase 0** shipped as written: the list route returns `fingerprint` and
+`value_len` and has no field able to hold a value; it is admin-only; `rm` sets
+`secure_delete` and truncates the WAL; CP-pushed values join the node's mask
+list automatically (`is_secret_name` — `_KEY`, `_TOKEN`, `_SECRET`,
+`_PASSWORD`, `_PASS`, `_PAT`). Verified on a live control plane: the operator
+role gets 403 on `GET` *and* `PUT`, and after `rm` the secret is `grep`-able in
+neither `cp.db` nor `cp.db-wal`.
+
+**Phase 1 = B**, implemented as ECIES over X25519 in `crates/common/src/seal.rs`:
+
+- The node generates a static X25519 keypair at enroll and stores the private
+  half in `credential.json` (0600). The public half is sent in `EnrollRequest`
+  and re-sent on every heartbeat, so a node enrolled before this change
+  becomes sealable on upgrade without re-enrolling.
+- The CP seals each value **per node** with a fresh ephemeral key
+  (HKDF-SHA256, salt `agentgrid-adapter-env-v1`, AES-256-GCM) into
+  `adapter_env_sealed`, and keeps only `sha256(value)[:8]` and the length on
+  the entry itself. `adapter_env.value` was renamed to `value_legacy`, blanked
+  by a startup step (`seal_legacy_adapter_env`) once node keys exist, and never
+  written again.
+- The entry identity is bound **into the derived key**, not only into the tag:
+  `aad = node_id \0 adapter \0 key`. A blob replayed as another variable or for
+  another node fails to open rather than decrypting to the wrong entry.
+- A node that has not announced a key yet gets nothing and shows up as
+  `pending` in `ag adapter-env ls`, instead of being handed a blob it cannot
+  use. Announcing a *different* key drops the blobs sealed to the old one.
+- `NODE_PROTOCOL_VERSION` went `1` → `2`: `adapter_env` in a poll response now
+  carries `sealed` instead of `value`. A protocol-1 node is served no
+  CP-managed adapter env at all, which is the only honest thing to do — it
+  would otherwise receive ciphertext it treats as the value.
+- `PollResponse.adapter_env_complete` (new) says the list is the node's whole
+  set, not a delta. Without it an empty list is ambiguous and `rm` could not
+  revoke a value on a running node — only at its next restart.
+
+What B does **not** buy: a compromised CP can still *push* a value of its
+choosing (it seals, it does not sign) and can still point an adapter at a base
+URL it controls. It cannot read back what an operator entered. That is the
+(read-half) claim the ADR made for B, and it holds.
+
+**Operational cost, stated before it is discovered:** upgrading a node mints a
+key it did not have, so any value sealed before the upgrade is unrecoverable —
+those entries report `pending` and must be re-entered once. Rotating a node's
+key has the same cost for that node.
+
+`tests/e2e/run-sealed-env.sh` (CI) proves the wiring end to end: a value piped
+into `ag adapter-env set` is sealed for the node, is absent from `cp.db`,
+`cp.db-wal` and the CP log, reaches the adapter process (the mock prints what
+the child saw), is masked in the event stream while a non-secret variable is
+not, and is gone from the next attempt after `ag adapter-env rm`.
 
 ## Method
 

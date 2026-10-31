@@ -129,6 +129,18 @@ pub async fn enroll(
             if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
                 let _ = state.store.set_node_degraded(&r.node_id).await;
             }
+            // ADR 0028: the key a node seals its secrets to is part of its
+            // identity from the first request, so enrollment stores it before
+            // any adapter-env entry can be aimed at this node.
+            if let Some(public_key) = req.public_key.as_deref() {
+                if let Err(e) = state
+                    .store
+                    .set_node_public_key(&r.node_id, public_key)
+                    .await
+                {
+                    tracing::warn!(node = %r.node_id, "could not store the node's public key: {e}");
+                }
+            }
             (StatusCode::OK, Json(Some(r)))
         }
         Ok(None) => (StatusCode::BAD_REQUEST, Json(None)),
@@ -152,6 +164,17 @@ pub async fn heartbeat(
         // and stay schedulable. Pin this beat's reported status too; the node
         // recovers naturally once it reports a compatible protocol again.
         req.status = Some(agentgrid_common::NodeStatus::Degraded);
+    }
+    // ADR 0028: a node that enrolled before this existed announces its key on
+    // its next heartbeat. Cheap no-op once stored — the store compares first.
+    if let Some(public_key) = req.public_key.as_deref() {
+        if let Err(e) = state
+            .store
+            .set_node_public_key(&auth.node_id, public_key)
+            .await
+        {
+            tracing::warn!(node = %auth.node_id, "could not store the node's public key: {e}");
+        }
     }
     match state.store.heartbeat(&auth.node_id, &req).await {
         Ok(true) => {

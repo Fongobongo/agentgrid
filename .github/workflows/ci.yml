@@ -443,6 +443,12 @@ jobs:
       # in-process tests against a fake CP.
       - name: ACP gateway (real binary, real CP, stdio JSON-RPC)
         run: bash tests/e2e/run-acp-gateway.sh
+      # ADR 0028 phase 1B: the CP delivers an adapter-env secret it cannot read
+      # (sealed per node), the value never lands in cp.db/cp.db-wal/cp.log, the
+      # adapter process receives it masked, and `ag adapter-env rm` revokes it
+      # on a running node. Process-based, no docker, no LLM.
+      - name: sealed adapter-env secrets (CP cannot read them)
+        run: bash tests/e2e/run-sealed-env.sh
       # NOTE (bucket placement): run-auto-retry.sh and
       # run-review-consensus.sh live in the `e2e` compose job — they bring
       # up docker-compose, not bare processes.

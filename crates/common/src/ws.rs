@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Assignment;
+use crate::{Assignment, SealedAdapterEnvEntry};
 
 /// JSON envelope on the node WS channel. Serialized as
 /// `{"type": "<snake_case variant>", ...}`. One enum covers both directions;
@@ -60,6 +60,19 @@ pub enum NodeWsMsg {
     ConfigUpdate {
         profile_id: Option<String>,
         hash: Option<String>,
+    },
+    /// CP → node: the node's CP-managed adapter env, sealed to its key.
+    ///
+    /// Sent right after `hello_ok` and again whenever an entry changes.
+    /// Without it the feature is dead on the default transport: `adapter_env`
+    /// only ever travelled in a poll response, and a node on `ws`/`auto` never
+    /// polls. Only protocol-2 connections receive it — a protocol-1 node would
+    /// fail to deserialize `sealed` and drop the whole session.
+    AdapterEnvUpdate {
+        adapter_env: Vec<SealedAdapterEnvEntry>,
+        /// True: this list is the node's whole set, so empty means "none"
+        /// (revocation) rather than "nothing to say".
+        adapter_env_complete: bool,
     },
 }
 

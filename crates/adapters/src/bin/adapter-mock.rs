@@ -14,6 +14,9 @@
 //!   fork:<n>           - spawn n concurrent children and wait (Plan 6.11
 //!                       E2E: trips the sandbox TasksMax / --pids-limit →
 //!                       fork fails or the kernel kills the excess tasks)
+//!   env:<VAR>          - print the value of <VAR> as the process sees it
+//!                       (ADR 0028 E2E: proves a sealed secret reached the
+//!                       adapter, and that a secret-named one was masked)
 //! Any other line is logged as a note. Emits a final `result` event.
 
 use std::env;
@@ -145,6 +148,15 @@ fn main() {
                     exit_code = 1;
                 }
             }
+        } else if let Some(name) = line.strip_prefix("env:") {
+            // Delivery probe (ADR 0028 E2E): print what the daemon actually
+            // put in this process's environment, so a test can prove a value
+            // crossed CP -> node -> adapter instead of trusting the wiring.
+            // A value the daemon considers a secret is masked before it gets
+            // this far, which is the other half of the same test.
+            let name = name.trim();
+            let value = env::var(name).unwrap_or_else(|_| "<unset>".into());
+            emit("log", json!({ "text": format!("env {name}={value}") }));
         } else if let Some(mb) = line.strip_prefix("oom:") {
             // Stage 12 E2E: allocate and touch <mb> MiB so the container
             // runtime's --memory limit OOM-kills the attempt. The allocation

@@ -1249,15 +1249,29 @@ pub(crate) async fn cmd_adapter_env(
                 println!("(no managed adapter env)");
             }
             for p in items {
+                let sealed = p["sealed_for"].as_array().map(|a| a.len()).unwrap_or(0);
+                let pending = p["pending"].as_array().map(|a| a.len()).unwrap_or(0);
                 println!(
-                    "#{:>3} {:<12} {:<28} node={:<10} fp={} len={}",
+                    "#{:>3} {:<12} {:<28} node={:<10} fp={} len={} sealed={} pending={}",
                     p["id"].as_i64().unwrap_or(0),
                     p["adapter"].as_str().unwrap_or(""),
                     p["key"].as_str().unwrap_or(""),
                     p["node_id"].as_str().unwrap_or("*"),
                     p["fingerprint"].as_str().unwrap_or(""),
                     p["value_len"].as_u64().unwrap_or(0),
+                    sealed,
+                    pending,
                 );
+                if let Some(names) = p["pending"].as_array() {
+                    if !names.is_empty() {
+                        let list: Vec<&str> = names.iter().filter_map(|n| n.as_str()).collect();
+                        println!(
+                            "     not delivered to {} (no public key yet; it gets one on its \
+                             next heartbeat, then re-run `set`)",
+                            list.join(", ")
+                        );
+                    }
+                }
             }
             Ok(())
         }
@@ -1280,7 +1294,25 @@ pub(crate) async fn cmd_adapter_env(
                 .await?;
             err_if_fail(resp.status(), "set adapter env")?;
             let v: serde_json::Value = resp.json().await?;
-            println!("adapter-env #{} saved", v["id"]);
+            let sealed = v["sealed_for"].as_array().map(|a| a.len()).unwrap_or(0);
+            println!(
+                "adapter-env #{} saved, sealed for {sealed} node(s)",
+                v["id"]
+            );
+            if let Some(pending) = v["pending"].as_array() {
+                if !pending.is_empty() {
+                    let list: Vec<&str> = pending.iter().filter_map(|n| n.as_str()).collect();
+                    // Not an error: the node will announce a key on its next
+                    // heartbeat, and the value has to be re-saved then. Saying
+                    // "saved" without this would be a lie the operator only
+                    // discovers from a broken adapter.
+                    eprintln!(
+                        "warning: {} node(s) have no public key yet and will not receive it: {}",
+                        list.len(),
+                        list.join(", ")
+                    );
+                }
+            }
             Ok(())
         }
         AdapterEnvAction::Rm { id } => {

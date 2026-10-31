@@ -59,7 +59,30 @@ pub async fn set_adapter_env(
         .upsert_adapter_env(&req.adapter, &req.key, &req.value, req.node_id.as_deref())
         .await
     {
-        Ok(id) => (StatusCode::OK, Json(serde_json::json!({ "id": id }))),
+        Ok(outcome) => {
+            // `pending` is the honest half of the answer: a node that has not
+            // announced a public key cannot receive a sealed value, and
+            // saying so is better than reporting a success the node will
+            // never see.
+            if !outcome.pending.is_empty() {
+                tracing::warn!(
+                    entry = outcome.id,
+                    pending = ?outcome.pending,
+                    "adapter env stored, but some nodes have no public key yet"
+                );
+            }
+            // Nodes on the WS transport never poll, so the poll response is
+            // not a delivery channel for them: push now.
+            state.ws_registry.push_adapter_env(&state.store).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": outcome.id,
+                    "sealed_for": outcome.sealed_for,
+                    "pending": outcome.pending,
+                })),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -76,7 +99,12 @@ pub async fn remove_adapter_env(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "no such entry" })),
         ),
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "removed": id }))),
+        Ok(_) => {
+            // Revocation has to reach a connected node too, or `rm` is a
+            // no-op until it reconnects.
+            state.ws_registry.push_adapter_env(&state.store).await;
+            (StatusCode::OK, Json(serde_json::json!({ "removed": id })))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),

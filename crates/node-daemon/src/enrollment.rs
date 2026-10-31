@@ -9,16 +9,38 @@ use agentgrid_common::{EnrollRequest, EnrollResponse};
 /// subsequent heartbeats/polls.
 pub async fn load_or_enroll(cfg: &Config) -> Result<SavedCredential> {
     if let Ok(data) = std::fs::read_to_string(&cfg.credential_path) {
-        if let Ok(cred) = serde_json::from_str::<SavedCredential>(&data) {
+        if let Ok(mut cred) = serde_json::from_str::<SavedCredential>(&data) {
+            // ADR 0028: a credential written before sealing has no key. Mint
+            // one now and save it, so the next heartbeat can announce it —
+            // without this, an upgraded node silently never receives a
+            // CP-managed secret again.
+            if cred.key_secret.is_none() {
+                let (_, private) = agentgrid_common::seal::generate_keypair()
+                    .map_err(|e| anyhow::anyhow!("generate node key: {e}"))?;
+                cred.key_secret = Some(private);
+                write_credential(&cfg.credential_path, &cred)?;
+                tracing::info!(
+                    "generated an adapter-env key for this node; secrets sealed before this \
+                     point must be re-entered with `ag adapter-env set`"
+                );
+            }
             return Ok(cred);
         }
     }
     let cred = enroll_node(cfg).await?;
-    // Node credential is secret material: 0600 regardless of umask (matches
-    // the env-file scrub path), including for a pre-existing file.
-    // (0600 is a POSIX concept; on Windows the best effort is a normal
-    // private write — ACL hardening is out of scope for a dev host.)
-    let data = serde_json::to_vec(&cred)?;
+    write_credential(&cfg.credential_path, &cred)?;
+    scrub_enroll_token_from_env(cfg).await;
+    Ok(cred)
+}
+
+/// Persist the credential (and the sealing key) with 0600.
+///
+/// Node credential is secret material: 0600 regardless of umask (matches the
+/// env-file scrub path), including for a pre-existing file. (0600 is a POSIX
+/// concept; on Windows the best effort is a normal private write — ACL
+/// hardening is out of scope for a dev host.)
+fn write_credential(path: &std::path::Path, cred: &SavedCredential) -> Result<()> {
+    let data = serde_json::to_vec(cred)?;
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -28,20 +50,25 @@ pub async fn load_or_enroll(cfg: &Config) -> Result<SavedCredential> {
             .write(true)
             .truncate(true)
             .mode(0o600)
-            .open(&cfg.credential_path)?;
+            .open(path)?;
         f.write_all(&data)?;
-        std::fs::set_permissions(&cfg.credential_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     #[cfg(not(unix))]
-    std::fs::write(&cfg.credential_path, &data)?;
-    scrub_enroll_token_from_env(cfg).await;
-    Ok(cred)
+    std::fs::write(path, &data)?;
+    Ok(())
 }
 
 /// Enroll this node with the control plane.
 async fn enroll_node(cfg: &Config) -> Result<SavedCredential> {
     let client = crate::polling::daemon_http_client()?;
+    // Mint the sealing keypair before the request: the public half is part of
+    // enrollment (ADR 0028), so a node is addressable by the CP from the first
+    // moment it exists.
+    let (public_key, key_secret) = agentgrid_common::seal::generate_keypair()
+        .map_err(|e| anyhow::anyhow!("generate node key: {e}"))?;
     let body = EnrollRequest {
+        public_key: Some(public_key),
         token: cfg.enroll_token.clone().unwrap_or_default(),
         name: cfg.node_name.clone(),
         adapters: cfg.adapters.iter().map(|a| a.id.clone()).collect(),
@@ -74,6 +101,7 @@ async fn enroll_node(cfg: &Config) -> Result<SavedCredential> {
                 return Ok(SavedCredential {
                     node_id: enrolled.node_id,
                     credential: enrolled.credential,
+                    key_secret: Some(key_secret),
                 });
             }
             Ok(r) => {

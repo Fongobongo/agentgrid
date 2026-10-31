@@ -208,11 +208,28 @@ pub async fn poll(
         .proxy_urls_for(&req.node_id)
         .await
         .unwrap_or_default();
-    let adapter_env = state
-        .store
-        .adapter_env_for(&req.node_id)
-        .await
-        .unwrap_or_default();
+    // A failed query must not look like "this node has no entries": with
+    // `adapter_env_complete` set the node would drop its whole snapshot on a
+    // transient database error.
+    //
+    // A protocol-1 node is served **no** adapter env (ADR 0028): the entries
+    // now carry `sealed` instead of `value`, and a node that predates the
+    // change would fail to deserialize the whole poll response — one protocol
+    // bump would take the fleet offline. Empty is the only safe answer for a
+    // node that cannot read it; it keeps whatever it already has locally.
+    let node_protocol = req
+        .protocol_version
+        .as_deref()
+        .and_then(|v| v.split('.').next())
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1);
+    let adapter_env = if node_protocol >= 2 {
+        state.store.adapter_env_for(&req.node_id).await
+    } else {
+        Ok(Vec::new())
+    };
+    let adapter_env_complete = node_protocol >= 2 && adapter_env.is_ok();
+    let adapter_env = adapter_env.unwrap_or_default();
     let out = match state.scheduler.poll(&req, max_batch).await {
         Ok((_, batch)) if !batch.is_empty() => {
             let mut resp = PollResponse {
@@ -220,6 +237,7 @@ pub async fn poll(
                 assignments: batch,
                 proxy_urls,
                 adapter_env,
+                adapter_env_complete,
             };
             resp.assignment = Some(resp.assignments[0].clone());
             (StatusCode::OK, Json(resp))
@@ -231,6 +249,7 @@ pub async fn poll(
                 assignments: Vec::new(),
                 proxy_urls,
                 adapter_env,
+                adapter_env_complete,
             }),
         ),
         Err(e) => {
@@ -242,6 +261,7 @@ pub async fn poll(
                     assignments: Vec::new(),
                     proxy_urls,
                     adapter_env,
+                    adapter_env_complete,
                 }),
             )
         }

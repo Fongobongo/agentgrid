@@ -70,6 +70,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -282,6 +283,7 @@ mod workflow_tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
         let a = s.try_assign(&node_id).await.unwrap().expect("assign");
@@ -1293,6 +1295,7 @@ mod workflow_tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let resp = s.enroll_node(&node).await.unwrap().expect("node enroll");
         let node_id = resp.node_id;
@@ -1355,6 +1358,7 @@ mod workflow_tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
         let view = s
@@ -1424,6 +1428,7 @@ mod workflow_tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
         for i in 0..100 {
@@ -1489,6 +1494,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             };
             node_ids.push(s.enroll_node(&node).await.unwrap().expect("enroll").node_id);
         }
@@ -1634,6 +1640,7 @@ mod workflow_tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
 
@@ -1849,6 +1856,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -1974,6 +1982,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -2078,6 +2087,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -2516,6 +2526,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -2604,6 +2615,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -2682,6 +2694,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -3039,6 +3052,7 @@ mod workflow_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -3466,6 +3480,7 @@ mod verifier_ro_tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
 
@@ -3544,6 +3559,7 @@ mod verifier_ro_tests {
             agent_version: "test".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
 
@@ -3642,6 +3658,7 @@ mod verifier_ro_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             };
             let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
             let arch = WorkflowStep {
@@ -3840,6 +3857,7 @@ mod verifier_ro_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             };
             let node_id = s.enroll_node(&node).await.unwrap().expect("enroll").node_id;
             let run = s
@@ -3956,35 +3974,263 @@ mod proxy_tests {
 #[cfg(test)]
 mod adapter_env_tests {
     use super::*;
+    use agentgrid_common::seal::{self, entry_aad};
+    use agentgrid_common::EnrollRequest;
 
-    #[tokio::test]
-    async fn global_and_node_scoped_upsert() {
+    async fn fresh() -> Store {
         let p = std::env::temp_dir().join(format!("ag-aenv-{}.db", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&p);
-        let s = Store::open(p.to_str().unwrap()).await.unwrap();
+        Store::open(p.to_str().unwrap()).await.unwrap()
+    }
+
+    /// Enroll a node, optionally announcing a sealing public key.
+    ///
+    /// The key is recorded through `set_node_public_key` because that is what
+    /// the enroll route does after `enroll_node` returns; a test that set the
+    /// column directly would not exercise the path that ships.
+    async fn enroll(s: &Store, name: &str, public_key: Option<String>) -> String {
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let node_id = s
+            .enroll_node(&EnrollRequest {
+                token,
+                name: name.into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 4,
+                agent_version: "t".into(),
+                protocol_version: None,
+                permission_interception: "none".into(),
+                public_key: public_key.clone(),
+            })
+            .await
+            .unwrap()
+            .expect("enroll")
+            .node_id;
+        if let Some(pk) = public_key {
+            s.set_node_public_key(&node_id, &pk).await.unwrap();
+        }
+        node_id
+    }
+
+    fn fp(value: &str) -> String {
+        agentgrid_common::sha256_hex(value.as_bytes())[..8].to_string()
+    }
+
+    fn opened(secret: &str, blob: &str, node: &str, key: &str) -> Option<String> {
+        seal::open(secret, blob, &entry_aad(node, "claude", key)).ok()
+    }
+
+    #[tokio::test]
+    async fn the_store_keeps_a_fingerprint_and_ciphertext_but_never_the_value() {
+        let s = fresh().await;
+        let (pub_a, priv_a) = seal::generate_keypair().unwrap();
+        let (pub_b, priv_b) = seal::generate_keypair().unwrap();
+        let a = enroll(&s, "a", Some(pub_a)).await;
+        let b = enroll(&s, "b", Some(pub_b)).await;
+
+        let out = s
+            .upsert_adapter_env("claude", "ANTHROPIC_API_KEY", "sk-ant-secret", None)
+            .await
+            .unwrap();
+        let mut got = out.sealed_for.clone();
+        got.sort();
+        let mut want = vec![a.clone(), b.clone()];
+        want.sort();
+        assert_eq!(got, want, "a global entry reaches every node");
+        assert!(out.pending.is_empty());
+
+        let for_a = s.adapter_env_for(&a).await.unwrap();
+        assert_eq!(for_a.len(), 1);
+        assert_eq!(
+            opened(&priv_a, &for_a[0].sealed, &a, "ANTHROPIC_API_KEY").as_deref(),
+            Some("sk-ant-secret")
+        );
+        assert!(
+            !for_a[0].sealed.contains("sk-ant"),
+            "the blob must not carry the value"
+        );
+        // Node B holds the same entry but cannot open node A's blob.
+        assert!(opened(&priv_b, &for_a[0].sealed, &a, "ANTHROPIC_API_KEY").is_none());
+
+        let view = &s.list_adapter_env().await.unwrap()[0];
+        assert_eq!(view.fingerprint, fp("sk-ant-secret"));
+        assert_eq!(view.value_len, 13);
+        let mut sealed_for = view.sealed_for.clone();
+        sealed_for.sort();
+        assert_eq!(sealed_for, want);
+        assert!(view.pending.is_empty(), "both nodes could be sealed for");
+    }
+
+    #[tokio::test]
+    async fn a_node_scoped_entry_only_reaches_that_node() {
+        let s = fresh().await;
+        let (pub_a, priv_a) = seal::generate_keypair().unwrap();
+        let (pub_b, _priv_b) = seal::generate_keypair().unwrap();
+        let a = enroll(&s, "a", Some(pub_a)).await;
+        let b = enroll(&s, "b", Some(pub_b)).await;
 
         s.upsert_adapter_env("claude", "ANTHROPIC_BASE_URL", "https://r.example", None)
             .await
             .unwrap();
-        s.upsert_adapter_env("claude", "ANTHROPIC_AUTH_TOKEN", "k1", Some("node-a"))
+        let out = s
+            .upsert_adapter_env("claude", "ANTHROPIC_AUTH_TOKEN", "k1", Some(&a))
             .await
             .unwrap();
+        assert_eq!(out.sealed_for, vec![a.clone()]);
 
-        let g = s.adapter_env_for("node-b").await.unwrap();
-        assert_eq!(g.len(), 1);
-        let a = s.adapter_env_for("node-a").await.unwrap();
-        assert_eq!(a.len(), 2);
-        assert_eq!(a[0].key, "ANTHROPIC_BASE_URL", "global rows first");
+        let for_a = s.adapter_env_for(&a).await.unwrap();
+        assert_eq!(for_a.len(), 2);
+        assert_eq!(for_a[0].key, "ANTHROPIC_BASE_URL", "global rows first");
+        assert_eq!(
+            opened(&priv_a, &for_a[1].sealed, &a, "ANTHROPIC_AUTH_TOKEN").as_deref(),
+            Some("k1")
+        );
+        assert_eq!(s.adapter_env_for(&b).await.unwrap().len(), 1);
+    }
 
-        // upsert updates value in place (same adapter+key+node)
-        s.upsert_adapter_env("claude", "ANTHROPIC_BASE_URL", "https://r2.example", None)
+    #[tokio::test]
+    async fn re_saving_a_value_reseals_it_without_adding_a_row() {
+        let s = fresh().await;
+        let (public, private) = seal::generate_keypair().unwrap();
+        let a = enroll(&s, "a", Some(public)).await;
+
+        s.upsert_adapter_env("claude", "K", "v1", None)
             .await
             .unwrap();
-        let g = s.adapter_env_for("node-b").await.unwrap();
-        assert_eq!(g[0].value, "https://r2.example");
+        let first = s.adapter_env_for(&a).await.unwrap()[0].sealed.clone();
+        s.upsert_adapter_env("claude", "K", "v2", None)
+            .await
+            .unwrap();
+        let second = s.adapter_env_for(&a).await.unwrap()[0].sealed.clone();
+
+        assert_ne!(first, second, "a fresh ephemeral key per seal");
+        assert_eq!(
+            opened(&private, &second, &a, "K").as_deref(),
+            Some("v2"),
+            "the newest value wins"
+        );
+        assert_eq!(
+            s.list_adapter_env().await.unwrap().len(),
+            1,
+            "upsert, not insert"
+        );
+        assert_eq!(s.list_adapter_env().await.unwrap()[0].fingerprint, fp("v2"));
+    }
+
+    #[tokio::test]
+    async fn an_entry_for_a_node_without_a_key_is_pending_not_delivered() {
+        let s = fresh().await;
+        let (public, _private) = seal::generate_keypair().unwrap();
+        let with_key = enroll(&s, "has-key", Some(public)).await;
+        let without = enroll(&s, "no-key", None).await;
+
+        let out = s
+            .upsert_adapter_env("claude", "K", "v", None)
+            .await
+            .unwrap();
+        assert_eq!(out.sealed_for, vec![with_key.clone()]);
+        assert_eq!(out.pending, vec![without.clone()]);
+        // A node that cannot open anything gets nothing rather than a blob it
+        // would fail to use on every poll.
+        assert!(s.adapter_env_for(&without).await.unwrap().is_empty());
+        assert_eq!(
+            s.list_adapter_env().await.unwrap()[0].pending,
+            vec![without]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_public_key_drops_the_ciphertexts_sealed_to_the_old_one() {
+        let s = fresh().await;
+        let (public_1, _private_1) = seal::generate_keypair().unwrap();
+        let node = enroll(&s, "n", Some(public_1)).await;
+        s.upsert_adapter_env("claude", "K", "v", None)
+            .await
+            .unwrap();
+        assert_eq!(s.adapter_env_for(&node).await.unwrap().len(), 1);
+
+        let (public_2, private_2) = seal::generate_keypair().unwrap();
+        assert!(
+            s.set_node_public_key(&node, &public_2).await.unwrap(),
+            "the key changed"
+        );
+        assert!(
+            s.adapter_env_for(&node).await.unwrap().is_empty(),
+            "blobs sealed to the old key are unusable and must not be served"
+        );
+        assert_eq!(
+            s.list_adapter_env().await.unwrap()[0].pending,
+            vec![node.clone()]
+        );
+        assert!(
+            !s.set_node_public_key(&node, &public_2).await.unwrap(),
+            "re-announcing the same key is a no-op"
+        );
+
+        // Re-saving the value seals it to the new key.
+        s.upsert_adapter_env("claude", "K", "v", None)
+            .await
+            .unwrap();
+        let sealed = s.adapter_env_for(&node).await.unwrap()[0].sealed.clone();
+        assert_eq!(
+            opened(&private_2, &sealed, &node, "K").as_deref(),
+            Some("v")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_rows_are_sealed_once_and_the_column_blanked() {
+        let s = fresh().await;
+        let (public, private) = seal::generate_keypair().unwrap();
+        let node = enroll(&s, "n", Some(public)).await;
+
+        // A row written before migration 0096: plaintext in `value_legacy`, no
+        // fingerprint, no ciphertext.
+        sqlx::query(
+            "INSERT INTO adapter_env (adapter, key, value_legacy, node_id)              VALUES ('claude', 'OLD_KEY', 'sk-old', '')",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(s.seal_legacy_adapter_env().await.unwrap(), (1, 1));
+        let view = &s.list_adapter_env().await.unwrap()[0];
+        assert_eq!(view.fingerprint, fp("sk-old"));
+        assert_eq!(view.value_len, 6);
+        let sealed = s.adapter_env_for(&node).await.unwrap()[0].sealed.clone();
+        assert_eq!(
+            opened(&private, &sealed, &node, "OLD_KEY").as_deref(),
+            Some("sk-old")
+        );
+        let left: String = sqlx::query_scalar("SELECT value_legacy FROM adapter_env")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, "", "the plaintext column is emptied");
+        // Idempotent: a second boot finds nothing left to seal.
+        assert_eq!(s.seal_legacy_adapter_env().await.unwrap(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn removing_an_entry_takes_its_ciphertexts_with_it() {
+        let s = fresh().await;
+        let (public, _private) = seal::generate_keypair().unwrap();
+        enroll(&s, "n", Some(public)).await;
+        s.upsert_adapter_env("claude", "K", "v", None)
+            .await
+            .unwrap();
 
         let id = s.list_adapter_env().await.unwrap()[0].id;
         assert_eq!(s.remove_adapter_env(id).await.unwrap(), 1);
+        assert!(s.list_adapter_env().await.unwrap().is_empty());
+        let blobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM adapter_env_sealed")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            blobs, 0,
+            "an orphaned ciphertext is still readable by the node"
+        );
     }
 }
 
@@ -4008,6 +4254,7 @@ mod mem_gate_tests {
                 agent_version: "t".into(),
                 protocol_version: None,
                 permission_interception: "none".into(),
+                public_key: None,
             })
             .await
             .unwrap()
@@ -4057,6 +4304,7 @@ mod mem_gate_tests {
             repo_states: vec![],
             capabilities_schema_version: None,
             supported_event_versions: None,
+            public_key: None,
         }
     }
 
@@ -4445,6 +4693,7 @@ mod artifact_blob_tests {
                 agent_version: "test".into(),
                 protocol_version: None,
                 permission_interception: "wrapper".into(),
+                public_key: None,
             })
             .await
             .unwrap()

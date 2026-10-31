@@ -124,6 +124,26 @@ impl AppState {
         ha: Arc<ha::HaRuntime>,
     ) -> anyhow::Result<Arc<Self>> {
         let mut store = Store::open_with_gate(db_path, ha.store_gate()).await?;
+        // ADR 0028: values written before the sealing schema are still in the
+        // clear under `value_legacy`. This is the last moment the CP has both
+        // the plaintext and a node key, so it seals them and blanks the column
+        // before serving anything. Idempotent: the query is empty afterwards,
+        // and a failure is retried on the next boot rather than refusing to
+        // start (a CP that will not boot cannot be used to re-enter the value).
+        if store.ha_allows_work() {
+            match store.seal_legacy_adapter_env().await {
+                Ok((0, 0)) => {}
+                Ok((entries, blobs)) => tracing::warn!(
+                    entries,
+                    blobs,
+                    "sealed adapter-env values that were stored in the clear (ADR 0028)"
+                ),
+                Err(e) => tracing::error!(
+                    "could not seal legacy adapter-env values, they are still readable in \
+                     adapter_env.value_legacy: {e}"
+                ),
+            }
+        }
         // Config rejects async/sync unless built with `ha-incremental`, so this
         // is only reachable in a build that has the SQLite session extension.
         if ha.is_ha() && ha.config.rpo_mode != ha::RpoMode::Snapshot {

@@ -145,6 +145,24 @@ pub fn process_credential() -> Option<SavedCredential> {
 pub struct SavedCredential {
     pub node_id: String,
     pub credential: String,
+    /// X25519 private key (base64) the control plane seals adapter-env values
+    /// to (ADR 0028). `None` on a credential file written before that existed;
+    /// `load_or_enroll` mints one and rewrites the file, so the only cost of
+    /// upgrading is that already-stored secrets must be re-entered once.
+    #[serde(default)]
+    pub key_secret: Option<String>,
+}
+
+impl SavedCredential {
+    /// The public half, recomputed from the stored private key.
+    ///
+    /// Derived rather than stored: two copies of the same keypair in one file
+    /// is a way to have them disagree.
+    pub fn public_key(&self) -> Option<String> {
+        self.key_secret
+            .as_deref()
+            .and_then(|s| agentgrid_common::seal::public_key_from_secret(s).ok())
+    }
 }
 
 /// How many consecutive gateway errors (see [`is_gateway_status`]) one endpoint

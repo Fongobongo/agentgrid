@@ -194,8 +194,28 @@ pub async fn poll_loop_inner(
                 // Audit X-N1b: Empty = keep current (the field is `[]` on
                 // every legacy poll) — never wipe managed env on an empty
                 // delivery.
-                if !pr.adapter_env.is_empty() {
-                    *cfg.managed_adapter_env.lock().unwrap() = pr.adapter_env.clone();
+                //
+                // ADR 0028: a protocol-2 CP sets `adapter_env_complete`, which
+                // makes an empty list mean "this node has none" instead of
+                // "nothing to say". That is what lets `ag adapter-env rm`
+                // revoke a value on a *running* node rather than at its next
+                // restart.
+                let complete = pr.adapter_env_complete;
+                if complete || !pr.adapter_env.is_empty() {
+                    // The values arrive sealed to this node's key. Opening
+                    // them here keeps the plaintext out of every struct that
+                    // gets logged or serialized; `apply` owns the
+                    // revoke-vs-keep-last-good decision so the WS transport
+                    // cannot drift from this one.
+                    if let Some(cred) = crate::config::process_credential() {
+                        crate::sealed_env::apply(
+                            &cfg.managed_adapter_env,
+                            &cred.node_id,
+                            cred.key_secret.as_deref(),
+                            &pr.adapter_env,
+                            complete,
+                        );
+                    }
                 }
                 let mut batch = pr.assignments;
                 if batch.is_empty() {
@@ -662,6 +682,7 @@ mod gateway_tests {
         let cred = SavedCredential {
             node_id,
             credential,
+            key_secret: None,
         };
         let sem = Arc::new(Semaphore::new(1));
         let node_id = cred.node_id.clone();

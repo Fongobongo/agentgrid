@@ -54,6 +54,7 @@ async fn migrations_serve_legacy_happy_path() {
         agent_version: "test".into(),
         protocol_version: None,
         permission_interception: "wrapper".into(),
+        public_key: None,
     };
     let resp = s.enroll_node(&enroll).await.unwrap().expect("enroll");
     let node_id = resp.node_id;
@@ -99,6 +100,7 @@ async fn migrations_serve_legacy_happy_path() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     assert!(s.heartbeat(&node_id, &hb).await.unwrap());
 
@@ -214,6 +216,7 @@ async fn foreign_keys_enforced_after_migration_0040() {
         agent_version: "test".into(),
         protocol_version: None,
         permission_interception: "wrapper".into(),
+        public_key: None,
     };
     let resp = s.enroll_node(&enroll).await.unwrap().expect("enroll");
     let node_id = resp.node_id;

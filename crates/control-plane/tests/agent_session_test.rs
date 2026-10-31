@@ -85,6 +85,7 @@ async fn enroll(
         agent_version: "test".into(),
         protocol_version: None,
         permission_interception: "wrapper".into(),
+        public_key: None,
     };
     let resp = app
         .clone()

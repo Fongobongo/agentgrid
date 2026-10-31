@@ -32,6 +32,7 @@
 | CP → узел | `cancel` | `attempt_id` | Отмена попытки (по `POST /v1/tasks/:id/cancel`). |
 | узел → CP | `cancel_ack` | `attempt_id` | Подтверждение получения отмены. Отмена действительна по статусу attempt'а в store даже без ack — пуш только ускоряет доставку. |
 | CP → узел | `ping` | — (WS ping-фрейм, раз в 15 с) | Liveness. Ответ — стандартный WS pong. Нет pong 45 с → разрыв. |
+| CP → узел | `adapter_env_update` | `adapter_env`: массив `SealedAdapterEnvEntry` (`adapter`, `key`, `sealed`), `adapter_env_complete`: bool | CP-managed adapter env, **зашифрованный ключом узла** (ADR 0028). Приходит сразу после `hello_ok` и при каждом изменении (upsert/rm). `adapter_env_complete=true` означает «это весь набор»: пустой список — отзыв. Только для `protocol_version` major ≥ 2: узел protocol 1 не разберёт `sealed` и потеряет сессию. Заменяет доставку через `PollResponse.adapter_env` для узлов на этом транспорте — они не поллят вообще. |
 | узел → CP | `heartbeat` | `free_slots`: u32 | Узел сообщает о свободившихся слотах; CP может сразу пушить следующее назначение. Без heartbeat CP пушит только после ack/cancel_ack. |
 
 ## Коды закрытия соединения

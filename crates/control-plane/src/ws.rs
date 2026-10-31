@@ -44,6 +44,10 @@ struct WsConn {
     gen: u64,
     tx: mpsc::Sender<Message>,
     max_concurrency: u32,
+    /// Protocol 2+: the connection understands `AdapterEnvUpdate`. A
+    /// protocol-1 node would fail to deserialize it and drop the session, so
+    /// the flag gates the push rather than the message shape.
+    adapter_env_capable: bool,
 }
 
 /// In-memory registry of connected WS nodes (ADR 0009). Lives in `AppState`;
@@ -67,6 +71,7 @@ impl WsRegistry {
         node_id: &str,
         tx: mpsc::Sender<Message>,
         max_concurrency: u32,
+        adapter_env_capable: bool,
     ) -> u64 {
         let gen = WS_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
         let mut conns = self.conns.lock().await;
@@ -76,6 +81,7 @@ impl WsRegistry {
                 gen,
                 tx,
                 max_concurrency,
+                adapter_env_capable,
             },
         ) {
             let _ = old.tx.try_send(Message::Close(Some(CloseFrame {
@@ -103,6 +109,39 @@ impl WsRegistry {
                 if c.tx.try_send(Message::Text(text.into())).is_err() {
                     tracing::warn!(node_id, "ws outbound channel full; dropping message");
                 }
+            }
+        }
+    }
+
+    /// Push the current sealed adapter env to every connected node that can
+    /// read it.
+    ///
+    /// Called after an adapter-env write so a value set while a node is
+    /// connected lands now rather than at its next poll — which, on this
+    /// transport, would be never. Best-effort like [`Self::send`]: a missed
+    /// push is repaired by the next connect (the CP sends it after `hello_ok`).
+    pub async fn push_adapter_env(&self, store: &crate::store::Store) {
+        let targets: Vec<String> = {
+            let conns = self.conns.lock().await;
+            conns
+                .iter()
+                .filter(|(_, c)| c.adapter_env_capable)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for node_id in targets {
+            match store.adapter_env_for(&node_id).await {
+                Ok(adapter_env) => {
+                    self.send(
+                        &node_id,
+                        &NodeWsMsg::AdapterEnvUpdate {
+                            adapter_env,
+                            adapter_env_complete: true,
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => tracing::warn!(node_id = %node_id, "ws adapter env push failed: {e}"),
             }
         }
     }
@@ -195,6 +234,16 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
             .await;
         return;
     }
+    // ADR 0028: `sealed` in an adapter-env entry is protocol 2. A protocol-1
+    // node would fail to deserialize the message and drop the session, so it
+    // is never sent one. Computed here because `protocol_version` moves into
+    // the registration below.
+    let adapter_env_capable = protocol_version
+        .as_deref()
+        .and_then(|v| v.split('.').next())
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1)
+        >= 2;
     if agentgrid_common::is_incompatible_protocol(&protocol_version) {
         if let Err(e) = state.store.set_node_degraded(&node_id).await {
             tracing::warn!(node_id, "set_node_degraded failed: {e}");
@@ -235,12 +284,33 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
 
     let gen = state
         .ws_registry
-        .register(&node_id, tx, max_concurrency)
+        .register(&node_id, tx, max_concurrency, adapter_env_capable)
         .await;
     let ok = NodeWsMsg::HelloOk {
         server_time: chrono::Utc::now().timestamp_millis(),
     };
     let _ = state.ws_registry.send(&node_id, &ok).await; // via channel
+
+    // Config on connect. `adapter_env` used to travel only in a poll response,
+    // and a node on this transport never polls — so on `ws`/`auto` the whole
+    // feature silently did nothing.
+    if adapter_env_capable {
+        match state.store.adapter_env_for(&node_id).await {
+            Ok(adapter_env) => {
+                let _ = state
+                    .ws_registry
+                    .send(
+                        &node_id,
+                        &NodeWsMsg::AdapterEnvUpdate {
+                            adapter_env,
+                            adapter_env_complete: true,
+                        },
+                    )
+                    .await;
+            }
+            Err(e) => tracing::warn!(node_id = %node_id, "ws adapter env on connect failed: {e}"),
+        }
+    }
 
     // A freshly connected node may already have free slots and queued work.
     // Reconnect pull for in-flight assignments: an assignment pushed to a

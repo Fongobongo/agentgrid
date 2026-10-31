@@ -1,5 +1,6 @@
 pub mod compress;
 pub mod policy;
+pub mod seal;
 pub mod workflow;
 pub mod ws;
 pub use policy::{
@@ -860,7 +861,13 @@ pub struct UserEntry {
 /// Node→control-plane protocol version (Stage 2.5). Bump the major on any
 /// incompatible change to enroll/heartbeat/poll; a node advertising a
 /// different major is marked `degraded(incompatible_protocol)`.
-pub const NODE_PROTOCOL_VERSION: &str = "1";
+///
+/// **2** (ADR 0028): `adapter_env` in a poll response carries sealed values
+/// and the CP needs the node's X25519 public key to produce them. A protocol-1
+/// node would deserialize a sealed blob into the variable it expects to be a
+/// key, so it is served no CP-managed adapter env at all and keeps whatever
+/// `AGENTGRID_ADAPTER_ENV` gave it locally.
+pub const NODE_PROTOCOL_VERSION: &str = "2";
 
 /// Plan 6.12: schema version of the `capabilities` array a node reports in
 /// each heartbeat (what fields an `AdapterCapability` carries). Absent on
@@ -921,6 +928,11 @@ pub struct EnrollRequest {
     /// nodes; a major mismatch marks the node `degraded`.
     #[serde(default)]
     pub protocol_version: Option<String>,
+    /// X25519 public key (base64) the control plane seals adapter-env secrets
+    /// to (ADR 0028). Absent on nodes older than protocol 2 — those get no
+    /// CP-managed adapter env at all rather than an undecryptable blob.
+    #[serde(default)]
+    pub public_key: Option<String>,
     /// Permission interception mode for this node's adapters. One of:
     /// "wrapper" (legacy stdout parsing) or "structured" (ACP-style).
     #[serde(default = "default_permission_interception")]
@@ -974,6 +986,11 @@ pub struct HeartbeatRequest {
     /// nodes; a major mismatch marks the node `degraded`.
     #[serde(default)]
     pub protocol_version: Option<String>,
+    /// X25519 public key (base64) the control plane seals adapter-env secrets
+    /// to (ADR 0028). Absent on nodes older than protocol 2 — those get no
+    /// CP-managed adapter env at all rather than an undecryptable blob.
+    #[serde(default)]
+    pub public_key: Option<String>,
     /// Per-adapter capability the node advertises each heartbeat (Stage 3.2):
     /// which adapters it can run, their versions, and whether each is ready.
     #[serde(default)]
@@ -1139,11 +1156,35 @@ pub struct PollResponse {
     /// CP-managed adapter environment (e.g. route claude at a custom proxy
     /// endpoint: adapter=claude, key=ANTHROPIC_BASE_URL). Entries with
     /// adapter="*" apply to every adapter. Empty = keep current.
+    ///
+    /// Values travel **sealed to this node's key** (ADR 0028): the control
+    /// plane stores ciphertext and cannot read it back.
     #[serde(default)]
-    pub adapter_env: Vec<AdapterEnvEntry>,
+    pub adapter_env: Vec<SealedAdapterEnvEntry>,
+    /// True when `adapter_env` is the node's **complete** set, not merely the
+    /// entries that changed.
+    ///
+    /// Without this an empty list is ambiguous — "you have none" and "this
+    /// control plane is too old to send any" look identical — and the node has
+    /// to keep its last snapshot, which would make `ag adapter-env rm` a
+    /// no-op until the node restarts. A protocol-1 control plane omits the
+    /// field, so the old behaviour is preserved exactly.
+    #[serde(default)]
+    pub adapter_env_complete: bool,
 }
 
-/// One CP-managed env-var entry for attempts of a given adapter (or `*`).
+/// One CP-managed env-var entry, sealed for the node receiving it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedAdapterEnvEntry {
+    pub adapter: String,
+    pub key: String,
+    /// `agentgrid_common::seal` blob, bound to `(node, adapter, key)`.
+    pub sealed: String,
+}
+
+/// A CP-managed entry after the node has opened it. Never serialized back to
+/// the control plane: the plaintext exists only in the node's memory, for the
+/// lifetime of the attempt that needs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterEnvEntry {
     pub adapter: String,
@@ -2005,6 +2046,7 @@ mod tests {
             assignments: vec![],
             proxy_urls: vec![],
             adapter_env: vec![],
+            adapter_env_complete: true,
         };
         assert_eq!(round_trip(&pr), pr);
         // Batch field round-trips and tolerates absence (N/N-1 compat).
@@ -2024,6 +2066,7 @@ mod tests {
             agent_version: "0.1".into(),
             protocol_version: None,
             permission_interception: "wrapper".into(),
+            public_key: None,
         };
         assert_eq!(round_trip(&er), er);
         let hb = HeartbeatRequest {
@@ -2041,6 +2084,7 @@ mod tests {
             mem_available_mb: 4096,
             capabilities: vec![],
             protocol_version: None,
+            public_key: None,
             discovered_skills: vec![],
             account_usage: vec![],
             unsafe_active: false,

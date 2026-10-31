@@ -1091,6 +1091,7 @@ async fn opencode_heartbeat_drift_audit() {
         max_rss_mib: 0,
         capabilities_schema_version: None,
         supported_event_versions: None,
+        public_key: None,
     };
     let hb_req = post_auth(
         "/v1/node/heartbeat",

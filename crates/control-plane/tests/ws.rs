@@ -112,6 +112,25 @@ async fn recv_msg(sock: &mut WsClient, timeout: Duration) -> Option<NodeWsMsg> {
     }
 }
 
+/// Receive the next message that is not an `adapter_env_update` push.
+///
+/// ADR 0028: the CP sends the node's sealed adapter env right after
+/// `hello_ok` and on every change, so a test that asserts on the next *data*
+/// message must not depend on where that frame happens to land.
+async fn recv_data_msg(sock: &mut WsClient, timeout: Duration) -> Option<NodeWsMsg> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match recv_msg(sock, remaining).await {
+            Some(NodeWsMsg::AdapterEnvUpdate { .. }) => continue,
+            other => return other,
+        }
+    }
+}
+
 async fn expect_hello_ok(sock: &mut WsClient) {
     match recv_msg(sock, Duration::from_secs(5)).await {
         Some(NodeWsMsg::HelloOk { .. }) => {}
@@ -150,7 +169,7 @@ async fn ws_assignment_pushed_under_200ms_and_ack_lands() {
 
     let t0 = Instant::now();
     let task_id = create_task(&base, &token).await;
-    let msg = recv_msg(&mut sock, Duration::from_secs(5)).await;
+    let msg = recv_data_msg(&mut sock, Duration::from_secs(5)).await;
     let elapsed = t0.elapsed();
     let Some(NodeWsMsg::Assignment { assignments }) = msg else {
         panic!("expected assignment push within 5 s, got {msg:?}")
@@ -250,7 +269,7 @@ async fn ws_second_connection_supersedes_first() {
     // The surviving connection still receives fresh work.
     let _task_id = create_task(&base, &token).await;
     assert!(matches!(
-        recv_msg(&mut second, Duration::from_secs(5)).await,
+        recv_data_msg(&mut second, Duration::from_secs(5)).await,
         Some(NodeWsMsg::Assignment { .. })
     ));
 }
@@ -265,7 +284,7 @@ async fn ws_cancel_pushed_to_owning_node() {
     expect_hello_ok(&mut sock).await;
     let task_id = create_task(&base, &token).await;
     let Some(NodeWsMsg::Assignment { assignments }) =
-        recv_msg(&mut sock, Duration::from_secs(5)).await
+        recv_data_msg(&mut sock, Duration::from_secs(5)).await
     else {
         panic!("no assignment")
     };
@@ -277,7 +296,7 @@ async fn ws_cancel_pushed_to_owning_node() {
         .send()
         .await
         .unwrap();
-    match recv_msg(&mut sock, Duration::from_secs(5)).await {
+    match recv_data_msg(&mut sock, Duration::from_secs(5)).await {
         Some(NodeWsMsg::Cancel { attempt_id: id }) => assert_eq!(id, attempt_id),
         other => panic!("expected cancel push, got {other:?}"),
     }
@@ -300,7 +319,7 @@ async fn poll_node_and_ws_node_coexist() {
     // receives it via push.
     let t1 = create_task(&base, &token).await;
     let Some(NodeWsMsg::Assignment { assignments }) =
-        recv_msg(&mut sock, Duration::from_secs(5)).await
+        recv_data_msg(&mut sock, Duration::from_secs(5)).await
     else {
         panic!("ws node got no push for task 1")
     };
@@ -339,7 +358,7 @@ async fn ws_ack_with_stale_fencing_token_rejected() {
     expect_hello_ok(&mut sock).await;
 
     let task_id = create_task(&base, &token).await;
-    let msg = recv_msg(&mut sock, Duration::from_secs(5)).await;
+    let msg = recv_data_msg(&mut sock, Duration::from_secs(5)).await;
     let Some(NodeWsMsg::Assignment { assignments }) = msg else {
         panic!("expected assignment push, got {msg:?}")
     };
@@ -400,7 +419,7 @@ async fn ws_reconnect_redelivers_unacked_assignment() {
     send_hello(&mut sock, &node_id, 2).await;
     expect_hello_ok(&mut sock).await;
 
-    let msg = recv_msg(&mut sock, Duration::from_secs(5)).await;
+    let msg = recv_data_msg(&mut sock, Duration::from_secs(5)).await;
     let Some(NodeWsMsg::Assignment { assignments }) = msg else {
         panic!("expected redelivered assignment after reconnect, got {msg:?}")
     };

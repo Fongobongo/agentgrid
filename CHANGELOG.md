@@ -4,6 +4,39 @@
 
 ### Added
 
+- **Adapter-env secrets are now sealed to each node's key, so the control plane
+  can deliver them but not read them** (ADR 0028, phase 1B). Phase 0 stopped
+  the read path from handing values out; this removes the values from the
+  control plane entirely. Each node generates an X25519 keypair at enroll and
+  keeps the private half in `credential.json`; the control plane stores one
+  ECIES ciphertext per node (`adapter_env_sealed`) and only a fingerprint plus
+  length on the entry. A `cp.db` copy, a backup, or a compromised control plane
+  yields ciphertext, not provider keys.
+  - The entry identity is bound **into the derived key** (`node_id \0 adapter
+    \0 key`), so a blob replayed as another variable or for another node does
+    not open at all — not merely "opens with a wrong tag".
+  - Every seal uses a fresh ephemeral key: re-saving an unchanged value
+    produces different ciphertext, so the stored blob does not reveal "this
+    secret did not change".
+  - A node that has not announced a public key gets nothing and shows as
+    `pending` in `ag adapter-env ls`; announcing a *different* key drops the
+    ciphertexts sealed to the old one instead of serving blobs it cannot open.
+  - `NODE_PROTOCOL_VERSION` is now `2`: `adapter_env` in a poll response carries
+    `sealed` instead of `value`. A protocol-1 node is served no CP-managed
+    adapter env at all rather than ciphertext it would treat as the value.
+  - `PollResponse.adapter_env_complete` distinguishes "you have none" from "this
+    control plane is too old to send any", which is what lets `ag adapter-env
+    rm` revoke a value on a **running** node instead of at its next restart.
+    Protocol-1 control planes omit the field, so their nodes keep the old
+    behaviour exactly.
+  - **Upgrade cost:** a node gains a key it did not have, so secrets sealed
+    before the upgrade are unrecoverable and must be re-entered once. Those
+    entries report `pending` until they are.
+  - `tests/e2e/run-sealed-env.sh` proves the wiring: the value is absent from
+    `cp.db`, `cp.db-wal` and the CP log, reaches the adapter process, is masked
+    in the event stream (while a non-secret variable is not), and is gone from
+    the next attempt after `rm`.
+
 - **The WebSocket transport now goes through the egress proxy pool.** ADR 0012
   gave the node a proxy pool for its HTTP egress, with one documented blind
   spot: `tokio-tungstenite` has no proxy support, so a proxied node silently

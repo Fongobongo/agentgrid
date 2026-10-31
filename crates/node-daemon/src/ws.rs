@@ -436,6 +436,21 @@ async fn handle_msg(
                 tracing::warn!("opencode config apply on ws_push failed: {e}");
             }
         }
+        // ADR 0028: the sealed adapter env, pushed instead of polled. On
+        // this transport a poll never happens, so this is the only path by
+        // which a CP-managed value reaches the adapter.
+        Ok(NodeWsMsg::AdapterEnvUpdate {
+            adapter_env,
+            adapter_env_complete,
+        }) => {
+            crate::sealed_env::apply(
+                &cfg.managed_adapter_env,
+                &cred.node_id,
+                cred.key_secret.as_deref(),
+                &adapter_env,
+                adapter_env_complete,
+            );
+        }
         Ok(other) => tracing::debug!("unexpected ws message: {other:?}"),
         Err(e) => tracing::warn!("bad ws message: {e}"),
     }

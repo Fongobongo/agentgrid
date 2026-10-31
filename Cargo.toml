@@ -67,6 +67,13 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "tls12", "std"] }
 webpki-roots = "1"
 base64 = "0.22"
+# ADR 0028: adapter-env values are sealed to a per-node X25519 key, so the
+# control plane can deliver a secret without being able to read it back.
+# `ring` is already built for rustls and supplies HKDF + AES-256-GCM; only the
+# key agreement is new, and `static_secrets` is the feature that lets a node
+# keep its private key across restarts.
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+ring = "0.17"
 # Stage 11.5 TUI: full-screen dashboards (ratatui + crossterm backend).
 ratatui = "0.30"
 crossterm = "0.29"
