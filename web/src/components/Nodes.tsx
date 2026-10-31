@@ -1,5 +1,6 @@
 import { useEffect, useState, Fragment } from 'react';
-import { drainNode, getJson, getOpencodeAudit, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, listOpencodeProfiles, postJson, revokeNode } from '../api';
+import { drainNode, getJson, getOpencodeAudit, getProvisioning, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, ProvisioningInfo, listOpencodeProfiles, postJson, revokeNode } from '../api';
+import InstallNode from './InstallNode';
 import { ConfirmModal } from './Modal';
 import { ErrorBox, Loading, StatusBadge, TimeAgo, fmtTime, useLiveRefresh } from './util';
 import { toast } from './Toast';
@@ -30,6 +31,11 @@ export default function Nodes() {
   const [enrollToken, setEnrollToken] = useState<{ token: string; expires_at: string } | null>(null);
   // Per-node credential-pool usage (Stage: accounts/usage).
   const [usageNode, setUsageNode] = useState<string | null>(null);
+  // Install-from-the-panel: the modal is always offered, but what it can do
+  // depends on `AGENTGRID_PROVISION_ENABLED` on the server — `prov` carries
+  // that answer (and the reason when the answer is no).
+  const [installOpen, setInstallOpen] = useState(false);
+  const [prov, setProv] = useState<ProvisioningInfo | null>(null);
   const [usageRows, setUsageRows] = useState<AccountUsage[] | null>(null);
 
   const load = () => {
@@ -48,6 +54,11 @@ export default function Nodes() {
   };
 
   useEffect(load, []);
+  useEffect(() => {
+    getProvisioning()
+      .then(setProv)
+      .catch(() => setProv(null));
+  }, []);
   useLiveRefresh(load);
 
   const assignProfile = async (nodeId: string, profileId: string | null) => {
@@ -147,6 +158,7 @@ export default function Nodes() {
     <section>
       <h2>Nodes</h2>
       <p>
+        <button onClick={() => setInstallOpen(true)}>Install node…</button>{' '}
         <button onClick={mintEnrollToken}>Enrollment token</button>{' '}
         <span className="muted">(one-shot token a new node daemon uses at first boot)</span>
       </p>
@@ -158,6 +170,13 @@ export default function Nodes() {
         </div>
       )}
       {error ? <ErrorBox err={error} /> : null}
+      {installOpen && (
+        <InstallNode
+          info={prov}
+          onClose={() => setInstallOpen(false)}
+          onInstalled={load}
+        />
+      )}
       <table className="grid">
         <thead>
           <tr>
