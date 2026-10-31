@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-31
+
 ### Added
 
 - **Install a node from the panel.** `Nodes → Install node…` provisions a
