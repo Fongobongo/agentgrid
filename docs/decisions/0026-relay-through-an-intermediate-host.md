@@ -150,9 +150,11 @@ feature of this daemon. The relay is deliberately not a step towards one.
 
 ## Revisit when
 
-- **More than one hop is needed** (A → B → control plane). The upstream is a
+- ~~**More than one hop is needed** (A → B → control plane). The upstream is a
   single URL today; chaining relays needs a hop counter to detect loops,
-  because the current self-loop check only catches a direct self-reference.
+  because the current self-loop check only catches a direct self-reference.~~
+  **Resolved (amendment below): relays chain with no extra configuration, and
+  a hop counter cuts a loop with `508`.**
 - **`tokio-tungstenite` gains proxy support**, or the node grows its own
   `CONNECT` client. Then the proxy pool could carry WS, and a relay could be
   replaced by an ordinary HTTP proxy the operator already runs.
@@ -164,3 +166,85 @@ feature of this daemon. The relay is deliberately not a step towards one.
   `const _: () = assert!` so the default cannot be edited to 1 either. It is
   documented in `docs/agent-ops.md` next to the relay section — the bullet
   above was right that an undocumented knob is worse than a constant.
+
+## Amendment (2026-10-31): chains are supported, and a loop is cut with 508
+
+The revisit item above said chaining "needs a hop counter to detect loops".
+Two things turned out to be true, and only one of them needed code.
+
+**Chaining needs no configuration.** A relay forwards to `cfg.base()` — the
+control plane *this node* would talk to right now. A stranded node's base is
+already the relay that carries it, so a node that is itself carried can relay
+for someone further out, and the chain grows by pointing the next node at it:
+
+```
+node C ──▶ relay B ──▶ relay A ──▶ control plane
+(knows B)            (knows A)
+```
+
+C is not told about A, B is not told about C, and no environment variable
+describes the topology. That fell out of the original `Fixed(|| cfg.base())`
+decision; the ADR's "one hop only" was a statement about what had been tested,
+not about what the design prevented.
+
+**The loop is what needed code.** The static check (`relays_to_itself`) only
+catches a relay whose upstream is itself. Two operators pointing relays at
+each other — or three in a ring — produce no startup error: every relay binds,
+every relay accepts, and a request that enters the ring is forwarded forever
+while the fleet stops heartbeating. The failure looks like a hang, which is
+the worst kind to debug.
+
+So a counter that travels *with the request*:
+
+- every relay increments `x-agentgrid-relay-hops` before forwarding, and
+  **replaces** whatever the client sent (a client cannot reset its own count
+  by sending `0`, and a later hop cannot be tricked by an earlier one);
+- at `AGENTGRID_RELAY_MAX_HOPS` (default **3**) a relay answers `508 Loop
+  Detected` before reading the body, with a message naming the header, the
+  count and the limit, and increments `agentgrid_edge_loop_detected_total`;
+- `0` is refused at startup — a relay that answers `508` to everything is a
+  relay that listens and is useless, and the operator would meet it as a
+  `508` storm rather than as a config error;
+- a non-numeric or negative value reads as "0 hops so far" rather than being
+  rejected, because a hand-edited header must not be able to *skip* the guard.
+
+The counter lives in the forwarder (`crates/edge`) rather than in the node
+daemon, because the daemon's relay and the standalone edge are the same
+forwarder and the WebSocket bridge is inside it — putting the guard in a layer
+means the HTTP fallback and `/v1/node/ws` are both covered without either
+knowing the header exists. `EdgeConfig::max_hops = None` leaves the request
+untouched: the standalone edge in front of a control plane is the first hop of
+a chain that has length one, and rewriting headers it has no reason to rewrite
+is how a proxy starts breaking the server behind it.
+
+### Proof
+
+- `crates/edge`: 21 tests (was 17). Four new: the arithmetic (`0`/absent →
+  1, at-limit → refused, nonsense → 0), and three that go through the real
+  layer stack on a real socket — a fresh request arrives upstream as `1`, one
+  entering with `2` arrives as `3`, one entering at the limit is answered
+  `508` **with the upstream hit count still zero** (it never got forwarded),
+  and with `max_hops = None` a client-sent `7` arrives as `7` and no header is
+  invented. Two of the four were watched failing with the layer removed; the
+  arithmetic test correctly kept passing, since it does not depend on the
+  layer.
+- `crates/node-daemon/src/relay.rs`: 9 tests (was 6). `AGENTGRID_RELAY_MAX_HOPS`
+  without `AGENTGRID_RELAY_LISTEN` is a startup error, `0` is refused with a
+  message that says what it would do, and a non-numeric value is an error
+  rather than a silent default.
+- `tests/e2e/run-relay-chain.sh`, registered in CI: three nodes on one host,
+  C configured with **only** B's relay and B with **only** A's. Asserts that C
+  enrolls through both hops, that a task pinned to C succeeds, that both
+  relays carried requests with no loop recorded, and then the discriminating
+  pair — the same request entering B with `1` hop is forwarded (A sees 2),
+  while entering with `2` is answered `508` with `relay loop` in the body and
+  A's counter at 1. With `max_hops` forced to `None` in the daemon, steps 1–5
+  still pass and step 6 fails (`got 404`) — which is the honest shape of the
+  change: the chain worked before, and the counter is what stops it from
+  becoming a ring.
+
+Still not claimed: every process in the E2E is on `127.0.0.1`, so "C cannot
+reach the control plane" is configuration, not a firewall — the same caveat as
+the one-hop E2E. And a relay still forwards only to its own control plane or
+to the relay that carries it; it is not a general proxy and does not accept a
+destination from the request.

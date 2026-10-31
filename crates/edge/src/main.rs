@@ -69,6 +69,11 @@ async fn main() -> anyhow::Result<()> {
         }),
         upstream_timeout: Duration::from_secs(args.upstream_timeout_secs.max(1)),
         allowed_sources,
+        // The standalone edge is the *first* hop in front of a control plane,
+        // never a hop in a chain of relays, so there is nothing to count and
+        // nothing to refuse. Leaving it at `None` keeps its upstream requests
+        // byte-identical to before the hop counter existed.
+        max_hops: None,
     })?;
     let listen: std::net::SocketAddr = args.listen.parse()?;
     let listener = tokio::net::TcpListener::bind(listen).await?;

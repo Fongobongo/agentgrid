@@ -418,6 +418,11 @@ jobs:
       # the relay counters asserted. Proves the wiring, not just the argv.
       - name: peer relay (a node carried by another node)
         run: bash tests/e2e/run-relay.sh
+      # Relay chain: C → B → A → CP, where C knows only B and B only A. The
+      # hop counter is the point — the same request one hop apart is forwarded
+      # at 2 and refused with 508 at 3.
+      - name: relay chain (two relays, hop counter, 508 on a loop)
+        run: bash tests/e2e/run-relay-chain.sh
       # One-button assembly: POST /v1/assembly with a goal → plan-stub
       # architect → auto-approve → workers → system collector. No LLM.
       - name: one-button assembly (goal in, merged project out)

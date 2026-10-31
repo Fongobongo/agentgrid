@@ -4,6 +4,29 @@
 
 ### Added
 
+- **Relays chain, and a chain that loops is cut with `508`.** A node's relay
+  forwards to the control plane that node would use — which, for a stranded
+  node, is already the relay carrying it. So relays chain with no new
+  configuration: C knows only B, B knows only A, and C's traffic crosses both
+  to reach the control plane. ADR 0026 said "one hop only", which described
+  what had been tested rather than what the design prevented.
+  - The loop that this makes possible was the real gap. The startup check
+    catches a relay whose upstream is itself; two relays pointed at each other
+    both bind, both accept, and every request that enters the ring is
+    forwarded forever — a hang, with the fleet offline behind it. Every relay
+    now increments `x-agentgrid-relay-hops` on the way out (replacing whatever
+    the client sent) and answers `508 Loop Detected` at
+    `AGENTGRID_RELAY_MAX_HOPS` (default 3, `0` refused at startup), before
+    reading the body, incrementing `agentgrid_edge_loop_detected_total`.
+  - `EdgeConfig::max_hops = None` leaves requests untouched, so the standalone
+    `agentgrid-cp-edge` sends exactly what it sent before.
+  - `tests/e2e/run-relay-chain.sh` (CI): three nodes, C configured with only
+    B's relay and B with only A's; a task pinned to C succeeds, both relays
+    report carrying it, and the discriminating pair — the same request
+    entering B with 1 hop is forwarded, with 2 is refused at A — flips exactly
+    one hop apart. Forcing `max_hops` off makes steps 1–5 still pass and step
+    6 fail, which is what the counter actually adds.
+
 - **An E2E for the ACP northbound gateway** (`tests/e2e/run-acp-gateway.sh`).
   `agentgrid-acp-agent` is the northbound half of ACP: an external ACP client
   speaks JSON-RPC over stdio to it, and `session/prompt` mints a task on the

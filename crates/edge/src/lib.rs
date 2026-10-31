@@ -42,6 +42,11 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 
 const HA_TOKEN_HEADER: &str = "x-agentgrid-ha-token";
+/// Counts how many relays a request has already passed through. Every relay
+/// stamps `incoming + 1` on the way out, so a chain of relays terminates even
+/// when none of them can tell that it is talking to itself — the static
+/// self-loop check only catches a direct self-reference.
+const HOPS_HEADER: &str = "x-agentgrid-relay-hops";
 const LEADER_TTL: Duration = Duration::from_secs(2);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The forwarder buffers a request body once so a `503 not_leader` retry is
@@ -75,6 +80,17 @@ pub struct EdgeConfig {
     /// operator's network policy, and wrong for a node-hosted relay — the
     /// daemon warns when it starts one without a list.
     pub allowed_sources: Vec<Cidr>,
+    /// Maximum number of relays a request may pass through, or `None` to leave
+    /// the hop header alone.
+    ///
+    /// `None` keeps the standalone edge exactly as it was: it forwards to the
+    /// control plane, which ignores the header, so counting would only add a
+    /// header nothing reads. A node relay is different — relays can be chained
+    /// (C → B → A → control plane) and the chain is a loop the moment two
+    /// operators point their relays at each other. With a limit set, the
+    /// forwarder stamps `incoming + 1` on every request and answers `508` when
+    /// the count has reached it.
+    pub max_hops: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +108,8 @@ struct Metrics {
     upstream_timeouts_total: AtomicU64,
     ws_bridges_total: AtomicU64,
     rejected_sources_total: AtomicU64,
+    /// Requests refused because they had already crossed `max_hops` relays.
+    loop_detected_total: AtomicU64,
 }
 
 pub struct Edge {
@@ -99,6 +117,7 @@ pub struct Edge {
     http: reqwest::Client,
     upstream_timeout: Duration,
     allowed_sources: Vec<Cidr>,
+    max_hops: Option<u32>,
     /// Only used by [`Upstream::Ha`]; the fixed variant has nothing to cache.
     leader: tokio::sync::RwLock<Option<CachedLeader>>,
     metrics: Metrics,
@@ -127,6 +146,7 @@ impl Edge {
             http,
             upstream_timeout: cfg.upstream_timeout,
             allowed_sources: cfg.allowed_sources,
+            max_hops: cfg.max_hops,
             leader: tokio::sync::RwLock::new(None),
             metrics: Metrics::default(),
         }))
@@ -239,11 +259,28 @@ pub fn router(edge: Arc<Edge>) -> Router {
 /// loudly instead of surfacing as a task that quietly died: the node daemon
 /// treats "relay configured but not listening" as fatal, and it can only do
 /// that if the bind happens on its side.
-pub async fn serve(edge: Arc<Edge>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    let listen = listener.local_addr()?;
+/// The forwarder with its layers applied: what [`serve`] actually serves.
+///
+/// Split out so tests can drive it with `oneshot` instead of binding a port —
+/// the hop guard and the source gate are both layers, and a test that only
+/// exercises `router()` would silently skip the code being tested.
+pub fn app(edge: Arc<Edge>) -> Router {
     // The allowlist layer needs its own handle: `router()` consumes one.
     let gate = Arc::clone(&edge);
-    let app = router(edge).layer(middleware::from_fn_with_state(gate, guard_sources));
+    let hops = Arc::clone(&edge);
+    router(edge)
+        .layer(middleware::from_fn_with_state(gate, guard_sources))
+        // Runs *outside* the source gate, so a looping request is refused
+        // before the allowlist work and before any body is read. It stamps the
+        // incremented header on the request itself, which is why both the HTTP
+        // fallback and the WebSocket bridge pick it up without knowing it
+        // exists.
+        .layer(middleware::from_fn_with_state(hops, guard_hops))
+}
+
+pub async fn serve(edge: Arc<Edge>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    let listen = listener.local_addr()?;
+    let app = app(edge);
     tracing::info!(%listen, "forwarder listening");
     axum::serve(
         listener,
@@ -251,6 +288,20 @@ pub async fn serve(edge: Arc<Edge>, listener: tokio::net::TcpListener) -> anyhow
     )
     .await?;
     Ok(())
+}
+
+/// How many relays a request will have crossed once this one is done.
+///
+/// `Err` carries the count that was already on the request, which is what the
+/// message and the metric need. Kept pure and separate from the middleware so
+/// the arithmetic — the part that can be wrong in a way no `curl` reveals — is
+/// testable without a router.
+fn next_hop(seen: Option<&str>, max: u32) -> Result<u32, u32> {
+    let seen = seen.and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
+    if seen >= max {
+        return Err(seen);
+    }
+    Ok(seen + 1)
 }
 
 /// Reject peers outside `allowed_sources` before any body is read.
@@ -269,6 +320,62 @@ async fn guard_sources(
         .fetch_add(1, Ordering::Relaxed);
     tracing::warn!(peer = %addr, "forwarder rejected a peer outside the allowlist");
     (StatusCode::FORBIDDEN, "peer not in the relay allowlist").into_response()
+}
+
+/// Stamp the hop count, or refuse a request that has already used them all.
+///
+/// Two relays pointed at each other is not a configuration error anyone
+/// notices at setup time: both listen, both accept, both forward, and the
+/// symptom is a request that never completes and a fleet that stops
+/// heartbeating. The static self-loop check in the daemon catches only the
+/// direct case (a relay whose upstream is itself); the chain case needs a
+/// value that travels *with the request*, which is what the header is.
+///
+/// `max_hops = None` leaves the request untouched — the standalone edge in
+/// front of a control plane has nothing to count, and changing what it sends
+/// upstream for no reason is how a proxy starts breaking servers.
+async fn guard_hops(State(state): State<Arc<Edge>>, mut req: Request, next: Next) -> Response {
+    let Some(max) = state.max_hops else {
+        return next.run(req).await;
+    };
+    let seen_header = req
+        .headers()
+        .get(HOPS_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    match next_hop(seen_header.as_deref(), max) {
+        Ok(next_hop) => {
+            // Replaces whatever the client sent, so the value upstream sees is
+            // ours and cannot be reset to 0 by the next hop's peer.
+            if let Ok(value) = axum::http::HeaderValue::from_str(&next_hop.to_string()) {
+                req.headers_mut()
+                    .insert(HeaderName::from_static(HOPS_HEADER), value);
+            }
+            next.run(req).await
+        }
+        Err(seen) => {
+            state
+                .metrics
+                .loop_detected_total
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                hops = seen,
+                max,
+                path = %req.uri().path(),
+                "forwarder refused a request that already crossed every allowed relay \
+                 — the chain of relays is a loop"
+            );
+            (
+                StatusCode::LOOP_DETECTED,
+                format!(
+                    "relay loop: this request already crossed {seen} relay(s) and the limit is \
+                     {max} ({HOPS_HEADER}); check that no relay forwards to another relay that \
+                     forwards back to it"
+                ),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn ready(State(edge): State<Arc<Edge>>) -> Response {
@@ -305,6 +412,8 @@ async fn metrics(State(edge): State<Arc<Edge>>) -> Response {
         agentgrid_edge_ws_bridges_total {ws_bridges_total}\n\
         # TYPE agentgrid_edge_rejected_sources_total counter\n\
         agentgrid_edge_rejected_sources_total {rejected_sources_total}\n\
+        # TYPE agentgrid_edge_loop_detected_total counter\n\
+        agentgrid_edge_loop_detected_total {loop_detected_total}\n\
         # HELP agentgrid_edge_requests_total Total client requests handled by the forwarder.\n\
         # HELP agentgrid_edge_leader_discoveries_total Successful leader discoveries via /v1/ha/status.\n\
         # HELP agentgrid_edge_leaderless_total Requests answered 503 because no leader was reachable.\n\
@@ -312,7 +421,8 @@ async fn metrics(State(edge): State<Arc<Edge>>) -> Response {
         # HELP agentgrid_edge_upstream_errors_total Forwarded requests that failed all upstream attempts.\n\
         # HELP agentgrid_edge_upstream_timeouts_total Forwarded requests whose upstream did not answer in time.\n\
         # HELP agentgrid_edge_ws_bridges_total Total WebSocket bridges established.\n\
-        # HELP agentgrid_edge_rejected_sources_total Peers refused by the allowlist before any request was read.\n",
+        # HELP agentgrid_edge_rejected_sources_total Peers refused by the allowlist before any request was read.\n\
+        # HELP agentgrid_edge_loop_detected_total Requests refused with 508 because they had already crossed every allowed relay.\n",
         requests_total = edge.metrics.requests_total.load(Ordering::Relaxed),
         leader_discoveries_total = edge.metrics.leader_discoveries_total.load(Ordering::Relaxed),
         leaderless_total = edge.metrics.leaderless_total.load(Ordering::Relaxed),
@@ -324,6 +434,7 @@ async fn metrics(State(edge): State<Arc<Edge>>) -> Response {
             .load(Ordering::Relaxed),
         ws_bridges_total = edge.metrics.ws_bridges_total.load(Ordering::Relaxed),
         rejected_sources_total = edge.metrics.rejected_sources_total.load(Ordering::Relaxed),
+        loop_detected_total = edge.metrics.loop_detected_total.load(Ordering::Relaxed),
     );
     (
         StatusCode::OK,
@@ -725,6 +836,7 @@ mod tests {
             }),
             upstream_timeout: timeout,
             allowed_sources: vec![],
+            max_hops: None,
         })
         .expect("edge")
     }
@@ -737,6 +849,7 @@ mod tests {
             upstream: Upstream::Fixed(Arc::new(move || url.clone())),
             upstream_timeout: Duration::from_secs(10),
             allowed_sources: vec![],
+            max_hops: None,
         })
         .expect("relay")
     }
@@ -795,6 +908,175 @@ mod tests {
             .uri(path)
             .body(Body::empty())
             .expect("request")
+    }
+
+    /// An upstream whose only job is to report the hop header it received, so
+    /// a test can tell what the forwarder actually sent rather than what it
+    /// intended to send.
+    async fn start_hop_echo_upstream() -> (String, Arc<AtomicU64>) {
+        let hits = Arc::new(AtomicU64::new(0));
+        let h = Arc::clone(&hits);
+        let app = Router::new().fallback(move |req: Request| {
+            let h = Arc::clone(&h);
+            async move {
+                h.fetch_add(1, Ordering::Relaxed);
+                let hops = req
+                    .headers()
+                    .get(HOPS_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-")
+                    .to_string();
+                (StatusCode::OK, hops)
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echo upstream");
+        let addr = listener.local_addr().expect("echo addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    /// Serve a forwarder on an ephemeral port, so the test goes through the
+    /// real layer stack (source gate + hop guard) and real `ConnectInfo`.
+    async fn start_forwarder(edge: Arc<Edge>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind forwarder");
+        let addr = listener.local_addr().expect("forwarder addr");
+        tokio::spawn(async move {
+            let _ = serve(edge, listener).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Loopback only: `HTTP_PROXY` is set in some environments and reqwest
+    /// honours it, which would send these requests to a proxy that cannot
+    /// reach the ephemeral port.
+    fn local_http() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("http client")
+    }
+
+    fn fixed_edge_with_hops(url: &str, max_hops: Option<u32>) -> Arc<Edge> {
+        let url = url.to_string();
+        Edge::new(EdgeConfig {
+            upstream: Upstream::Fixed(Arc::new(move || url.clone())),
+            upstream_timeout: Duration::from_secs(10),
+            allowed_sources: vec![],
+            max_hops,
+        })
+        .expect("relay")
+    }
+
+    #[test]
+    fn hop_arithmetic_starts_at_zero_and_counts_up() {
+        assert_eq!(next_hop(None, 3), Ok(1));
+        assert_eq!(next_hop(Some("0"), 3), Ok(1));
+        assert_eq!(next_hop(Some("1"), 3), Ok(2));
+        assert_eq!(next_hop(Some("2"), 3), Ok(3));
+        // At the limit the request is refused, and the error carries what the
+        // request had already spent so the message can say it.
+        assert_eq!(next_hop(Some("3"), 3), Err(3));
+        assert_eq!(next_hop(Some("9"), 3), Err(9));
+        // A client cannot skip the guard by sending nonsense: it reads as 0.
+        assert_eq!(next_hop(Some("-1"), 3), Ok(1));
+        assert_eq!(next_hop(Some("many"), 3), Ok(1));
+        assert_eq!(next_hop(Some(""), 3), Ok(1));
+        // Whitespace is trimmed rather than rejected — a hand-edited header.
+        assert_eq!(next_hop(Some(" 2 "), 3), Ok(3));
+        assert_eq!(next_hop(None, 0), Err(0));
+    }
+
+    #[tokio::test]
+    async fn each_hop_increments_the_counter_it_sends_upstream() {
+        let (upstream, _hits) = start_hop_echo_upstream().await;
+        let base = start_forwarder(fixed_edge_with_hops(&upstream, Some(3))).await;
+        let http = local_http();
+
+        // No header: the first relay stamps 1.
+        let body = http
+            .get(format!("{base}/v1/tasks"))
+            .send()
+            .await
+            .expect("request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "1", "a fresh request must enter the chain at 1");
+
+        // Two relays already passed: this one sends 3.
+        let body = http
+            .get(format!("{base}/v1/tasks"))
+            .header(HOPS_HEADER, "2")
+            .send()
+            .await
+            .expect("request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "3", "the counter must be incremented, not replaced");
+    }
+
+    #[tokio::test]
+    async fn a_request_at_the_hop_limit_is_refused_before_forwarding() {
+        let (upstream, hits) = start_hop_echo_upstream().await;
+        let edge = fixed_edge_with_hops(&upstream, Some(3));
+        let base = start_forwarder(Arc::clone(&edge)).await;
+
+        let resp = local_http()
+            .get(format!("{base}/v1/tasks"))
+            .header(HOPS_HEADER, "3")
+            .send()
+            .await
+            .expect("request");
+
+        assert_eq!(resp.status(), StatusCode::LOOP_DETECTED);
+        let body = resp.text().await.expect("body");
+        assert!(
+            body.contains("relay loop") && body.contains(HOPS_HEADER),
+            "the body must name the loop and the header: {body}"
+        );
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            0,
+            "a looping request must not reach the upstream at all"
+        );
+        assert_eq!(edge.metrics.loop_detected_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn without_a_limit_the_header_is_left_exactly_as_sent() {
+        // The standalone edge in front of a control plane: nothing to count,
+        // and a forwarder that rewrites headers for no reason is how a proxy
+        // starts breaking the server behind it.
+        let (upstream, _hits) = start_hop_echo_upstream().await;
+        let base = start_forwarder(fixed_edge_with_hops(&upstream, None)).await;
+
+        let body = local_http()
+            .get(format!("{base}/v1/tasks"))
+            .header(HOPS_HEADER, "7")
+            .send()
+            .await
+            .expect("request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "7", "no limit configured = no rewriting");
+
+        let body = local_http()
+            .get(format!("{base}/v1/tasks"))
+            .send()
+            .await
+            .expect("request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "-", "and no header is invented");
     }
 
     #[tokio::test]
@@ -970,6 +1252,7 @@ mod tests {
             upstream: Upstream::Fixed(Arc::new(move || slot.lock().expect("slot").clone())),
             upstream_timeout: Duration::from_secs(10),
             allowed_sources: vec![],
+            max_hops: None,
         })
         .expect("relay");
 
@@ -1030,6 +1313,7 @@ mod tests {
             upstream: Upstream::Fixed(Arc::new(|| "http://127.0.0.1:1".into())),
             upstream_timeout: Duration::from_secs(10),
             allowed_sources: vec![Cidr::parse("10.0.0.0/8").unwrap()],
+            max_hops: None,
         })
         .expect("relay");
         assert!(closed.source_allowed("10.9.9.9".parse().unwrap()));

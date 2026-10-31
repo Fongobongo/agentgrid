@@ -356,6 +356,31 @@ Unlike the proxy pool this carries the WebSocket transport too, and it needs
 no cluster token. See "Связь через промежуточный хост" in
 `docs/runbook-transport.md` and ADR 0026.
 
+Relays chain without extra configuration: if node B is itself stranded and
+carried by A, B can still relay for C — C points at B, B already points at A,
+and the request crosses both. Nothing needs to know how long the chain is
+except the loop guard, which counts:
+
+```bash
+# how many relays one request may cross before a relay answers 508 (default 3)
+AGENTGRID_RELAY_MAX_HOPS=5 agentgrid-node-daemon
+```
+
+Every relay adds 1 to the `x-agentgrid-relay-hops` header it forwards, and
+refuses with `508 Loop Detected` once the count reaches the limit — the body
+names the header and the limit, and `agentgrid_edge_loop_detected_total` on
+`/metrics` increments. This is the guard for the failure that is otherwise
+invisible at setup time: two operators point their relays at each other, both
+listen, both accept, and every request that enters the ring is forwarded
+forever. The static startup check only catches a relay whose own upstream *is*
+itself. `0` is refused at startup (a relay that answers 508 to everything) and
+a non-numeric value is an error rather than a silent default.
+
+The default of 3 fits the chain an operator actually builds (C → B → A →
+control plane is three) and cuts a ring in milliseconds instead of leaving it
+to a timeout. Raising it only makes sense if you have a longer deliberate
+chain; the number is a loop bound, not a performance knob.
+
 Both mechanisms produce the same misleading answer: a dead proxy in front of the
 control plane and a relay that lost its own upstream both reply `502`, which is
 not a transport error, so nothing marks them dead. The node now leaves such an
