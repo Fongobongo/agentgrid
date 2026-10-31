@@ -785,8 +785,17 @@ mod tests {
         let mut p = plan();
         p.transport = Transport::Direct;
         p.server = Some("http://cp.example.com:7800".into());
+        // A certificate goes through the whole sequence, not just the argv
+        // builder: `ssh` ignores a bad or missing `CertificateFile` without a
+        // word, so the only way to know the flag reached the *child* is to
+        // have the child write down what it was given.
+        let t = Target {
+            ssh_key: Some("/home/op/.ssh/id_ed25519".into()),
+            ssh_cert: Some("/home/op/.ssh/id_ed25519-cert.pub".into()),
+            ..target()
+        };
         let mut steps: Vec<String> = Vec::new();
-        let outcome = install(&target(), &p, "tok-1", &mut |m| steps.push(m.to_string()));
+        let outcome = install(&t, &p, "tok-1", &mut |m| steps.push(m.to_string()));
         std::env::set_var("PATH", &old);
         // The start step is detached (`setsid nohup ssh ...`), so its fake may
         // still be writing when install() returns. Wait for that one line
@@ -830,6 +839,10 @@ mod tests {
             argv.lines().filter(|l| l.starts_with("scp ")).count(),
             2,
             "one scp for the binary, one for the env file:\n{argv}"
+        );
+        assert!(
+            argv.contains("-o CertificateFile=/home/op/.ssh/id_ed25519-cert.pub"),
+            "the certificate must reach every ssh/scp child, not just argv():\n{argv}"
         );
     }
 }
