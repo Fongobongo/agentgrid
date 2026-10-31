@@ -122,12 +122,24 @@ feature of this daemon. The relay is deliberately not a step towards one.
   HA replicas, so a node moves onto the second relay when the first stops
   answering. Nothing discovers a relay, and a node configured with a single
   `AGENTGRID_SERVER` has nowhere to go — which is why the e2e asserts both
-  outcomes (cut off with one relay, carried on with two). The rotation triggers
-  on a connect/timeout error, on `503` and on demotion, **not** on `502`: a relay
-  that is alive but has lost its own route answers `502`, and so does any egress
-  proxy in front of a dead one, so those cases stay pinned. Making `502` rotate
-  is a change to HA semantics (it would also move nodes off a CP replica that
-  merely had a bad gateway) and is deliberately not made here.
+  outcomes (cut off with one relay, carried on with two).
+- **A `502` rotates, but only after three in a row.** A relay that is alive but
+  has lost its own route answers `502 control-plane unreachable` — and so does
+  any egress proxy in front of a dead control plane. Neither is a transport
+  error: the connection was established, so `is_connect()` never sees it, and
+  before this the node stayed pinned while a working endpoint sat unused in its
+  list. The fix is a counter rather than "rotate on 502", because the earlier
+  objection was to rotating on a *single* bad gateway — a load balancer hiccup
+  would then shuffle the whole fleet. Three consecutive `502`/`504` from one
+  endpoint is a real failure; the counter is shared by poll, heartbeat and ws
+  (same endpoint, so three failures across them mean the same thing) and is
+  cleared by any successful answer and by every endpoint change. `503` keeps
+  its own meaning (standby, follow the hint) and other `5xx`/`4xx` do not
+  rotate at all: a `500` is the control plane answering, and a `401` is not
+  fixed by moving.
+- Enrollment applies the same rule with no threshold: it retries the next
+  endpoint on a gateway error instead of failing boot. It runs once, over a
+  bounded number of attempts, so there is no thrashing to avoid.
 - The relay's `/metrics` and `/health/*` shadow the control plane's paths on
   that port (the same trade the standalone edge already makes).
 - `agentgrid-node-daemon` now links `axum` (through the edge library). The rest
@@ -144,3 +156,9 @@ feature of this daemon. The relay is deliberately not a step towards one.
 - **`tokio-tungstenite` gains proxy support**, or the node grows its own
   `CONNECT` client. Then the proxy pool could carry WS, and a relay could be
   replaced by an ordinary HTTP proxy the operator already runs.
+- **Three proves too few or too many in practice.** The threshold is a constant
+  (`GATEWAY_FAILURES_BEFORE_ROTATING`), not a knob: one fleet's "relay lost its
+  route" and another's "load balancer hiccups every minute" want different
+  numbers, and only an operator can say which. Making it configurable is a
+  small change; leaving it configurable *and undocumented* is how a default
+  nobody chose becomes a rule.

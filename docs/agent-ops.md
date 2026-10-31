@@ -303,6 +303,14 @@ Unlike the proxy pool this carries the WebSocket transport too, and it needs
 no cluster token. See "Связь через промежуточный хост" in
 `docs/runbook-transport.md` and ADR 0026.
 
+Both mechanisms produce the same misleading answer: a dead proxy in front of the
+control plane and a relay that lost its own upstream both reply `502`, which is
+not a transport error, so nothing marks them dead. The node now leaves such an
+*endpoint* after three consecutive `502`/`504` — `AGENTGRID_SERVERS` gives it
+somewhere to go. That does not mark the *proxy* dead: the pool rotates on
+connect/timeout only, so a proxy answering `502` stays in the pool and a node
+with a single endpoint has nowhere to move.
+
 ## Two-host smoke test
 
 A minimal end-to-end check that both nodes actually work:

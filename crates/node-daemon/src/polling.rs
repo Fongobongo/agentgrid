@@ -149,8 +149,13 @@ pub async fn poll_loop_inner(
             max_concurrency: cfg.max_concurrency,
             protocol_version: Some(agentgrid_common::NODE_PROTOCOL_VERSION.into()),
         };
+        // Captured once per request: the gateway branch below rotates the
+        // endpoint, and `cfg.base()` read afterwards would name the endpoint we
+        // just moved *to* — "3 gateway errors in a row from <the new one>" is a
+        // log line that sends the next reader hunting for the wrong host.
+        let endpoint = cfg.base();
         let resp = client
-            .post(format!("{}/v1/node/poll", cfg.base()))
+            .post(format!("{endpoint}/v1/node/poll"))
             .header("x-agentgrid-max-batch", cfg.max_concurrency.to_string())
             .json(&poll_req)
             .send()
@@ -169,6 +174,9 @@ pub async fn poll_loop_inner(
                     }
                 };
                 fail_streak = 0;
+                // The endpoint reaches the control plane, so any run of
+                // gateway errors against it is over.
+                cfg.endpoints.note_success();
                 // CP-managed proxy list (env AGENTGRID_PROXY_URLS wins if set).
                 cfg.proxies.update_from_cp(pr.proxy_urls.clone());
                 // Rebuild the client whenever the effective proxy changes:
@@ -223,6 +231,37 @@ pub async fn poll_loop_inner(
                     fail_streak = 0;
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     continue;
+                }
+                // 502/504: the endpoint answered, and *its* upstream did not.
+                // That is a relay that lost its own route to the control plane,
+                // or any egress proxy in front of a dead one — it looks like a
+                // healthy endpoint to `is_connect()`, so this is the only place
+                // that can decide to leave. Not on the first one: see
+                // `GATEWAY_FAILURES_BEFORE_ROTATING`.
+                if crate::config::is_gateway_status(status.as_u16()) {
+                    match cfg.endpoints.note_gateway_failure() {
+                        crate::config::GatewayOutcome::Rotated(next) => {
+                            tracing::warn!(
+                                "poll: {} gateway errors in a row from {endpoint}; rotating \
+                                 control-plane endpoint to {next}",
+                                crate::config::GATEWAY_FAILURES_BEFORE_ROTATING
+                            );
+                            // The new endpoint deserves a prompt attempt, not
+                            // the backoff accumulated against the old one.
+                            fail_streak = 0;
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            continue;
+                        }
+                        crate::config::GatewayOutcome::Counted(seen) => tracing::warn!(
+                            "poll: control plane answered {status} — gateway failure {seen}/{}; \
+                             the endpoint is up but cannot reach its own upstream",
+                            crate::config::GATEWAY_FAILURES_BEFORE_ROTATING
+                        ),
+                        crate::config::GatewayOutcome::Nowhere => tracing::warn!(
+                            "poll: control plane answered {status} and no other endpoint is \
+                             configured; staying put"
+                        ),
+                    }
                 }
                 let wait = backoff(fail_streak);
                 fail_streak = fail_streak.saturating_add(1);
@@ -533,5 +572,140 @@ pub async fn send_with_retry(
                 return Err(e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    //! A `502`/`504` never surfaces as a transport error, so nothing in the
+    //! connect/timeout path can see it: the endpoint answered. This drives the
+    //! *real* poll loop against an endpoint that answers `502` and a real
+    //! control plane behind the next one, and requires the rotation to happen —
+    //! after the threshold, not on the first answer.
+    //!
+    //! Before this, a node pointed at a relay whose own route died sat on it
+    //! forever, backing off, while a working endpoint sat unused in
+    //! `AGENTGRID_SERVERS`.
+
+    use super::*;
+    use crate::config::{Endpoints, SavedCredential, Transport, GATEWAY_FAILURES_BEFORE_ROTATING};
+    use crate::test_support::{authed_client, cfg as test_cfg, enroll, login, wait_until};
+    use agentgrid_control_plane::{build_router, AppState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// An endpoint that is up and answers `502` to everything — the shape of a
+    /// relay whose own route to the control plane died.
+    async fn broken_endpoint() -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&hits);
+        let app = axum::Router::new().fallback(move || {
+            let seen = Arc::clone(&seen);
+            async move {
+                seen.fetch_add(1, Ordering::Relaxed);
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "control-plane unreachable",
+                )
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn poll_leaves_an_endpoint_that_answers_502() {
+        let state = AppState::open_temp().await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let st = state.clone();
+        let _cp = tokio::spawn(async move {
+            let _ = axum::serve(listener, build_router(st)).await;
+        });
+        let base = format!("http://{addr}");
+        let token = login(&base).await;
+        let (node_id, credential) = enroll(&base, &token, "gateway-node").await;
+
+        let (broken, hits) = broken_endpoint().await;
+        let dir = std::env::temp_dir().join(format!(
+            "ag-gw-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut cfg = test_cfg(&base, &dir);
+        // Broken first, so the loop starts on it and has to move.
+        cfg.endpoints = Endpoints::new(vec![broken.clone(), base.clone()]);
+        cfg.transport = Transport::Poll;
+        // The poll request carries this name, and the assertion below looks for
+        // it in `/v1/nodes`: keep the two in step instead of relying on the
+        // fixture's default.
+        cfg.node_name = "gateway-node".into();
+        let cred = SavedCredential {
+            node_id,
+            credential,
+        };
+        let sem = Arc::new(Semaphore::new(1));
+        let node_id = cred.node_id.clone();
+        let poller = tokio::spawn(poll_loop_inner(
+            cfg.clone(),
+            authed_client(&cred),
+            sem,
+            node_id,
+            None,
+            Client::new,
+        ));
+
+        wait_until(
+            "the poll loop to leave the 502 endpoint",
+            Duration::from_secs(60),
+            || async { cfg.endpoints.current() == base },
+        )
+        .await;
+
+        // Exactly the threshold. Not one — a single bad gateway must not move a
+        // node (that is a compile-time assertion next to the constant). And not
+        // "as many as fitted in the wait", which is what a counter that never
+        // resets would produce.
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            GATEWAY_FAILURES_BEFORE_ROTATING,
+            "the loop should hit the broken endpoint exactly {GATEWAY_FAILURES_BEFORE_ROTATING} \
+             times before rotating"
+        );
+
+        // Rotating is only half of it: the loop has to *work* on the new
+        // endpoint, or the node would be off the broken relay and still not
+        // registered anywhere.
+        let http = reqwest::Client::new();
+        wait_until(
+            "the node to poll the real control plane",
+            Duration::from_secs(30),
+            || {
+                let http = http.clone();
+                let base = base.clone();
+                let token = token.clone();
+                async move {
+                    let Ok(r) = http
+                        .get(format!("{base}/v1/nodes"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .send()
+                        .await
+                    else {
+                        return false;
+                    };
+                    r.text()
+                        .await
+                        .unwrap_or_default()
+                        .contains("\"gateway-node\"")
+                }
+            },
+        )
+        .await;
+
+        poller.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

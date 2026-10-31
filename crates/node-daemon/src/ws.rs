@@ -57,13 +57,21 @@ fn ws_url(server: &str) -> String {
     }
 }
 
-/// A failed connect attempt, plus whether it already moved the daemon onto a
-/// hinted leader. The reconnect loops must not rotate after that: rotating
-/// steps *off* the leader they were just told about, so the failover never
-/// lands (see `next_after_failure`).
+/// A failed connect attempt, plus what it learned about the endpoint. The
+/// reconnect loops must not rotate after a followed leader hint: rotating steps
+/// *off* the leader they were just told about, so the failover never lands (see
+/// `next_after_failure`). And a `502`/`504` must not rotate on its own either —
+/// the endpoint is alive, its upstream is not, and one bad gateway is a blip
+/// (`GATEWAY_FAILURES_BEFORE_ROTATING`).
+#[derive(Default)]
+struct ConnectProbe {
+    followed_hint: bool,
+    gateway: bool,
+}
+
 struct ConnectError {
     error: anyhow::Error,
-    followed_hint: bool,
+    probe: ConnectProbe,
 }
 
 impl std::fmt::Display for ConnectError {
@@ -76,19 +84,16 @@ impl std::fmt::Display for ConnectError {
 /// The handshake is time-bounded (10 s connect, 10 s overall): an accepting-
 /// but-silent CP used to park the WS session setup forever.
 async fn connect_once(cfg: &Config, cred: &SavedCredential) -> Result<WsStream, ConnectError> {
-    let mut followed_hint = false;
-    connect_inner(cfg, cred, &mut followed_hint)
+    let mut probe = ConnectProbe::default();
+    connect_inner(cfg, cred, &mut probe)
         .await
-        .map_err(|error| ConnectError {
-            error,
-            followed_hint,
-        })
+        .map_err(|error| ConnectError { error, probe })
 }
 
 async fn connect_inner(
     cfg: &Config,
     cred: &SavedCredential,
-    followed_hint: &mut bool,
+    probe: &mut ConnectProbe,
 ) -> Result<WsStream> {
     let url = format!("{}/v1/node/ws", ws_url(&cfg.base()));
     let mut req = url.into_client_request()?;
@@ -106,14 +111,17 @@ async fn connect_inner(
         Ok(ok) => ok,
         Err(e) => {
             // A standby answers 503 with the leader hint; follow it (only for
-            // configured replicas) so the next attempt goes to the leader.
+            // configured replicas) so the next attempt goes to the leader. A
+            // 502/504 means the endpoint is up but its own upstream is not,
+            // which is the relay/proxy case the counter handles.
             if let tokio_tungstenite::tungstenite::Error::Http(resp) = &e {
+                probe.gateway = crate::config::is_gateway_status(resp.status().as_u16());
                 let hint = resp
                     .headers()
                     .get("x-agentgrid-leader")
                     .and_then(|v| v.to_str().ok());
-                *followed_hint = cfg.endpoints.follow_hint(hint);
-                if *followed_hint {
+                probe.followed_hint = cfg.endpoints.follow_hint(hint);
+                if probe.followed_hint {
                     tracing::info!("ws: following leader hint to {}", cfg.base());
                 }
             }
@@ -287,9 +295,21 @@ async fn handle_msg(
 /// shorten failover was being thrown away, and a node kept retrying standbys
 /// (and the frozen old leader) until the poll fallback happened to land on the
 /// new leader minutes later. `heartbeat` and `poll` already guard this.
-fn next_after_failure(endpoints: &Endpoints, followed_hint: bool) -> Option<String> {
-    if followed_hint || endpoints.urls().len() < 2 {
+///
+/// A gateway error is not a transport failure: the endpoint answered, and its
+/// own upstream did not. Rotating on the first one would let any single bad
+/// gateway shuffle the fleet, so it goes through the shared counter instead.
+fn next_after_failure(endpoints: &Endpoints, probe: &ConnectProbe) -> Option<String> {
+    if probe.followed_hint || endpoints.urls().len() < 2 {
         return None;
+    }
+    if probe.gateway {
+        return match endpoints.note_gateway_failure() {
+            crate::config::GatewayOutcome::Rotated(next) => Some(next),
+            crate::config::GatewayOutcome::Counted(_) | crate::config::GatewayOutcome::Nowhere => {
+                None
+            }
+        };
     }
     Some(endpoints.advance())
 }
@@ -309,6 +329,9 @@ pub async fn ws_loop<F: Fn() -> Client>(
         match connect_once(&cfg, &cred).await {
             Ok(sock) => {
                 backoff = Duration::from_secs(1);
+                // The handshake succeeded: this endpoint reaches the control
+                // plane, so a run of gateway errors against it is over.
+                cfg.endpoints.note_success();
                 match run_session(sock, &cfg, &client, &sem, &cred).await {
                     Ok(SessionEnd::Demoted) => {
                         // Leader lost its lease: reconnect at once and try the
@@ -324,7 +347,7 @@ pub async fn ws_loop<F: Fn() -> Client>(
             }
             Err(e) => {
                 tracing::warn!("ws connect failed: {e}");
-                if let Some(next) = next_after_failure(&cfg.endpoints, e.followed_hint) {
+                if let Some(next) = next_after_failure(&cfg.endpoints, &e.probe) {
                     tracing::warn!("ws: rotating control-plane endpoint to {next}");
                 }
             }
@@ -352,6 +375,7 @@ pub async fn auto_loop<F: Fn() -> Client + Clone>(
             Ok(sock) => {
                 consecutive_failures = 0;
                 backoff = Duration::from_secs(1);
+                cfg.endpoints.note_success();
                 match run_session(sock, &cfg, &client, &sem, &cred).await {
                     Ok(SessionEnd::Demoted) => {
                         cfg.endpoints.advance();
@@ -370,7 +394,7 @@ pub async fn auto_loop<F: Fn() -> Client + Clone>(
             Err(e) => {
                 consecutive_failures += 1;
                 tracing::warn!("ws connect failed ({consecutive_failures}): {e}");
-                if let Some(next) = next_after_failure(&cfg.endpoints, e.followed_hint) {
+                if let Some(next) = next_after_failure(&cfg.endpoints, &e.probe) {
                     tracing::warn!("ws: rotating control-plane endpoint to {next}");
                 }
                 if consecutive_failures >= MAX_CONSECUTIVE_WS_FAILURES {
@@ -416,7 +440,11 @@ mod failover_tests {
         assert_eq!(e.current(), "http://127.0.0.1:17922");
         // The regression: rotating here moved `current` to 17923 (a standby),
         // so the daemon never retried the leader the hint pointed at.
-        assert_eq!(next_after_failure(&e, true), None);
+        let probe = ConnectProbe {
+            followed_hint: true,
+            gateway: false,
+        };
+        assert_eq!(next_after_failure(&e, &probe), None);
         assert_eq!(e.current(), "http://127.0.0.1:17922");
     }
 
@@ -424,7 +452,7 @@ mod failover_tests {
     fn a_failure_without_a_hint_still_rotates() {
         let e = endpoints();
         assert_eq!(
-            next_after_failure(&e, false).as_deref(),
+            next_after_failure(&e, &ConnectProbe::default()).as_deref(),
             Some("http://127.0.0.1:17922")
         );
         assert_eq!(e.current(), "http://127.0.0.1:17922");
@@ -433,7 +461,27 @@ mod failover_tests {
     #[test]
     fn a_single_endpoint_never_rotates() {
         let e = Endpoints::new(vec!["http://127.0.0.1:17921".into()]);
-        assert_eq!(next_after_failure(&e, false), None);
+        assert_eq!(next_after_failure(&e, &ConnectProbe::default()), None);
+    }
+
+    /// A `502` from the endpoint is not a transport failure, so the ws loop
+    /// must count it like poll and heartbeat do instead of hopping off on the
+    /// first one — and must hop once the run reaches the threshold.
+    #[test]
+    fn a_gateway_error_rotates_only_after_the_run() {
+        let e = endpoints();
+        let probe = ConnectProbe {
+            followed_hint: false,
+            gateway: true,
+        };
+        for _ in 1..crate::config::GATEWAY_FAILURES_BEFORE_ROTATING {
+            assert_eq!(next_after_failure(&e, &probe), None);
+            assert_eq!(e.current(), "http://127.0.0.1:17921");
+        }
+        assert_eq!(
+            next_after_failure(&e, &probe).as_deref(),
+            Some("http://127.0.0.1:17922")
+        );
     }
 }
 
@@ -446,53 +494,10 @@ mod tests {
     //! pushed over the restored channel.
 
     use super::*;
-    use crate::config::Transport;
+    use crate::test_support::{authed_client, cfg as test_cfg, enroll, login, wait_until};
     use agentgrid_control_plane::{build_router, AppState};
     use serde_json::json;
     use std::time::Instant;
-
-    async fn login(base: &str) -> String {
-        reqwest::Client::new()
-            .post(format!("{base}/v1/auth/login"))
-            .json(&json!({"username": "test", "password": "test"}))
-            .send()
-            .await
-            .unwrap()
-            .json::<agentgrid_common::LoginResponse>()
-            .await
-            .unwrap()
-            .token
-    }
-
-    async fn enroll(base: &str, token: &str) -> (String, String) {
-        let http = reqwest::Client::new();
-        let tok: String = http
-            .post(format!("{base}/v1/nodes/enrollment-token"))
-            .header("authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap()
-            .json::<agentgrid_common::EnrollTokenResponse>()
-            .await
-            .unwrap()
-            .token;
-        let er = http
-            .post(format!("{base}/v1/node/enroll"))
-            .json(&json!({
-                "token": tok,
-                "name": "ws-reconnect-node",
-                "adapters": ["mock"],
-                "repositories": ["*"],
-                "max_concurrency": 1,
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json::<agentgrid_common::EnrollResponse>()
-            .await
-            .unwrap();
-        (er.node_id, er.credential)
-    }
 
     async fn create_task(base: &str, token: &str) -> String {
         reqwest::Client::new()
@@ -511,77 +516,6 @@ mod tests {
             .await
             .unwrap()
             .id
-    }
-
-    fn test_cfg(server: &str, dir: &std::path::Path) -> Config {
-        std::fs::create_dir_all(dir).unwrap();
-        Config {
-            server: server.to_string(),
-            endpoints: Endpoints::new(vec![server.to_string()]),
-            node_name: "ws-reconnect-node".into(),
-            workspace_root: dir.join("ws"),
-            max_concurrency: 1,
-            agent_version: "test".into(),
-            adapters: vec![crate::config::AdapterSpec {
-                id: "mock".into(),
-                protocol: crate::config::AdapterProtocol::Wrapper,
-            }],
-            repositories: vec!["*".into()],
-            heartbeat_secs: 5,
-            enroll_token: None,
-            credential_path: dir.join("credential.json"),
-            env_file: None,
-            repository_root: dir.join("repos"),
-            secrets: vec![],
-            adapter_env: vec![],
-            sandbox: crate::sandbox::SandboxKind::None,
-            outbox_root: dir.join("outbox"),
-            artifact_spool_root: dir.join("spool"),
-            max_artifact_size: 1024 * 1024,
-            completion_outbox: Arc::new(
-                crate::outbox::CompletionOutbox::open(&dir.join("outbox")).unwrap(),
-            ),
-            autonomy: Default::default(),
-            adapter_versions: Default::default(),
-            network_mode: "none".into(),
-            transport: Transport::Ws,
-            guard_deny: vec![],
-            guard_allow: vec![],
-            accounts: vec![],
-            github_token: None,
-            proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
-            managed_adapter_env: Default::default(),
-        }
-    }
-
-    /// Node HTTP client carrying the node credential, exactly like
-    /// `run_transport` builds it — the attempt runner's data-plane calls
-    /// (events/completion/artifacts) authenticate with this header.
-    fn authed_client(cred: &SavedCredential) -> reqwest::Client {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", cred.credential).parse().unwrap(),
-        );
-        reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .unwrap()
-    }
-
-    async fn wait_until<F, Fut>(desc: &str, timeout: Duration, mut f: F)
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = bool>,
-    {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if f().await {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        panic!("timed out waiting for: {desc}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -635,7 +569,7 @@ mod tests {
         });
         let base = format!("http://{addr}");
         let token = login(&base).await;
-        let (node_id, credential) = enroll(&base, &token).await;
+        let (node_id, credential) = enroll(&base, &token, "ws-reconnect-node").await;
 
         let dir = std::env::temp_dir().join(format!(
             "ag-ws-node-{}-{}",
@@ -761,7 +695,7 @@ mod tests {
         });
         let base = format!("http://{addr}");
         let token = login(&base).await;
-        let (node_id, credential) = enroll(&base, &token).await;
+        let (node_id, credential) = enroll(&base, &token, "ws-reconnect-node").await;
 
         let cfg = test_cfg(&base, &dir.join("data"));
         let cred = SavedCredential {

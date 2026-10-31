@@ -107,6 +107,45 @@ pub struct SavedCredential {
     pub credential: String,
 }
 
+/// How many consecutive gateway errors (see [`is_gateway_status`]) one endpoint
+/// may produce before the daemon moves to the next one.
+///
+/// Not one: a single `502` is a load balancer hiccup or a proxy blip, and
+/// rotating on it would shuffle every node in the fleet on any bad minute. Not
+/// ten either: at poll backoff (3 s, 6 s, …) ten failures is over a minute of a
+/// node that is visibly talking to something that cannot reach the control
+/// plane. Three is one "did you mean it" plus a real failure, and with the
+/// counter shared by poll/heartbeat/ws it is ~10 s in poll mode, ~3 s over ws.
+pub const GATEWAY_FAILURES_BEFORE_ROTATING: usize = 3;
+
+/// The whole point of the constant is "not on the first one", so a future edit
+/// that sets it to 1 must not compile rather than quietly restore the behaviour
+/// this exists to avoid.
+const _: () = assert!(
+    GATEWAY_FAILURES_BEFORE_ROTATING > 1,
+    "a single bad gateway must not move a node"
+);
+
+/// `502 Bad Gateway` / `504 Gateway Timeout`: the endpoint answered, and its
+/// own upstream did not. This is the shape of a relay whose route to the
+/// control plane died, and of any egress proxy in front of a dead control
+/// plane — both look like a *healthy* endpoint from the outside, which is why
+/// `is_connect()` never sees them.
+pub fn is_gateway_status(code: u16) -> bool {
+    code == 502 || code == 504
+}
+
+/// What [`Endpoints::note_gateway_failure`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GatewayOutcome {
+    /// Counted, still on the same endpoint. `seen` consecutive so far.
+    Counted(usize),
+    /// The threshold was reached; the daemon is now on this endpoint.
+    Rotated(String),
+    /// The threshold was reached but there is nowhere to go.
+    Nowhere,
+}
+
 /// Ordered control-plane endpoints. HA deployments list every replica
 /// (`AGENTGRID_SERVERS=a,b,c`); the daemon follows `X-AgentGrid-Leader`
 /// hints when they name a configured host and otherwise rotates in order.
@@ -114,6 +153,12 @@ pub struct SavedCredential {
 pub struct Endpoints {
     urls: Vec<String>,
     current: std::sync::atomic::AtomicUsize,
+    /// Consecutive gateway errors seen on the current endpoint, shared by every
+    /// loop (poll, heartbeat, ws) on purpose: they are all talking to the same
+    /// endpoint, so three failures spread across them mean the same thing as
+    /// three in one. Cleared by any successful answer and by every move
+    /// (`advance` / `follow_hint`), so it only ever counts a *run*.
+    gateway_failures: std::sync::Mutex<usize>,
 }
 
 impl Endpoints {
@@ -126,6 +171,7 @@ impl Endpoints {
         Arc::new(Self {
             urls,
             current: std::sync::atomic::AtomicUsize::new(0),
+            gateway_failures: std::sync::Mutex::new(0),
         })
     }
 
@@ -151,6 +197,7 @@ impl Endpoints {
             return false;
         };
         self.current.store(i, std::sync::atomic::Ordering::Relaxed);
+        self.reset_gateway_failures();
         true
     }
 
@@ -160,7 +207,46 @@ impl Endpoints {
             self.current
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        self.reset_gateway_failures();
         self.current()
+    }
+
+    /// A successful answer: whatever went wrong before, this endpoint reaches
+    /// the control plane, so the run is over.
+    pub fn note_success(&self) {
+        self.reset_gateway_failures();
+    }
+
+    /// Count a gateway error from the current endpoint and rotate once
+    /// [`GATEWAY_FAILURES_BEFORE_ROTATING`] of them have happened in a row.
+    ///
+    /// A `502`/`504` never surfaces as a transport error, so the connect/timeout
+    /// rotation cannot see it: without this, a node pointed at a relay that lost
+    /// its own route — or at any proxy in front of a dead control plane — sits
+    /// on that endpoint forever, backing off, while a working endpoint sits
+    /// unused in `AGENTGRID_SERVERS`.
+    ///
+    /// A `Mutex`, not an atomic: counting and rotating must be one step. With
+    /// `fetch_add` two loops could both see "3" and rotate twice, skipping an
+    /// endpoint. The guard is never held across an `.await`.
+    pub fn note_gateway_failure(&self) -> GatewayOutcome {
+        if self.urls.len() < 2 {
+            return GatewayOutcome::Nowhere;
+        }
+        let mut seen = self.gateway_failures.lock().unwrap();
+        *seen += 1;
+        if *seen < GATEWAY_FAILURES_BEFORE_ROTATING {
+            return GatewayOutcome::Counted(*seen);
+        }
+        // Clear the run before rotating: `advance` takes the same mutex, so
+        // holding the guard across it would deadlock.
+        *seen = 0;
+        drop(seen);
+        GatewayOutcome::Rotated(self.advance())
+    }
+
+    fn reset_gateway_failures(&self) {
+        *self.gateway_failures.lock().unwrap() = 0;
     }
 }
 
@@ -476,5 +562,84 @@ mod tests {
         assert_eq!(e.current(), "http://cp-b:7800");
         assert_eq!(e.advance(), "http://cp-a:7800");
         assert_eq!(e.advance(), "http://cp-b:7800");
+    }
+
+    fn pair() -> Arc<Endpoints> {
+        Endpoints::new(vec![
+            "http://relay-a:7900".into(),
+            "http://relay-b:7900".into(),
+        ])
+    }
+
+    /// The whole point of the counter: a relay that answers `502` because *its*
+    /// route died is not a transport error, so nothing rotates on it. Two in a
+    /// row must still not move the node — a single bad gateway is a blip.
+    #[test]
+    fn gateway_failures_rotate_only_after_the_threshold() {
+        let e = pair();
+        for n in 1..GATEWAY_FAILURES_BEFORE_ROTATING {
+            assert_eq!(e.note_gateway_failure(), GatewayOutcome::Counted(n));
+            assert_eq!(e.current(), "http://relay-a:7900", "rotated too early");
+        }
+        assert_eq!(
+            e.note_gateway_failure(),
+            GatewayOutcome::Rotated("http://relay-b:7900".into())
+        );
+        assert_eq!(e.current(), "http://relay-b:7900");
+    }
+
+    /// One good answer proves the endpoint reaches the control plane, so the
+    /// run is over. Without this, a node with an intermittent gateway would
+    /// accumulate failures over hours and rotate on a healthy endpoint.
+    #[test]
+    fn a_successful_answer_clears_the_run() {
+        let e = pair();
+        for _ in 1..GATEWAY_FAILURES_BEFORE_ROTATING {
+            assert!(matches!(
+                e.note_gateway_failure(),
+                GatewayOutcome::Counted(_)
+            ));
+        }
+        e.note_success();
+        // The run starts over: the next two are "1 of 3", "2 of 3" again.
+        assert_eq!(e.note_gateway_failure(), GatewayOutcome::Counted(1));
+        assert_eq!(e.current(), "http://relay-a:7900");
+    }
+
+    /// Moving to another endpoint ends the run: the failures belonged to the
+    /// one we left, and counting them against the new one would rotate again
+    /// on its first hiccup.
+    #[test]
+    fn moving_clears_the_run() {
+        let e = pair();
+        for _ in 1..GATEWAY_FAILURES_BEFORE_ROTATING {
+            e.note_gateway_failure();
+        }
+        assert!(e.follow_hint(Some("http://relay-b:7900")));
+        assert_eq!(e.note_gateway_failure(), GatewayOutcome::Counted(1));
+    }
+
+    /// With one endpoint there is nowhere to go, and pretending otherwise
+    /// would report a rotation that never happened.
+    #[test]
+    fn gateway_failures_with_a_single_endpoint_are_not_a_rotation() {
+        let e = Endpoints::new(vec!["http://only:7900".into()]);
+        for _ in 0..10 {
+            assert_eq!(e.note_gateway_failure(), GatewayOutcome::Nowhere);
+        }
+        assert_eq!(e.current(), "http://only:7900");
+    }
+
+    /// `504` is the same failure with a slower upstream, so it counts too.
+    #[test]
+    fn gateway_statuses_are_the_two_proxy_timeouts() {
+        for code in [502u16, 504] {
+            assert!(is_gateway_status(code), "{code} should count as a gateway");
+        }
+        // 503 is *not* one: it means "I am a standby" and carries a leader
+        // hint, which is handled by following the hint, not by counting.
+        for code in [500u16, 503, 404, 401, 200] {
+            assert!(!is_gateway_status(code), "{code} is not a gateway error");
+        }
     }
 }

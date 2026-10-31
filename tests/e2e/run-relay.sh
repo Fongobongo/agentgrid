@@ -18,6 +18,10 @@
 #      B off: it rotates onto the second and keeps running tasks. This is the
 #      redundancy answer to "what if the middle host dies" — it is configuration,
 #      not discovery, and without the list there is nothing to rotate to (5).
+#   7. the other half of 6: a relay that is *alive* but has lost its own route
+#      answers `502`, which no connect error ever surfaces. The node must leave
+#      it — after several answers, not on the first — and get through the
+#      working relay.
 #
 # Honest limit: every process here is on 127.0.0.1, so "B cannot reach the
 # control plane" is expressed by B's configuration (it is told only the relays'
@@ -241,5 +245,83 @@ AFTER=$(metric_at "$RELAY2" agentgrid_edge_requests_total)
   || { echo "second relay handled no new requests ($BEFORE -> $AFTER) — B did not move"; exit 1; }
 echo "   task $TID pinned to relay-b: $STATUS, carried by the second relay ($BEFORE -> $AFTER requests)"
 
+# --- 7. a relay that is alive but has lost its own upstream ----------------
+# Section 5 was "the relay died" — a connect error, which rotates at once.
+# This is the case nothing in the connect/timeout path can see: the hop answers,
+# and answers `502 control-plane unreachable` because *its* route to the control
+# plane is gone. A node used to sit on such an endpoint forever, backing off,
+# while a working relay sat unused in its list.
+echo ">> a relay answering 502 must be abandoned, but not on the first answer"
+
+RELAY_BROKEN_PORT="${AGENTGRID_RELAY_BROKEN_PORT:-7834}"
+RELAY_BROKEN="http://127.0.0.1:$RELAY_BROKEN_PORT"
+# Nothing listens here: it stands in for "this host can no longer reach the
+# control plane", which is the whole premise of a relay in the first place.
+DEAD_CP="${AGENTGRID_DEAD_CP:-http://127.0.0.1:7839}"
+
+# Node A comes back with the same credential (no token) and the same relay, but
+# pointed at an unreachable control plane. The relay still starts — that is the
+# point: the host is up, its uplink is not.
+ENROLL_TOKEN=""
+e2e_start_node a "relay-a" "mock" "$TMP/work-a" "$TMP/repos-a" "$TMP/a" \
+  AGENTGRID_SERVER="$DEAD_CP" \
+  AGENTGRID_RELAY_LISTEN="127.0.0.1:$RELAY_BROKEN_PORT" \
+  AGENTGRID_RELAY_ALLOW="127.0.0.1/32"
+A_PID=$NODE_PID
+
+for _ in $(seq 1 60); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$RELAY_BROKEN/health/live" || true)" = "200" ] && break
+  sleep 0.5
+done
+# The premise, asserted before blaming the node: the relay is up and answers
+# 502, not a refused connection.
+CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+  -H 'content-type: application/json' -d '{}' "$RELAY_BROKEN/v1/node/poll" || true)
+[ "$CODE" = "502" ] || { echo "expected 502 from the stranded relay, got $CODE"; tail -20 "$TMP/a.log"; exit 1; }
+echo "   relay A is up (health/live 200) and answers $CODE for the control plane"
+
+# B is told: stranded relay first, working relay second. Nothing reconfigures
+# it afterwards — the gateway counter has to carry it across.
+kill -9 "$B_PID" 2>/dev/null || true
+wait "$B_PID" 2>/dev/null || true
+e2e_forget_pid "$B_PID"
+e2e_start_node b "relay-b" "mock" "$TMP/work-b" "$TMP/repos-b" "$TMP/b" \
+  AGENTGRID_SERVERS="$RELAY_BROKEN,$RELAY2" \
+  AGENTGRID_TRANSPORT=poll
+B_PID=$NODE_PID
+
+for _ in $(seq 1 120); do
+  grep -q "gateway errors in a row" "$TMP/b.log" 2>/dev/null && break
+  sleep 0.5
+done
+grep -q "gateway errors in a row from $RELAY_BROKEN; rotating control-plane endpoint to $RELAY2" \
+  "$TMP/b.log" \
+  || { echo "B never rotated off the 502 relay"; grep -iE "gateway|rotating|poll" "$TMP/b.log" | tail -20; exit 1; }
+
+# The threshold, asserted rather than assumed: two failures are logged and the
+# third is the one that rotates (it logs the rotation line, not "3/3"), so the
+# rotation line's own count is the third data point. One failure before rotating
+# would mean a single bad gateway moves a node — the behaviour this counter
+# exists to avoid; more would mean the run never resets.
+ROT_LINE=$(grep -n "gateway errors in a row" "$TMP/b.log" | head -1 | cut -d: -f1)
+COUNTED=$(head -n $((ROT_LINE - 1)) "$TMP/b.log" | grep -cE "gateway failure [0-9]+/" || true)
+[ "$COUNTED" = "2" ] \
+  || { echo "expected 2 logged gateway failures before the third rotated (threshold 3), saw $COUNTED"; grep -iE "gateway" "$TMP/b.log" | head -10; exit 1; }
+echo "   B left the 502 relay on the third gateway failure"
+
+e2e_wait_nodes_online 2 120 || { echo "B never came back online through the working relay"; tail -40 "$TMP/b.log"; exit 1; }
+
+BID=$(node_id_by_name "relay-b")
+[ -n "$BID" ] || { echo "relay-b is not in /v1/nodes"; exit 1; }
+BEFORE=$(metric_at "$RELAY2" agentgrid_edge_requests_total)
+TID=$(submit_pinned "write:relay-gateway.txt:hi" "$BID")
+e2e_wait_terminal 120 "$TID" || { echo "task after the gateway rotation never finished"; tail -40 "$TMP/b.log"; exit 1; }
+[ "$STATUS" = "succeeded" ] || { echo "task status=$STATUS"; tail -40 "$TMP/b.log"; exit 1; }
+AFTER=$(metric_at "$RELAY2" agentgrid_edge_requests_total)
+[ "${AFTER:-0}" -gt "${BEFORE:-0}" ] \
+  || { echo "working relay handled no new requests ($BEFORE -> $AFTER) — B did not move"; exit 1; }
+echo "   task $TID pinned to relay-b: $STATUS, through the working relay ($BEFORE -> $AFTER requests)"
+
 echo "PASS: a node reached the control plane through a peer's relay, over poll and ws,"
-echo "      and with two relays configured it survived the loss of the first one"
+echo "      survived the loss of the first of two relays, and left a relay that answered 502"
+echo "      only after three gateway failures"

@@ -490,12 +490,16 @@ pub fn spawn_heartbeat(
                 active_rss_mib: vmrss_mib,
                 max_rss_mib,
             };
+            // Captured before the request: the gateway branch rotates the
+            // endpoint, and `cfg.base()` read afterwards names the one we moved
+            // to, not the one that answered.
+            let endpoint = cfg.base();
             // See HEARTBEAT_TIMEOUT: the shared client's 120 s poll timeout is
             // wrong for a beat, and a frozen leader otherwise swallows it whole.
             let posted = tokio::time::timeout(
                 HEARTBEAT_TIMEOUT,
                 client
-                    .post(format!("{}/v1/node/heartbeat", cfg.base()))
+                    .post(format!("{endpoint}/v1/node/heartbeat"))
                     .json(&req)
                     .send(),
             )
@@ -526,7 +530,35 @@ pub fn spawn_heartbeat(
                         cfg.base()
                     );
                 }
-                Ok(Ok(_)) => {}
+                // 502/504: the endpoint is up but its own upstream is not (a
+                // relay that lost its route, a proxy in front of a dead
+                // control plane). Shared counter with the poll and ws loops —
+                // on the ws transport this beat is the only HTTP path, so
+                // without it a ws node would never leave such an endpoint.
+                Ok(Ok(r)) if crate::config::is_gateway_status(r.status().as_u16()) => {
+                    let status = r.status();
+                    match cfg.endpoints.note_gateway_failure() {
+                        crate::config::GatewayOutcome::Rotated(next) => tracing::warn!(
+                            "heartbeat: {} gateway errors in a row from {endpoint} ({status}); \
+                             rotating control-plane endpoint to {next}",
+                            crate::config::GATEWAY_FAILURES_BEFORE_ROTATING
+                        ),
+                        crate::config::GatewayOutcome::Counted(seen) => tracing::warn!(
+                            "heartbeat: control plane answered {status} — gateway failure \
+                             {seen}/{}; the endpoint is up but cannot reach its own upstream",
+                            crate::config::GATEWAY_FAILURES_BEFORE_ROTATING
+                        ),
+                        crate::config::GatewayOutcome::Nowhere => tracing::warn!(
+                            "heartbeat: control plane answered {status} and no other endpoint \
+                             is configured; staying put"
+                        ),
+                    }
+                }
+                Ok(Ok(_)) => {
+                    // Reached the control plane: whatever the previous answers
+                    // were, this endpoint works.
+                    cfg.endpoints.note_success();
+                }
                 Ok(Err(e)) => {
                     tracing::warn!("heartbeat failed: {e}");
                     if e.is_connect() || e.is_timeout() {

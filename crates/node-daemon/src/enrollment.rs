@@ -88,11 +88,22 @@ async fn enroll_node(cfg: &Config) -> Result<SavedCredential> {
                 if !followed && cfg.endpoints.urls().len() > 1 {
                     cfg.endpoints.advance();
                 }
-                if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                // A gateway error (502/504) is the one other status worth
+                // another attempt: the endpoint answered, so it is up, but it
+                // cannot reach the control plane — a relay whose own route
+                // died, or a proxy in front of a dead one. The next configured
+                // endpoint may well work, and this loop is bounded (two passes
+                // over the list) and runs once at boot, so there is no
+                // thrashing to avoid: one 502 is enough to move on. Any other
+                // status is a real answer (401 bad token, 400 bad request) and
+                // must not be retried.
+                if status != reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    && !crate::config::is_gateway_status(status.as_u16())
+                {
                     break;
                 }
                 tracing::warn!(
-                    "enroll: control plane is not the leader; retrying at {}",
+                    "enroll: control plane answered {status}; retrying at {}",
                     cfg.base()
                 );
             }

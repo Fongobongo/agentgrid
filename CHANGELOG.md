@@ -34,14 +34,27 @@
     makes the node's existing endpoint rotation carry it onto the second hop
     when the first stops answering — nothing finds relay B on its own. Asserted
     end to end: `run-relay.sh` now starts two relays, kills the one the node is
-    using, and requires the next pinned task to land through the other. Rotation
-    fires on connect/timeout, on 503 and on demotion, **not** on 502 — so a relay
-    that is alive but has lost its own route to the control plane pins the node
-    where it is, and so does any egress proxy in front (a proxy answers a refused
-    connection with 502, which is how this was found).
+    using, and requires the next pinned task to land through the other.
   - One hop only; chaining relays is not supported (ADR 0026).
 
 ### Changed
+
+- **A `502`/`504` now rotates the node's endpoint — after three in a row.** A
+  relay that is alive but has lost its own route to the control plane answers
+  `502 control-plane unreachable`, and so does any egress proxy in front of a
+  dead one. Neither is a transport error (the connection was established), so
+  the connect/timeout rotation never saw them and the node sat on that endpoint
+  forever while a working one sat unused in `AGENTGRID_SERVERS`. The counter is
+  shared by `poll`, `heartbeat` and `ws`, cleared by any successful answer and
+  by every endpoint change, and the threshold is three rather than one because a
+  single bad gateway is a load balancer hiccup — moving the fleet on it is the
+  reason this was not done earlier. `503` keeps its own meaning (standby, follow
+  the leader hint); other `5xx`/`4xx` do not rotate. Enrollment retries the next
+  endpoint on a gateway error instead of failing boot. Verified in-process
+  against an endpoint that answers `502` (exactly three requests, then the loop
+  works on the real control plane) and end to end: `run-relay.sh` now brings a
+  relay back with an unreachable upstream, points the node at it, and requires
+  the rotation on the third `502` plus a task through the working relay.
 
 - **The web client's task body is typed, and a contract test keeps it honest.**
   `POST /v1/tasks` is hand-written in three places — `crates/common` is the

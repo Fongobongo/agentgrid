@@ -45,6 +45,8 @@ mod relay;
 mod sandbox;
 mod secret_redactor;
 pub(crate) mod skills;
+#[cfg(test)]
+mod test_support;
 mod validation;
 mod ws;
 mod zeroshot;
