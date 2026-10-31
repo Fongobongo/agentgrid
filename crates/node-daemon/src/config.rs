@@ -126,6 +126,29 @@ const _: () = assert!(
     "a single bad gateway must not move a node"
 );
 
+/// Overrides [`GATEWAY_FAILURES_BEFORE_ROTATING`] for one node.
+///
+/// A constant was the wrong shape: one fleet's "the relay lost its route" and
+/// another's "the load balancer hiccups every minute" want different numbers,
+/// and only the operator knows which. The default stays, so a node that does
+/// not set this behaves exactly as before.
+pub const GATEWAY_FAILURES_ENV: &str = "AGENTGRID_GATEWAY_FAILURES_BEFORE_ROTATING";
+
+/// Resolve the rotation threshold from a raw environment value.
+///
+/// Anything that is not an integer **above 1** falls back to the default,
+/// deliberately without an error path: a single `502` is a blip, and a node
+/// that refuses to start because someone typed `AGENTGRID_GATEWAY_FAILURES_
+/// BEFORE_ROTATING=1` (or `three`) would turn a typo into an outage. Refusing
+/// `1` here is the same invariant the `const _: () = assert!` above enforces
+/// on the default — this is where it has to be enforced at runtime instead.
+pub fn parse_gateway_threshold(raw: Option<&str>) -> usize {
+    match raw.map(str::trim).and_then(|v| v.parse::<usize>().ok()) {
+        Some(n) if n > 1 => n,
+        _ => GATEWAY_FAILURES_BEFORE_ROTATING,
+    }
+}
+
 /// `502 Bad Gateway` / `504 Gateway Timeout`: the endpoint answered, and its
 /// own upstream did not. This is the shape of a relay whose route to the
 /// control plane died, and of any egress proxy in front of a dead control
@@ -159,10 +182,21 @@ pub struct Endpoints {
     /// three in one. Cleared by any successful answer and by every move
     /// (`advance` / `follow_hint`), so it only ever counts a *run*.
     gateway_failures: std::sync::Mutex<usize>,
+    /// How many of those in a row rotate. [`GATEWAY_FAILURES_BEFORE_ROTATING`]
+    /// unless [`GATEWAY_FAILURES_ENV`] said otherwise.
+    gateway_threshold: usize,
 }
 
 impl Endpoints {
     pub fn new(urls: Vec<String>) -> Arc<Self> {
+        Self::with_threshold(urls, GATEWAY_FAILURES_BEFORE_ROTATING)
+    }
+
+    /// [`Endpoints::new`] with an explicit rotation threshold. Below 2 is
+    /// raised to 2 rather than rejected: `parse_gateway_threshold` already
+    /// maps nonsense to the default, and a constructor that panics on a
+    /// caller's arithmetic is a worse failure than a floor.
+    pub fn with_threshold(urls: Vec<String>, threshold: usize) -> Arc<Self> {
         let urls: Vec<String> = urls
             .into_iter()
             .map(|u| u.trim().trim_end_matches('/').to_string())
@@ -172,7 +206,13 @@ impl Endpoints {
             urls,
             current: std::sync::atomic::AtomicUsize::new(0),
             gateway_failures: std::sync::Mutex::new(0),
+            gateway_threshold: threshold.max(2),
         })
+    }
+
+    /// The threshold in force — the default unless the environment overrode it.
+    pub fn gateway_threshold(&self) -> usize {
+        self.gateway_threshold
     }
 
     pub fn current(&self) -> String {
@@ -217,8 +257,9 @@ impl Endpoints {
         self.reset_gateway_failures();
     }
 
-    /// Count a gateway error from the current endpoint and rotate once
-    /// [`GATEWAY_FAILURES_BEFORE_ROTATING`] of them have happened in a row.
+    /// Count a gateway error from the current endpoint and rotate once the
+    /// threshold ([`GATEWAY_FAILURES_BEFORE_ROTATING`] by default) of them have
+    /// happened in a row.
     ///
     /// A `502`/`504` never surfaces as a transport error, so the connect/timeout
     /// rotation cannot see it: without this, a node pointed at a relay that lost
@@ -235,7 +276,7 @@ impl Endpoints {
         }
         let mut seen = self.gateway_failures.lock().unwrap();
         *seen += 1;
-        if *seen < GATEWAY_FAILURES_BEFORE_ROTATING {
+        if *seen < self.gateway_threshold {
             return GatewayOutcome::Counted(*seen);
         }
         // Clear the run before rotating: `advance` takes the same mutex, so
@@ -387,6 +428,42 @@ fn parse_autonomy(v: Option<String>) -> AutonomyLevel {
     serde_json::from_value(serde_json::Value::String(v.to_lowercase())).unwrap_or_default()
 }
 
+/// Endpoints plus their rotation threshold, from the pieces
+/// [`config_from_env`] reads.
+///
+/// Split out so the env → counter wiring is testable without mutating the
+/// process environment: every test in this binary shares it, and a
+/// `set_var`/`remove_var` pair around a live poll loop is a race waiting for a
+/// slow CI box.
+fn build_endpoints(
+    server: &str,
+    servers: Vec<String>,
+    raw_threshold: Option<&str>,
+) -> Arc<Endpoints> {
+    let threshold = parse_gateway_threshold(raw_threshold);
+    if let Some(raw) = raw_threshold {
+        // Complain only when the value was ignored: a correct override must not
+        // produce noise on every boot, and a bad one must not be silent — the
+        // operator set a number and got a different one.
+        if raw.trim().parse::<usize>().ok() != Some(threshold) {
+            tracing::warn!(
+                value = raw,
+                using = threshold,
+                "{} must be an integer above 1; using the default",
+                GATEWAY_FAILURES_ENV
+            );
+        }
+    }
+    Endpoints::with_threshold(
+        if servers.is_empty() {
+            vec![server.to_string()]
+        } else {
+            servers
+        },
+        threshold,
+    )
+}
+
 pub fn config_from_env() -> Config {
     let data_dir =
         std::env::var("AGENTGRID_DATA_DIR").unwrap_or_else(|_| "./agentgrid-data".into());
@@ -398,11 +475,11 @@ pub fn config_from_env() -> Config {
         .ok()
         .map(|raw| raw.split(',').map(str::trim).map(str::to_string).collect())
         .unwrap_or_default();
-    let endpoints = Endpoints::new(if servers.is_empty() {
-        vec![server.clone()]
-    } else {
-        servers
-    });
+    let endpoints = build_endpoints(
+        &server,
+        servers,
+        std::env::var(GATEWAY_FAILURES_ENV).ok().as_deref(),
+    );
     Config {
         server,
         endpoints,
@@ -586,6 +663,91 @@ mod tests {
             GatewayOutcome::Rotated("http://relay-b:7900".into())
         );
         assert_eq!(e.current(), "http://relay-b:7900");
+    }
+
+    /// The threshold is a knob now, so the two things that must never be
+    /// configurable are the floor (one blip moves a node) and the ability of a
+    /// typo to stop the daemon from starting.
+    #[test]
+    fn the_gateway_threshold_is_a_knob_with_a_floor() {
+        assert_eq!(
+            parse_gateway_threshold(None),
+            GATEWAY_FAILURES_BEFORE_ROTATING
+        );
+        assert_eq!(parse_gateway_threshold(Some("5")), 5);
+        assert_eq!(parse_gateway_threshold(Some(" 7 ")), 7);
+        assert_eq!(parse_gateway_threshold(Some("2")), 2);
+        // Below 2, not a number, empty, negative: the default, never a panic.
+        for bad in ["1", "0", "", "abc", "three", "-4"] {
+            assert_eq!(
+                parse_gateway_threshold(Some(bad)),
+                GATEWAY_FAILURES_BEFORE_ROTATING,
+                "value {bad:?} must fall back to the default"
+            );
+        }
+    }
+
+    /// A configured threshold is what the counter actually uses — the point of
+    /// the change. Two endpoints, threshold 2: the second `502` rotates.
+    #[test]
+    fn a_configured_threshold_rotates_sooner() {
+        let e = Endpoints::with_threshold(
+            vec!["http://relay-a:7900".into(), "http://relay-b:7900".into()],
+            2,
+        );
+        assert_eq!(e.gateway_threshold(), 2);
+        assert_eq!(e.note_gateway_failure(), GatewayOutcome::Counted(1));
+        assert_eq!(e.current(), "http://relay-a:7900");
+        assert_eq!(
+            e.note_gateway_failure(),
+            GatewayOutcome::Rotated("http://relay-b:7900".into())
+        );
+    }
+
+    /// `with_threshold(.., 1)` would restore the behaviour the counter exists
+    /// to prevent, so the constructor raises it instead of trusting the caller.
+    #[test]
+    fn a_threshold_below_two_is_raised_not_honoured() {
+        let e = Endpoints::with_threshold(vec!["http://a:1".into(), "http://b:1".into()], 1);
+        assert_eq!(e.gateway_threshold(), 2);
+        assert_eq!(e.note_gateway_failure(), GatewayOutcome::Counted(1));
+        assert_eq!(e.current(), "http://a:1", "rotated on a single bad gateway");
+        // And the default constructor still uses the constant.
+        assert_eq!(
+            Endpoints::new(vec!["http://a:1".into()]).gateway_threshold(),
+            GATEWAY_FAILURES_BEFORE_ROTATING
+        );
+    }
+
+    /// The env value has to reach the endpoints the loops actually hold. The
+    /// parser and the constructor are covered above; a wiring mistake between
+    /// them would leave the knob dead while every unit test stayed green.
+    #[test]
+    fn the_env_threshold_reaches_the_endpoints() {
+        let e = build_endpoints("http://a:1", vec![], Some("2"));
+        assert_eq!(e.gateway_threshold(), 2);
+        assert_eq!(e.current(), "http://a:1");
+
+        // `AGENTGRID_SERVERS` still wins over `AGENTGRID_SERVER`.
+        let e = build_endpoints(
+            "http://ignored:1",
+            vec!["http://x:1".into(), "http://y:1".into()],
+            Some("9"),
+        );
+        assert_eq!(e.gateway_threshold(), 9);
+        assert_eq!(e.current(), "http://x:1");
+
+        // No env: the constant, so an unconfigured node behaves exactly as it
+        // did before the knob existed.
+        assert_eq!(
+            build_endpoints("http://a:1", vec![], None).gateway_threshold(),
+            GATEWAY_FAILURES_BEFORE_ROTATING
+        );
+        // A value the parser refuses must not leak into the endpoint list.
+        assert_eq!(
+            build_endpoints("http://a:1", vec![], Some("1")).gateway_threshold(),
+            GATEWAY_FAILURES_BEFORE_ROTATING
+        );
     }
 
     /// One good answer proves the endpoint reaches the control plane, so the

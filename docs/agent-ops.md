@@ -364,6 +364,19 @@ somewhere to go. That does not mark the *proxy* dead: the pool rotates on
 connect/timeout only, so a proxy answering `502` stays in the pool and a node
 with a single endpoint has nowhere to move.
 
+Three is a default, not a law:
+
+```bash
+# rotate after 5 consecutive 502/504 instead of 3
+AGENTGRID_GATEWAY_FAILURES_BEFORE_ROTATING=5 agentgrid-node-daemon
+```
+
+The value must be an integer above 1; anything else (`1`, `0`, `three`, empty)
+is ignored and the default is used, with a warning in the node log. It is not
+allowed to be 1 on purpose: a single `502` is a blip, and rotating on it would
+shuffle every node in the fleet during any bad minute. The counter is shared by
+poll, heartbeat and ws, so the threshold counts one run across all three.
+
 ## Two-host smoke test
 
 A minimal end-to-end check that both nodes actually work:

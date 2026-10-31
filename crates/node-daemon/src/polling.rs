@@ -239,12 +239,16 @@ pub async fn poll_loop_inner(
                 // that can decide to leave. Not on the first one: see
                 // `GATEWAY_FAILURES_BEFORE_ROTATING`.
                 if crate::config::is_gateway_status(status.as_u16()) {
+                    // The threshold in force, not the constant: an operator who
+                    // set the env var must not be told "3 gateway errors" by a
+                    // node that rotated on 2.
+                    let threshold = cfg.endpoints.gateway_threshold();
                     match cfg.endpoints.note_gateway_failure() {
                         crate::config::GatewayOutcome::Rotated(next) => {
                             tracing::warn!(
                                 "poll: {} gateway errors in a row from {endpoint}; rotating \
                                  control-plane endpoint to {next}",
-                                crate::config::GATEWAY_FAILURES_BEFORE_ROTATING
+                                threshold
                             );
                             // The new endpoint deserves a prompt attempt, not
                             // the backoff accumulated against the old one.
@@ -255,7 +259,7 @@ pub async fn poll_loop_inner(
                         crate::config::GatewayOutcome::Counted(seen) => tracing::warn!(
                             "poll: control plane answered {status} — gateway failure {seen}/{}; \
                              the endpoint is up but cannot reach its own upstream",
-                            crate::config::GATEWAY_FAILURES_BEFORE_ROTATING
+                            threshold
                         ),
                         crate::config::GatewayOutcome::Nowhere => tracing::warn!(
                             "poll: control plane answered {status} and no other endpoint is \
@@ -618,6 +622,18 @@ mod gateway_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn poll_leaves_an_endpoint_that_answers_502() {
+        poll_leaves_a_502_endpoint_after(GATEWAY_FAILURES_BEFORE_ROTATING).await;
+    }
+
+    /// The same loop with the threshold configured to 2 — the env override in
+    /// `AGENTGRID_GATEWAY_FAILURES_BEFORE_ROTATING` has to reach the counter the
+    /// loops actually use, not just the parser. Two hits, not three.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn poll_honours_a_configured_gateway_threshold() {
+        poll_leaves_a_502_endpoint_after(2).await;
+    }
+
+    async fn poll_leaves_a_502_endpoint_after(threshold: usize) {
         let state = AppState::open_temp().await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -637,7 +653,7 @@ mod gateway_tests {
         ));
         let mut cfg = test_cfg(&base, &dir);
         // Broken first, so the loop starts on it and has to move.
-        cfg.endpoints = Endpoints::new(vec![broken.clone(), base.clone()]);
+        cfg.endpoints = Endpoints::with_threshold(vec![broken.clone(), base.clone()], threshold);
         cfg.transport = Transport::Poll;
         // The poll request carries this name, and the assertion below looks for
         // it in `/v1/nodes`: keep the two in step instead of relying on the
@@ -671,8 +687,8 @@ mod gateway_tests {
         // resets would produce.
         assert_eq!(
             hits.load(Ordering::Relaxed),
-            GATEWAY_FAILURES_BEFORE_ROTATING,
-            "the loop should hit the broken endpoint exactly {GATEWAY_FAILURES_BEFORE_ROTATING} \
+            threshold,
+            "the loop should hit the broken endpoint exactly {threshold} \
              times before rotating"
         );
 

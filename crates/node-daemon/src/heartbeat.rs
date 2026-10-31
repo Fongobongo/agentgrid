@@ -537,16 +537,18 @@ pub fn spawn_heartbeat(
                 // without it a ws node would never leave such an endpoint.
                 Ok(Ok(r)) if crate::config::is_gateway_status(r.status().as_u16()) => {
                     let status = r.status();
+                    // The threshold in force, not the constant — see polling.rs.
+                    let threshold = cfg.endpoints.gateway_threshold();
                     match cfg.endpoints.note_gateway_failure() {
                         crate::config::GatewayOutcome::Rotated(next) => tracing::warn!(
                             "heartbeat: {} gateway errors in a row from {endpoint} ({status}); \
                              rotating control-plane endpoint to {next}",
-                            crate::config::GATEWAY_FAILURES_BEFORE_ROTATING
+                            threshold
                         ),
                         crate::config::GatewayOutcome::Counted(seen) => tracing::warn!(
                             "heartbeat: control plane answered {status} — gateway failure \
                              {seen}/{}; the endpoint is up but cannot reach its own upstream",
-                            crate::config::GATEWAY_FAILURES_BEFORE_ROTATING
+                            threshold
                         ),
                         crate::config::GatewayOutcome::Nowhere => tracing::warn!(
                             "heartbeat: control plane answered {status} and no other endpoint \

@@ -156,9 +156,11 @@ feature of this daemon. The relay is deliberately not a step towards one.
 - **`tokio-tungstenite` gains proxy support**, or the node grows its own
   `CONNECT` client. Then the proxy pool could carry WS, and a relay could be
   replaced by an ordinary HTTP proxy the operator already runs.
-- **Three proves too few or too many in practice.** The threshold is a constant
-  (`GATEWAY_FAILURES_BEFORE_ROTATING`), not a knob: one fleet's "relay lost its
-  route" and another's "load balancer hiccups every minute" want different
-  numbers, and only an operator can say which. Making it configurable is a
-  small change; leaving it configurable *and undocumented* is how a default
-  nobody chose becomes a rule.
+- ~~**Three proves too few or too many in practice.**~~ **Resolved.** The
+  threshold is now `AGENTGRID_GATEWAY_FAILURES_BEFORE_ROTATING`, defaulting to
+  `GATEWAY_FAILURES_BEFORE_ROTATING` (3). Values below 2 are refused and fall
+  back to the default with a warning, because "a single bad gateway must not
+  move a node" is the whole point of the counter; the constant keeps its
+  `const _: () = assert!` so the default cannot be edited to 1 either. It is
+  documented in `docs/agent-ops.md` next to the relay section — the bullet
+  above was right that an undocumented knob is worse than a constant.

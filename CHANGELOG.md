@@ -90,6 +90,22 @@
   relay back with an unreachable upstream, points the node at it, and requires
   the rotation on the third `502` plus a task through the working relay.
 
+- **That threshold is a knob now: `AGENTGRID_GATEWAY_FAILURES_BEFORE_ROTATING`.**
+  Three was a constant, and the ADR said why that was wrong — one fleet's "the
+  relay lost its route" and another's "the load balancer hiccups every minute"
+  want different numbers, and only the operator knows which. The default is
+  unchanged, so a node that does not set the variable behaves exactly as before.
+  Values below 2 are refused and fall back to the default *with a warning*: a
+  single `502` is a blip, and a typo (`=1`, `=three`) must not silently turn
+  into fleet-wide shuffling or a node that will not start. The constant keeps
+  its compile-time `assert!` so the default itself cannot be edited to 1. Both
+  rotation log lines printed the constant rather than the threshold in force —
+  a node configured to rotate on 2 would have claimed "3 gateway errors in a
+  row" — so they now read `endpoints.gateway_threshold()`. Covered by the
+  parser/constructor/wiring unit tests plus the existing 502 loop test
+  parameterised over the threshold; the threshold-2 case was verified red
+  against the old code (`left: 3, right: 2`).
+
 - **The web client's task body is typed, and a contract test keeps it honest.**
   `POST /v1/tasks` is hand-written in three places — `crates/common` is the
   schema, the two SDKs and `web/src/api.ts` are copies — and only the SDKs were
