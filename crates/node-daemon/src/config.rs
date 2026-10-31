@@ -454,14 +454,20 @@ fn build_endpoints(
             );
         }
     }
-    Endpoints::with_threshold(
-        if servers.is_empty() {
-            vec![server.to_string()]
-        } else {
-            servers
-        },
-        threshold,
-    )
+    let urls = if servers.is_empty() {
+        vec![server.to_string()]
+    } else {
+        servers
+    };
+    // No override, or one the parser refused: go through the default
+    // constructor, so the unconfigured path is literally the code that existed
+    // before the knob (and `Endpoints::new` stays the one place the default is
+    // spelled).
+    if threshold == GATEWAY_FAILURES_BEFORE_ROTATING {
+        Endpoints::new(urls)
+    } else {
+        Endpoints::with_threshold(urls, threshold)
+    }
 }
 
 pub fn config_from_env() -> Config {

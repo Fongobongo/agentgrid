@@ -116,6 +116,9 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
           # Ubuntu 20.04 / Debian 11. Raise deliberately, never by accident.
+          # The cross build measured 2.18 on every binary when this landed, so
+          # there is headroom: a jump to the ceiling itself is a regression
+          # worth looking at even though it would still pass.
           CEILING: "2.31"
         run: |
           set -eu
@@ -465,8 +468,8 @@ jobs:
             printf "The \`*-musl\` tarballs are **statically linked** — any Linux, any distro, no\n"
             printf "libc. Use them unless you have a reason not to.\n\n"
             printf "\`x86_64-unknown-linux-gnu\` is the fallback for hosts where musl misbehaves\n"
-            printf "with DNS or a proxy. It is built against **glibc 2.31**, so it runs on\n"
-            printf "Debian 11+, Ubuntu 20.04+ and anything newer.\n\n"
+            printf "with DNS or a proxy. It needs no more than **glibc 2.31** (the current\n"
+            printf "build needs 2.18), so Debian 11+ and Ubuntu 20.04+ are covered.\n\n"
             printf "Check what you downloaded:\n\n"
             printf "    ./agentgrid-control-plane --version   # -> agentgrid-control-plane %s\n\n" "${GITHUB_REF_NAME#v}"
             cat "$notes"

@@ -127,12 +127,13 @@
   to start with `version 'GLIBC_2.38' not found` — the fallback was unusable
   on exactly the hosts that need a fallback. It now builds through `cross`, the
   same mechanism the musl targets already use, whose gnu image is Ubuntu 20.04
-  based: the ceiling becomes **glibc 2.31**, i.e. Debian 11/12/13 and Ubuntu
-  20.04+. A new "glibc ceiling" step in `release.yml` reads the highest
-  `GLIBC_x.y` each binary asks the loader for (`objdump -T`) and fails the
-  build above 2.31, so this cannot drift back the next time `ubuntu-latest`
-  moves. The release-notes block states the guarantee now instead of
-  apologising for it.
+  based: the ceiling becomes **glibc 2.31**, and the build that shipped this
+  change needed only **2.18** (measured by the gate on every binary), so Debian
+  11/12/13 and Ubuntu 20.04+ are covered with room to spare. A new "glibc
+  ceiling" step in `release.yml` reads the highest `GLIBC_x.y` each binary asks
+  the loader for (`objdump -T`) and fails the build above 2.31, so this cannot
+  drift back the next time `ubuntu-latest` moves. The release-notes block states
+  the guarantee now instead of apologising for it.
 
 - **The OpenAPI lint now fails on the two things it only warned about.**
   `redocly lint` exits 0 when its only complaints are warnings, and the

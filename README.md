@@ -76,8 +76,8 @@ The control plane ships as a static musl binary with the web UI embedded:
 
 Pick the `musl` tarball. It is statically linked and runs on any distro. The
 `x86_64-unknown-linux-gnu` tarball is the fallback for hosts where musl
-misbehaves with DNS or a proxy; it is built against glibc 2.31, so it runs on
-Debian 11+ and Ubuntu 20.04+.
+misbehaves with DNS or a proxy; it needs no more than glibc 2.31 (the current
+build needs 2.18), so Debian 11+ and Ubuntu 20.04+ are covered.
 
 Open http://127.0.0.1:7800, switch to **setup**, paste the setup token from
 the server log, and create the first admin. Then `ag login` from the bundled
