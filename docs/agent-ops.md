@@ -57,7 +57,63 @@ opencode keeps its own SQLite state DB; two concurrent runs on the same host
 fail with `database is locked`. Set `AGENTGRID_MAX_CONCURRENCY=1` on any
 node whose adapters include `opencode`. Scale by adding hosts, not slots.
 
-## Enrolling a node (any host)
+## Adding a node
+
+Three ways, in the order to try them. All of them end the same way: the daemon
+enrolls with a one-shot token, appears in `Nodes`, and from then on receives
+tasks like any other node (delivery is pull — the control plane never dials
+it).
+
+**1. From the panel.** `Nodes → Install node…`. The control plane runs the
+install itself over ssh: verify (or pin) the host key, copy
+`agentgrid-node-daemon`, write a `0600` env file with a one-shot token, start
+the daemon. Each step is shown as it completes.
+
+This needs two things on the control plane:
+
+```bash
+AGENTGRID_PROVISION_ENABLED=1          # off by default, see ADR 0027
+AGENTGRID_NODE_DIST=/opt/agentgrid/bin # where agentgrid-node-daemon lives
+AGENTGRID_PUBLIC_URL=https://cp.example.com:7800   # default for the form
+```
+
+and an `ssh` client with a path to the host (a key file, or the agent). The
+form asks for the **server URL the node will dial** — the control plane, or a
+peer node's relay (`AGENTGRID_RELAY_LISTEN`, ADR 0026) when the host cannot
+reach the CP directly.
+
+With the flag off, the same dialog renders the server's `reason` and the
+equivalent `ag nodes install` command, so nothing is a dead end.
+
+**2. From the CLI**, on a machine that can reach the host:
+
+```bash
+ag nodes install --host user@host [--ssh-key ~/.ssh/id_ed25519] \
+  --name box-2 --adapters opencode --repositories '*' --max-concurrency 1 \
+  --server https://cp.example.com:7800
+```
+
+`--server` makes the node dial that URL itself. **Without it the CLI opens a
+reverse SSH tunnel to the machine running the command** (`--local-port`, 7800),
+which only works when that machine can reach the control plane — handy for a
+laptop next to the CP, wrong for anything else. `--accept-new-host-key` is
+required for a fresh host (the default refuses an unknown key) and
+`--host-key-fingerprint SHA256:…` pins it.
+
+**3. On the host itself**, for a durable install:
+
+```bash
+./deploy/install-node.sh --server https://cp.example.com:7800 --token <enroll-token>
+```
+
+This creates the unprivileged `agentgrid` user, a systemd unit with the full
+hardening set and an `EnvironmentFile` for the token. `ag nodes install` and the
+panel do **not** write a systemd unit: they start the daemon with
+`setsid nohup`, so it does not survive a reboot. Bootstrap with one, keep it
+with the other.
+
+**Fully manual** (no ssh from anywhere, e.g. an air-gapped jump host): mint a
+token, copy `agentgrid-node-daemon` + `adapter-*`, and start it:
 
 ```bash
 # control plane side (admin JWT):
@@ -73,11 +129,8 @@ AGENTGRID_ENROLL_TOKEN=<token> \
 agentgrid-node-daemon   # first run enrolls, then keep it running
 ```
 
-Remote hosts: upload the `agentgrid-node-daemon` + `adapter-*` binaries
-(`tests/e2e/remote-ssh.py --file …` works without sshpass), make sure the
-remote can reach the CP's listen address, and launch detached
-(`setsid nohup … </dev/null &`). Use `AGENTGRID_ALLOW_ROOT=1` when running
-as root.
+`tests/e2e/remote-ssh.py --file …` uploads without sshpass. Use
+`AGENTGRID_ALLOW_ROOT=1` when running as root — nothing sets it for you.
 
 ## Skills: importing a pack
 

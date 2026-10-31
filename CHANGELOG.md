@@ -4,6 +4,33 @@
 
 ### Added
 
+- **Install a node from the panel.** `Nodes → Install node…` provisions a
+  remote host over ssh from the control plane: verify (or pin) the host key,
+  copy `agentgrid-node-daemon`, write a `0600` env file with a one-shot
+  enrollment token, start the daemon — with each step shown as it completes.
+  - **Off by default.** `AGENTGRID_PROVISION_ENABLED=1` is required, because a
+    control plane that can ssh into hosts is a different threat model from one
+    that cannot (ADR 0027, threat model T35). Without the flag the API answers
+    `403` naming the variable and the dialog renders that sentence plus the
+    equivalent `ag nodes install` command — the panel is never a dead end.
+  - **The credential is used, never kept.** A key path or password arrives in
+    the request, lives for the install, is never stored, audited or logged
+    (`InstallRequest` has no `Debug`); the attempt is audited as
+    `node.install` before it runs.
+  - **Jobs, not a blocking request.** `POST /v1/nodes/install` answers `202`
+    with a job id; `GET /v1/nodes/install/{id}` and `/v1/nodes/installs` follow
+    it. The install runs on `spawn_blocking` because it spawns `ssh`/`scp`.
+  - **Direct transport only.** The CLI's default reverse tunnel points at the
+    machine running the command — behind a button that is the CP itself — so
+    the install requires a server URL the *node* can dial (the CP, or a peer's
+    relay) and defaults to `AGENTGRID_PUBLIC_URL`.
+  - `GET /v1/nodes/provisioning` reports whether installs are possible and why
+    not (feature off, or no `agentgrid-node-daemon` next to the CP).
+- **`crates/provision`** now owns the SSH provisioning that `ag nodes install`
+  used to keep to itself, so the CLI and the control plane share one
+  implementation of the security-sensitive part (host-key policy, argv
+  construction, the `0600` env file).
+
 - **A node can carry another node's traffic (`AGENTGRID_RELAY_LISTEN`).** When
   two hosts cannot talk directly but a third one reaches both — a node behind a
   firewall or a NAT, a replica across a segment that was never peered — the
@@ -38,6 +65,13 @@
   - One hop only; chaining relays is not supported (ADR 0026).
 
 ### Changed
+
+- `ag nodes install` (and the panel) now pass `-o ConnectTimeout=10` to every
+  `ssh`/`scp`. Without it a host that never answers holds the caller for the
+  kernel's TCP timeout, which behind a button reads as "the control plane hung".
+- `ag nodes install` validates the SSH target before running anything: a
+  leading `-` (which ssh would read as an option) or a control character is
+  refused. IPv6 literals (`user@[::1]:2222`) keep working.
 
 - **A `502`/`504` now rotates the node's endpoint — after three in a row.** A
   relay that is alive but has lost its own route to the control plane answers
