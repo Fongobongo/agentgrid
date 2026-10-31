@@ -61,3 +61,11 @@ Debian 12/13, Fedora, Rocky, Alpine, and WSL2 alike. The GNU
 (`x86_64-unknown-linux-gnu`) fallback exists for hosts where musl
 misbehaves with DNS/proxy (see TROUBLESHOOTING.md "TLS / DNS" if you hit
 `getaddrinfo`-style failures).
+
+The gnu tarball is built through `cross` against **glibc 2.31**, so it
+starts on Debian 11+ and Ubuntu 20.04+. This is enforced, not promised:
+`release.yml` runs a "glibc ceiling" step that reads the highest
+`GLIBC_x.y` each binary asks the loader for and fails the build above
+2.31. Before that step existed, v0.6.1 shipped a gnu asset linked
+against the `ubuntu-latest` runner's glibc 2.38 and refused to start on
+Debian 12 — the distro it was meant to be the fallback for.

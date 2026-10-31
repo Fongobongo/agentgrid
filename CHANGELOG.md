@@ -105,6 +105,19 @@
 
 ### Fixed
 
+- **The gnu release tarball now starts on the distros it exists for.** v0.6.1's
+  `x86_64-unknown-linux-gnu` asset was built natively on `ubuntu-latest` and
+  linked that runner's glibc, so on Debian 12 (2.36) the control plane refused
+  to start with `version 'GLIBC_2.38' not found` — the fallback was unusable
+  on exactly the hosts that need a fallback. It now builds through `cross`, the
+  same mechanism the musl targets already use, whose gnu image is Ubuntu 20.04
+  based: the ceiling becomes **glibc 2.31**, i.e. Debian 11/12/13 and Ubuntu
+  20.04+. A new "glibc ceiling" step in `release.yml` reads the highest
+  `GLIBC_x.y` each binary asks the loader for (`objdump -T`) and fails the
+  build above 2.31, so this cannot drift back the next time `ubuntu-latest`
+  moves. The release-notes block states the guarantee now instead of
+  apologising for it.
+
 - **The OpenAPI lint now fails on the two things it only warned about.**
   `redocly lint` exits 0 when its only complaints are warnings, and the
   `recommended` ruleset marks `no-unused-components` and
@@ -118,13 +131,14 @@
   where it is silently ignored).
 
 - **The release page now says which tarball to download.** The
-  `x86_64-unknown-linux-gnu` build is compiled on `ubuntu-latest` and links
-  that runner's glibc, so it needs 2.38+ — on Debian 12 (glibc 2.36)
-  `agentgrid-control-plane` refuses to start with `version 'GLIBC_2.38' not
-  found`, verified on the v0.6.1 assets. The README called it a "fallback" and
-  the release body said nothing, so the one artifact that cannot run on a
-  common server was the one a reader would pick after musl failed for some
-  other reason. `release.yml` now prepends a "which binary should I download"
+  `x86_64-unknown-linux-gnu` build *was* compiled on `ubuntu-latest` and linked
+  that runner's glibc, so it needed 2.38+ — on Debian 12 (glibc 2.36)
+  `agentgrid-control-plane` refused to start with `version 'GLIBC_2.38' not
+  found`, verified on the v0.6.1 assets. (The build itself is fixed in the
+  entry above; this is the documentation half.) The README called it a
+  "fallback" and the release body said nothing, so the one artifact that cannot
+  run on a common server was the one a reader would pick after musl failed for
+  some other reason. `release.yml` prepends a "which binary should I download"
   block to every release body and the README states the requirement. (`ag`
   only prints `weak version 'GLIBC_2.39' not found` and keeps working — that
   symbol is weak, so the warning is not a failure.)

@@ -5,7 +5,13 @@ name: Release
 # x86_64-gnu is the fallback (AGENTS.md release-target matrix).
 #
 # musl targets cross-compile via `cross` (prebuilt Docker toolchains on
-# ghcr.io — reliable, no external zig download). The gnu target builds natively.
+# ghcr.io — reliable, no external zig download).
+#
+# gnu goes through `cross` too, and that is the whole point: built natively on
+# `ubuntu-latest` it linked the runner's glibc (2.38+) and refused to start on
+# Debian 12 (2.36) — an asset that only ran on machines that did not need it.
+# The cross gnu image is Ubuntu 20.04 based (glibc 2.31), and the
+# "glibc ceiling" step below fails the build if that ever regresses.
 on:
   push:
     tags: ["v*"]
@@ -30,7 +36,8 @@ jobs:
           - target: aarch64-unknown-linux-musl
             cross: true
           - target: x86_64-unknown-linux-gnu
-            cross: false
+            # cross, not native: the native build linked the runner's glibc.
+            cross: true
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
@@ -61,7 +68,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: install cross (musl cross-compile)
+      - name: install cross
         if: matrix.cross
         run: cargo install cross --locked
 
@@ -99,6 +106,43 @@ jobs:
               -p agentgrid-node-daemon -p agentgrid-adapters \
               -p agentgrid-gateway -p agentgrid-edge -p agentgrid-acp
           fi
+
+      - name: "glibc ceiling (the gnu tarball must start on Debian 11+)"
+        # The v0.6.1 gnu asset was built natively and needed GLIBC_2.38, so it
+        # refused to start on Debian 12 (2.36) — the very distro the fallback
+        # exists for. Building through `cross` puts the ceiling at that image's
+        # glibc; this step is what stops it drifting back to the runner's, and
+        # it fails the build rather than shipping a tarball nobody can run.
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          # Ubuntu 20.04 / Debian 11. Raise deliberately, never by accident.
+          CEILING: "2.31"
+        run: |
+          set -eu
+          cd "target/${{ matrix.target }}/release"
+          bad=""
+          for b in agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
+                   agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude \
+                   adapter-codex adapter-aider adapter-pi adapter-opencode; do
+            [ -f "$b" ] || continue
+            # Highest GLIBC_x.y the binary actually asks the loader for.
+            max=$(objdump -T "$b" 2>/dev/null \
+                  | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' \
+                  | sort -V -u | tail -1)
+            if [ -z "$max" ]; then
+              echo "$b: no GLIBC version references — not a dynamically linked gnu binary" >&2
+              bad=1
+              continue
+            fi
+            printf '%-26s needs glibc <= %s\n' "$b" "$max"
+            # `sort -V | tail -1` yields the larger of the two, so the ceiling
+            # surviving the comparison means the ceiling is >= max.
+            if [ "$(printf '%s\n%s\n' "$max" "$CEILING" | sort -V | tail -1)" != "$CEILING" ]; then
+              echo "$b needs glibc $max > $CEILING — it will not start on Debian 11/12 or Ubuntu 22.04" >&2
+              bad=1
+            fi
+          done
+          [ -z "$bad" ] || exit 1
 
       - name: binary size guardrail
         run: |
@@ -399,12 +443,15 @@ jobs:
           if [ ! -s "$notes" ]; then
             echo "_No changelog entries for ${GITHUB_REF_NAME}._" > "$notes"
           fi
-          # Verified on v0.6.1: the gnu tarball is built on ubuntu-latest and
-          # links that runner's glibc (2.38+), so it refuses to start on
-          # Debian 12 / Ubuntu 22.04 with "version `GLIBC_2.38' not found".
-          # Nothing in the asset name says so, and the release page is where
-          # people choose — so the answer goes above the changelog, not in a
-          # wiki nobody opens. Kept to printf rather than a heredoc: a YAML
+          # v0.6.1 shipped a gnu tarball that linked the ubuntu-latest runner's
+          # glibc (2.38+) and refused to start on Debian 12 with "version
+          # `GLIBC_2.38' not found" — a fallback asset that only ran on machines
+          # that did not need a fallback. It is now built through `cross`
+          # against glibc 2.31 and gated by the "glibc ceiling" step, so this
+          # block states the guarantee instead of apologising for it. Nothing in
+          # the asset name says which libc it wants, and the release page is
+          # where people choose — so the answer goes above the changelog, not in
+          # a wiki nobody opens. Kept to printf rather than a heredoc: a YAML
           # block scalar indents every line, and a heredoc terminator cannot
           # be indented without `<<-` (tabs only).
           #
@@ -417,8 +464,9 @@ jobs:
             printf '## Which binary should I download?\n\n'
             printf "The \`*-musl\` tarballs are **statically linked** — any Linux, any distro, no\n"
             printf "libc. Use them unless you have a reason not to.\n\n"
-            printf "\`x86_64-unknown-linux-gnu\` links the CI runner's glibc (2.38+), so it does\n"
-            printf "**not** start on Debian 12 or Ubuntu 22.04: \`\`version \`GLIBC_2.38' not found\`\`.\n\n"
+            printf "\`x86_64-unknown-linux-gnu\` is the fallback for hosts where musl misbehaves\n"
+            printf "with DNS or a proxy. It is built against **glibc 2.31**, so it runs on\n"
+            printf "Debian 11+, Ubuntu 20.04+ and anything newer.\n\n"
             printf "Check what you downloaded:\n\n"
             printf "    ./agentgrid-control-plane --version   # -> agentgrid-control-plane %s\n\n" "${GITHUB_REF_NAME#v}"
             cat "$notes"
