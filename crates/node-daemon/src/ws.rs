@@ -751,6 +751,7 @@ mod tests {
         let cred = SavedCredential {
             node_id: node_id.clone(),
             credential,
+            key_secret: None,
         };
         let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
         let http = authed_client(&cred);
@@ -872,6 +873,7 @@ mod tests {
         let cred = SavedCredential {
             node_id: node_id.clone(),
             credential,
+            key_secret: None,
         };
         let sem = Arc::new(Semaphore::new(cfg.max_concurrency as usize));
         let http = authed_client(&cred);
