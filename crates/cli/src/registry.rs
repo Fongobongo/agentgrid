@@ -1218,17 +1218,19 @@ pub(crate) struct AdapterEnvArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum AdapterEnvAction {
-    /// List managed entries.
+    /// List managed entries (fingerprints only — values are never returned).
     Ls,
     /// Add or update an entry (adapter or `*`; `--node` scopes it).
+    /// Omit VALUE to read the secret from stdin, so it stays out of shell
+    /// history and out of `ps`.
     Set {
         adapter: String,
         key: String,
-        value: String,
+        value: Option<String>,
         #[arg(long)]
         node: Option<String>,
     },
-    /// Remove an entry by id (see `ls`).
+    /// Remove an entry by id (see `ls`). Erases the value from the database.
     Rm { id: i64 },
 }
 
@@ -1242,14 +1244,19 @@ pub(crate) async fn cmd_adapter_env(
             let resp = client.get(format!("{base}/v1/adapter-env")).send().await?;
             err_if_fail(resp.status(), "list adapter env")?;
             let v: serde_json::Value = resp.json().await?;
-            for p in list_items(&v) {
+            let items = list_items(&v);
+            if items.is_empty() {
+                println!("(no managed adapter env)");
+            }
+            for p in items {
                 println!(
-                    "#{:>3} {:<12} {:<28} node={}  value={}",
+                    "#{:>3} {:<12} {:<28} node={:<10} fp={} len={}",
                     p["id"].as_i64().unwrap_or(0),
                     p["adapter"].as_str().unwrap_or(""),
                     p["key"].as_str().unwrap_or(""),
                     p["node_id"].as_str().unwrap_or("*"),
-                    p["value"].as_str().unwrap_or(""),
+                    p["fingerprint"].as_str().unwrap_or(""),
+                    p["value_len"].as_u64().unwrap_or(0),
                 );
             }
             Ok(())
@@ -1260,6 +1267,10 @@ pub(crate) async fn cmd_adapter_env(
             value,
             node,
         } => {
+            let value = match value {
+                Some(v) => v,
+                None => read_secret_from_stdin(&key)?,
+            };
             let resp = client
                 .put(format!("{base}/v1/adapter-env"))
                 .json(&serde_json::json!({
@@ -1282,4 +1293,20 @@ pub(crate) async fn cmd_adapter_env(
             Ok(())
         }
     }
+}
+
+/// Read a secret from stdin so it never appears in argv (shell history, `ps`,
+/// CI logs). One trailing newline is stripped; an empty value is refused
+/// rather than stored, because an empty entry would silently unset the
+/// variable on every node instead of doing nothing.
+fn read_secret_from_stdin(key: &str) -> Result<String> {
+    use std::io::Read;
+    eprintln!("reading {key} from stdin — end with Ctrl-D");
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    let trimmed = buf.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        anyhow::bail!("no value on stdin — refusing to store an empty {key}");
+    }
+    Ok(trimmed.to_string())
 }

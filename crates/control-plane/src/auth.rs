@@ -83,6 +83,13 @@ pub struct AuthedUser {
 /// nothing else mutates. All other mutating verbs are rejected with 403 by
 /// [`require_user_auth`] before the handler runs.
 fn operator_allowed(method: &str, path: &str) -> bool {
+    // Secrets are not "view" data. The list carries fingerprints rather than
+    // values (ADR 0028 Phase 0), but even the fingerprint is an oracle — it
+    // confirms a guessed key — and enumerating which credentials exist on
+    // which node is itself information. Admin only, on every verb.
+    if path == "/v1/adapter-env" || path.starts_with("/v1/adapter-env/") {
+        return false;
+    }
     if method == "GET" || method == "HEAD" {
         return true;
     }

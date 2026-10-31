@@ -520,7 +520,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                     &assignment.attempt_id,
                     &assignment.fencing_token,
                     &sink,
-                    &cfg.secrets,
+                    &cfg.effective_secrets(),
                 )
                 .await
                 {
@@ -1031,7 +1031,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
             cancel_url.clone(),
             client.clone(),
             sink.clone(),
-            cfg.secrets.clone(),
+            cfg.effective_secrets(),
             raw_file.clone(),
             &assignment.attempt_id,
             // Plan 1.2 (#4): command guard derived from the daemon's config.
@@ -1149,7 +1149,7 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
                 &assignment.attempt_id,
                 &assignment.fencing_token,
                 &sink,
-                &cfg.secrets,
+                &cfg.effective_secrets(),
             )
             .await;
             clock.close("validation");

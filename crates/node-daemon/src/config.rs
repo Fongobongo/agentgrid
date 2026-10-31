@@ -85,6 +85,46 @@ impl Config {
             current
         }
     }
+
+    /// Values the redactor must mask: the operator's `AGENTGRID_SECRETS` list
+    /// plus every CP-pushed adapter env entry whose *name* says it is a
+    /// secret.
+    ///
+    /// The control plane already knows those are keys, so requiring the
+    /// operator to repeat each one in a per-node env file was busywork with a
+    /// failure mode: the key leaks unmasked on exactly the node where nobody
+    /// remembered to duplicate it.
+    ///
+    /// Keyed on the name, not the value: `ANTHROPIC_BASE_URL` is not a secret,
+    /// and masking a URL would shred readable logs for nothing.
+    pub fn effective_secrets(&self) -> Vec<String> {
+        merge_secrets(&self.secrets, &self.managed_adapter_env.lock().unwrap())
+    }
+}
+
+/// [`Config::effective_secrets`] as a pure function, so the merge rule is
+/// testable without a whole `Config`.
+pub fn merge_secrets(
+    base: &[String],
+    managed: &[agentgrid_common::AdapterEnvEntry],
+) -> Vec<String> {
+    let mut out = base.to_vec();
+    for e in managed {
+        if is_secret_name(&e.key) && !e.value.is_empty() && !out.contains(&e.value) {
+            out.push(e.value.clone());
+        }
+    }
+    out
+}
+
+/// `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`, `DB_PASSWORD`, … — the naming
+/// convention providers already follow, so the CP does not need a new flag on
+/// every entry to say what it obviously is.
+pub fn is_secret_name(key: &str) -> bool {
+    let k = key.trim().to_ascii_uppercase();
+    ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASS", "_PAT"]
+        .iter()
+        .any(|suffix| k.ends_with(suffix))
 }
 
 /// SavedCredential for the running process, stashed once at startup by
@@ -809,5 +849,47 @@ mod tests {
         for code in [500u16, 503, 404, 401, 200] {
             assert!(!is_gateway_status(code), "{code} is not a gateway error");
         }
+    }
+
+    #[test]
+    fn secret_names_follow_the_convention_and_nothing_else() {
+        for k in [
+            "ANTHROPIC_API_KEY",
+            "GITHUB_TOKEN",
+            "DB_PASSWORD",
+            "openai_api_key",
+            "SMTP_PASS",
+            "GH_PAT",
+            "CLIENT_SECRET",
+        ] {
+            assert!(is_secret_name(k), "{k} must be treated as a secret");
+        }
+        // The point of the name test: these are pushed by the same mechanism
+        // and must stay readable in logs.
+        for k in ["ANTHROPIC_BASE_URL", "OPENCODE_MODEL", "MONKEY", "KEYSTORE"] {
+            assert!(!is_secret_name(k), "{k} must NOT be masked");
+        }
+    }
+
+    #[test]
+    fn pushed_secrets_join_the_mask_list_without_duplicates() {
+        let entry = |adapter: &str, key: &str, value: &str| agentgrid_common::AdapterEnvEntry {
+            adapter: adapter.into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        let managed = vec![
+            entry("claude", "ANTHROPIC_API_KEY", "sk-ant-pushed"),
+            entry("claude", "ANTHROPIC_BASE_URL", "https://proxy.internal"),
+            // Already listed locally: must not appear twice (the redactor
+            // scans the list per line, so duplicates are pure cost).
+            entry("claude", "GITHUB_TOKEN", "ghp-local"),
+        ];
+        let merged = merge_secrets(&["ghp-local".to_string()], &managed);
+        assert_eq!(
+            merged,
+            vec!["ghp-local".to_string(), "sk-ant-pushed".to_string()],
+            "the pushed key joins the list, the URL stays out, the duplicate is dropped"
+        );
     }
 }

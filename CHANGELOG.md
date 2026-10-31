@@ -92,6 +92,34 @@
   with no child of its own. The mechanism inside `CreateProcess` was not
   diagnosed further; killing the child removes the precondition.
 
+### Changed
+
+- **`GET /v1/adapter-env` no longer returns the secret** (ADR 0028, phase 0).
+  The list carried `value` verbatim, so the endpoint that exists to show *which*
+  keys are configured was also the endpoint that hands them out. It now returns
+  `fingerprint` (`sha256(value)[..8]`) and `value_len`, which answers "is the
+  key I just pasted the stored one?" without answering anything else.
+  - The route is **admin-only**. `operator_allowed` waved every `GET` through,
+    so the view-only role could read the fleet's provider keys in one request;
+    it now returns `403`, same as the write verbs.
+  - `ag adapter-env ls` prints `fp=… len=…` instead of the value, and
+    `ag adapter-env set` takes the value from stdin when the argument is
+    omitted, so it stops landing in shell history and `ps`.
+  - `ag adapter-env rm` now erases. A plain `DELETE` leaves the text in the
+    page — measured on a live DB: still `grep`-able after `DELETE` and a WAL
+    checkpoint, gone only after `VACUUM`. Removal is the only revocation verb
+    the API has, so it now runs with `secure_delete` and truncates the WAL.
+  - CP-pushed adapter env entries whose **name** looks like a secret
+    (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_PASS`, `*_PAT`) join the
+    node's redactor list automatically. The control plane already knew they
+    were keys; making the operator duplicate each one in `AGENTGRID_SECRETS`
+    per node meant the key leaked unmasked on whichever node was forgotten.
+    Values whose name is not a secret (`ANTHROPIC_BASE_URL`) are deliberately
+    left readable — masking a URL would shred logs for nothing.
+  - Breaking for any client that reads `value` from that endpoint. Nothing in
+    the repo does: the web UI never calls it, and nodes receive the values in
+    the poll response, not here.
+
 ## [0.7.0] - 2026-10-31
 
 ### Added
