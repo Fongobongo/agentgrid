@@ -744,6 +744,61 @@ paths:
   /v1/nodes/enrollment-token:
     post:
       summary: Mint a one-time node enrollment token (admin)
+  /v1/nodes/provisioning:
+    get:
+      summary: Whether this control plane can install nodes over ssh
+      description: |
+        `enabled` mirrors `AGENTGRID_PROVISION_ENABLED`; `reason` is the
+        operator-facing explanation the panel renders when it cannot offer the
+        Install button (feature off, or no `agentgrid-node-daemon` next to the
+        control plane). Read-only, so an operator (GET-only) may call it.
+      responses:
+        '200':
+          description: Capability report (`enabled`, `node_binary`, `reason`).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/nodes/install:
+    post:
+      summary: Provision a remote host as a node over ssh (admin)
+      description: |
+        Off unless `AGENTGRID_PROVISION_ENABLED=1`: a control plane that can ssh
+        into hosts is a different threat model from one that cannot.
+
+        Mints a one-shot enrollment token, then runs the same provisioning as
+        `ag nodes install` on a blocking thread — verify (or pin) the SSH host
+        key, copy `agentgrid-node-daemon`, write a `0600` env file, start the
+        daemon detached. Credentials (password, key path) are used for the
+        length of the install and never stored, audited or logged.
+
+        Direct transport only: `server` must be an address the **node** can
+        dial (this control plane, or a peer's relay) and defaults to
+        `AGENTGRID_PUBLIC_URL`. Returns a job id; poll
+        `GET /v1/nodes/install/{id}` for the steps.
+      responses:
+        '202':
+          description: Install started (`job_id`, `state`).
+        '400': { description: Invalid host/name, or no server URL. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Provisioning is disabled on this control plane. }
+        '409': { description: No `agentgrid-node-daemon` (set `AGENTGRID_NODE_DIST`). }
+        '503': { description: Could not mint an enrollment token. }
+  /v1/nodes/installs:
+    get:
+      summary: Recent node-install jobs, newest first
+      responses:
+        '200': { description: Jobs with their steps and terminal state. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/nodes/install/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Progress of one node-install job
+      responses:
+        '200': { description: The job (state, steps, error, server_url). }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: No such job, or it was evicted from the ring. }
   /v1/node/skills-trust:
     get:
       summary: "Node-readable copy of the operator skill trust ledger"

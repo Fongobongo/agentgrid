@@ -445,7 +445,7 @@ fn run_remote(
         .status()
         .with_context(|| format!("failed to run ssh/scp ({what})"))?;
     if !status.success() {
-        anyhow::bail!("ssh/scp step failed ({what}): exit {status}");
+        anyhow::bail!("ssh/scp step failed ({what}): {status}");
     }
     Ok(())
 }
@@ -601,5 +601,77 @@ mod tests {
         let t = Target::default();
         assert!(!t.accept_new_host_key);
         assert!(t.host_key_fingerprint.is_none());
+    }
+
+    /// The success path, end to end, without a server: fake `ssh`/`scp` at the
+    /// front of PATH record their argv and exit 0, so the whole sequence —
+    /// validate, keyscan-less verify, mkdir, scp the binary, scp the env file,
+    /// start detached — has to run in order for this to pass.
+    ///
+    /// Unix-only: the fakes are shell scripts, and `run_remote` detaches with
+    /// `setsid`. CI runs this; the Windows dev box cannot.
+    #[cfg(unix)]
+    #[test]
+    fn a_full_install_runs_every_step_in_order() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("ag-prov-fake-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("argv.log");
+        for prog in ["ssh", "scp"] {
+            let p = dir.join(prog);
+            std::fs::write(
+                &p,
+                format!(
+                    "#!/bin/sh\nprintf '{prog} %s\\n' \"$*\" >> '{}'\nexit 0\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{old}", dir.display()));
+
+        let mut p = plan();
+        p.transport = Transport::Direct;
+        p.server = Some("http://cp.example.com:7800".into());
+        let mut steps: Vec<String> = Vec::new();
+        let outcome = install(&target(), &p, "tok-1", &mut |m| steps.push(m.to_string()));
+        std::env::set_var("PATH", &old);
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let outcome = outcome.expect("fake ssh/scp must make the install succeed");
+        assert_eq!(outcome.transport, "direct/https");
+        assert_eq!(outcome.server_url, "http://cp.example.com:7800");
+        assert_eq!(outcome.remote_bin, "/var/lib/agentgrid/agentgrid-node");
+        assert_eq!(
+            steps,
+            vec![
+                "verifying SSH host key of node-b".to_string(),
+                "creating /var/lib/agentgrid on the remote".to_string(),
+                "copying agentgrid-node-daemon".to_string(),
+                "writing the environment file (0600)".to_string(),
+                "starting the node daemon".to_string(),
+            ],
+            "every step must run, in this order"
+        );
+        // The remote commands are what actually configure the host; a green
+        // `install()` that never sent them would be worthless.
+        assert!(
+            argv.contains("mkdir -p /var/lib/agentgrid"),
+            "mkdir step missing from ssh argv:\n{argv}"
+        );
+        assert!(
+            argv.contains("chmod 600 /var/lib/agentgrid/agentgrid.env"),
+            "env file must be 0600 before the daemon starts:\n{argv}"
+        );
+        assert_eq!(
+            argv.lines().filter(|l| l.starts_with("scp ")).count(),
+            2,
+            "one scp for the binary, one for the env file:\n{argv}"
+        );
     }
 }

@@ -70,6 +70,7 @@ name = "agentgrid-control-plane"
 version = "0.6.1"
 dependencies = [
  "agentgrid-common",
+ "agentgrid-provision",
  "agentgrid-skills",
  "anyhow",
  "argon2",

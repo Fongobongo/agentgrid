@@ -104,6 +104,10 @@ pub struct AppState {
     pub account_usage: std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<String, Vec<agentgrid_common::AccountUsage>>>,
     >,
+    /// Node provisioning from the panel (`POST /v1/nodes/install`). Off unless
+    /// `AGENTGRID_PROVISION_ENABLED=1`: a control plane that can ssh into
+    /// hosts is a different threat model from one that cannot.
+    pub provisioning: std::sync::Arc<routes::provision::ProvisioningRuntime>,
 }
 
 impl AppState {
@@ -276,6 +280,7 @@ impl AppState {
             account_usage: std::sync::Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            provisioning: std::sync::Arc::new(routes::provision::ProvisioningRuntime::from_env()),
         });
         // Plan 0.3 2.2: push assignments to connected WS nodes on every
         // scheduler wake. Harmless when no node is connected (tests).
@@ -595,6 +600,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/nodes/enrollment-token",
             post(routes::nodes::create_enrollment_token),
+        )
+        // Provisioning from the panel. `provisioning` reports whether the
+        // feature is available at all; `install` starts a background job and
+        // `install/{id}` follows it. Static segments win over `{id}`.
+        .route(
+            "/v1/nodes/provisioning",
+            get(routes::provision::provisioning_info),
+        )
+        .route("/v1/nodes/install", post(routes::provision::start_install))
+        .route("/v1/nodes/installs", get(routes::provision::list_installs))
+        .route(
+            "/v1/nodes/install/{id}",
+            get(routes::provision::get_install),
         )
         .route(
             "/v1/nodes/{id}",

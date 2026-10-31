@@ -13,6 +13,7 @@ pub mod maintenance;
 pub mod nodes;
 pub mod opencode;
 pub mod profiles;
+pub mod provision;
 pub mod proxies;
 pub mod repositories;
 pub mod shared_context;

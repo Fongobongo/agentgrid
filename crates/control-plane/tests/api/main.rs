@@ -11,6 +11,7 @@ mod lifecycle;
 mod misc;
 mod nodes;
 mod profiles;
+mod provision;
 mod repos;
 mod scheduler;
 mod security;
