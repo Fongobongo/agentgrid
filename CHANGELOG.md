@@ -19,7 +19,9 @@
   adapter, rather than being echoed back by the gateway. Registered in the
   `e2e-failinject` CI job. Both assertions were confirmed to fail when their
   subject is wrong (a mismatched prompt fails the CP lookup, and a prompt that
-  was never sent fails the adapter-echo check with the payloads printed).
+  was never sent fails the adapter-echo check with the payloads printed). Also
+  run green against the published `v0.7.0` musl tarball on Debian 12
+  (glibc 2.36), so the shipped artifact — not just a debug build — is covered.
 
 ### Fixed
 

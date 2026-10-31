@@ -29,7 +29,7 @@ with the MVP 0.2 critical path (real adapters, workflow reliability, ops).
 4. Revisit after the MVP 0.2 Definition of Done is met; candidates for the
    next cycle are a real ACP-agent E2E against a second host and promoting
    the gateway to a documented deployment artifact. *(Trigger fired; see the
-   amendment at the end.)*
+   amendments at the end.)*
 
 ## Consequences
 
@@ -65,9 +65,46 @@ The freeze is lifted. What that does and does not mean:
 - **Still experimental**, and the README is the source of truth for that word.
   Nothing here promises a stable northbound contract; the Telegram surface is
   what is documented, the ACP side is not.
-- **Still unproven against a real agent.** The remaining gate is a real
-  ACP-agent E2E against a second host — the original item 4 candidate. That is
-  a verification task, not a freeze.
+- **Now proven against a real binary, on a second host** (see the second
+  amendment below). The gate that item 4 named is closed: a real
+  `agentgrid-acp-agent` drives a real task on a real control plane, asserted
+  from the control plane's side, and the whole thing runs in CI.
 
 If the ACP spec moves before that E2E exists, the catch-up pass named above is
 still the accepted cost.
+
+## Second amendment (2026-10-31): the E2E gate is closed
+
+The bullet above said the remaining gate was "a real ACP-agent E2E against a
+second host". That was accurate at the time: `GatewayAgent` had four in-process
+tests against a fake control plane, and the shipped binary had never spoken to
+a real one.
+
+`tests/e2e/run-acp-gateway.sh` now does exactly that, and it is registered in
+the `e2e-failinject` CI job. It brings up a real control plane and a real node,
+runs the real binary's JSON-RPC lifecycle over stdio (`initialize` →
+`session/new` → `session/prompt`), and then — because the gateway's own
+`succeeded` answer is not evidence — asks the control plane: the task exists
+under the prompt that was sent, it has events, an event carries an
+`attempt_id`, and one payload contains the prompt **as echoed by the node's
+adapter**. That last assertion is what separates "the gateway answered" from
+"the prompt reached an adapter and came back".
+
+Both assertions were observed failing on purpose (a prompt absent from the CP
+fails the lookup; a prompt never sent fails the echo check, printing the
+payloads), so the test is not a green tick that cannot go red.
+
+Run on two hosts, both green:
+
+- Windows (debug build): 6 `session/update` notifications, `status=succeeded`.
+- Debian 12, glibc 2.36, **the published `v0.7.0` musl tarball** — i.e. the
+  artifact users actually download, `sha256sum -c` clean, all three binaries
+  reporting `0.7.0`: 7 `session/update` notifications, and on the control
+  plane `task 99d887c8-…: 7 events from 1 attempt(s), prompt echoed by the
+  adapter`.
+
+So "the second host" half of the gate is met with release artifacts, not a
+local build. What is still *not* claimed: this is the ACP **agent** role that
+Agentgrid implements and an external client drives; it is not a proof against
+a third-party ACP agent implementation, and the northbound contract remains
+experimental — the README is still the source of truth for that word.
