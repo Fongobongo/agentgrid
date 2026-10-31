@@ -110,7 +110,9 @@ script — a supply-chain surface this ADR does not take on.
   non-goals.
 - **Credentials need to be per-host.** Today one key path or one agent serves
   every install. Per-host keys mean a vault, and a vault means deciding what
-  the CP is allowed to decrypt.
+  the CP is allowed to decrypt. *(Split out and worked through in ADR 0028 —
+  including the part this sentence got wrong: a CP-side vault cannot stop a
+  compromised CP from reading what it must push.)*
 - **A signed bootstrap script exists.** Then the button can hand out a
   one-liner instead of an ssh session, and the flag, the job store and the
   credential path all disappear.
