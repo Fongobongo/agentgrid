@@ -4,6 +4,23 @@
 
 ### Added
 
+- **`ag nodes install` accepts an OpenSSH certificate** (`--ssh-cert`), and
+  `POST /v1/node-installs` takes the same `ssh_cert` field (ADR 0028, phase 2).
+  The certificate goes to both `ssh` and `scp` as `-o CertificateFile=<path>`,
+  so a host can trust a CA and hand out access that expires, instead of a key
+  that lives forever.
+  - It is read from the machine running the install and never copied to the
+    node; the remote env file is unchanged.
+  - Refused before a connection is opened, not silently downgraded: a
+    certificate without `--ssh-key` (ssh would fall back to the default
+    identity and fail on the remote, after the job was queued), a certificate
+    together with `--password` (the `sshpass`/`expect` wrapper is chosen first
+    and would ignore the certificate), and an empty or control-character path.
+  - The argv builder became a pure function (`ssh_argv`) so the flag is
+    asserted without spawning a child — a dropped `CertificateFile=` degrades
+    to plain key auth with no error, which is exactly the failure a runtime
+    check cannot see.
+
 - **Adapter-env secrets are now sealed to each node's key, so the control plane
   can deliver them but not read them** (ADR 0028, phase 1B). Phase 0 stopped
   the read path from handing values out; this removes the values from the

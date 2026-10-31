@@ -46,6 +46,7 @@ describe('installCommand', () => {
   it('only emits the optional flags that were asked for', () => {
     const plain = installCommand({ ...defaultForm(), host: 'h' });
     expect(plain).not.toContain('--ssh-key');
+    expect(plain).not.toContain('--ssh-cert');
     expect(plain).not.toContain('--allow-root');
     expect(plain).not.toContain('--accept-new-host-key');
 
@@ -53,11 +54,15 @@ describe('installCommand', () => {
       ...defaultForm(),
       host: 'h',
       ssh_key: '/root/.ssh/id_ed25519',
+      ssh_cert: '/root/.ssh/id_ed25519-cert.pub',
       accept_new_host_key: true,
       allow_root: true,
       host_key_fingerprint: 'SHA256:abc',
     });
     expect(strict).toContain('--ssh-key /root/.ssh/id_ed25519');
+    // The command has to reproduce the certificate too: an operator who copies
+    // it out of the panel must get the same access the button would have used.
+    expect(strict).toContain('--ssh-cert /root/.ssh/id_ed25519-cert.pub');
     expect(strict).toContain('--accept-new-host-key');
     expect(strict).toContain('--allow-root');
     expect(strict).toContain('--host-key-fingerprint SHA256:abc');

@@ -31,6 +31,15 @@ pub struct Target {
     pub host: String,
     /// Path to a private key, on the machine running this code.
     pub ssh_key: Option<String>,
+    /// Path to an OpenSSH **certificate** for `ssh_key` (ADR 0028 phase 2).
+    ///
+    /// A certificate carries a TTL and a principal list that the host already
+    /// trusts, so an install does not need a fleet-wide authorized_keys entry
+    /// that lives forever. Passed as `-o CertificateFile=<path>`; it must be
+    /// paired with the private key it was signed for, and it cannot be
+    /// combined with password auth (that wrapper is chosen first and would
+    /// ignore the certificate).
+    pub ssh_cert: Option<String>,
     /// Password auth. Needs `sshpass` or `expect` on the machine running this.
     pub password: Option<String>,
     /// Accept an unknown host key on first connect (like `ssh-keyscan`).
@@ -228,6 +237,22 @@ pub fn validate(t: &Target, p: &Plan) -> Result<()> {
             anyhow::bail!("invalid ssh host {:?}", t.host);
         }
     }
+    // The key and certificate paths go straight into argv. `-i`/`-o` take
+    // them as values, so a leading `-` is harmless, but a newline is not a
+    // path and an empty string would silently mean "the default identity".
+    for (what, path) in [("ssh-key", &t.ssh_key), ("ssh-cert", &t.ssh_cert)] {
+        if let Some(path) = path {
+            if path.is_empty() || path.chars().any(|c| c.is_control()) {
+                anyhow::bail!("invalid {what} path");
+            }
+        }
+    }
+    if t.ssh_cert.is_some() && t.ssh_key.is_none() {
+        anyhow::bail!("an ssh certificate must be paired with its private key (--ssh-key)");
+    }
+    if t.ssh_cert.is_some() && t.password.is_some() {
+        anyhow::bail!("an ssh certificate and a password are mutually exclusive");
+    }
     if p.transport == Transport::Direct && p.server.is_none() {
         anyhow::bail!("direct transport needs a server URL");
     }
@@ -334,25 +359,23 @@ fn home_dir() -> Result<PathBuf> {
     anyhow::bail!("HOME unset: cannot resolve ~/.ssh/known_hosts for SSH host-key pinning")
 }
 
-/// Run ssh/scp against the remote, choosing the auth wrapper: key (direct),
-/// password via `sshpass` when present, else `expect`.
+/// Build the `ssh`/`scp` argv (before the auth wrapper is chosen).
 ///
-/// `extra` are program-specific args (e.g. `-f -N -R ...`); `remote_cmd` (ssh
-/// only) is the final argument. `detach` starts the command in its own session
-/// so it survives this process — used for the tunnel and for the node start.
-fn run_remote(
-    t: &Target,
-    is_scp: bool,
-    extra: &[String],
-    remote_cmd: Option<String>,
-    what: &str,
-    detach: bool,
-) -> Result<()> {
+/// Split out from [`run_remote`] so the flags can be asserted without spawning
+/// a child: a missing `-o CertificateFile=` is invisible at runtime — ssh just
+/// falls back to plain key auth and the install "succeeds" against a host that
+/// was supposed to require a short-lived certificate.
+fn ssh_argv(t: &Target, is_scp: bool, extra: &[String], remote_cmd: Option<&str>) -> Vec<String> {
     let prog = if is_scp { "scp" } else { "ssh" };
     let mut base: Vec<String> = vec![prog.to_string()];
     if let Some(key) = &t.ssh_key {
         base.push("-i".into());
         base.push(key.clone());
+    }
+    // `scp` takes the same `-o`, so one branch covers both programs.
+    if let Some(cert) = &t.ssh_cert {
+        base.push("-o".into());
+        base.push(format!("CertificateFile={cert}"));
     }
     base.push("-o".into());
     // Fail CLOSED on an unknown host key by default (no MITM).
@@ -383,10 +406,28 @@ fn run_remote(
         .unwrap_or_else(|| host.clone());
     if !is_scp {
         base.push(target);
-        if let Some(rc) = &remote_cmd {
-            base.push(rc.clone());
+        if let Some(rc) = remote_cmd {
+            base.push(rc.to_string());
         }
     }
+    base
+}
+
+/// Run ssh/scp against the remote, choosing the auth wrapper: key (direct),
+/// password via `sshpass` when present, else `expect`.
+///
+/// `extra` are program-specific args (e.g. `-f -N -R ...`); `remote_cmd` (ssh
+/// only) is the final argument. `detach` starts the command in its own session
+/// so it survives this process — used for the tunnel and for the node start.
+fn run_remote(
+    t: &Target,
+    is_scp: bool,
+    extra: &[String],
+    remote_cmd: Option<String>,
+    what: &str,
+    detach: bool,
+) -> Result<()> {
+    let base = ssh_argv(t, is_scp, extra, remote_cmd.as_deref());
 
     // auth wrapper -> final argv (+ optional secret passed via env, never argv)
     let (argv, secret_env) = if let Some(pw) = &t.password {
@@ -601,6 +642,113 @@ mod tests {
         let t = Target::default();
         assert!(!t.accept_new_host_key);
         assert!(t.host_key_fingerprint.is_none());
+    }
+
+    /// A certificate signs a *specific* public key, so ssh needs the private
+    /// half too. Accepting `--ssh-cert` alone would make ssh fall back to
+    /// whatever identity it finds and fail with "Permission denied" on the
+    /// remote — after the install job was already queued.
+    #[test]
+    fn validate_requires_a_key_for_a_certificate() {
+        let t = Target {
+            host: "deploy@node-b:2222".into(),
+            ssh_cert: Some("/home/op/.ssh/id_ed25519-cert.pub".into()),
+            ..Default::default()
+        };
+        let err = validate(&t, &plan()).unwrap_err().to_string();
+        assert!(
+            err.contains("--ssh-key"),
+            "the error must name the missing flag, got: {err}"
+        );
+    }
+
+    /// `run_remote` picks the auth wrapper from `password` first: with both set
+    /// the certificate would be passed to `sshpass`/`expect` and the password
+    /// would win, so the operator's short-lived credential would silently be
+    /// ignored. Refuse the combination instead of picking one.
+    #[test]
+    fn validate_rejects_certificate_with_password() {
+        let t = Target {
+            host: "deploy@node-b:2222".into(),
+            ssh_key: Some("/home/op/.ssh/id_ed25519".into()),
+            ssh_cert: Some("/home/op/.ssh/id_ed25519-cert.pub".into()),
+            password: Some("hunter2".into()),
+            ..Default::default()
+        };
+        let err = validate(&t, &plan()).unwrap_err().to_string();
+        assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    /// Both paths are handed to ssh as option values, so a newline (argv split
+    /// in the `expect` path) or an empty string ("use the default identity")
+    /// must be rejected before anything is spawned.
+    #[test]
+    fn validate_rejects_malformed_certificate_path() {
+        for bad in ["", "/home/op/.ssh/id\ncert.pub", "/home/op/.ssh/\u{7f}cert"] {
+            let t = Target {
+                host: "deploy@node-b:2222".into(),
+                ssh_key: Some("/home/op/.ssh/id_ed25519".into()),
+                ssh_cert: Some(bad.into()),
+                ..Default::default()
+            };
+            assert!(
+                validate(&t, &plan()).is_err(),
+                "certificate path {bad:?} must be rejected"
+            );
+        }
+        let ok = Target {
+            host: "deploy@node-b:2222".into(),
+            ssh_key: Some("/home/op/.ssh/id_ed25519".into()),
+            ssh_cert: Some("/home/op/.ssh/id_ed25519-cert.pub".into()),
+            ..Default::default()
+        };
+        assert!(validate(&ok, &plan()).is_ok());
+    }
+
+    /// The certificate has to reach argv, on both `ssh` and `scp`, and it has
+    /// to sit next to `-i`: ssh associates a `CertificateFile` with the
+    /// identity it was given, so a reordering that drops it turns cert auth
+    /// back into plain key auth without any error.
+    #[test]
+    fn ssh_argv_carries_the_certificate_for_ssh_and_scp() {
+        let t = Target {
+            host: "deploy@node-b:2222".into(),
+            ssh_key: Some("/home/op/.ssh/id_ed25519".into()),
+            ssh_cert: Some("/home/op/.ssh/id_ed25519-cert.pub".into()),
+            ..Default::default()
+        };
+        for is_scp in [false, true] {
+            let argv = ssh_argv(&t, is_scp, &[], Some("true"));
+            let prog = if is_scp { "scp" } else { "ssh" };
+            assert_eq!(argv[0], prog);
+            let head: Vec<&str> = argv[1..5].iter().map(|s| s.as_str()).collect();
+            assert_eq!(
+                head,
+                vec![
+                    "-i",
+                    "/home/op/.ssh/id_ed25519",
+                    "-o",
+                    "CertificateFile=/home/op/.ssh/id_ed25519-cert.pub",
+                ],
+                "{prog} argv must carry the certificate: {argv:?}"
+            );
+        }
+    }
+
+    /// Without `--ssh-cert` the option must not appear at all: an empty
+    /// `CertificateFile=` would make ssh try to load a file named "".
+    #[test]
+    fn ssh_argv_omits_the_certificate_when_unset() {
+        let t = Target {
+            host: "deploy@node-b:2222".into(),
+            ssh_key: Some("/home/op/.ssh/id_ed25519".into()),
+            ..Default::default()
+        };
+        let argv = ssh_argv(&t, false, &[], None);
+        assert!(
+            !argv.iter().any(|a| a.starts_with("CertificateFile=")),
+            "no certificate was requested: {argv:?}"
+        );
     }
 
     /// The success path, end to end, without a server: fake `ssh`/`scp` at the

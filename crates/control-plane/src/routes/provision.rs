@@ -187,6 +187,10 @@ pub struct InstallRequest {
     /// Private key path **on the control-plane host**. None = ssh agent.
     #[serde(default)]
     pub ssh_key: Option<String>,
+    /// OpenSSH certificate for `ssh_key` (short-lived, CA-signed). Requires
+    /// `ssh_key`; mutually exclusive with `password`.
+    #[serde(default)]
+    pub ssh_cert: Option<String>,
     /// Password auth (needs `sshpass` or `expect` on the control-plane host).
     #[serde(default)]
     pub password: Option<String>,
@@ -314,6 +318,7 @@ pub async fn start_install(
     let target = Target {
         host: req.host.trim().to_string(),
         ssh_key: req.ssh_key.clone(),
+        ssh_cert: req.ssh_cert.clone(),
         password: req.password.clone(),
         accept_new_host_key: req.accept_new_host_key,
         host_key_fingerprint: req.host_key_fingerprint.clone(),

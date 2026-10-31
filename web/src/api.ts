@@ -1162,6 +1162,8 @@ export interface InstallNodeRequest {
   server?: string;
   data_dir?: string;
   ssh_key?: string;
+  /** OpenSSH certificate for `ssh_key`: CA-signed, short-lived, never copied. */
+  ssh_cert?: string;
   password?: string;
   accept_new_host_key?: boolean;
   host_key_fingerprint?: string;

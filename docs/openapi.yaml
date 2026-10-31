@@ -775,6 +775,13 @@ paths:
         daemon detached. Credentials (password, key path) are used for the
         length of the install and never stored, audited or logged.
 
+        `ssh_cert` is an OpenSSH certificate for `ssh_key` (CA-signed and
+        short-lived, the way a bastion hands out access): it is passed to both
+        `ssh` and `scp` as `-o CertificateFile=<path>`, is read from the
+        control plane's own filesystem, and is never copied to the node.
+        It requires `ssh_key` and is mutually exclusive with `password` —
+        a combination is a `400`, not a silent preference for one of them.
+
         Direct transport only: `server` must be an address the **node** can
         dial (this control plane, or a peer's relay) and defaults to
         `AGENTGRID_PUBLIC_URL`. Returns a job id; poll

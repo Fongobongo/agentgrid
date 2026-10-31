@@ -100,6 +100,13 @@ laptop next to the CP, wrong for anything else. `--accept-new-host-key` is
 required for a fresh host (the default refuses an unknown key) and
 `--host-key-fingerprint SHA256:…` pins it.
 
+For access granted by a CA rather than a long-lived key, add
+`--ssh-cert ~/.ssh/id_ed25519-cert.pub` next to `--ssh-key`: the certificate
+travels to `ssh` and `scp` as `-o CertificateFile=…` and is read on the machine
+running the command, so the host trusts the CA and the credential expires on
+its own. A certificate without `--ssh-key`, or together with `--password`, is
+refused before a connection is opened — not silently ignored.
+
 **3. On the host itself**, for a durable install:
 
 ```bash

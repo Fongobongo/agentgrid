@@ -51,6 +51,11 @@ pub(crate) struct NodeInstallArgs {
     /// Path to SSH private key (key-based auth; recommended over --password).
     #[arg(long)]
     ssh_key: Option<String>,
+    /// Path to an OpenSSH certificate for --ssh-key. A certificate expires,
+    /// which is the point: the host trusts the CA, not a key that lives
+    /// forever. Requires --ssh-key.
+    #[arg(long)]
+    ssh_cert: Option<String>,
     /// SSH password (requires `sshpass`; passed via SSHPASS env, never argv).
     #[arg(long)]
     password: Option<String>,
@@ -310,6 +315,7 @@ impl NodeInstallArgs {
         agentgrid_provision::Target {
             host: self.host.clone(),
             ssh_key: self.ssh_key.clone(),
+            ssh_cert: self.ssh_cert.clone(),
             password: self.password.clone(),
             accept_new_host_key: self.accept_new_host_key,
             host_key_fingerprint: self.host_key_fingerprint.clone(),
@@ -439,6 +445,7 @@ mod node_install_tests {
         NodeInstallArgs {
             host: "deploy@node-b:2222".into(),
             ssh_key: None,
+            ssh_cert: None,
             password: None,
             accept_new_host_key: false,
             host_key_fingerprint: None,

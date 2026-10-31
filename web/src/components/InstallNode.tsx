@@ -33,6 +33,8 @@ export interface InstallForm {
   server: string;
   data_dir: string;
   ssh_key: string;
+  /** OpenSSH certificate for `ssh_key` (CA-signed, short-lived). */
+  ssh_cert: string;
   password: string;
   accept_new_host_key: boolean;
   host_key_fingerprint: string;
@@ -52,6 +54,7 @@ export function defaultForm(): InstallForm {
     server: typeof window === 'undefined' ? '' : window.location.origin,
     data_dir: '/var/lib/agentgrid',
     ssh_key: '',
+    ssh_cert: '',
     password: '',
     accept_new_host_key: false,
     host_key_fingerprint: '',
@@ -80,6 +83,7 @@ export function installCommand(f: InstallForm): string {
   if (f.server) parts.push(`--server ${quote(f.server)}`);
   if (f.data_dir) parts.push(`--data-dir ${quote(f.data_dir)}`);
   if (f.ssh_key) parts.push(`--ssh-key ${quote(f.ssh_key)}`);
+  if (f.ssh_cert) parts.push(`--ssh-cert ${quote(f.ssh_cert)}`);
   if (f.host_key_fingerprint)
     parts.push(`--host-key-fingerprint ${quote(f.host_key_fingerprint)}`);
   if (f.accept_new_host_key) parts.push('--accept-new-host-key');
@@ -143,6 +147,7 @@ export default function InstallNode({
         server: f.server.trim() || undefined,
         data_dir: f.data_dir.trim() || undefined,
         ssh_key: f.ssh_key.trim() || undefined,
+        ssh_cert: f.ssh_cert.trim() || undefined,
         password: f.password || undefined,
         accept_new_host_key: f.accept_new_host_key,
         host_key_fingerprint: f.host_key_fingerprint.trim() || undefined,
@@ -270,6 +275,15 @@ export default function InstallNode({
             placeholder="/root/.ssh/id_ed25519"
             disabled={running || busy}
             onChange={(e) => set('ssh_key', e.target.value)}
+          />
+        </label>
+        <label>
+          SSH certificate for that key (empty = plain key auth)
+          <input
+            value={f.ssh_cert}
+            placeholder="/root/.ssh/id_ed25519-cert.pub"
+            disabled={running || busy}
+            onChange={(e) => set('ssh_cert', e.target.value)}
           />
         </label>
         <label>

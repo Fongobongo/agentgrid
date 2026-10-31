@@ -1,8 +1,9 @@
 # ADR 0028: Per-host credentials — what a vault would and would not buy
 
 Status: accepted — Phase 0 shipped, Phase 1 chose **B** (node-held keypair) and
-is implemented (both unreleased, 0.7.0); Phase 2 (install credentials) and
-Phase 3 (node credential rotation) are still open. See [Outcome](#outcome).
+is implemented, Phase 2 (SSH certificates for install) is implemented (all
+unreleased, 0.7.0); Phase 3 (node credential rotation) is still open. See
+[Outcome](#outcome).
 
 ## Context
 
@@ -206,6 +207,22 @@ into `ag adapter-env set` is sealed for the node, is absent from `cp.db`,
 `cp.db-wal` and the CP log, reaches the adapter process (the mock prints what
 the child saw), is masked in the event stream while a non-secret variable is
 not, and is gone from the next attempt after `ag adapter-env rm`.
+
+**Phase 2** adds the certificate leg of the install credential: `--ssh-cert`
+on `ag nodes install`, `ssh_cert` on `POST /v1/node-installs`, forwarded to
+both `ssh` and `scp` as `-o CertificateFile=<path>`. It is read where the
+install runs and never copied to the node, so the "install SSH key or
+password" row above stays one-install-wide even when the credential is
+CA-signed and expires on its own. Three combinations are refused *before* a
+connection is opened, because each one otherwise fails silently rather than
+loudly: a certificate without its private key (ssh falls back to whatever
+identity it finds), a certificate together with a password (the
+`sshpass`/`expect` wrapper is chosen first and the certificate is ignored),
+and an empty or control-character path (empty means "default identity", a
+newline splits argv in the `expect` path).
+
+**Phase 3** — rotation of the node's own credential (`ag nodes rotate`) — is
+not started.
 
 ## Method
 
