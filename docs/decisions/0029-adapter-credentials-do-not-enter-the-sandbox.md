@@ -1,7 +1,9 @@
 # ADR 0029: Adapter credentials do not enter the sandbox
 
 Status: **proposed** — nothing here is implemented. T13 in
-[`threat-model.md`](threat-model.md) stays open until option C or D ships.
+[`threat-model.md`](threat-model.md) stays open until the inject mode (option F)
+ships, and stays *partially* open even then: neither F nor D stops the agent
+from *using* a credential while it lives, they only bound and attribute it.
 
 ## Context
 
@@ -141,6 +143,54 @@ installation tokens (one hour, scoped to a repository) are exactly E, and for
 git access C is not needed at all. That is a reason to implement E **for those
 secrets**, not to use it for provider API keys.
 
+**F. The hybrid: one sidecar, two modes, chosen per secret.** C3 and E are not
+rivals once the gateway is the component that holds the key, because the only
+thing E adds is a short-lived credential — and the gateway is the natural place
+to mint one. The modes differ by one question: *can the consumer's traffic be
+proxied?*
+
+- **inject** (provider keys): the sandbox holds a per-attempt *capability*
+  instead of a constant placeholder. It is opaque, bound to the attempt, with a
+  TTL and a quota; the gateway validates it and adds the real credential on its
+  own leg. The real key never leaves the gateway, and the sandbox's token is
+  worthless anywhere else.
+- **exchange** (secrets that have an exchange): the gateway mints a real,
+  short-lived, provider-issued token and hands it to the sandbox, which then
+  talks to the provider directly. Needed when the consumer cannot go through a
+  proxy — git push is the case, and GitHub App installation tokens (one hour,
+  scoped to a repository) are exactly this.
+
+Why this beats E rather than repeating it: the credential authority is the
+gateway, which already holds the key — no signing key on the daemon, no token
+store with revocation semantics, no change to the adapter contract (the CLI
+still receives an environment variable, exactly as it receives the placeholder
+today). It also keeps E's genuine benefit where E is right, instead of
+pretending provider keys have an exchange they do not.
+
+What it adds over plain C:
+
+- **Attribution.** Usage is counted per attempt at the provider boundary, not
+  aggregated across whatever shares the node's key.
+- **Revocation.** Cancelling an attempt revokes its capability; with a static
+  placeholder the gateway cannot tell two attempts apart at all.
+- **Quota before the call.** A per-attempt ceiling can refuse the next request,
+  where today's budgets are computed from streamed events after the fact.
+- **Budgets the agent cannot under-report.** Today cost comes from what the CLI
+  prints; at the gateway it comes from the provider's own response.
+
+What it costs: the sidecar becomes stateful (a token table or a persisted
+signing key) and grows a small control API from the daemon (mint on attempt
+start, revoke on end/cancel) — a new coupling and a new failure mode, since a
+dead gateway now fails every provider call rather than merely removing a proxy.
+One extra hop for SSE streams, and two code paths to test.
+
+The asymmetry worth writing down: **inject mode is safe even with advisory
+networking** — a capability is useless outside the gateway, so it does not
+matter that the sandbox could dial the provider directly. **Exchange mode is
+not**: the token it hands out is real, and it works from anywhere until it
+expires. So exchange mode requires the enforced-egress fix above; inject mode
+does not.
+
 ## Premise check: `restricted` is not enforced today
 
 C and E both lean on `restricted` meaning "one reachable peer". It does not, in
@@ -162,20 +212,38 @@ claims a guarantee the compose file does not provide.
 
 ## Decision (recommended)
 
-1. **Implement C, gated on an explicit marker.** The marker must be explicit
-   rather than a `*_KEY`/`*_TOKEN` name heuristic: a heuristic is exactly the
-   "silently unenforced" state `validate_network_mode` exists to prevent
-   (ADR 0023), and it fails in the direction that matters — a secret whose name
-   does not match the pattern is handed to the agent and nobody is told.
-   Concretely: an entry marked `gateway` keeps the secret on the node, never
-   places it in `container_env`, and the daemon **refuses** an attempt whose
-   entries are `gateway` but whose `network_mode` is not `restricted` — the same
-   fail-closed discipline as refusing an unenforceable allowlist.
-2. **Document D as the escape hatch**, for adapters that cannot take C, with its
+Staged, because each step is useful on its own and none of them requires the
+next:
+
+1. **Fix the egress topology first** (see the premise check below): two
+   networks, so `restricted` means what the README says. Independent of this
+   ADR and worth doing regardless — but exchange mode cannot ship without it.
+2. **Ship the marker and the inject mode (F).** An entry marked `gateway` keeps
+   the secret on the node, never places it in `container_env`, and the daemon
+   **refuses** an attempt whose entries are `gateway` but whose `network_mode`
+   is not `restricted` — the same fail-closed discipline as refusing an
+   unenforceable allowlist. The marker must be explicit rather than a
+   `*_KEY`/`*_TOKEN` name heuristic: a heuristic is exactly the "silently
+   unenforced" state `validate_network_mode` exists to prevent (ADR 0023), and
+   it fails in the direction that matters — a secret whose name does not match
+   the pattern is handed to the agent and nobody is told.
+3. **Add per-attempt capabilities** to the inject mode: an opaque token per
+   attempt, bound to it, revocable on cancel, with a quota. This is where the
+   accounting and the trustworthy budget come from; a constant placeholder is a
+   working first version of step 2 and a dead end for everything else.
+4. **Add the exchange mode** for secrets that have an exchange — starting with
+   GitHub App installation tokens if and when git access moves off a static
+   token. Not for provider keys, which have nothing to exchange.
+5. **C3 (TLS + own CA) only if a CLI refuses an `http://` base URL.** It buys
+   compatibility, not security: the agent's leg is inside the sandbox either way.
+6. **Document D as the escape hatch**, for adapters that cannot take F, with its
    costs stated next to it. Not the default.
-3. **Change T13's row to an honest partial**: "enforced for `gateway` entries;
-   `env` entries are still handed to the agent and say so".
-4. **Do not ship B**, and do not describe anything as T13 mitigation unless the
+7. **Change T13's row to an honest partial**: "enforced for `gateway` entries;
+   `env` entries are still handed to the agent and say so". Neither C nor F
+   closes T13 — the agent can still *use* a capability or a short-lived token
+   while it lives; both shrink the blast radius and make it attributable, which
+   is not the same claim.
+8. **Do not ship B**, and do not describe anything as T13 mitigation unless the
    value never enters the sandbox.
 
 ## Consequences
@@ -184,8 +252,12 @@ claims a guarantee the compose file does not provide.
   already set (`AGENTGRID_ADAPTER_ENV`) — and a new failure mode at attempt
   start (`gateway` entry without `restricted` networking). Both are cheap to
   test and cheap to explain.
-- C makes the egress sidecar mandatory for the hardened path, so a node without
+- F makes the egress sidecar mandatory for the hardened path, so a node without
   it can no longer claim a `gateway` entry. That is the point.
+- Per-attempt capabilities turn the sidecar into a stateful component with a
+  lifecycle hook from the daemon, and a dead gateway into a failed attempt
+  rather than a missing convenience. That is the price of attribution and
+  revocation, and it should be stated in the operator docs, not discovered.
 - D, if adopted later, puts a CA in every sandbox image: a supply-chain and
   trust-store change, not a config flag.
 - None of this makes `env` mode safe. The end state is that the exposure is
