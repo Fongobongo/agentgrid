@@ -406,7 +406,8 @@ completion reports which artifacts are still owed (`pending_artifacts`).
 
 ### Artifact retention, backup, upgrade & rollback
 
-- **Artifacts:** per-attempt under `AGENTGRID_ARTIFACT_ROOT/<attempt_id>/<name>`;
+- **Artifacts:** per-attempt under `AGENTGRID_ARTIFACT_ROOT/<attempt_id>/<name>`
+  (default: `<directory of AGENTGRID_DB>/artifacts`);
   atomic upload (temp+rename) with server-side SHA-256 verification
   (client hash mismatch → 422). `cleanup_artifacts(<hours>)` drops the metadata
   row **and** the backing file, then removes now-empty attempt dirs. Upload size

@@ -5066,3 +5066,57 @@ mod rekey_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod artifact_root_tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("ag-root-{tag}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// `AGENTGRID_ARTIFACT_ROOT` was documentation only until this landed: the
+    /// store always derived `<db dir>/artifacts`, so an operator who pointed
+    /// artifacts at a dedicated volume got them next to the database, and the
+    /// critical-disk watermark watched the database volume instead of the one
+    /// that actually fills up.
+    #[tokio::test]
+    async fn an_explicit_artifact_root_beats_the_db_directory() {
+        let dir = temp_dir("explicit");
+        let db = dir.join("db").join("cp.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let artifacts = dir.join("big-volume").join("artifacts");
+        let s = Store::open_with_gate_and_root(db.to_str().unwrap(), None, Some(artifacts.clone()))
+            .await
+            .unwrap();
+        assert_eq!(s.artifact_root(), artifacts.as_path());
+        assert!(
+            artifacts.is_dir(),
+            "the root is created eagerly: the disk watermark stats it before the first upload"
+        );
+        // Not just what the field says — where an artifact actually resolves.
+        assert_eq!(
+            s.artifact_path("att-root", "out.txt").unwrap(),
+            artifacts.join("att-root").join("out.txt")
+        );
+        assert!(
+            !db.parent().unwrap().join("artifacts").exists(),
+            "the derived root must not be created as a side effect"
+        );
+    }
+
+    /// The override is optional: every existing caller and test keeps the
+    /// derived path.
+    #[tokio::test]
+    async fn without_an_override_the_db_directory_still_wins() {
+        let dir = temp_dir("fallback");
+        let db = dir.join("cp.db");
+        let s = Store::open_with_gate_and_root(db.to_str().unwrap(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(s.artifact_root(), dir.join("artifacts").as_path());
+    }
+}

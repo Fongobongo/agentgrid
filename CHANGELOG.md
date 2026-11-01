@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`AGENTGRID_ARTIFACT_ROOT` is honoured.** It was set by both Dockerfiles,
+  both install scripts, all three HA compose files and described in the README
+  and the failure runbook — and read by nothing: `Store::open` always derived
+  the artifact root from the database directory, so the knob silently did
+  nothing. Two consequences worth knowing about:
+  - Artifacts could not live on their own volume. They always landed next to
+    the database, and the critical-disk watermark (`AGENTGRID_DISK_CRITICAL_MB`)
+    watched the database volume — a full artifact disk was invisible, and a
+    full database disk refused assignments while the big volume sat empty.
+  - `install-control-plane.sh` created and handed over `$DATA_DIR/artifacts`
+    while the control plane wrote `$DATA_DIR/data/artifacts`. It only worked
+    because `ReadWritePaths` and `chown -R` covered both.
+  The default is unchanged (`<db dir>/artifacts`), so an upgrade does not move
+  existing artifacts out from under their URLs; `install-control-plane.sh`
+  gained `--artifact-dir` for the separate-volume case. The empty value counts
+  as unset, so a blank line in a unit file cannot create a directory named `""`.
+  `deploy/install-node.sh` no longer sets the variable: the node daemon never
+  read it either (its spool is `AGENTGRID_DATA_DIR/artifact-spool`).
+
 ## [0.8.1] - 2026-11-01
 
 ### Fixed

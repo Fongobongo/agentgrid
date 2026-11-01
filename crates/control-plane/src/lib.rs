@@ -123,7 +123,21 @@ impl AppState {
         db_path: &str,
         ha: Arc<ha::HaRuntime>,
     ) -> anyhow::Result<Arc<Self>> {
-        let mut store = Store::open_with_gate(db_path, ha.store_gate()).await?;
+        Self::open_with_runtime_and_root(db_path, ha, None).await
+    }
+
+    /// HA-aware open with an explicit artifact root.
+    ///
+    /// `main.rs` passes `AGENTGRID_ARTIFACT_ROOT` here; `None` keeps the
+    /// historical `<db dir>/artifacts`. See
+    /// [`Store::open_with_gate_and_root`] for why the env is not read here.
+    pub async fn open_with_runtime_and_root(
+        db_path: &str,
+        ha: Arc<ha::HaRuntime>,
+        artifact_root: Option<std::path::PathBuf>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let mut store =
+            Store::open_with_gate_and_root(db_path, ha.store_gate(), artifact_root).await?;
         // ADR 0028: values written before the sealing schema are still in the
         // clear under `value_legacy`. This is the last moment the CP has both
         // the plaintext and a node key, so it seals them and blanks the column

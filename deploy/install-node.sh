@@ -97,7 +97,6 @@ Environment=AGENTGRID_NODE_NAME=$NAME
 Environment=AGENTGRID_DATA_DIR=$DATA_DIR/data
 Environment=AGENTGRID_WORKSPACE_ROOT=$WORKSPACE
 Environment=AGENTGRID_REPOSITORY_ROOT=$REPOS
-Environment=AGENTGRID_ARTIFACT_ROOT=$DATA_DIR/artifacts
 Environment=AGENTGRID_ENV_FILE=$DATA_DIR/enroll.env
 EnvironmentFile=-$DATA_DIR/enroll.env
 # Hardening P0 (systemd): drop destructive capabilities and hide the rest of

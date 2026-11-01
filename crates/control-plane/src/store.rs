@@ -568,6 +568,25 @@ impl Store {
         db_path: &str,
         ha_gate: Option<std::sync::Arc<HaGate>>,
     ) -> Result<Self> {
+        Self::open_with_gate_and_root(db_path, ha_gate, None).await
+    }
+
+    /// `artifact_root` overrides the default `<db dir>/artifacts`.
+    ///
+    /// `AGENTGRID_ARTIFACT_ROOT` was documented in both Dockerfiles, both
+    /// install scripts, every HA compose file and the README long before
+    /// anything read it, so the derivation below always won: an operator who
+    /// pointed artifacts at a dedicated volume silently got them next to the
+    /// database instead, and the critical-disk watermark then watched the
+    /// database volume. The environment is read in `main.rs` and passed in
+    /// here, never read from inside the store: env is process-global and the
+    /// `tests/api` binary runs ~170 tests in one process, so a knob read here
+    /// would leak between them.
+    pub async fn open_with_gate_and_root(
+        db_path: &str,
+        ha_gate: Option<std::sync::Arc<HaGate>>,
+        artifact_root: Option<std::path::PathBuf>,
+    ) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
             .filename(db_path)
             .create_if_missing(true)
@@ -595,10 +614,12 @@ impl Store {
                 .execute(&mut *c)
                 .await?;
         }
-        let artifact_root = std::path::Path::new(db_path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("artifacts");
+        let artifact_root = artifact_root.unwrap_or_else(|| {
+            std::path::Path::new(db_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("artifacts")
+        });
         // Hardening P1 item 15: create the artifact root eagerly so the
         // critical-disk watermark (statvfs on the root) is meaningful from the
         // first assignment, even before any artifact is written.

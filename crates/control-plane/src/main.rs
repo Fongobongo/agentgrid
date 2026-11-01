@@ -123,6 +123,17 @@ async fn amain() -> Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:7800".into())
         .parse()?;
     let db_path = std::env::var("AGENTGRID_DB").unwrap_or_else(|_| "control-plane.db".into());
+    // Documented since 0.4 — both Dockerfiles, both install scripts, every HA
+    // compose file, the README — and read nowhere until now: the artifact root
+    // was always derived from the database directory, so a dedicated artifact
+    // volume was silently ignored (and the disk watermark watched the wrong
+    // one). Empty counts as unset: a blank line in a unit file must not create
+    // a directory named "".
+    let artifact_root = std::env::var("AGENTGRID_ARTIFACT_ROOT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from);
 
     let ha = agentgrid_control_plane::ha::HaRuntime::from_env()?;
     if ha.is_ha() && ha.config.role == NodeRole::Witness {
@@ -136,7 +147,7 @@ async fn amain() -> Result<()> {
     // own database copy, so the lock still guards against two local writers.
     let _instance_lock = acquire_instance_lock(&db_path)?;
 
-    let state = AppState::open_with_runtime(&db_path, ha).await?;
+    let state = AppState::open_with_runtime_and_root(&db_path, ha, artifact_root).await?;
     if state.ha.is_ha() {
         serve_ha(state, addr).await
     } else {

@@ -2,6 +2,7 @@
 # Stage 5.3: install the agentgrid control plane on a clean Linux host.
 #
 #   ./install-control-plane.sh [--listen 127.0.0.1:7800] [--data-dir /var/lib/agentgrid]
+#                             [--artifact-dir /var/lib/agentgrid/data/artifacts]
 #                             [--ha-role data|witness] [--ha-node-id cp-1]
 #                             [--ha-cluster-id prod] [--ha-cluster-token <token>]
 #                             [--ha-peers cp-2@url,cp-3@url] [--ha-witnesses w1@url]
@@ -22,7 +23,9 @@ LISTEN="${AGENTGRID_LISTEN:-127.0.0.1:7800}"
 BIN_DIR="/usr/local/bin"
 DATA_DIR="/var/lib/agentgrid"
 DB_DIR="$DATA_DIR/data"
-ARTIFACT_DIR="$DATA_DIR/artifacts"
+# Empty = derive from DB_DIR (the historical behavior); resolved after parsing
+# so `--artifact-dir` and `--data-dir` can come in either order.
+ARTIFACT_DIR=""
 # HA flags (all optional; unset = single-node mode, unchanged behavior).
 HA_ROLE=""; HA_NODE_ID=""; HA_CLUSTER_ID=""; HA_CLUSTER_TOKEN=""
 HA_PEERS=""; HA_WITNESSES=""; HA_ADVERTISE_URL=""
@@ -31,7 +34,7 @@ HA_RPO_MODE="snapshot"; HA_SNAPSHOT_INTERVAL="60"; HA_ALLOW_PLAINTEXT=""
 # one-time setup token to stdout (journalctl) the operator presents at
 # POST /v1/auth/setup to create the first admin. See README.
 
-usage() { echo "usage: $0 [--listen addr] [--data-dir dir] [--ha-role data|witness]
+usage() { echo "usage: $0 [--listen addr] [--data-dir dir] [--artifact-dir dir] [--ha-role data|witness]
   [--ha-node-id id] [--ha-cluster-id id] [--ha-cluster-token token]
   [--ha-peers peers] [--ha-witnesses witnesses] [--ha-advertise-url url]
   [--ha-rpo-mode snapshot|async|sync] [--ha-snapshot-interval secs]
@@ -40,7 +43,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --listen)            LISTEN="$2";             shift 2;;
     --data-dir)          DATA_DIR="$2"; shift 2
-                         DB_DIR="$DATA_DIR/data"; ARTIFACT_DIR="$DATA_DIR/artifacts";;
+                         DB_DIR="$DATA_DIR/data";;
+    --artifact-dir)      ARTIFACT_DIR="$2";       shift 2;;
     --ha-role)           HA_ROLE="$2";            shift 2;;
     --ha-node-id)        HA_NODE_ID="$2";         shift 2;;
     --ha-cluster-id)     HA_CLUSTER_ID="$2";      shift 2;;
@@ -55,6 +59,12 @@ while [ $# -gt 0 ]; do
     *) usage;;
   esac
 done
+
+# Artifacts default to <DB dir>/artifacts, which is where the control plane put
+# them before AGENTGRID_ARTIFACT_ROOT was honoured. Keeping that as the default
+# means an upgrade does not move existing artifacts out from under their URLs;
+# pass --artifact-dir to put them on their own volume.
+[ -n "$ARTIFACT_DIR" ] || ARTIFACT_DIR="$DB_DIR/artifacts"
 
 command -v "$BIN_DIR/agentgrid-control-plane" >/dev/null 2>&1 || {
   echo "missing $BIN_DIR/agentgrid-control-plane (build + copy it first)"; exit 1;
