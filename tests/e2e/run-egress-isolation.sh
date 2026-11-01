@@ -4,15 +4,18 @@
 #
 #   bash tests/e2e/run-egress-isolation.sh
 #
-# Needs docker (runs in the compose e2e job). Three assertions, each of which
-# has been wrong in this repo at least once:
+# Needs docker (runs in the compose e2e job). Five assertions, each of which has
+# been wrong in this repo at least once:
 #   1. the egress network is `internal`, so a sandbox has no route of its own;
-#   2. without the proxy there is no way out — the old single-network compose
-#      passed this test only because nothing tried;
-#   3. with the proxy, a non-allowlisted domain is refused AND an allowlisted
-#      one passes. The second half is the one that catches a squid config that
-#      denies everything (the `acl localnet src` + `deny localnet` bug: every
-#      sandbox is a 172.16/12 *client*, so the rule refused all traffic).
+#   2. a non-allowlisted domain is refused over plain http — the proxy answers
+#      that request itself, so the 403 is a real status code;
+#   3. the same over https/CONNECT, which is what an agent actually does, and
+#      where the refusal arrives as `%{http_connect}` rather than `%{http_code}`;
+#   4. an allowlisted domain passes. That one catches a squid config that denies
+#      everything (the `acl localnet src` + `deny localnet` bug: every sandbox is
+#      a 172.16/12 *client*, so the rule refused all traffic);
+#   5. with no proxy at all, nothing gets out — the old single-network compose
+#      passed this only because nothing tried.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -47,14 +50,32 @@ internal=$(docker network inspect "$NET" --format '{{.Internal}}' 2>/dev/null ||
 [ "$internal" = "true" ] || { dump_diagnostics; fail "$NET is '$internal', not internal — a sandbox on it gets NAT and the allowlist is advisory"; }
 
 echo ">> squid enforces the allowlist"
+# A denial on an `https://` URL reads as curl `000`, not `403`: curl opens a
+# CONNECT tunnel, the proxy refuses it, and no response ever comes back *from
+# the target* — so `%{http_code}` has nothing to report. Asserting 403 on an
+# https URL is a test that can never pass, which is how this looked like a
+# broken proxy for one CI cycle. `%{http_connect}` is the code of the CONNECT
+# reply, which is the thing that was actually denied.
 code=""
 for _ in $(seq 1 20); do
-  code=$(docker run --rm --network "$NET" -e https_proxy="$PROXY" "$CURL_IMAGE" \
-    -s -o /dev/null -w '%{http_code}' --max-time 3 https://example.com/ 2>/dev/null || true)
+  # Plain http: the proxy answers the request itself, so the 403 is a real
+  # status code.
+  code=$(docker run --rm --network "$NET" -e http_proxy="$PROXY" "$CURL_IMAGE" \
+    -s -o /dev/null -w '%{http_code}' --max-time 3 http://example.com/ 2>/dev/null || true)
   [ "$code" = "403" ] && break
   sleep 2
 done
 [ "$code" = "403" ] || { dump_diagnostics; fail "a non-allowlisted domain returned '$code' through the proxy, expected 403 (000 = the proxy never answered: check the sidecar logs above; 200 = not enforcing)"; }
+
+# And the same for the CONNECT path agents actually use.
+connect=""
+for _ in $(seq 1 10); do
+  connect=$(docker run --rm --network "$NET" -e https_proxy="$PROXY" "$CURL_IMAGE" \
+    -s -o /dev/null -w '%{http_connect}' --max-time 5 https://example.com/ 2>/dev/null || true)
+  [ "$connect" = "403" ] && break
+  sleep 2
+done
+[ "$connect" = "403" ] || { dump_diagnostics; fail "an https CONNECT to a non-allowlisted domain was answered '$connect', expected 403"; }
 
 code=$(docker run --rm --network "$NET" -e https_proxy="$PROXY" "$CURL_IMAGE" \
   -s -o /dev/null -w '%{http_code}' --max-time 10 https://api.github.com/ 2>/dev/null || true)
