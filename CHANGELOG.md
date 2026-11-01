@@ -82,6 +82,38 @@
     beside the plain names when something is. Names and routes are not
     secrets; values are never logged. The panel is the queryable version of the
     same fact — the log survives being read once, the badge survives rotation.
+- **Reachability: "is this node connected directly?" is now answerable.** It was
+  not, and the two halves of the question have different answers.
+  - `relay_hops` on every node row: how many relays the last heartbeat crossed.
+    A relay already stamps `x-agentgrid-relay-hops` on everything it forwards
+    and replaces whatever the client sent, so the control plane — which was
+    throwing the header away — is the only party that can observe this. A node
+    cannot claim fewer hops than it used; the field is `#[serde(skip)]` on the
+    heartbeat body, so it cannot be set from the node's side at all. `0` is a
+    real observation ("no relay carried this"), `null` means no heartbeat since
+    the column existed.
+  - `egress_proxy` on every node row: the node reports that its egress proxy
+    pool (ADR 0012) has an entry in rotation. This one is a **claim** and is
+    documented as one — a forward proxy is invisible to the receiver, so the
+    node is the only possible source. `None` (older binary) stays
+    distinguishable from `Some(false)`.
+  - The panel shows a `via relay ×N` badge, a `via proxy` badge, `reach ?` when
+    neither fact has been reported, and nothing at all for a direct node — with
+    a legend, because "no badge" would otherwise be an unexplained blank. A
+    fleet line above the table counts reachable/offline/revoked and how many
+    nodes are relayed, proxied or unknown.
+  - **What it does not claim:** a standalone `agentgrid-cp-edge` in front of the
+    control plane does not stamp the hop header (`EdgeConfig::max_hops = None`),
+    so `relay_hops: 0` does not prove there is no forwarder in the path.
+- **Hosts that were configured but never enrolled are visible.** The node list
+  is keyed by enrollment, so a host whose install failed — or whose daemon never
+  reached the control plane — had no row anywhere in the UI; the install jobs
+  existed at `GET /v1/node-installs` but nothing rendered them. The Nodes page
+  now lists them with the cross-reference that matters (`succeeded` only means
+  ssh finished): `never enrolled`, or the node's live status with its last
+  heartbeat. The list is in-memory and the UI says so, and a host installed by
+  hand never appears in it — there is no inventory of hosts, only of hosts the
+  control plane provisioned itself.
 
 ### Fixed
 

@@ -671,7 +671,7 @@ impl Store {
         const MAX_NODES: i64 = 1000;
         let limit = limit.unwrap_or(100).min(MAX_NODES as u64) as i64;
         let mut sql = String::from(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery, relay_hops, egress_proxy \
              FROM nodes WHERE 1=1",
         );
         if after.is_some() {
@@ -691,7 +691,7 @@ impl Store {
     /// `None` when the id is unknown.
     pub async fn get_node(&self, node_id: &str) -> Result<Option<NodeView>> {
         let row = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery, relay_hops, egress_proxy \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
@@ -1285,6 +1285,21 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok()),
+        // ADR 0026 / ADR 0012 reachability. Both NULL-able: a row that has not
+        // beaten since the columns existed knows neither, and a node without
+        // the `egress_proxy` field never says. `relay_hops = 0` is a real
+        // observation (the heartbeat arrived with no hop counter), so the
+        // panel must be able to tell it from `None`.
+        relay_hops: r
+            .try_get::<Option<i64>, _>("relay_hops")
+            .ok()
+            .flatten()
+            .and_then(|n| u32::try_from(n).ok()),
+        egress_proxy: r
+            .try_get::<Option<i64>, _>("egress_proxy")
+            .ok()
+            .flatten()
+            .map(|n| n != 0),
         created_at: r.try_get("created_at").unwrap_or_default(),
     }
 }

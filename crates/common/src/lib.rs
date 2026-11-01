@@ -635,6 +635,27 @@ pub struct NodeView {
     /// reported" rather than "clean", because those are different claims.
     #[serde(default)]
     pub adapter_env_delivery: Option<AdapterEnvDelivery>,
+    /// ADR 0026 reachability: how many relays the last heartbeat crossed before
+    /// it reached this control plane (`0` = none, i.e. the node dialled the
+    /// control plane itself).
+    ///
+    /// **Observed, not reported.** A relay replaces `x-agentgrid-relay-hops`
+    /// with its own count, so a node behind a relay cannot claim fewer hops
+    /// than it used. It can only claim *more*, which buys it nothing (the
+    /// number is a diagnostic, not an authorisation).
+    ///
+    /// `None` = no heartbeat since this column existed. Note what `0` does
+    /// *not* prove: a standalone `agentgrid-cp-edge` in front of the control
+    /// plane does not stamp the header (`EdgeConfig::max_hops = None`), so a
+    /// node behind a load balancer reads the same as a direct one.
+    #[serde(default)]
+    pub relay_hops: Option<u32>,
+    /// ADR 0012 reachability: the node reported that it reaches the control
+    /// plane through its egress proxy pool. A node claim — see
+    /// `HeartbeatRequest::egress_proxy` for why the control plane cannot
+    /// verify it. `None` = never reported.
+    #[serde(default)]
+    pub egress_proxy: Option<bool>,
 }
 
 /// Plan 2.5 (#204): one repository's attach state on a node. `state` is
@@ -1126,6 +1147,38 @@ pub struct HeartbeatRequest {
     /// sends the field would look exactly like a fully-migrated one.
     #[serde(default)]
     pub adapter_env_delivery: Option<AdapterEnvDelivery>,
+    /// ADR 0012 reachability: the node dials the control plane through its
+    /// egress proxy pool, so it is not connected directly.
+    ///
+    /// **A claim, not an observation.** The control plane cannot see a forward
+    /// proxy — the node's request looks like any other once it arrives — so the
+    /// only source for this is the node itself. `None` = the node never said
+    /// (a binary older than this field, or it has not beaten since upgrading),
+    /// which is *not* the same claim as `Some(false)`.
+    ///
+    /// The other half of the same question — is this node relayed? — is
+    /// **not** here on purpose: a node cannot tell a relay from a control
+    /// plane, it just has a URL. That one is observed by the control plane
+    /// from the `x-agentgrid-relay-hops` header and lands in
+    /// `NodeView::relay_hops`.
+    #[serde(default)]
+    pub egress_proxy: Option<bool>,
+    /// ADR 0026 reachability: relay hops this heartbeat crossed, **filled in
+    /// by the control plane** from `x-agentgrid-relay-hops` before the row is
+    /// written. The node never sends it.
+    ///
+    /// `#[serde(skip)]` in both directions, deliberately. The value describes
+    /// the *transport the request arrived on*, not anything the node knows —
+    /// a node cannot tell a relay from a control plane, it just has a URL. So
+    /// the only party that can observe it is the receiver, and skipping
+    /// deserialization means a node cannot spoof it even by editing its own
+    /// request. Skipping serialization keeps it out of the heartbeat body the
+    /// node sends, where it would otherwise be a field that means nothing.
+    ///
+    /// `None` = this heartbeat was not observed through a relay-aware
+    /// receiver (only tests reach that state).
+    #[serde(skip)]
+    pub relay_hops: Option<u32>,
 }
 
 /// ADR 0029: how the node hands adapter credentials to the agent.
@@ -2161,6 +2214,8 @@ mod tests {
             max_rss_mib: 0,
             capabilities_schema_version: None,
             supported_event_versions: None,
+            egress_proxy: None,
+            relay_hops: None,
         };
         assert_eq!(round_trip(&hb), hb);
         let resp = EnrollResponse {

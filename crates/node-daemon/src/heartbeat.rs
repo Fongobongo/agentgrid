@@ -501,6 +501,17 @@ pub fn spawn_heartbeat(
                     plain: cfg.adapter_env.len() as u32,
                     gateway: cfg.gateway_env.len() as u32,
                 }),
+                // ADR 0012 reachability: the control plane cannot see a
+                // forward proxy, so "am I connected directly?" has no observer
+                // on its side. `current()` — not `all()` — because the question
+                // is whether the request in flight goes through one: a pool
+                // whose every entry is dead has fallen back to direct egress
+                // (see `ProxyPool::current`), and reporting `true` then would
+                // name a proxy this beat is not using.
+                egress_proxy: Some(cfg.proxies.current().is_some()),
+                // Filled in by the control plane from the relay header; the
+                // node has no way to know it (`#[serde(skip)]` on the field).
+                relay_hops: None,
             };
             // Captured before the request: the gateway branch rotates the
             // endpoint, and `cfg.base()` read afterwards names the one we moved

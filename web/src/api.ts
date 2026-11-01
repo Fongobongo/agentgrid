@@ -64,6 +64,14 @@ export interface NodeView {
   // Counts only (names and values stay on the node). `null`/absent means the
   // node has never reported — which is NOT the same claim as plain === 0.
   adapter_env_delivery?: { plain: number; gateway: number } | null;
+  // ADR 0026 reachability: relays the last heartbeat crossed, as observed by
+  // the control plane from the header a relay stamps (0 = none). `null` =
+  // no heartbeat since the column existed.
+  relay_hops?: number | null;
+  // ADR 0012 reachability: the node reports that its egress proxy pool has an
+  // entry in rotation, so it is not connected directly. A node claim — the
+  // control plane cannot see a forward proxy. `null` = never reported.
+  egress_proxy?: boolean | null;
   // Feature "opencode profiles": the opencode profile this node applies.
   opencode_profile_id?: string | null;
 }

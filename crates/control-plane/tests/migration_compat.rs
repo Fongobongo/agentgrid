@@ -102,6 +102,8 @@ async fn migrations_serve_legacy_happy_path() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     assert!(s.heartbeat(&node_id, &hb).await.unwrap());
 

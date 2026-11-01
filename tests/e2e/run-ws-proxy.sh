@@ -19,7 +19,12 @@
 #      assertion. Everything above would also pass if the node had dialled the
 #      control plane directly and ignored the proxy; only the proxy's own record
 #      proves the traffic went through the tunnel;
-#   4. a task submitted after the session is up completes, so the control
+#   4. the control plane reports the node as `egress_proxy: true` with
+#      `relay_hops: 0`. The proxy half is the node's own claim (a forward proxy
+#      is invisible to the receiver), so this is the only place that proves the
+#      claim is actually sent and persisted — and that "0 relay hops" arrives as
+#      an observation rather than as a missing column;
+#   5. a task submitted after the session is up completes, so the control
 #      channel carried a real assignment, not just a handshake.
 #
 # Honest limit: everything is on 127.0.0.1, so "must use the proxy" is expressed
@@ -86,6 +91,7 @@ echo "   proxy listening on 127.0.0.1:$PROXY_PORT"
 echo ">> node on AGENTGRID_TRANSPORT=ws with AGENTGRID_PROXY_URLS=$PROXY"
 e2e_start_node n1 "ws-proxy-n1" "mock" "$TMP/work" "$TMP/repos" "$TMP/node" \
   AGENTGRID_TRANSPORT=ws \
+  AGENTGRID_HEARTBEAT_SECS=2 \
   AGENTGRID_PROXY_URLS="$PROXY"
 e2e_wait_nodes_online 1 || { echo "node never came online over the proxy"; tail -40 "$TMP/n1.log"; exit 1; }
 
@@ -104,7 +110,35 @@ grep -q "CONNECT 127.0.0.1:$PORT" "$HITS" \
   }
 echo "   proxy recorded: $(grep -c "CONNECT 127.0.0.1:$PORT" "$HITS") CONNECT(s) to the control plane"
 
-# --- 5. the channel carries a real assignment ---------------------------
+# --- 5. the control plane knows how the node reaches it ----------------
+# `egress_proxy` is the node's claim (nothing on the CP side can see a forward
+# proxy), `relay_hops` is what the CP observed on the request itself. Both are
+# NULL until a heartbeat lands, so poll rather than assert immediately.
+reach=""
+for _ in $(seq 1 30); do
+  reach=$(curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt" \
+    | python3 -c '
+import json, sys
+nodes = json.load(sys.stdin)["items"]
+n = next((x for x in nodes if x["name"] == "ws-proxy-n1"), None)
+if n is None or n.get("egress_proxy") is None:
+    print("pending")
+else:
+    print("%s/%s" % (json.dumps(n["egress_proxy"]), json.dumps(n["relay_hops"])))
+')
+  [ "$reach" = "true/0" ] && break
+  sleep 1
+done
+[ "$reach" = "true/0" ] || {
+  echo "the control plane does not report this node as proxied+direct (got '$reach')."
+  echo "egress_proxy must be the node's claim (true here: the pool has an entry)"
+  echo "and relay_hops must be 0 — an observation, not a missing column."
+  curl -fsS "$BASE/v1/nodes" -H "authorization: Bearer $jwt"
+  exit 1
+}
+echo "   control plane reports: egress_proxy=true, relay_hops=0"
+
+# --- 6. the channel carries a real assignment ---------------------------
 echo ">> a task after the tunnelled session is up"
 TID=$(curl -fsS -X POST "$BASE/v1/tasks" \
   -H "authorization: Bearer $jwt" -H 'content-type: application/json' \

@@ -16,6 +16,28 @@ use crate::auth::AuthedNode;
 use crate::routes::WorkflowRunsQuery;
 use crate::AppState;
 
+/// ADR 0026: the header a relay stamps with the number of relays the request
+/// has crossed (`crates/edge/src/lib.rs`, `HOPS_HEADER`). Duplicated as a
+/// literal rather than shared, because the control plane does not depend on
+/// the forwarder — and a `const` in a crate it never links would be a
+/// dependency added to share one string.
+const RELAY_HOPS_HEADER: &str = "x-agentgrid-relay-hops";
+
+/// Relay hops this request crossed, per the header a relay stamped.
+///
+/// Absent or unparseable means `0`: a request that did not come through a
+/// relay-aware forwarder is direct as far as we can tell, and a hand-edited
+/// header must not be able to make a node look relayed *or* hide that it was
+/// (the relay replaces the value, so a lower count cannot be forged; this
+/// only decides what a nonsense value reads as).
+fn relay_hops_from(headers: &axum::http::HeaderMap) -> u32 {
+    headers
+        .get(RELAY_HOPS_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 pub async fn list_nodes(
     State(state): State<Arc<AppState>>,
     Query(q): Query<WorkflowRunsQuery>,
@@ -174,8 +196,14 @@ pub async fn enroll(
 pub async fn heartbeat(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthedNode>,
+    headers: axum::http::HeaderMap,
     Json(mut req): Json<HeartbeatRequest>,
 ) -> StatusCode {
+    // ADR 0026: a relay stamps how many relays this request has crossed. The
+    // node cannot fake a *lower* number (every relay replaces the header with
+    // its own count), so this is the one place that can answer "is this node
+    // connected directly?" — a node cannot tell a relay from a control plane.
+    req.relay_hops = Some(relay_hops_from(&headers));
     if agentgrid_common::is_incompatible_protocol(&req.protocol_version) {
         let _ = state.store.set_node_degraded(&auth.node_id).await;
         // Audit X-C1: the heartbeat UPDATE keeps only 'revoked' sticky — it

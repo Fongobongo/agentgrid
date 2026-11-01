@@ -567,6 +567,25 @@ paths:
         credential gateway. Counts only; names and values stay on the node.
         Absent means the node has never reported (older binary, or no heartbeat
         since upgrading), which is **not** the same claim as `plain: 0`.
+
+        Reachability (ADR 0026 + ADR 0012): `relay_hops` is how many relays the
+        last heartbeat crossed before it arrived — `0` when none did — and
+        `egress_proxy` says the node dials through its egress proxy pool. The
+        two are sourced differently on purpose. `relay_hops` is **observed** by
+        the control plane from the `x-agentgrid-relay-hops` header that every
+        relay replaces with its own count, so a node cannot claim fewer hops
+        than it used; `egress_proxy` is **claimed** by the node, because a
+        forward proxy is invisible to the receiver. Both are `null` until a
+        heartbeat carries them (no heartbeat since the columns existed), and
+        `null` is not "direct" — a standalone `agentgrid-cp-edge` in front of
+        the control plane does not stamp the hop header, so `relay_hops: 0`
+        does not prove there is no forwarder in the path.
+
+        The list is every enrolled node in every state — `offline`, `degraded`,
+        `revoked` included. A node is flipped to `offline` after 30 s without a
+        heartbeat. A host that was configured but never enrolled has no row
+        here at all; `GET /v1/node-installs` is the only record of one, and it
+        is in-memory.
   /v1/nodes/{id}:
     parameters:
       - name: id

@@ -422,8 +422,8 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         return Ok(());
     }
     println!(
-        "{:<36} {:<10} {:<8} {:<6} {:<10} {:<12} {:<14} {:<12} {:<10}",
-        "ID", "STATUS", "ACTIVE", "MAX", "DISK", "INTERCEPT", "UNSAFE", "SPOOL", "REPOS"
+        "{:<36} {:<10} {:<8} {:<6} {:<10} {:<12} {:<14} {:<12} {:<12} {:<10}",
+        "ID", "STATUS", "ACTIVE", "MAX", "DISK", "INTERCEPT", "UNSAFE", "SPOOL", "REACH", "REPOS"
     );
     for n in &nodes {
         let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("-");
@@ -468,6 +468,7 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         };
         // Plan 2.5 (#204): per-repository attach state — `ready/total`,
         // with `!` when any repo is cloning/invalid (details in JSON).
+        let reach = reach_cell(n);
         let repos = n.get("repo_states").and_then(|v| v.as_array());
         let repo_cell = match repos {
             None => "-".to_string(),
@@ -485,10 +486,38 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
             }
         };
         println!(
-            "{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10} {intercept:<12} {unsafe_flag:<14} {spool:<12} {repo_cell:<10}"
+            "{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10} {intercept:<12} {unsafe_flag:<14} {spool:<12} {reach:<12} {repo_cell:<10}"
         );
     }
     Ok(())
+}
+
+/// ADR 0026 + ADR 0012: how this node reaches the control plane.
+///
+/// `direct` is only printed when both facts are known and neither says
+/// otherwise — `?` means no heartbeat has carried either column yet, and
+/// claiming `direct` for that would be a guess. `relay×N` is what the control
+/// plane observed on the request; `proxy` is what the node claims.
+fn reach_cell(n: &serde_json::Value) -> String {
+    let hops = n.get("relay_hops").and_then(|v| v.as_u64());
+    let proxy = n.get("egress_proxy").and_then(|v| v.as_bool());
+    if hops.is_none() && proxy.is_none() {
+        return "?".to_string();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(h) = hops {
+        if h > 0 {
+            parts.push(format!("relay×{h}"));
+        }
+    }
+    if proxy == Some(true) {
+        parts.push("proxy".to_string());
+    }
+    if parts.is_empty() {
+        "direct".to_string()
+    } else {
+        parts.join("+")
+    }
 }
 
 #[cfg(test)]
@@ -549,5 +578,44 @@ mod node_install_tests {
     fn explicit_binary_wins() {
         let p = resolve_node_binary(Some("/opt/ag/agentgrid-node-daemon")).unwrap();
         assert_eq!(p, PathBuf::from("/opt/ag/agentgrid-node-daemon"));
+    }
+}
+
+#[cfg(test)]
+mod reach_cell_tests {
+    use super::reach_cell;
+    use serde_json::json;
+
+    /// ADR 0026 / ADR 0012: `ag nodes ls` answers "is this node connected
+    /// directly?" without opening the panel.
+    #[test]
+    fn reach_cell_names_the_path_or_admits_it_does_not_know() {
+        // Never reported: `?`, never `direct` — that would be a guess.
+        assert_eq!(reach_cell(&json!({})), "?");
+        assert_eq!(
+            reach_cell(&json!({ "relay_hops": null, "egress_proxy": null })),
+            "?"
+        );
+
+        // Observed 0 hops and no proxy claim: direct.
+        assert_eq!(
+            reach_cell(&json!({ "relay_hops": 0, "egress_proxy": false })),
+            "direct"
+        );
+        // A node on an older binary sends no `egress_proxy`; the observation
+        // alone is enough to call it direct.
+        assert_eq!(reach_cell(&json!({ "relay_hops": 0 })), "direct");
+
+        assert_eq!(reach_cell(&json!({ "relay_hops": 2 })), "relay×2");
+        assert_eq!(
+            reach_cell(&json!({ "relay_hops": 0, "egress_proxy": true })),
+            "proxy"
+        );
+        // Both at once: the two facts are independent, so neither may hide the
+        // other.
+        assert_eq!(
+            reach_cell(&json!({ "relay_hops": 1, "egress_proxy": true })),
+            "relay×1+proxy"
+        );
     }
 }

@@ -66,6 +66,8 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     let resp = app
         .clone()
@@ -251,6 +253,8 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     let resp = app
         .clone()
@@ -358,6 +362,8 @@ async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     let resp = app
         .clone()
@@ -469,6 +475,8 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     let resp = app
         .clone()
@@ -710,6 +718,8 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     let resp = app
         .clone()
@@ -829,6 +839,8 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     let resp = app
         .clone()
@@ -917,6 +929,8 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     let resp = app
         .clone()
@@ -1452,4 +1466,92 @@ async fn poll_marks_the_proxy_pool_complete_so_removal_reaches_the_node() {
         pr.proxy_urls_complete,
         "empty + complete is the only way the node learns the pool is gone"
     );
+}
+
+/// ADR 0026: the relay stamps `x-agentgrid-relay-hops` and the control plane
+/// is the only party that can observe it — a node cannot tell a relay from a
+/// control plane, so "am I connected directly?" has no other source.
+///
+/// The header is read on the heartbeat and stored; the node's own body cannot
+/// set the value (`#[serde(skip)]` on `HeartbeatRequest::relay_hops`), which is
+/// what the last case pins.
+#[tokio::test]
+async fn heartbeat_records_relay_hops_from_the_header() {
+    use axum::body::Body;
+    use axum::http::Request;
+
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+    let (node_id, cred) = enroll(&app, "node-relayed", vec!["mock".into()], vec!["*".into()]).await;
+
+    let beat = |hops: Option<&str>, body: serde_json::Value| {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/v1/node/heartbeat")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {cred}"));
+        if let Some(h) = hops {
+            b = b.header("x-agentgrid-relay-hops", h);
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    };
+    let body = serde_json::json!({ "status": "online", "name": "node-relayed" });
+    let hops = |id: String| {
+        let store = state.store.clone();
+        async move { store.get_node(&id).await.unwrap().unwrap().relay_hops }
+    };
+
+    // Two relays carried it.
+    let resp = app
+        .clone()
+        .oneshot(beat(Some("2"), body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hops(node_id.clone()).await, Some(2));
+
+    // A direct beat: no header, so 0 — an observation, not a missing value.
+    let resp = app.clone().oneshot(beat(None, body.clone())).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hops(node_id.clone()).await, Some(0));
+
+    // Nonsense reads as 0 rather than failing the beat: a hand-edited header
+    // must not be able to take a node offline.
+    let resp = app
+        .clone()
+        .oneshot(beat(Some("not-a-number"), body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(hops(node_id.clone()).await, Some(0));
+
+    // The body cannot override it — the field is skipped on deserialization,
+    // so a node cannot claim to be relayed (or claim not to be).
+    let mut forged = body.clone();
+    forged["relay_hops"] = serde_json::json!(3);
+    let resp = app.clone().oneshot(beat(None, forged)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        hops(node_id.clone()).await,
+        Some(0),
+        "relay_hops must come from the transport, never from the node's body"
+    );
+
+    // The operator route carries it too (the panel reads /v1/nodes).
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/nodes", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let row = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == node_id.as_str())
+        .expect("node listed");
+    assert_eq!(row["relay_hops"], serde_json::json!(0));
 }

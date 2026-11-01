@@ -4306,6 +4306,8 @@ mod mem_gate_tests {
             capabilities_schema_version: None,
             supported_event_versions: None,
             public_key: None,
+            egress_proxy: None,
+            relay_hops: None,
         }
     }
 
@@ -4661,6 +4663,54 @@ mod mem_gate_tests {
         s.heartbeat(&node_id, &req).await.unwrap();
         let n = s.get_node(&node_id).await.unwrap().expect("node");
         assert_eq!(n.adapter_env_delivery, None);
+    }
+
+    /// Reachability (ADR 0026 observed + ADR 0012 claimed). Both columns are
+    /// NULL-able for the same reason `adapter_env_delivery` is: "nobody has
+    /// told us" must stay distinguishable from a real negative report.
+    #[tokio::test]
+    async fn heartbeat_persists_reachability() {
+        let (s, node_id) = fresh().await;
+
+        // No heartbeat yet: neither fact is known, and 0 hops would be a
+        // claim this row cannot make.
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(n.relay_hops, None);
+        assert_eq!(n.egress_proxy, None);
+
+        // A direct, proxy-less beat: the observation is 0 hops, the claim is
+        // "no proxy". Both are real answers, not absences.
+        let mut req = hb(4096);
+        req.relay_hops = Some(0);
+        req.egress_proxy = Some(false);
+        s.heartbeat(&node_id, &req).await.unwrap();
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(n.relay_hops, Some(0), "0 hops is an observation");
+        assert_eq!(n.egress_proxy, Some(false));
+
+        // Relayed through two hops, dialling through the egress pool.
+        let mut req = hb(4096);
+        req.relay_hops = Some(2);
+        req.egress_proxy = Some(true);
+        s.heartbeat(&node_id, &req).await.unwrap();
+        // list_nodes carries both — the panel reads that route, and a column
+        // added only to `row_to_node_view` would read as None here.
+        let all = s.list_nodes(None, None).await.unwrap();
+        let n = all.iter().find(|x| x.id == node_id).expect("listed");
+        assert_eq!(n.relay_hops, Some(2));
+        assert_eq!(n.egress_proxy, Some(true));
+
+        // A node downgraded to a binary that does not send `egress_proxy`
+        // returns to "never said" — stale "via proxy" would be a lie about the
+        // current path. `relay_hops` cannot go back to NULL: it is the control
+        // plane's own observation and every beat carries one.
+        let mut req = hb(4096);
+        req.relay_hops = Some(0);
+        req.egress_proxy = None;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(n.relay_hops, Some(0));
+        assert_eq!(n.egress_proxy, None);
     }
 
     /// A corrupt blob must degrade to "not reported", never fail a listing:

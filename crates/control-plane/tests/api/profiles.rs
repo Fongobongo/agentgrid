@@ -1093,6 +1093,8 @@ async fn opencode_heartbeat_drift_audit() {
         capabilities_schema_version: None,
         supported_event_versions: None,
         public_key: None,
+        egress_proxy: None,
+        relay_hops: None,
     };
     let hb_req = post_auth(
         "/v1/node/heartbeat",

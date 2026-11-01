@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { AdapterEnvBadge } from './components/Nodes';
+import { AdapterEnvBadge, FleetSummary, InstallAttempts, ReachBadge } from './components/Nodes';
+import type { InstallJob, NodeView } from './api';
 
 // ADR 0029 observability. The badge is the only place an operator can see
 // whether a node's adapter credentials are still readable inside the sandbox —
@@ -48,5 +49,181 @@ describe('AdapterEnvBadge', () => {
 
   it('renders nothing for a node with no adapter env at all', () => {
     expect(render({ plain: 0, gateway: 0 })).toBe('');
+  });
+});
+
+/**
+ * ADR 0026 + ADR 0012: "is this node reachable, and is it direct?"
+ *
+ * The two facts come from different places — `relay_hops` is what the control
+ * plane observed on the request, `egress_proxy` is what the node claims — so
+ * the badge has to keep them apart rather than merge them into one "not
+ * direct" label.
+ */
+function renderReach(relayHops?: number | null, egressProxy?: boolean | null) {
+  return renderToStaticMarkup(<ReachBadge relayHops={relayHops} egressProxy={egressProxy} />);
+}
+
+describe('ReachBadge', () => {
+  it('renders nothing for a direct, proxy-less node', () => {
+    // The common case. A badge on every row would be noise; the legend above
+    // the table says that "no badge" means direct.
+    expect(renderReach(0, false)).toBe('');
+  });
+
+  it('names the hop count when a relay carried the heartbeat', () => {
+    const html = renderReach(2, false);
+    expect(html).toContain('via relay ×2');
+    expect(html).toContain('badge warn');
+    // The tooltip must say the number is observed, not reported: that is why
+    // an operator can trust it.
+    expect(html).toContain('x-agentgrid-relay-hops');
+    expect(html).toContain('ADR 0026');
+  });
+
+  it('shows the proxy claim separately, because a node can be both', () => {
+    const html = renderReach(1, true);
+    expect(html).toContain('via relay ×1');
+    expect(html).toContain('via proxy');
+    // And it must not read as a verified fact.
+    expect(html).toContain('node claim');
+  });
+
+  it('shows only the proxy badge when the node is proxied but direct', () => {
+    const html = renderReach(0, true);
+    expect(html).toContain('via proxy');
+    expect(html).not.toContain('via relay');
+  });
+
+  /**
+   * The state that must not be silently rendered as "direct": a row older than
+   * the migration has no heartbeat with either column, so the panel knows
+   * nothing about its path.
+   */
+  it('says "reach ?" when neither fact has ever been reported', () => {
+    expect(renderReach(null, null)).toContain('reach ?');
+    expect(renderReach(undefined, undefined)).toContain('reach ?');
+  });
+
+  it('trusts a reported 0 even when the proxy claim is missing', () => {
+    // A node on an older binary sends no `egress_proxy`; the observed hop
+    // count is still an observation, so this is not "unknown".
+    const html = renderReach(0, null);
+    expect(html).not.toContain('reach ?');
+    expect(html).toBe('');
+  });
+});
+
+function node(over: Partial<NodeView>): NodeView {
+  return {
+    id: over.name ?? 'id',
+    name: 'n',
+    status: 'online',
+    adapters: [],
+    repositories: [],
+    max_concurrency: 1,
+    active_attempts: 0,
+    last_heartbeat_at: '2026-01-01T00:00:00Z',
+    agent_version: '0.8.1',
+    load_avg: 0,
+    free_disk_mb: 0,
+    ...over,
+  } as NodeView;
+}
+
+describe('FleetSummary', () => {
+  it('separates "offline" from "revoked" and counts only answering nodes as reachable', () => {
+    const html = renderToStaticMarkup(
+      <FleetSummary
+        nodes={[
+          node({ name: 'a', status: 'online' }),
+          node({ name: 'b', status: 'degraded' }),
+          node({ name: 'c', status: 'offline' }),
+          node({ name: 'd', status: 'revoked' }),
+        ]}
+      />,
+    );
+    expect(html).toContain('2/4 reachable');
+    expect(html).toContain('1 offline');
+    expect(html).toContain('1 revoked');
+    // degraded is reachable — it is answering, just not fully usable.
+    expect(html).toContain('1 degraded');
+  });
+
+  it('counts relayed, proxied and unknown paths', () => {
+    const html = renderToStaticMarkup(
+      <FleetSummary
+        nodes={[
+          node({ name: 'a', relay_hops: 2, egress_proxy: false }),
+          node({ name: 'b', relay_hops: 0, egress_proxy: true }),
+          node({ name: 'c', relay_hops: null, egress_proxy: null }),
+        ]}
+      />,
+    );
+    expect(html).toContain('1 via relay');
+    expect(html).toContain('1 via proxy');
+    expect(html).toContain('1 path unknown');
+  });
+
+  it('says plainly that an unenrolled host leaves no row', () => {
+    const html = renderToStaticMarkup(<FleetSummary nodes={[]} />);
+    expect(html).toContain('No nodes are enrolled');
+  });
+});
+
+function job(over: Partial<InstallJob>): InstallJob {
+  return {
+    id: over.name ?? 'job',
+    host: 'root@10.0.0.5',
+    name: 'n',
+    state: 'succeeded',
+    steps: [],
+    error: null,
+    server_url: null,
+    started_at: '2026-01-01T00:00:00Z',
+    finished_at: null,
+    ...over,
+  } as InstallJob;
+}
+
+describe('InstallAttempts', () => {
+  it('renders nothing when no host was ever provisioned from the panel', () => {
+    expect(renderToStaticMarkup(<InstallAttempts jobs={[]} nodes={[]} />)).toBe('');
+  });
+
+  /**
+   * The gap this closes: `state: succeeded` only means ssh finished. The
+   * question is whether the daemon ever enrolled, and a host that did not has
+   * no row in the node table at all.
+   */
+  it('marks a successful install whose daemon never enrolled', () => {
+    const html = renderToStaticMarkup(
+      <InstallAttempts jobs={[job({ name: 'ghost', state: 'succeeded' })]} nodes={[]} />,
+    );
+    expect(html).toContain('never enrolled');
+    expect(html).toContain('root@10.0.0.5');
+  });
+
+  it('cross-references an enrolled node and its live status', () => {
+    const html = renderToStaticMarkup(
+      <InstallAttempts
+        jobs={[job({ name: 'n1' })]}
+        nodes={[node({ name: 'n1', status: 'offline' })]}
+      />,
+    );
+    expect(html).not.toContain('never enrolled');
+    expect(html).toContain('offline');
+    expect(html).toContain('last seen');
+  });
+
+  it('surfaces the failure text of a failed install', () => {
+    const html = renderToStaticMarkup(
+      <InstallAttempts
+        jobs={[job({ name: 'bad', state: 'failed', error: 'ssh: connect to host 10.0.0.5 port 22' })]}
+        nodes={[]}
+      />,
+    );
+    expect(html).toContain('badge err');
+    expect(html).toContain('ssh: connect to host');
   });
 });

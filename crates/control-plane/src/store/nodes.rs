@@ -214,6 +214,15 @@ impl Store {
             Some(d) => Some(serde_json::to_string(&d)?),
             None => None,
         };
+        // ADR 0012: same rule for the egress-proxy claim — NULL is "the node
+        // never said", which a node downgraded to a binary without the field
+        // must be able to return to. `false` is a real report and must not be
+        // conflated with it.
+        let egress_proxy = req.egress_proxy.map(i64::from);
+        // ADR 0026: observed by the route handler from the relay header. Bound
+        // unconditionally (0 when absent), so a row stops being NULL as soon as
+        // it beats once — "0 hops" is an observation, not a missing value.
+        let relay_hops = req.relay_hops.map(i64::from);
         let now = now_iso();
         let affected = self
             .write_one(
@@ -224,7 +233,7 @@ impl Store {
                load_avg = ?, free_disk_mb = ?, free_memory_mb = ?, cpu_count = ?, mem_available_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
                outbox_bytes = ?, artifact_spool_bytes = ?, \
-               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ?, adapter_env_delivery = ? \
+               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ?, adapter_env_delivery = ?, egress_proxy = ?, relay_hops = ? \
              WHERE id = ?",
                 )
                 // active_attempts is intentionally not heartbeat-settable: it is the
@@ -269,6 +278,11 @@ impl Store {
                 // That is the honest answer — the information genuinely went
                 // away — and stale counts would read as a clean node.
                 .bind(&adapter_env_delivery)
+                // ADR 0012 / ADR 0026: reachability. `egress_proxy` is the
+                // node's claim (NULL when it does not say), `relay_hops` is
+                // what this control plane observed on this very request.
+                .bind(egress_proxy)
+                .bind(relay_hops)
                 .bind(node_id),
             )
             .await?

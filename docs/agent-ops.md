@@ -561,6 +561,48 @@ allowed to be 1 on purpose: a single `502` is a blip, and rotating on it would
 shuffle every node in the fleet during any bad minute. The counter is shared by
 poll, heartbeat and ws, so the threshold counts one run across all three.
 
+## Is this node connected directly?
+
+Two mechanisms above make a node reach the control plane *indirectly* — the
+egress proxy pool and a relay chain — and they fail in the same way: everything
+looks fine, because the node is online. Until this change nothing recorded which
+path a node used, so "node B is online" could mean four different things.
+
+`GET /v1/nodes` now carries two fields per node, and the difference between them
+is the point:
+
+| field | source | who can be wrong |
+| --- | --- | --- |
+| `relay_hops` | **observed** — a relay stamps `x-agentgrid-relay-hops` on every request it forwards and *replaces* whatever the client sent | a node cannot claim fewer hops than it used |
+| `egress_proxy` | **claimed** by the node in its heartbeat | a forward proxy is invisible to the receiver, so the node is the only possible source |
+
+```bash
+ag nodes ls
+# ... SPOOL  REACH        REPOS
+#     -      direct       -
+#     -      relay×2      -
+#     -      proxy        3/3
+#     -      relay×1+proxy 3/3
+#     -      ?            -     <- no heartbeat since the columns existed
+```
+
+`?` is not `direct`: it means no heartbeat has carried either fact yet (a row
+older than the migration). The panel renders the same three states as badges.
+
+What `relay_hops: 0` does **not** prove: a standalone `agentgrid-cp-edge` in
+front of the control plane is started with `EdgeConfig::max_hops = None` and
+does not stamp the header, so a node behind a load balancer reads exactly like a
+direct one. That is a deliberate asymmetry — the counter exists to cut loops,
+not to inventory forwarders, and the edge leaves requests it has no reason to
+rewrite alone. There is no flag to change it: the only forwarder that stamps
+today is the node relay (`AGENTGRID_RELAY_LISTEN`). So read `relay×N` as "a node
+relay carried this", and `direct` as "no node relay did" rather than "nothing
+did".
+
+The egress-proxy claim is re-evaluated every heartbeat from the pool's *current*
+entry, so a pool whose every entry is dead reports `false` on the next beat: the
+node has fallen back to direct egress, and the badge disappears with it.
+
 ## Two-host smoke test
 
 A minimal end-to-end check that both nodes actually work:
