@@ -243,3 +243,23 @@ async fn the_rest_of_the_node_api_is_still_closed() {
         .unwrap();
     assert_eq!(heartbeat.status(), 401);
 }
+
+/// `docs/openapi.yaml` gives both script routes a `405` and nothing else in the
+/// 4XX range, on the grounds that the script is embedded in the binary and has
+/// no per-request way to fail. This is the test that keeps that claim honest —
+/// and it also proves the auth exemption is method-agnostic: a POST to a public
+/// path is answered by the router, not bounced to a credential check.
+#[tokio::test]
+async fn a_non_get_on_a_script_route_is_405() {
+    let base = boot().await;
+    let http = reqwest::Client::new();
+    for path in ["/v1/node/join.sh", "/v1/node/install.sh"] {
+        let resp = http.post(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(resp.status(), 405, "POST {path}");
+        let body = resp.text().await.unwrap();
+        assert!(
+            !body.contains("#!/usr/bin/env bash"),
+            "POST {path} returned the script body"
+        );
+    }
+}

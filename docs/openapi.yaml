@@ -892,6 +892,14 @@ paths:
       responses:
         '200':
           description: "The script (`text/x-shellscript`, `cache-control: no-store`)."
+        '405':
+          description: |
+            Not a GET. This is the only 4XX the route has: the script is
+            embedded in the binary and its only input is the request's `Host`,
+            so there is nothing per-request to reject. Deliberately **not** a
+            `404` when no bundle is configured — `curl -f | bash` turns a 4XX
+            into a silent no-op, and the script's own "is AGENTGRID_NODE_DIST
+            set?" message is the one an operator can act on.
   /v1/node/install.sh:
     get:
       summary: The node installer the join script delegates to
@@ -904,6 +912,11 @@ paths:
       responses:
         '200':
           description: "The installer (`text/x-shellscript`, `cache-control: no-store`)."
+        '405':
+          description: |
+            Not a GET. Like `/v1/node/join.sh`, the installer is embedded in the
+            binary, so a wrong method is the only way this route can be
+            refused.
   /v1/node/bundle:
     get:
       summary: Manifest of the node bundle this control plane can serve
