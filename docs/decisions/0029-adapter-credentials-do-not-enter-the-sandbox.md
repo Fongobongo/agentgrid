@@ -1,9 +1,10 @@
 # ADR 0029: Adapter credentials do not enter the sandbox
 
-Status: **proposed** — nothing here is implemented. T13 in
-[`threat-model.md`](threat-model.md) stays open until the inject mode (option F)
-ships, and stays *partially* open even then: neither F nor D stops the agent
-from *using* a credential while it lives, they only bound and attribute it.
+Status: **proposed** — nothing here is implemented. The threat it addresses is
+split in [`threat-model.md`](threat-model.md) as **T13a** (the secret is
+readable by the agent) and **T13b** (the agent acts with a credential it holds).
+T13a closes for `gateway` entries when option F ships; T13b is not closable by
+construction and is bounded instead.
 
 ## Context
 
@@ -50,8 +51,8 @@ The agent process is the container's main process. It can print
 `$ANTHROPIC_API_KEY`, copy it into the worktree, or send it to any host it can
 reach. Output masking (T1) cannot help: masking filters what is *logged*, while
 the value is genuinely present, and any exfiltration path that does not pass
-through a logged stream is unaffected. **This is the exposure T13 names, and the
-only one this ADR is about.**
+through a logged stream is unaffected. **This is T13a, and the only exposure
+this ADR is about.**
 
 Two things sharpen it. `network_mode=restricted` gives the sandbox exactly one
 reachable peer — the egress proxy (ADR 0012/0023) — so the set of destinations a
@@ -66,7 +67,7 @@ node → sandbox.
 
 ## Options
 
-**A. Status quo.** T13 stays "not yet enforced" permanently, and every operator
+**A. Status quo.** T13a stays "not yet enforced" permanently, and every operator
 who wants a hardened node invents the same workaround. Rejected as a
 destination; this is the starting point.
 
@@ -76,7 +77,7 @@ addresses only half of it (`docker inspect` still shows the value). It also
 cannot help exposure 2: either the CLI reads the credential from a path — which
 almost none do — or a wrapper exports it into the child's environment, at which
 point the agent has it again. The one honest gain is smaller than the confusion
-of shipping it under T13's name.
+of shipping it under T13a's name.
 
 **C. A credential gateway the sandbox talks to instead of the provider.** The
 sandbox gets a placeholder (`ANTHROPIC_API_KEY=agentgrid-gateway`) and a base URL
@@ -238,12 +239,12 @@ next:
    compatibility, not security: the agent's leg is inside the sandbox either way.
 6. **Document D as the escape hatch**, for adapters that cannot take F, with its
    costs stated next to it. Not the default.
-7. **Change T13's row to an honest partial**: "enforced for `gateway` entries;
-   `env` entries are still handed to the agent and say so". Neither C nor F
-   closes T13 — the agent can still *use* a capability or a short-lived token
-   while it lives; both shrink the blast radius and make it attributable, which
-   is not the same claim.
-8. **Do not ship B**, and do not describe anything as T13 mitigation unless the
+7. **Close T13a, do not claim T13b.** The split matters: T13a ("the secret is
+   readable by the agent") closes for `gateway` entries and the row says which
+   entries are still `env`. T13b ("the agent acts with a credential it holds")
+   cannot close — acting is the product — so it is bounded by the quota, the
+   revocation and the provider-boundary accounting, and described that way.
+8. **Do not ship B**, and do not describe anything as T13a mitigation unless the
    value never enters the sandbox.
 
 ## Consequences
