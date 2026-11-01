@@ -144,15 +144,23 @@ impl ProvisioningRuntime {
     }
 }
 
-fn resolve_node_binary() -> Option<PathBuf> {
-    let dir = std::env::var("AGENTGRID_NODE_DIST")
+/// Where the node binaries live: `AGENTGRID_NODE_DIST`, else the directory the
+/// control plane itself runs from (the release tarball unpacks them side by
+/// side). Shared with the bundle endpoints in [`super::join`] — a control plane
+/// that can push a daemon over ssh can also serve it to a host that pulls.
+pub(crate) fn node_dist_dir() -> Option<PathBuf> {
+    std::env::var("AGENTGRID_NODE_DIST")
         .ok()
         .map(PathBuf::from)
         .or_else(|| {
             std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        })?;
+        })
+}
+
+fn resolve_node_binary() -> Option<PathBuf> {
+    let dir = node_dist_dir()?;
     ["agentgrid-node-daemon", "agentgrid-node-daemon.exe"]
         .iter()
         .map(|n| dir.join(n))

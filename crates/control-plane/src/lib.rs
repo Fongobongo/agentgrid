@@ -5,6 +5,10 @@
 //! persistence in Stage 2.1.
 
 mod auth;
+// The one list of node routes that are open before a credential exists. The
+// contract test asserts the OpenAPI document agrees with it, so the two cannot
+// drift apart the way a second hardcoded list would.
+pub use auth::node_route_is_public;
 use auth::Claims;
 mod config;
 mod diff_scan;
@@ -711,6 +715,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .get(routes::repositories::list_repositories),
         )
         .route("/v1/node/enroll", post(routes::nodes::enroll))
+        // Pull-based join: the new host fetches the script, the installer and
+        // the daemon from the control plane it is joining (ADR 0027 covers the
+        // push direction, which needs ssh *to* the host). Unauthenticated on
+        // purpose — see `auth::node_route_is_public`.
+        .route("/v1/node/join.sh", get(routes::join::join_script))
+        .route("/v1/node/install.sh", get(routes::join::install_script))
+        .route("/v1/node/bundle", get(routes::join::bundle_manifest))
+        .route("/v1/node/bundle/{name}", get(routes::join::bundle_file))
         .route("/v1/node/poll", post(routes::events::poll))
         .route("/v1/node/ws", get(ws::node_ws))
         .route("/v1/node/heartbeat", post(routes::nodes::heartbeat))

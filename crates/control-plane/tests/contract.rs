@@ -264,11 +264,15 @@ fn effective_schemes(doc: &Value, op: &Value) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// `/v1/node/*` is authenticated by the node credential, except `enroll`,
-/// which issues it (see `auth::require_node_auth`). Documenting a node route
-/// under the user scheme makes a generated client send a JWT to a route that
-/// rejects it — and documenting a user route under the node scheme does the
-/// same in reverse.
+/// `/v1/node/*` is authenticated by the node credential, except the routes
+/// that issue or bootstrap one — `enroll`, and the pull-based join (script,
+/// installer, bundle), which a host with nothing installed has to reach.
+///
+/// The exemption list is not duplicated here: `auth::node_route_is_public` is
+/// what the middleware itself consults, so the document and the code cannot
+/// drift. Documenting a node route under the user scheme makes a generated
+/// client send a JWT to a route that rejects it — and documenting a user route
+/// under the node scheme does the same in reverse.
 #[test]
 fn node_routes_use_the_node_scheme() {
     let doc = openapi_doc();
@@ -277,13 +281,13 @@ fn node_routes_use_the_node_scheme() {
         if !path.starts_with("/v1/node/") {
             continue;
         }
-        let enroll = path == "/v1/node/enroll";
+        let public = agentgrid_control_plane::node_route_is_public(path);
         for (method, op) in item.as_object().expect("path item").iter() {
             if !matches!(method.as_str(), "get" | "post" | "put" | "delete" | "patch") {
                 continue;
             }
             let schemes = effective_schemes(&doc, op);
-            let ok = if enroll {
+            let ok = if public {
                 schemes.is_empty()
             } else {
                 schemes.contains("nodeAuth") && !schemes.contains("userAuth")

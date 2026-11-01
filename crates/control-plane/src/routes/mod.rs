@@ -8,6 +8,7 @@ pub mod artifacts;
 pub mod attempts;
 pub mod conversations;
 pub mod events;
+pub mod join;
 pub mod learnings;
 pub mod maintenance;
 pub mod nodes;

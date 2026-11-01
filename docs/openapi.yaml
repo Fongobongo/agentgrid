@@ -864,6 +864,89 @@ paths:
         node has no credential yet, so it authenticates with the one-time
         enrollment token instead. `require_node_auth` exempts this path.
       security: []
+  /v1/node/join.sh:
+    get:
+      summary: Shell script that joins a new host to this control plane
+      description: |
+        Served with this control plane's public URL substituted in, so the whole
+        join is one line the operator copies out of the panel and pastes on the
+        new host:
+
+        ```sh
+        curl -fsSL https://cp.example.com/v1/node/join.sh | sudo bash -s -- --token <t>
+        ```
+
+        The script fetches the daemon (and the adapters named on the command
+        line) from `/v1/node/bundle`, verifies each against the bundle's
+        SHA-256, then hands the staging directory to the installer served at
+        `/v1/node/install.sh` — the same `deploy/install-node.sh` the release
+        tarball ships, so the pull path and the tarball path run one
+        implementation.
+
+        Unauthenticated like `/v1/node/enroll`: a host with nothing installed
+        has no credential to present. The enrollment token it is handed is
+        single-use and expires in 10 minutes, and that is what authorizes the
+        join. This is the pull direction; `POST /v1/node-installs` is the push
+        direction, which needs ssh *to* the host.
+      security: []
+      responses:
+        '200':
+          description: "The script (`text/x-shellscript`, `cache-control: no-store`)."
+  /v1/node/install.sh:
+    get:
+      summary: The node installer the join script delegates to
+      description: |
+        `deploy/install-node.sh` verbatim, so a host that cannot run the join
+        script can still fetch the installer and drive it by hand. Takes the
+        server URL, the token, a `--staging` directory of verified binaries and
+        optionally `--data-dir`/`--bin-dir`/`--adapters`.
+      security: []
+      responses:
+        '200':
+          description: "The installer (`text/x-shellscript`, `cache-control: no-store`)."
+  /v1/node/bundle:
+    get:
+      summary: Manifest of the node bundle this control plane can serve
+      description: |
+        One line per file — `<name> <size> <sha256>` — preceded by
+        `# arch=<arch> os=<os>`. Plain text rather than JSON on purpose: the
+        consumer is a shell script on a host that may have no JSON parser, and
+        the format is one `read` away.
+
+        The bundle is whatever `AGENTGRID_NODE_DIST` holds (default: the
+        directory the control plane runs from), restricted to
+        `agentgrid-node-daemon*` and `adapter-*` at the top level. The `arch`
+        line is what lets the script refuse to install an x86-64 daemon on an
+        arm host instead of producing `Exec format error` later.
+
+        `404` when no bundle is configured, so the panel can explain it.
+      security: []
+      responses:
+        '200':
+          description: "The manifest (`text/plain`)."
+        '404':
+          description: No `agentgrid-node-daemon` in `AGENTGRID_NODE_DIST`.
+  /v1/node/bundle/{name}:
+    get:
+      summary: One file from the node bundle
+      description: |
+        The bytes plus an `x-agentgrid-sha256` header carrying the same digest
+        the manifest lists. Only the daemon and `adapter-*` files at the top
+        level of the dist directory are served, and the resolved path must stay
+        inside it — that directory is operator-chosen, and an endpoint that
+        serves "whatever is in this folder" is a reader for any file the control
+        plane can open.
+      security: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: "The file (`application/octet-stream`)."
+        '404':
+          description: Not in the bundle.
   /v1/node/heartbeat:
     post:
       summary: Publish node status/load/capabilities (node credentials)

@@ -1204,3 +1204,25 @@ export function getInstallJob(id: string): Promise<InstallJob> {
 export function listInstallJobs(): Promise<InstallJob[]> {
   return getJson<InstallJob[]>("/v1/node-installs");
 }
+
+export interface EnrollTokenView {
+  token: string;
+  expires_at: string;
+}
+
+/**
+ * Mint a single-use enrollment token (10 minutes) for the pull-based join.
+ *
+ * The join command carries the token in clear text — that is what a
+ * copy-pasteable command is — so it is deliberately short-lived and can be
+ * spent once. Nothing is stored on this side.
+ */
+export async function createEnrollmentToken(): Promise<EnrollTokenView> {
+  const r = await req("POST", "/v1/nodes/enrollment-token");
+  if (!r.ok)
+    throw new ApiError(
+      r.status,
+      `POST /v1/nodes/enrollment-token -> ${r.status}`,
+    );
+  return r.json();
+}

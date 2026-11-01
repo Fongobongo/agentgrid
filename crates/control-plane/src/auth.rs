@@ -114,14 +114,29 @@ pub(crate) struct AuthedNode {
     pub(crate) node_id: String,
 }
 
-/// Enforce Bearer node-credential auth on all `/v1/node/` routes except enroll.
+/// Node-facing routes that must work before the caller has a credential.
+///
+/// `/v1/node/enroll` is authorized by the enrollment token in its body. The
+/// join routes are the same deal one step earlier: a host that has nothing
+/// installed yet fetches the script, the installer and the bundle, and the
+/// single-use ten-minute token it was handed is what authorizes the enrollment
+/// those files lead to. Everything else under `/v1/node/` stays closed.
+pub fn node_route_is_public(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/node/enroll" | "/v1/node/join.sh" | "/v1/node/install.sh" | "/v1/node/bundle"
+    ) || path.starts_with("/v1/node/bundle/")
+}
+
+/// Enforce Bearer node-credential auth on all `/v1/node/` routes except the
+/// ones a node has to reach *before* it has a credential.
 pub async fn require_node_auth(
     State(state): State<Arc<AppState>>,
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path().to_string();
-    if path.starts_with("/v1/node/") && path != "/v1/node/enroll" {
+    if path.starts_with("/v1/node/") && !node_route_is_public(&path) {
         let cred = req
             .headers()
             .get(header::AUTHORIZATION)

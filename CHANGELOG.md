@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+### Added
+
+- **One-line node join — the pull-based twin of `ag nodes install`.** The push
+  path needs ssh *to* the host, so it is exactly wrong where a fleet grows: a
+  host behind NAT, a host with no sshd, a host another team owns. This inverts
+  it. The panel mints a single-use token (ten minutes) and prints one line:
+
+  ```sh
+  curl -fsSL https://cp.example.com:7800/v1/node/join.sh | sudo bash -s -- --token <t>
+  ```
+
+  The host fetches the join script, the daemon and the adapters from the
+  control plane it is joining (`/v1/node/join.sh`, `/v1/node/install.sh`,
+  `/v1/node/bundle`, `/v1/node/bundle/{name}`), verifies every byte against the
+  bundle's SHA-256 **before** anything is installed, then hands the staging
+  directory to the same `deploy/install-node.sh` the release tarball ships — one
+  installer, not two that drift. `--dry-run` fetches and verifies without
+  installing.
+  - The bundle is `AGENTGRID_NODE_DIST` — the directory `ag nodes install`
+    already scp's from, so a control plane that can push can also serve. Only
+    `agentgrid-node-daemon*` and `adapter-*` at the top level are exposed, and
+    the resolved path must stay inside that directory: it is operator-chosen,
+    and "serve whatever is in this folder" would be a reader for any file the
+    control plane can open.
+  - The manifest carries `arch`/`os`, so an arm host refuses an x86-64 bundle
+    instead of installing a daemon that dies with `Exec format error` later.
+  - The token is an argument, never a query parameter: a query string lands in
+    the access log, where a token outlives its ten minutes.
+  - The four routes are unauthenticated by design, like `/v1/node/enroll` — a
+    host with nothing installed has no credential to present.
+    `auth::node_route_is_public` is now the one list of them, and the contract
+    test asks it instead of keeping a second copy that could drift.
+- `deploy/install-node.sh` takes `--data-dir`.
+
 ### Fixed
 
 - **`AGENTGRID_ARTIFACT_ROOT` is honoured.** It was set by both Dockerfiles,

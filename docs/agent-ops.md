@@ -59,12 +59,37 @@ node whose adapters include `opencode`. Scale by adding hosts, not slots.
 
 ## Adding a node
 
-Three ways, in the order to try them. All of them end the same way: the daemon
+Four ways, in the order to try them. All of them end the same way: the daemon
 enrolls with a one-shot token, appears in `Nodes`, and from then on receives
 tasks like any other node (delivery is pull — the control plane never dials
 it).
 
-**1. From the panel.** `Nodes → Install node…`. The control plane runs the
+**1. One line, run on the new host.** `Nodes → Install node… → get join
+command` mints a token and prints it:
+
+```bash
+curl -fsSL https://cp.example.com:7800/v1/node/join.sh | sudo bash -s -- --token <token>
+```
+
+That is the whole procedure. The host fetches the join script from the control
+plane, which downloads the daemon (and the adapters named on the line) from
+`/v1/node/bundle`, verifies every byte against the bundle's SHA-256, and hands
+the staging directory to the same `deploy/install-node.sh` the release tarball
+ships — so this ends in a systemd unit, exactly like option 4.
+
+Nothing on the control plane connects to the host, which is the point: it works
+when the CP cannot reach the host at all (NAT, no ssh daemon, a host behind a
+bastion). The host only has to reach the CP, which it must do anyway. The
+binaries come from `AGENTGRID_NODE_DIST` — the ones this control plane would
+have pushed — so a CP that can push can also serve.
+
+The token is single-use and expires in ten minutes. It is passed as an argument
+rather than a query parameter on purpose: a query string lands in the access
+log, where a token outlives its TTL. Add `--dry-run` to fetch and verify
+everything without installing, `--adapters mock,opencode` to pick what to
+install, or `--server <url>` when the script was not fetched from the CP.
+
+**2. From the panel.** `Nodes → Install node…`. The control plane runs the
 install itself over ssh: verify (or pin) the host key, copy
 `agentgrid-node-daemon`, write a `0600` env file with a one-shot token, start
 the daemon. Each step is shown as it completes.
@@ -85,7 +110,7 @@ reach the CP directly.
 With the flag off, the same dialog renders the server's `reason` and the
 equivalent `ag nodes install` command, so nothing is a dead end.
 
-**2. From the CLI**, on a machine that can reach the host:
+**3. From the CLI**, on a machine that can reach the host:
 
 ```bash
 ag nodes install --host user@host [--ssh-key ~/.ssh/id_ed25519] \
@@ -107,7 +132,7 @@ running the command, so the host trusts the CA and the credential expires on
 its own. A certificate without `--ssh-key`, or together with `--password`, is
 refused before a connection is opened — not silently ignored.
 
-**3. On the host itself**, for a durable install:
+**4. On the host itself**, for a durable install:
 
 ```bash
 ./deploy/install-node.sh --server https://cp.example.com:7800 --token <enroll-token>

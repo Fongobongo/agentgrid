@@ -116,3 +116,22 @@ script — a supply-chain surface this ADR does not take on.
 - **A signed bootstrap script exists.** Then the button can hand out a
   one-liner instead of an ssh session, and the flag, the job store and the
   credential path all disappear.
+
+## Update (after v0.8.1): the pull path exists, the push path stays
+
+The last trigger fired, halfway. `/v1/node/join.sh` hands the operator a
+one-liner, but it is not a *signed* script: the trust anchor is the control
+plane's TLS plus the SHA-256 manifest it serves, which is the same anchor the
+ssh push already relies on. What it removes is the two constraints this ADR
+accepted:
+
+- **No ssh *to* the host.** The host pulls, so NAT, a host with no sshd and a
+  host another team owns all work.
+- **No per-host credential on the control plane** for the join itself. The
+  enrollment token is the only secret: single-use, ten minutes, and it is an
+  argument rather than a query parameter so it does not land in an access log.
+
+It does not replace the push path. `ag nodes install` still writes
+`credential.json` over an authenticated channel and can copy the daemon to a
+host that has no route to the control plane yet; the join needs the host to
+reach the CP first. The flag, the job store and the ssh code all stay.

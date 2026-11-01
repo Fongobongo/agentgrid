@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ApiError,
+  createEnrollmentToken,
   getInstallJob,
   InstallJob,
   InstallNodeRequest,
@@ -89,6 +90,76 @@ export function installCommand(f: InstallForm): string {
   if (f.accept_new_host_key) parts.push('--accept-new-host-key');
   if (f.allow_root) parts.push('--allow-root');
   return parts.join(' \\\n  ');
+}
+
+/**
+ * The pull-based join: one line, run on the new host.
+ *
+ * The token is an argument, not a query parameter. A query string lands in the
+ * control plane's access log on every request, and an enrollment token in a log
+ * is a token that outlives its ten minutes. `bash -s --` is what lets a piped
+ * script take arguments at all.
+ */
+export function joinCommand(server: string, token: string): string {
+  const base = (server || 'https://cp.example.com').replace(/\/+$/, '');
+  return `curl -fsSL ${base}/v1/node/join.sh | sudo bash -s -- --token ${quote(token)}`;
+}
+
+/**
+ * "Or pull it from here instead."
+ *
+ * Rendered in both modes: the join does not depend on
+ * `AGENTGRID_PROVISION_ENABLED`, because nothing on this side reaches into the
+ * host — the host reaches here, which it has to do anyway to work. The token is
+ * minted on demand rather than on mount so a modal left open does not leave a
+ * live credential in the DOM after its ten minutes.
+ */
+function JoinSection({ server }: { server: string }) {
+  const [token, setToken] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+
+  const mint = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      setToken((await createEnrollmentToken()).token);
+    } catch (e) {
+      setErr(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <strong>Or join from the new host</strong>
+      <p className="muted">
+        Nothing on this side connects to the host. Mint a one-time token — it
+        expires in ten minutes and can be spent once — and run this on the host
+        itself. It fetches the daemon from this control plane, verifies every
+        byte against the bundle&apos;s SHA-256 and starts it.
+      </p>
+      {err ? <ErrorBox err={err} /> : null}
+      {token ? (
+        <>
+          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+            {joinCommand(server, token)}
+          </pre>
+          <div className="muted">
+            <button onClick={() => navigator.clipboard?.writeText(joinCommand(server, token)).catch(() => undefined)}>
+              copy join command
+            </button>{' '}
+            <button onClick={() => setToken(null)}>hide</button>
+          </div>
+        </>
+      ) : (
+        <button disabled={busy} onClick={mint}>
+          {busy ? 'minting…' : 'get join command'}
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default function InstallNode({
@@ -196,6 +267,7 @@ export default function InstallNode({
             <div className="muted">
               <button onClick={() => copy(installCommand(f))}>copy command</button>
             </div>
+            <JoinSection server={f.server} />
           </>
         }
         actions={<button onClick={onClose}>Close</button>}
@@ -347,6 +419,7 @@ export default function InstallNode({
           {job.error ? <ErrorBox err={new ApiError(0, job.error)} /> : null}
         </div>
       ) : null}
+      <JoinSection server={f.server} />
     </>
   );
 

@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import InstallNode, { defaultForm, installCommand } from './components/InstallNode';
+import InstallNode, {
+  defaultForm,
+  installCommand,
+  joinCommand,
+} from './components/InstallNode';
 
 // No DOM in this project (vitest runs in the node environment), so the modal is
 // rendered to static markup. That is enough for the branch that matters most:
@@ -75,6 +79,29 @@ describe('installCommand', () => {
   });
 });
 
+describe('joinCommand', () => {
+  it('is one line that needs nothing but a token', () => {
+    const cmd = joinCommand('http://cp.example.com:7800', 'tok-123');
+    expect(cmd).toBe(
+      'curl -fsSL http://cp.example.com:7800/v1/node/join.sh | sudo bash -s -- --token tok-123',
+    );
+  });
+
+  it('passes the token as an argument, never in the URL', () => {
+    const cmd = joinCommand('https://cp.example.com', 'tok-123');
+    // A query string would land in the control plane's access log, where the
+    // token would outlive its ten minutes.
+    expect(cmd).not.toContain('?token=');
+    expect(cmd).toContain('bash -s -- --token');
+  });
+
+  it('strips a trailing slash so the path does not double up', () => {
+    expect(joinCommand('https://cp.example.com/', 't')).toContain(
+      'https://cp.example.com/v1/node/join.sh',
+    );
+  });
+});
+
 describe('InstallNode when the control plane cannot install', () => {
   const html = render({
     enabled: false,
@@ -92,6 +119,13 @@ describe('InstallNode when the control plane cannot install', () => {
     // No Install button: there is nothing to press it against.
     expect(html).not.toContain('>Install<');
   });
+
+  it('offers the pull-based join too', () => {
+    // The join does not need AGENTGRID_PROVISION_ENABLED: the host reaches the
+    // control plane, not the other way round.
+    expect(html).toContain('Or join from the new host');
+    expect(html).toContain('get join command');
+  });
 });
 
 describe('InstallNode when the control plane can install', () => {
@@ -105,6 +139,10 @@ describe('InstallNode when the control plane can install', () => {
     expect(html).toContain('>Install<');
     expect(html).toContain('root@10.0.0.5'); // the host placeholder
     expect(html).not.toContain('copy command');
+  });
+
+  it('offers the join even when the control plane can install', () => {
+    expect(html).toContain('Or join from the new host');
   });
 
   it('keeps root and accept-new-host-key off by default', () => {

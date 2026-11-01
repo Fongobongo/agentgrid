@@ -25,13 +25,14 @@ ADAPTERS="mock"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGING="$SCRIPT_DIR/bin"
 
-usage() { echo "usage: $0 --server <url> --token <token> [--name <node>] [--bin-dir <dir>] [--adapters mock[,claude,...]] [--staging <dir>]"; exit 1; }
+usage() { echo "usage: $0 --server <url> --token <token> [--name <node>] [--bin-dir <dir>] [--data-dir <dir>] [--adapters mock[,claude,...]] [--staging <dir>]"; exit 1; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --server) SERVER="$2"; shift 2;;
     --token)  TOKEN="$2";  shift 2;;
     --name)   NAME="$2";   shift 2;;
     --bin-dir) BIN_DIR="$2"; shift 2;;
+    --data-dir) DATA_DIR="$2"; WORKSPACE="$DATA_DIR/workspace"; REPOS="$DATA_DIR/repos"; shift 2;;
     --adapters) ADAPTERS="$2"; shift 2;;
     --staging) STAGING="$2"; shift 2;;
     *) usage;;
