@@ -67,11 +67,21 @@
     construction: acting is the product. It is bounded (quota, TTL, route
     binding) and the residual is deliberate. "Closed" is also a property of
     *configuration*, not of the mechanism: an entry still written as a plain
-    `NAME=value` is still a key in the sandbox. So the daemon now says which is
-    which at startup — a `WARN` naming every plain entry when nothing is
-    gateway-delivered, and a `INFO` listing `NAME->route` next to the plain
-    names when something is. Names and routes are not secrets; values are never
-    logged.
+    `NAME=value` is still a key in the sandbox.
+  - **So the panel shows which is which.** The `@gateway` marker lives in the
+    daemon's environment, which the control plane never reads (ADR 0028), so
+    the node now reports counts in its heartbeat
+    (`adapter_env_delivery: {plain, gateway}`) and `GET /v1/nodes` carries them:
+    a node with any plain entry gets a warning badge with the count, a fully
+    migrated one gets a neutral badge, and a node that has never reported gets
+    nothing — because "not reported" and "nothing plain" are different claims
+    and the second one would be a lie for a node still running an older binary.
+    Counts only: names and values stay on the node.
+  - The daemon also logs the split at startup: a `WARN` naming every plain
+    entry when nothing is gateway-delivered, an `INFO` with `NAME->route`
+    beside the plain names when something is. Names and routes are not
+    secrets; values are never logged. The panel is the queryable version of the
+    same fact — the log survives being read once, the badge survives rotation.
 
 ### Fixed
 
@@ -101,6 +111,16 @@
     in the contract suite now fails on any `deploy/**/*.y*ml` image pin that is
     not 64 lowercase hex, because nothing in the test suite read a compose file
     before and the only thing that noticed was a CI cycle.
+  - With the image pulled, the next failure was quieter: the sidecar started and
+    never listened. The image runs squid as root and squid drops to
+    `cache_effective_user proxy`, which needs `CAP_SETUID`/`CAP_SETGID` — the
+    capabilities `cap_drop: ALL` removes — so the drop failed and squid exited,
+    which a client sees as curl `000`, indistinguishable from a network
+    problem. It now runs as `user: "13:13"`, like the distro's own unit
+    (`User=proxy`), so there is no drop to perform and the capability set stays
+    empty. The e2e script dumps `docker compose ps` and the sidecar logs on
+    failure, because "died", "up but not enforcing" and "not internal" all look
+    the same from outside.
 
 - **`AGENTGRID_ARTIFACT_ROOT` is honoured.** It was set by both Dockerfiles,
   both install scripts, all three HA compose files and described in the README

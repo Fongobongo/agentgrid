@@ -71,3 +71,24 @@ not in the credential docs alone.
 The proxy runs read-only, cap-dropped, `no-new-privileges`, with caching
 disabled (agent responses must be fresh; caching could leak one attempt's
 fetched content into another).
+
+## Why it runs as uid 13
+
+`user: "13:13"` is not cosmetic, and removing it breaks the proxy rather than
+hardening it. The `ubuntu/squid` image starts squid as **root** and squid then
+drops to `cache_effective_user proxy` — which needs `CAP_SETUID`/`CAP_SETGID`,
+the exact capabilities `cap_drop: ALL` removes. The drop fails, squid exits, and
+the proxy never listens; from a client that looks like a network problem (curl
+returns `000`), not like a permissions problem.
+
+Being the target user already means there is nothing to drop. It is what the
+distro's own unit does (`User=proxy` in `squid.service`), and it is strictly
+weaker than the alternative fix of adding `SETUID`/`SETGID`/`CHOWN` back to a
+root process. `/var/log/squid` is a `VOLUME` in the image (root-owned, 0755) and
+uid 13 cannot write it, so it is a tmpfs here too — the access log goes to
+stdout anyway; this is only so nothing fails to open.
+
+`tests/e2e/run-egress-isolation.sh` dumps `docker compose ps` and the sidecar's
+logs when an assertion fails, because "squid died", "squid is up but not
+enforcing" and "the network is not internal" are three different bugs that all
+look like a failed curl.

@@ -32,9 +32,21 @@ services:
   egress-proxy:
     image: ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
     restart: unless-stopped
+    # Run as `proxy` (uid 13) instead of root. Not cosmetic: the image starts
+    # squid as root and squid then drops to `cache_effective_user proxy`, which
+    # needs CAP_SETUID/CAP_SETGID — and `cap_drop: ALL` below removes them, so
+    # the drop fails, squid exits, and the proxy never listens (the symptom is
+    # a curl `000` through the proxy, which reads like a network problem).
+    # Being the target user already means there is no drop to perform. This is
+    # what the distro's own unit does (`User=proxy` in squid.service).
+    user: "13:13"
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,nodev
+      # Squid's own dirs. `/var/log/squid` is a VOLUME in the image (root-owned,
+      # 0755) and uid 13 cannot write it, so it becomes a tmpfs too — the
+      # access log goes to stdout anyway, this is only so nothing fails to open.
+      - /var/log/squid:mode=0777
       - /var/spool/squid:mode=0777
       - /var/run:mode=0777
       - /var/cache/squid:mode=0777

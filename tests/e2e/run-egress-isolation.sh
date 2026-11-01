@@ -26,26 +26,39 @@ fail() { echo "FAIL: $*"; exit 1; }
 cleanup() { "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# A failure here has three very different causes — squid died, squid is up but
+# not enforcing, or the network is not internal — and they look identical from
+# curl (`000`, `403`, `200`). Dumping the sidecar's own state on the way out is
+# the difference between one CI cycle and three.
+dump_diagnostics() {
+  echo "---- docker compose ps ----"
+  "${COMPOSE[@]}" ps -a 2>&1 || true
+  echo "---- egress-proxy logs (tail 60) ----"
+  "${COMPOSE[@]}" logs --no-color --tail 60 2>&1 || true
+  echo "---- networks ----"
+  docker network inspect "$NET" --format '{{.Name}} internal={{.Internal}}' 2>&1 || true
+}
+
 echo ">> bringing the egress stack up"
 "${COMPOSE[@]}" up -d >/dev/null
 docker pull -q "$CURL_IMAGE" >/dev/null
 
 internal=$(docker network inspect "$NET" --format '{{.Internal}}' 2>/dev/null || echo missing)
-[ "$internal" = "true" ] || fail "$NET is '$internal', not internal — a sandbox on it gets NAT and the allowlist is advisory"
+[ "$internal" = "true" ] || { dump_diagnostics; fail "$NET is '$internal', not internal — a sandbox on it gets NAT and the allowlist is advisory"; }
 
 echo ">> squid enforces the allowlist"
 code=""
-for _ in $(seq 1 60); do
+for _ in $(seq 1 20); do
   code=$(docker run --rm --network "$NET" -e https_proxy="$PROXY" "$CURL_IMAGE" \
-    -s -o /dev/null -w '%{http_code}' --max-time 5 https://example.com/ 2>/dev/null || true)
+    -s -o /dev/null -w '%{http_code}' --max-time 3 https://example.com/ 2>/dev/null || true)
   [ "$code" = "403" ] && break
   sleep 2
 done
-[ "$code" = "403" ] || fail "a non-allowlisted domain returned '$code' through the proxy, expected 403 (squid unreachable, or not enforcing)"
+[ "$code" = "403" ] || { dump_diagnostics; fail "a non-allowlisted domain returned '$code' through the proxy, expected 403 (000 = the proxy never answered: check the sidecar logs above; 200 = not enforcing)"; }
 
 code=$(docker run --rm --network "$NET" -e https_proxy="$PROXY" "$CURL_IMAGE" \
   -s -o /dev/null -w '%{http_code}' --max-time 10 https://api.github.com/ 2>/dev/null || true)
-[ "$code" = "200" ] || fail "an allowlisted domain returned '$code' through the proxy, expected 200 — the allowlist denies everything (check the src/dst acls)"
+[ "$code" = "200" ] || { dump_diagnostics; fail "an allowlisted domain returned '$code' through the proxy, expected 200 — the allowlist denies everything (check the src/dst acls)"; }
 
 echo ">> and nothing gets out around it"
 if docker run --rm --network "$NET" "$CURL_IMAGE" -sS --max-time 5 https://api.github.com/ >/dev/null 2>&1; then
