@@ -100,6 +100,66 @@ proxy that can read all sandbox TLS, and anything with certificate pinning
 breaks. Largest blast radius of the four; the only one that covers adapters C
 cannot.
 
+**E. A credential broker.** The adapter asks the daemon for a short-lived
+credential instead of holding a long-lived key. It is the most appealing option
+on paper and it does not work as a replacement for C, for one structural
+reason: **our adapter is a wrapper, not the API client.** `adapter-claude.rs:210`
+spawns `claude`; `claude` makes the provider call. A broker can only hand its
+token to that child — i.e. into the environment this whole ADR is about. E does
+not remove the credential from the sandbox, it shortens its life.
+
+The rest follows:
+
+- **No exchange exists.** Anthropic and OpenAI do not mint short-lived scoped
+  tokens from an API key. So "short-lived" can only mean a token our own
+  component validates — which is a gateway. E without a gateway is not
+  implementable; E with one is C plus a token layer.
+- **TTL against run length.** Attempts run for minutes to hours and the wrapped
+  CLI cannot refresh. A TTL shorter than the run fails mid-attempt with a 401;
+  a TTL longer than the run is a leak window barely smaller than a permanent
+  key.
+- **The daemon becomes a credential authority**: a signing key, a store of
+  issued tokens, revocation, clock skew, restart semantics (in-memory tokens
+  vanish), and a much better target — compromising the daemon stops meaning
+  "read the key" and starts meaning "mint one".
+- **Accounting is lost.** With C every provider call passes one gateway that
+  can count tokens, enforce quotas and log. With E the CLI talks to the provider
+  directly; the daemon sees a mint, not a spend. That was C's second-largest
+  benefit.
+- **It covers the same subset** — nothing for git tokens, registry credentials,
+  SSH keys or MCP tokens, none of which can be exchanged for a short-lived one.
+- **It inherits the broken premise** below: without enforced egress the token is
+  still exfiltratable and usable until expiry.
+- **It changes the adapter contract**, the least versioned part of the system
+  (five wrappers plus the ACP path, and we have just been through
+  `NODE_PROTOCOL_VERSION=2`), and needs a fail-closed test per adapter.
+- Practical: no unix socket on Windows nodes, and some CLIs cache the credential
+  into `~/.config` inside the container, which a broker does not prevent.
+
+Where E is genuinely right: secrets that *have* an exchange — GitHub App
+installation tokens (one hour, scoped to a repository) are exactly E, and for
+git access C is not needed at all. That is a reason to implement E **for those
+secrets**, not to use it for provider API keys.
+
+## Premise check: `restricted` is not enforced today
+
+C and E both lean on `restricted` meaning "one reachable peer". It does not, in
+the shipped deploy. `resolved_network_mode` (`sandbox.rs:505`) attaches the
+sandbox to `$AGENTGRID_SANDBOX_EGRESS_NETWORK`, and
+`deploy/egress-proxy/docker-compose.yml` declares that network `internal: false`
+— a user-defined bridge with NAT, so a process that ignores `HTTP_PROXY` reaches
+the internet and the LAN directly. `deploy/egress-proxy/README.md` promises
+"internet to allowlisted domains only, no LAN", which is precisely the
+silently-unenforced state ADR 0023 exists to prevent.
+
+Consequence for this ADR: the gate in the decision ("`gateway` without
+`restricted` is refused") stays correct — it guarantees the sandbox can reach
+the gateway — but the *reason* changes from "the gateway is the only peer" to
+"the gateway is the only peer we put there". Fixing the topology (two networks:
+`internal: true` for squid + sandboxes, a second one for squid only) is a
+prerequisite, and it is worth doing on its own because the README currently
+claims a guarantee the compose file does not provide.
+
 ## Decision (recommended)
 
 1. **Implement C, gated on an explicit marker.** The marker must be explicit
@@ -135,7 +195,6 @@ cannot.
 
 - An adapter that needs D exists (C blocked by a hardcoded endpoint), which
   turns D from an escape hatch into a requirement.
-- Or the adapter contract grows a credential-broker call — the agent asks the
-  daemon for a short-lived token instead of holding a long-lived key. That is C
-  with a different transport, and it would also cover adapters whose CLI cannot
-  be pointed at a base URL.
+- Or a provider starts issuing short-lived scoped tokens derived from a
+  long-lived key. That makes option E implementable without a gateway and would
+  shrink the window for `env` entries too, without pretending they are safe.
