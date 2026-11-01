@@ -111,6 +111,15 @@ Tear down: `./deploy/compose/down.sh` (or `docker compose down`).
 > unprivileged `agentgrid` user, installs a hardened systemd unit, and scrubs the
 > enrollment token after first connect). Both are idempotent.
 >
+> Adding a host the control plane cannot ssh *into* (NAT, no sshd, another
+> team's machine) is one line, minted by the panel under
+> `Nodes → Install node…`:
+> `curl -fsSL <cp>/v1/node/join.sh | sudo bash -s -- --token <t>`. The host
+> pulls the daemon and the adapters from the control plane, verifies every byte
+> against the bundle's SHA-256, and then runs the same installer — so the pull
+> and push paths cannot drift. Needs `AGENTGRID_NODE_DIST` on the control plane;
+> see [`docs/agent-ops.md`](docs/agent-ops.md#adding-a-node).
+>
 > Node transport defaults to **WebSocket** with automatic fallback to long
 > polling (set `AGENTGRID_TRANSPORT=poll|ws|auto` on a node to pin one).
 > See [`docs/runbook-transport.md`](docs/runbook-transport.md) for the
