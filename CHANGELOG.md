@@ -4,6 +4,28 @@
 
 ### Added
 
+- **A node's credential can be re-keyed without losing its identity or its
+  secrets** (ADR 0028). `ag nodes rekey <id>`, `POST /v1/nodes/{id}/rekey-token`,
+  and `AGENTGRID_REKEY=1` on the node side.
+  - Before this, the only answer to a leaked `credential.json` was revoke →
+    re-enroll, and enrollment mints a **new node id**: every ciphertext in
+    `adapter_env_sealed` was dropped with it and every adapter-env value had to
+    be re-entered by hand. A re-key keeps the id, the task history and the
+    X25519 sealing key, and brings a `revoked` node back online.
+  - The token is bound to the node (404 for an unknown id), single-use, valid
+    30 minutes, and audited as `node.rekey`.
+  - The node spends it by starting once with `AGENTGRID_REKEY=1` and the token
+    in `AGENTGRID_ENROLL_TOKEN`; it reuses `key_secret` from `credential.json`,
+    so the control plane never sees a key change and re-seals nothing. Both
+    variables are scrubbed from `AGENTGRID_ENV_FILE` afterwards — a flag left
+    behind would re-arm the path on the next boot, where a spent token fails the
+    boot.
+  - A failed re-key leaves the old credential file untouched, so an expired
+    token or an unreachable control plane does not lock a node out.
+  - The sealing key is deliberately *not* rotated (a leaked credential does not
+    compromise it, and rotating would discard every secret). If the key itself
+    leaked, delete `credential.json` before the re-key and re-enter the secrets.
+
 - **`ag nodes install` accepts an OpenSSH certificate** (`--ssh-cert`), and
   `POST /v1/node-installs` takes the same `ssh_cert` field (ADR 0028, phase 2).
   The certificate goes to both `ssh` and `scp` as `-o CertificateFile=<path>`,

@@ -139,6 +139,39 @@ agentgrid-node-daemon   # first run enrolls, then keep it running
 `tests/e2e/remote-ssh.py --file …` uploads without sshpass. Use
 `AGENTGRID_ALLOW_ROOT=1` when running as root — nothing sets it for you.
 
+## Re-keying a node (a leaked credential)
+
+`credential.json` holds the node's identity **and** the X25519 key its
+adapter-env secrets are sealed to. If a copy of it leaks, revoking and enrolling
+again is the wrong repair: enrollment mints a **new node id**, which drops every
+ciphertext in `adapter_env_sealed` and leaves you re-entering every secret by
+hand. Re-key instead — same node id, same task history, same sealing key:
+
+```bash
+ag nodes rekey <node-id>          # prints the token and the command that spends it
+```
+
+On the node host, start the daemon **once** with both variables:
+
+```bash
+AGENTGRID_REKEY=1 AGENTGRID_ENROLL_TOKEN=<token> <the daemon's usual command>
+```
+
+It exchanges the token for a new credential, keeps the sealing key already in
+`credential.json`, and scrubs both variables from `AGENTGRID_ENV_FILE`. The token
+is single-use, valid 30 minutes, and audited as `node.rekey`; the old credential
+stops working the moment it is spent. A **revoked** node comes back this way,
+which is the point: `DELETE /v1/nodes/{id}` is otherwise irreversible, and the
+replacement would be a different node under the same name.
+
+Two things this deliberately does *not* do. It does not rotate the sealing key —
+a leaked credential alone does not compromise it, and rotating would throw away
+every secret. And if the **key** did leak, delete `credential.json` (or just its
+`key_secret`) before the re-key: the node then mints a new key, the control plane
+drops the old ciphertexts, and every secret has to be re-entered with
+`ag adapter-env set`. If the re-key fails — expired token, control plane
+unreachable — the old file is left untouched and still works.
+
 ## Skills: importing a pack
 
 The node discovers `SKILL.md` files under `<worktree>/.agents/skills` (project

@@ -744,6 +744,36 @@ paths:
   /v1/nodes/enrollment-token:
     post:
       summary: Mint a one-time node enrollment token (admin)
+  /v1/nodes/{id}/rekey-token:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      summary: Mint a one-time re-key token bound to an existing node (admin)
+      description: |
+        The token is spent by `POST /v1/node/enroll` exactly like a plain one,
+        but it does not create a node: it replaces the credential of the node it
+        is bound to. The id, the task history and the X25519 key the node's
+        adapter-env secrets are sealed to all survive, and a `revoked` node
+        comes back online — so this is the recovery path for a leaked
+        `credential.json`, where revoke + re-enroll would mint a new id and drop
+        every sealed secret.
+
+        Valid 30 minutes, single use, audited as `node.rekey`. `404` for an
+        unknown node: a token nobody can spend would read as a successful
+        re-key until the node never came back.
+
+        The node spends it by starting once with `AGENTGRID_REKEY=1` and the
+        token in `AGENTGRID_ENROLL_TOKEN`; it keeps the sealing key already in
+        `credential.json`, so no adapter-env value has to be re-entered.
+      responses:
+        '200':
+          description: '`{ token, expires_at }` — the same shape as the plain token.'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: No node with that id.
   /v1/provisioning:
     get:
       summary: Whether this control plane can install nodes over ssh

@@ -34,6 +34,7 @@ pub(crate) fn cfg(server: &str, dir: &std::path::Path) -> Config {
         repositories: vec!["*".into()],
         heartbeat_secs: 5,
         enroll_token: None,
+        rekey: false,
         credential_path: dir.join("credential.json"),
         env_file: None,
         repository_root: dir.join("repos"),

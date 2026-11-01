@@ -449,6 +449,13 @@ jobs:
       # on a running node. Process-based, no docker, no LLM.
       - name: sealed adapter-env secrets (CP cannot read them)
         run: bash tests/e2e/run-sealed-env.sh
+      # ADR 0028 phase 3 (reduced): a leaked node credential is repaired by
+      # re-keying, not by revoke + re-enroll. The node must come back as the
+      # SAME node id, and the adapter-env secret sealed before the incident must
+      # still reach the adapter — which is what proves the ciphertexts were
+      # neither dropped nor re-sealed.
+      - name: node re-key keeps identity and sealed secrets
+        run: bash tests/e2e/run-rekey.sh
       # NOTE (bucket placement): run-auto-retry.sh and
       # run-review-consensus.sh live in the `e2e` compose job — they bring
       # up docker-compose, not bare processes.

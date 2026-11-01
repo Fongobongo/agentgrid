@@ -148,6 +148,50 @@ async fn get_node_returns_view_and_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// A re-key token is bound to a node, so both ways this route can be wrong are
+/// silent. A misrouted path hands the operator a token the node can never
+/// spend; a token minted for a node that does not exist leaves them waiting for
+/// a node that is never coming back. Neither shows up as an error anywhere
+/// else, which is why the 200 and the 404 are asserted together.
+#[tokio::test]
+async fn rekey_token_is_bound_to_the_node_and_404s_for_an_unknown_one() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let (node_id, _cred) = enroll(&app, "node-rekey", vec!["mock".into()], vec!["*".into()]).await;
+    let token = test_token(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            &format!("/v1/nodes/{node_id}/rekey-token"),
+            "{}".into(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        v["token"].as_str().is_some_and(|t| !t.is_empty()),
+        "no token in {v}"
+    );
+    assert!(
+        v["expires_at"].is_string(),
+        "the CLI prints the expiry, so the response must carry it: {v}"
+    );
+
+    let resp = app
+        .oneshot(post_auth("/v1/nodes/nope/rekey-token", "{}".into(), &token))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "an unknown node must not get a spendable token"
+    );
+}
+
 #[tokio::test]
 async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
     let state = AppState::open_temp().await.unwrap();

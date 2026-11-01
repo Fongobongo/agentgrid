@@ -33,12 +33,56 @@ impl Store {
         Ok((token, expires_at))
     }
 
+    /// Issue a one-time **re-key** token bound to an existing node (TTL 30 min).
+    ///
+    /// Consuming it replaces that node's credential and keeps its id, its task
+    /// history and its X25519 key — so the adapter-env ciphertexts sealed for
+    /// it stay readable and no secret has to be re-entered. `None` when the
+    /// node does not exist, so the route can answer 404 instead of handing out
+    /// a token that can never be spent.
+    ///
+    /// 30 minutes rather than the 10 of a plain token: this one is carried to a
+    /// host by a human, not consumed by an installer in the same second. It is
+    /// not a weaker secret for that — minting either kind needs an admin
+    /// session, and both are stored as a sha256 hash.
+    pub async fn create_rekey_token(&self, node_id: &str) -> Result<Option<(String, String)>> {
+        let node = sqlx::query("SELECT id FROM nodes WHERE id = ?")
+            .bind(node_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        if node.is_none() {
+            return Ok(None);
+        }
+        let token = Uuid::new_v4().to_string();
+        let hash = sha256_hex(&token);
+        let expires_at = iso_plus_secs(1800);
+        let id = Uuid::new_v4().to_string();
+        let now = now_iso();
+        self.write_one(
+            sqlx::query(
+                "INSERT INTO enrollment_tokens (id, token_hash, expires_at, created_at, node_id) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&hash)
+            .bind(&expires_at)
+            .bind(&now)
+            .bind(node_id),
+        )
+        .await?;
+        Ok(Some((token, expires_at)))
+    }
+
     /// Exchange a valid (unused, unexpired) token for a permanent node credential.
+    ///
+    /// Two kinds of token land here. A plain one creates a node. A re-key token
+    /// (`create_rekey_token`) replaces the credential of the node it is bound
+    /// to — same id, same history, same sealing key — and clears a revocation,
+    /// because the reason for it left with the old credential.
     pub async fn enroll_node(&self, req: &EnrollRequest) -> Result<Option<EnrollResponse>> {
         let mut tx = self.write_txn().await?;
         let hash = sha256_hex(&req.token);
         let tok = sqlx::query(
-            "SELECT id, expires_at, used_at FROM enrollment_tokens WHERE token_hash = ?",
+            "SELECT id, expires_at, used_at, node_id FROM enrollment_tokens WHERE token_hash = ?",
         )
         .bind(&hash)
         .fetch_optional(&mut *tx)
@@ -53,33 +97,70 @@ impl Store {
             let _ = tx.rollback().await;
             return Ok(None);
         }
-        let node_id = Uuid::new_v4().to_string();
         let credential = Uuid::new_v4().to_string();
         let cred_hash = sha256_hex(&credential);
         let now = now_iso();
-        let adapters = serde_json::to_string(&req.adapters)?;
-        let repos = serde_json::to_string(&req.repositories)?;
-        sqlx::query(
-            "INSERT INTO nodes (id, name, status, agent_version, max_concurrency, adapters, repositories, active_attempts, last_heartbeat_at, credential_hash, created_at, repo_cache_bytes, workspace_bytes) \
-             VALUES (?, ?, 'online', ?, ?, ?, ?, 0, ?, ?, ?, 0, 0)",
-        )
-        .bind(&node_id)
-        .bind(&req.name)
-        .bind(&req.agent_version)
-        .bind(req.max_concurrency as i64)
-        .bind(&adapters)
-        .bind(&repos)
-        .bind(&now)
-        .bind(&cred_hash)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await?;
+        let token_id: String = tok.try_get("id")?;
+        let node_id = match tok.try_get::<Option<String>, _>("node_id")? {
+            Some(target) => {
+                // Re-key. The node must still exist: a token minted before a
+                // delete must not resurrect the row, and it must not fall
+                // through to the create branch either — that would put a second
+                // node behind a name the operator already has history for.
+                let existing = sqlx::query("SELECT status FROM nodes WHERE id = ?")
+                    .bind(&target)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                if existing.is_none() {
+                    let _ = tx.rollback().await;
+                    return Ok(None);
+                }
+                // `revoked` is exactly the state a re-key exists to leave, so
+                // it goes together with `revoked_at`. Every other status
+                // (drained, degraded, offline) is the node's own business and
+                // survives. Both CASEs read the pre-update row.
+                sqlx::query(
+                    "UPDATE nodes SET credential_hash = ?, \
+                     status = CASE WHEN status = 'revoked' THEN 'online' ELSE status END, \
+                     revoked_at = CASE WHEN status = 'revoked' THEN NULL ELSE revoked_at END \
+                     WHERE id = ?",
+                )
+                .bind(&cred_hash)
+                .bind(&target)
+                .execute(&mut *tx)
+                .await?;
+                self.audit_tx(&mut tx, "node", Some(&target), "rekey", None, None)
+                    .await?;
+                target
+            }
+            None => {
+                let node_id = Uuid::new_v4().to_string();
+                let adapters = serde_json::to_string(&req.adapters)?;
+                let repos = serde_json::to_string(&req.repositories)?;
+                sqlx::query(
+                    "INSERT INTO nodes (id, name, status, agent_version, max_concurrency, adapters, repositories, active_attempts, last_heartbeat_at, credential_hash, created_at, repo_cache_bytes, workspace_bytes) \
+                     VALUES (?, ?, 'online', ?, ?, ?, ?, 0, ?, ?, ?, 0, 0)",
+                )
+                .bind(&node_id)
+                .bind(&req.name)
+                .bind(&req.agent_version)
+                .bind(req.max_concurrency as i64)
+                .bind(&adapters)
+                .bind(&repos)
+                .bind(&now)
+                .bind(&cred_hash)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+                self.audit_tx(&mut tx, "node", Some(&node_id), "enroll", None, None)
+                    .await?;
+                node_id
+            }
+        };
         sqlx::query("UPDATE enrollment_tokens SET used_at = ? WHERE id = ?")
             .bind(&now)
-            .bind(tok.try_get::<String, _>("id")?)
+            .bind(&token_id)
             .execute(&mut *tx)
-            .await?;
-        self.audit_tx(&mut tx, "node", Some(&node_id), "enroll", None, None)
             .await?;
         tx.commit().await?;
         Ok(Some(EnrollResponse {

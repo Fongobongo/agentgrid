@@ -120,6 +120,26 @@ pub async fn create_enrollment_token(
         })
 }
 
+/// Mint a one-time **re-key** token for an existing node (admin).
+///
+/// Unlike `/v1/nodes/enrollment-token`, the token is bound to a node: spending
+/// it replaces that node's credential and keeps its id, history and sealing
+/// key. 404 rather than 202 for an unknown node — a token nobody can spend
+/// reads as "the re-key worked" until the node never comes back.
+pub async fn create_rekey_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<EnrollTokenResponse>, StatusCode> {
+    match state.store.create_rekey_token(&id).await {
+        Ok(Some((token, expires_at))) => Ok(Json(EnrollTokenResponse { token, expires_at })),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("create_rekey_token failed: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 pub async fn enroll(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EnrollRequest>,

@@ -4806,3 +4806,263 @@ mod artifact_blob_tests {
         let _ = std::fs::remove_file(p);
     }
 }
+
+/// ADR 0028 re-key: a token bound to an existing node.
+///
+/// Every test here asserts on something that would **not** break loudly if the
+/// re-key branch were wrong: a fall-through to the create path still returns a
+/// credential, the node still works, and the only symptom is a new node id and
+/// silently dropped secrets. So the assertions are on identity, on what the old
+/// credential does afterwards, and on the ciphertexts.
+mod rekey_tests {
+    use super::*;
+    use agentgrid_common::seal;
+    use agentgrid_common::{EnrollRequest, EnrollResponse, NodeStatus};
+
+    async fn fresh() -> Store {
+        let p = std::env::temp_dir().join(format!("ag-rekey-{}.db", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&p);
+        Store::open(p.to_str().unwrap()).await.unwrap()
+    }
+
+    fn req(token: String, name: &str, public_key: Option<String>) -> EnrollRequest {
+        EnrollRequest {
+            token,
+            name: name.into(),
+            adapters: vec!["mock".into()],
+            repositories: vec!["*".into()],
+            max_concurrency: 4,
+            agent_version: "t".into(),
+            protocol_version: None,
+            permission_interception: "none".into(),
+            public_key,
+        }
+    }
+
+    /// Enroll the way the route does: spend the token, then record the key the
+    /// node announced (that is the order `enroll()` in the route follows).
+    async fn enroll(s: &Store, name: &str, public_key: Option<String>) -> String {
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let r = s
+            .enroll_node(&req(token, name, public_key.clone()))
+            .await
+            .unwrap()
+            .expect("enroll");
+        if let Some(pk) = public_key {
+            s.set_node_public_key(&r.node_id, &pk).await.unwrap();
+        }
+        r.node_id
+    }
+
+    async fn rekey(
+        s: &Store,
+        node_id: &str,
+        name: &str,
+        public_key: Option<String>,
+    ) -> EnrollResponse {
+        let (token, _) = s
+            .create_rekey_token(node_id)
+            .await
+            .unwrap()
+            .expect("a re-key token for an existing node");
+        let out = s
+            .enroll_node(&req(token, name, public_key.clone()))
+            .await
+            .unwrap()
+            .expect("rekey enroll");
+        // The route records the announced key after `enroll_node` returns. A
+        // helper that skipped this would make the "new key drops the old
+        // ciphertexts" test pass for the wrong reason — nothing would ever have
+        // compared keys.
+        if let Some(pk) = public_key {
+            s.set_node_public_key(&out.node_id, &pk).await.unwrap();
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_rekey_replaces_the_credential_and_keeps_the_node() {
+        let s = fresh().await;
+        let node = enroll(&s, "web-1", None).await;
+        let before = s.get_node(&node).await.unwrap().unwrap();
+
+        let out = rekey(&s, &node, "web-1", None).await;
+
+        assert_eq!(out.node_id, node, "the re-key must not mint a new id");
+        let after = s.get_node(&node).await.unwrap().unwrap();
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.status, NodeStatus::Online);
+        assert_eq!(
+            s.list_nodes(None, Some(50)).await.unwrap().len(),
+            1,
+            "a re-key must not leave a second node behind"
+        );
+        assert_eq!(
+            s.node_id_for_credential(&out.credential).await.unwrap(),
+            Some(node),
+            "the new credential must resolve to the same node"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_old_credential_stops_working() {
+        let s = fresh().await;
+        // Enroll by hand: the helper swallows the credential, and the leaked
+        // one going dead is the whole point of a re-key.
+        let (token, _) = s.create_enrollment_token().await.unwrap();
+        let first = s
+            .enroll_node(&req(token, "web-1", None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s.node_id_for_credential(&first.credential).await.unwrap(),
+            Some(first.node_id.clone())
+        );
+
+        let out = rekey(&s, &first.node_id, "web-1", None).await;
+
+        assert_eq!(
+            s.node_id_for_credential(&first.credential).await.unwrap(),
+            None,
+            "the credential that leaked must stop working"
+        );
+        assert_eq!(
+            s.node_id_for_credential(&out.credential).await.unwrap(),
+            Some(first.node_id),
+            "and the one the re-key handed out must work"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rekey_revives_a_revoked_node() {
+        let s = fresh().await;
+        let node = enroll(&s, "web-1", None).await;
+        assert!(s.revoke_node(&node).await.unwrap());
+        assert_eq!(
+            s.get_node(&node).await.unwrap().unwrap().status,
+            NodeStatus::Revoked
+        );
+
+        let out = rekey(&s, &node, "web-1", None).await;
+        assert_eq!(out.node_id, node);
+        let after = s.get_node(&node).await.unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            NodeStatus::Online,
+            "a revoked node comes back"
+        );
+        assert_eq!(
+            s.node_id_for_credential(&out.credential).await.unwrap(),
+            Some(node),
+            "and its new credential is accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rekey_leaves_other_statuses_alone() {
+        let s = fresh().await;
+        let node = enroll(&s, "web-1", None).await;
+        s.set_node_degraded(&node).await.unwrap();
+
+        rekey(&s, &node, "web-1", None).await;
+
+        // `degraded` means "this build speaks an incompatible protocol"; a new
+        // credential does not fix that, and clearing it would make the node
+        // schedulable while it still cannot be talked to.
+        assert_eq!(
+            s.get_node(&node).await.unwrap().unwrap().status,
+            NodeStatus::Degraded
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rekey_token_is_single_use() {
+        let s = fresh().await;
+        let node = enroll(&s, "web-1", None).await;
+        let (token, _) = s.create_rekey_token(&node).await.unwrap().unwrap();
+        assert!(s
+            .enroll_node(&req(token.clone(), "web-1", None))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(
+            s.enroll_node(&req(token, "web-1", None))
+                .await
+                .unwrap()
+                .is_none(),
+            "a spent re-key token must not hand out a second credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rekey_token_for_an_unknown_node_is_refused() {
+        let s = fresh().await;
+        assert!(s
+            .create_rekey_token("no-such-node")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// The reason the whole path exists: the ciphertexts sealed to the node's
+    /// key must survive it. A re-key that minted a fresh keypair would make
+    /// `set_node_public_key` drop every blob, and the operator would be left
+    /// re-entering secrets — the exact cost this was built to avoid.
+    #[tokio::test]
+    async fn a_rekey_keeps_the_sealed_ciphertexts() {
+        let s = fresh().await;
+        let (public, secret) = seal::generate_keypair().unwrap();
+        let node = enroll(&s, "web-1", Some(public.clone())).await;
+        s.upsert_adapter_env("claude", "ANTHROPIC_API_KEY", "sk-ant-keep-me", None)
+            .await
+            .unwrap();
+        let before = s.adapter_env_for(&node).await.unwrap();
+        assert_eq!(before.len(), 1);
+        let blob_before = before[0].sealed.clone();
+        assert!(!blob_before.is_empty());
+
+        // The node re-enrolls with the *same* key, as `enrollment.rs` does when
+        // it reuses `key_secret`.
+        let out = rekey(&s, &node, "web-1", Some(public)).await;
+        assert_eq!(out.node_id, node);
+
+        let after = s.adapter_env_for(&node).await.unwrap();
+        assert_eq!(after.len(), 1, "the entry is still sealed for this node");
+        assert_eq!(
+            after[0].sealed, blob_before,
+            "the ciphertext must be untouched, not re-sealed"
+        );
+        // And it still opens with the key the node already holds.
+        let opened = seal::open(
+            &secret,
+            &after[0].sealed,
+            &seal::entry_aad(&node, "claude", "ANTHROPIC_API_KEY"),
+        )
+        .unwrap();
+        assert_eq!(opened, "sk-ant-keep-me");
+    }
+
+    /// A re-key that announced a *different* key is a different story: the old
+    /// ciphertexts are unreadable, so they must be dropped rather than shipped
+    /// to a node that cannot open them. Asserted here so the "keeps the blobs"
+    /// test above cannot pass by the store simply never dropping anything.
+    #[tokio::test]
+    async fn a_rekey_with_a_new_key_drops_the_old_ciphertexts() {
+        let s = fresh().await;
+        let (public_a, _) = seal::generate_keypair().unwrap();
+        let (public_b, _) = seal::generate_keypair().unwrap();
+        let node = enroll(&s, "web-1", Some(public_a)).await;
+        s.upsert_adapter_env("claude", "ANTHROPIC_API_KEY", "sk-ant-gone", None)
+            .await
+            .unwrap();
+        assert_eq!(s.adapter_env_for(&node).await.unwrap().len(), 1);
+
+        rekey(&s, &node, "web-1", Some(public_b)).await;
+
+        assert!(
+            s.adapter_env_for(&node).await.unwrap().is_empty(),
+            "a new key cannot open the old blobs, so they must be dropped"
+        );
+    }
+}

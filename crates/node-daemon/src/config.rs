@@ -361,6 +361,12 @@ pub struct Config {
     pub repositories: Vec<String>,
     pub heartbeat_secs: u64,
     pub enroll_token: Option<String>,
+    /// `AGENTGRID_REKEY=1`: re-enroll even though `credential.json` exists,
+    /// reusing the sealing key inside it (ADR 0028 re-key). Set by hand, once,
+    /// together with a re-key token from `ag nodes rekey <id>`; both are
+    /// scrubbed from the env file after the exchange, so the next plain restart
+    /// enrolls nothing.
+    pub rekey: bool,
     pub credential_path: PathBuf,
     pub env_file: Option<PathBuf>,
     pub repository_root: PathBuf,
@@ -568,6 +574,12 @@ pub fn config_from_env() -> Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
         enroll_token: std::env::var("AGENTGRID_ENROLL_TOKEN").ok(),
+        // Only an explicit `1`/`true`: an empty variable in an env file must not
+        // re-arm the re-key path, because a spent token fails the boot.
+        rekey: matches!(
+            std::env::var("AGENTGRID_REKEY").as_deref(),
+            Ok("1") | Ok("true")
+        ),
         credential_path: PathBuf::from(&data_dir).join("credential.json"),
         env_file: std::env::var("AGENTGRID_ENV_FILE").ok().map(PathBuf::from),
         repository_root: PathBuf::from(

@@ -646,6 +646,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::nodes::drain_node_handler),
         )
         .route(
+            "/v1/nodes/{id}/rekey-token",
+            post(routes::nodes::create_rekey_token),
+        )
+        .route(
             "/v1/opencode-profiles",
             get(routes::opencode::list_profiles),
         )

@@ -31,6 +31,12 @@ pub(crate) enum NodeSub {
         #[arg(long)]
         undrain: bool,
     },
+    /// Issue a one-time re-key token for an existing node. The node keeps its
+    /// id, its task history and the key its adapter-env secrets are sealed to;
+    /// only its credential is replaced. This is the recovery path for a leaked
+    /// `credential.json` — revoking and re-enrolling would give the node a new
+    /// id and drop every sealed secret with it.
+    Rekey { node_id: String },
 }
 
 /// Transport used for the node -> control-plane runtime link.
@@ -125,6 +131,7 @@ pub(crate) async fn cmd_nodes(
         NodeSub::Drain { node_id, undrain } => {
             cmd_node_drain(client, base, &node_id, undrain).await
         }
+        NodeSub::Rekey { node_id } => cmd_node_rekey(client, base, json, &node_id).await,
     }
 }
 
@@ -164,6 +171,54 @@ async fn cmd_node_drain(
     } else {
         anyhow::bail!("node drain failed: HTTP {}", resp.status())
     }
+}
+
+async fn cmd_node_rekey(
+    client: &reqwest::Client,
+    base: &str,
+    json: bool,
+    node_id: &str,
+) -> Result<()> {
+    let resp = client
+        .post(format!("{base}/v1/nodes/{node_id}/rekey-token"))
+        .send()
+        .await
+        .context("re-key token request failed")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("node {node_id} not found");
+    }
+    err_if_fail(resp.status(), "re-key token")?;
+    let body: serde_json::Value = resp.json().await?;
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .context("re-key token response missing 'token'")?;
+    let expires = body
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    // `--json` for scripts (the re-key E2E reads the token out of it); the
+    // human form is the same token plus the command that spends it.
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "node_id": node_id, "token": token, "expires_at": expires })
+        );
+        return Ok(());
+    }
+    println!("re-key token for node {node_id} (valid until {expires}):");
+    println!();
+    println!("  {token}");
+    println!();
+    println!("On the node host, restart the daemon once with both variables set:");
+    println!();
+    println!("  AGENTGRID_REKEY=1 AGENTGRID_ENROLL_TOKEN={token} \\");
+    println!("    <the daemon's usual command>");
+    println!();
+    println!("The node keeps its id, its task history and its sealing key, so every");
+    println!("adapter-env secret sealed for it stays readable. The token is single-use");
+    println!("and the daemon scrubs it (and the flag) from AGENTGRID_ENV_FILE after use.");
+    Ok(())
 }
 
 async fn cmd_node_doctor(client: &reqwest::Client, base: &str, node_id: &str) -> Result<()> {

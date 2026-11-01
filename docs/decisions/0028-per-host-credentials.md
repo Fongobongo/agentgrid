@@ -1,8 +1,8 @@
 # ADR 0028: Per-host credentials — what a vault would and would not buy
 
-Status: accepted — Phase 0 shipped, Phase 1 chose **B** (node-held keypair) and
-is implemented, Phase 2 (SSH certificates for install) is implemented (all
-unreleased, 0.7.0); Phase 3 (node credential rotation) is still open. See
+Status: accepted — all three phases implemented (unreleased, 0.7.0). Phase 1
+chose **B** (node-held keypair), Phase 2 added SSH certificates to the install,
+and Phase 3 shipped as a re-key token instead of a full rotation protocol. See
 [Outcome](#outcome).
 
 ## Context
@@ -221,8 +221,40 @@ identity it finds), a certificate together with a password (the
 and an empty or control-character path (empty means "default identity", a
 newline splits argv in the `expect` path).
 
-**Phase 3** — rotation of the node's own credential (`ag nodes rotate`) — is
-not started.
+**Phase 3** — rotation of the node's own credential — shipped in a reduced
+form, and the reduction is the interesting part.
+
+The original plan (`ag nodes rotate`, two-phase handover over the WS push
+channel) ranked this last as "lowest blast radius". That ranking predates phase
+1B. After 1B a single file, `credential.json`, holds the node's identity *and*
+the X25519 key every adapter-env ciphertext is sealed to, so one leaked copy
+yields both. The only repair was `DELETE /v1/nodes/{id}` → re-enroll, and
+enrollment mints a new node id: the task history and every ciphertext in
+`adapter_env_sealed` go with it, and an operator re-enters every secret by hand.
+The recovery path had become more destructive than the incident.
+
+What shipped instead is `ag nodes rekey <id>`: a one-time token **bound to an
+existing node** (`enrollment_tokens.node_id`), spent by starting the daemon once
+with `AGENTGRID_REKEY=1` and the token in `AGENTGRID_ENROLL_TOKEN`. The node
+reuses `key_secret` from `credential.json`, so the control plane sees the same
+public key, drops nothing and re-seals nothing; a `revoked` node comes back
+online. Same id, same history, same secrets.
+
+The full push-based rotation buys exactly one thing this does not: not touching
+the host. At three nodes that is not worth a protocol message, a two-phase
+handover state machine and a `PROCESS_CRED` swap in the middle of a live socket
+— and the seam for it is already there (six call sites read the credential per
+use through `process_credential()`; only `ws_loop`/`run_transport` take it by
+value). Revisit when the fleet is large enough that "ssh in once" is the
+expensive part.
+
+Deliberately *not* rotated: the sealing key. A leaked credential does not
+compromise it, and rotating it would discard every secret — the cost this path
+exists to avoid. For the key-leak case the runbook is to delete
+`credential.json` before the re-key; the node then mints a new key, the control
+plane drops the old ciphertexts, and the secrets are re-entered.
+`tests/e2e/run-rekey.sh` (CI) proves the good path end to end: seal a secret,
+revoke, re-key, and the adapter still receives it as the same node.
 
 ## Method
 
