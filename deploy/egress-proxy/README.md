@@ -1,4 +1,4 @@
-# Competitor-gap feature: egress firewall for restricted-mode sandboxes
+# Egress firewall for restricted-mode sandboxes
 
 Docker/Podman have no native per-domain egress filter, so the node daemon
 collapses `network_mode=restricted` to `--network none` (strictly more
@@ -22,9 +22,28 @@ allowlisted domains only" for restricted attempts.
    the allowlisted domains and blocks LAN ranges (RFC1918) by default. Without
    the two env vars, restricted keeps the old behaviour (`--network none`).
 
+## Two networks, and why
+
+`agentgrid-egress` is `internal: true`. A sandbox attached to it has exactly one
+reachable peer — this sidecar — and no route to anything else: a process that
+ignores `HTTP_PROXY` and opens a raw socket gets `ENETUNREACH`. The sidecar is
+also the only member of `agentgrid-egress-outbound`, which is where its own
+default route comes from.
+
+This is not decoration. An earlier version of this file declared a single
+network with `internal: false`; a sandbox attached to it had NAT of its own, so
+the allowlist applied only to processes that chose to use the proxy, and the
+"internet to allowlisted domains only" line below was false. If you are
+upgrading, recreate the stack — the network definition is part of the guarantee.
+
+The daemon cannot verify the topology for you (it only knows a network name), so
+`tests/e2e/run-egress-isolation.sh` asserts it from the outside: a container on
+`agentgrid-egress` must fail to reach the internet without the proxy.
+
 ## Isolation guarantees
 
-- **restricted + proxy**: internet to allowlisted domains only, no LAN.
+- **restricted + proxy**: internet to allowlisted domains only, no LAN, and no
+  direct route that bypasses the proxy.
 - **restricted, no proxy**: no network at all (fail-closed, current default).
 - **none / unrestricted**: unchanged — a `bridge` attempt never inherits the
   proxy env (the node only injects it for restricted attempts on the egress

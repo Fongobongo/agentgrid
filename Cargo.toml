@@ -9,6 +9,7 @@ members = [
     "crates/skills",
     "crates/acp",
     "crates/gateway",
+    "crates/cred-gateway",
     "crates/edge",
     "crates/index",
     "crates/provision",

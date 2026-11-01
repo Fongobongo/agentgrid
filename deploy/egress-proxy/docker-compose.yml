@@ -1,4 +1,4 @@
-# Competitor-gap feature: egress firewall for restricted-mode sandboxes.
+# Egress firewall for restricted-mode sandboxes.
 #
 # A squid sidecar that enforces a domain allowlist for agent traffic. Docker
 # has no native per-domain/per-CIDR egress filter, so the node daemon
@@ -11,6 +11,15 @@
 #   - squid permits only the allowlisted domains and blocks every other
 #     destination, including RFC1918 LAN ranges (the whole point of
 #     "restricted": internet OK, LAN off-limits)
+#
+# Two networks, and the split is the whole guarantee. `agentgrid-egress` is
+# `internal: true`, so a sandbox on it has exactly one reachable peer — this
+# sidecar — and no route anywhere else; a process that ignores HTTP_PROXY and
+# opens a raw socket gets ENETUNREACH. The sidecar is the only member of
+# `agentgrid-egress-outbound`, which is what gives it a default route. With a
+# single non-internal network (the previous shape) the sandbox had NAT of its
+# own and the proxy env was advisory: the allowlist existed, the enforcement
+# did not.
 #
 # Usage:
 #   docker compose -f deploy/egress-proxy/docker-compose.yml up -d
@@ -36,11 +45,17 @@ services:
     volumes:
       - ./squid.allowlist.conf:/etc/squid/squid.conf:ro
     networks:
-      - agentgrid-egress
+      - egress
+      - outbound
     expose:
       - "3128"
 
 networks:
-  agentgrid-egress:
+  # Sandboxes and the sidecar. No route to anywhere else.
+  egress:
     name: agentgrid-egress
+    internal: true
+  # The sidecar's own way out. Nothing else joins this one.
+  outbound:
+    name: agentgrid-egress-outbound
     internal: false

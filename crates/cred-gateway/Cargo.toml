@@ -1,0 +1,24 @@
+[package]
+name = "agentgrid-cred-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Credential gateway: the sandbox holds a per-attempt capability, the real key never leaves this process"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+
+[[bin]]
+name = "agentgrid-cred-gateway"
+path = "src/main.rs"

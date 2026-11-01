@@ -119,6 +119,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentgrid-cred-gateway"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "agentgrid-edge"
 version = "0.8.1"
 dependencies = [
