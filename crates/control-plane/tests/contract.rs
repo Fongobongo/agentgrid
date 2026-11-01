@@ -641,3 +641,76 @@ fn sdk_package_versions_match_the_workspace_version() {
          bump sdks/python/pyproject.toml and sdks/ts/package.json with it"
     );
 }
+
+/// Every container image pinned by digest under `deploy/` must carry a digest
+/// that can exist.
+///
+/// `deploy/egress-proxy/docker-compose.yml` shipped a 63-hex `sha256:` — one
+/// character short, invented rather than resolved. `docker compose up -d`
+/// rejected it with "invalid checksum digest length", so the egress sidecar
+/// could not start at all, and the only thing that noticed was a 25-minute CI
+/// cycle: nothing in the test suite reads a compose file. A digest is either 64
+/// lowercase hex or it is a typo, and that is cheap to say here.
+#[test]
+fn deploy_image_digests_are_well_formed() {
+    fn yaml_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                yaml_files(&path, out);
+            } else if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("yml") | Some("yaml")
+            ) {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy");
+    let mut files = Vec::new();
+    yaml_files(&root, &mut files);
+    files.sort();
+
+    let mut checked = 0;
+    for file in &files {
+        let raw = std::fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        for (n, line) in raw.replace("\r\n", "\n").lines().enumerate() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("image:") {
+                continue;
+            }
+            let Some((_, digest)) = trimmed.split_once("@sha256:") else {
+                continue;
+            };
+            let digest = digest.split_whitespace().next().unwrap_or_default();
+            checked += 1;
+            assert_eq!(
+                digest.len(),
+                64,
+                "{}:{}: digest {digest:?} is {} hex chars, not 64 — resolve it with \
+                 `docker manifest inspect <image>`; docker rejects the whole file",
+                file.display(),
+                n + 1,
+                digest.len()
+            );
+            assert!(
+                digest
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "{}:{}: digest {digest:?} must be lowercase hex",
+                file.display(),
+                n + 1
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "no digest-pinned images found under {} — the walk is broken, and a broken \
+         walk is indistinguishable from a clean tree",
+        root.display()
+    );
+}

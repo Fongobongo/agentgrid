@@ -94,6 +94,13 @@
     domain gets 403 **and an allowlisted one gets 200** (the second half is what
     catches a config that denies everything), and that a container on the
     network with no proxy has no route out.
+  - The compose file's `ubuntu/squid` digest was 65 hex characters — invented
+    rather than resolved — so `docker compose up -d` refused the file outright
+    ("invalid checksum digest length") and the sidecar could not start at all.
+    Resolved to the real manifest digest, and `deploy_image_digests_are_well_formed`
+    in the contract suite now fails on any `deploy/**/*.y*ml` image pin that is
+    not 64 lowercase hex, because nothing in the test suite read a compose file
+    before and the only thing that noticed was a CI cycle.
 
 - **`AGENTGRID_ARTIFACT_ROOT` is honoured.** It was set by both Dockerfiles,
   both install scripts, all three HA compose files and described in the README

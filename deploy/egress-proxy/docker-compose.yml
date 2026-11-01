@@ -30,7 +30,7 @@
 # Edit deploy/egress-proxy/squid.allowlist.conf to allow your domains.
 services:
   egress-proxy:
-    image: ubuntu/squid:6.6-24.04_edge@sha256:b3a5d08db09638f1b7e26bc5751d6b32c61a6993f4b9d5521b9f4d9e48ff53a27
+    image: ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
     restart: unless-stopped
     read_only: true
     tmpfs:
