@@ -1153,6 +1153,16 @@ pub struct PollResponse {
     /// current; the node's own env `AGENTGRID_PROXY_URLS` always wins when set.
     #[serde(default)]
     pub proxy_urls: Vec<String>,
+    /// True when `proxy_urls` is the node's **complete** pool, not merely
+    /// "nothing to say".
+    ///
+    /// Without it an empty list is ambiguous — "you have none" and "this
+    /// control plane is too old to send any" look identical — so the node has
+    /// to keep its last pool, which made removing the last proxy a no-op for
+    /// every node already connected. An older control plane omits the field,
+    /// so the old behaviour is preserved exactly.
+    #[serde(default)]
+    pub proxy_urls_complete: bool,
     /// CP-managed adapter environment (e.g. route claude at a custom proxy
     /// endpoint: adapter=claude, key=ANTHROPIC_BASE_URL). Entries with
     /// adapter="*" apply to every adapter. Empty = keep current.
@@ -2045,6 +2055,7 @@ mod tests {
             }),
             assignments: vec![],
             proxy_urls: vec![],
+            proxy_urls_complete: true,
             adapter_env: vec![],
             adapter_env_complete: true,
         };
@@ -2053,6 +2064,12 @@ mod tests {
         let legacy = r#"{"assignment":null}"#;
         let parsed: PollResponse = serde_json::from_str(legacy).unwrap();
         assert!(parsed.assignments.is_empty());
+        // A pre-0.9 control plane omits the flag: empty must keep meaning
+        // "nothing to say", not "you have no proxies".
+        assert!(
+            !parsed.proxy_urls_complete,
+            "an absent flag must default to incomplete, not to a revocation"
+        );
     }
 
     #[test]

@@ -74,6 +74,30 @@ pub enum NodeWsMsg {
         /// (revocation) rather than "nothing to say".
         adapter_env_complete: bool,
     },
+    /// CP → node: the node's effective egress proxy pool (ADR 0012).
+    ///
+    /// Sent right after `hello_ok` and again whenever `/v1/proxies` changes.
+    /// Without it the pool only ever travelled in a poll response, and a node
+    /// on `ws`/`auto` never polls — so the CP-managed pool did nothing on the
+    /// default transport and the node egressed **direct**, past the operator's
+    /// proxy, for both agent traffic and its own WS upgrade.
+    ProxyUpdate {
+        proxy_urls: Vec<String>,
+        /// True: this list is the node's whole set, so empty means "the pool
+        /// is now empty" (the last proxy was removed) rather than "nothing to
+        /// say". `ProxyPool::update_from_cp` cannot tell those apart without
+        /// it, and a removed proxy stayed in rotation forever.
+        proxy_urls_complete: bool,
+    },
+    /// A message this build does not know: a newer control plane, or a variant
+    /// added after this node was released.
+    ///
+    /// Ignored instead of being a parse error, because an unknown *control*
+    /// message must not cost the node its session — and, on the CP side, a
+    /// typo'd tag is now visible as `unknown` in the log rather than as a
+    /// generic parse failure.
+    #[serde(other)]
+    Unknown,
 }
 
 /// WS close codes for the node channel (docs/node-ws-protocol.md).
@@ -125,5 +149,37 @@ mod tests {
             }
             _ => panic!("expected hello"),
         }
+    }
+
+    #[test]
+    fn proxy_update_round_trips_with_its_complete_flag() {
+        let m = NodeWsMsg::ProxyUpdate {
+            proxy_urls: vec!["http://p:3128".into()],
+            proxy_urls_complete: true,
+        };
+        let j = serde_json::to_string(&m).unwrap();
+        assert!(j.contains("\"type\":\"proxy_update\""), "got: {j}");
+        assert_eq!(serde_json::from_str::<NodeWsMsg>(&j).unwrap(), m);
+
+        // Empty + complete is the "the pool is now empty" delivery — it must
+        // survive the round trip, or removing the last proxy is unrepresentable.
+        let empty = NodeWsMsg::ProxyUpdate {
+            proxy_urls: vec![],
+            proxy_urls_complete: true,
+        };
+        let j = serde_json::to_string(&empty).unwrap();
+        assert_eq!(serde_json::from_str::<NodeWsMsg>(&j).unwrap(), empty);
+    }
+
+    /// A control message from a newer CP must not fail the parse: the node
+    /// would log a warning per frame, and the CP side would report a generic
+    /// "bad ws message" instead of naming what it did not understand.
+    #[test]
+    fn unknown_tag_parses_as_unknown() {
+        let j = r#"{"type":"proxy_update_v9","payload":{"anything":1}}"#;
+        assert_eq!(
+            serde_json::from_str::<NodeWsMsg>(j).unwrap(),
+            NodeWsMsg::Unknown
+        );
     }
 }

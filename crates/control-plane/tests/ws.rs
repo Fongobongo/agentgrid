@@ -112,11 +112,12 @@ async fn recv_msg(sock: &mut WsClient, timeout: Duration) -> Option<NodeWsMsg> {
     }
 }
 
-/// Receive the next message that is not an `adapter_env_update` push.
+/// Receive the next message that is not a config push.
 ///
-/// ADR 0028: the CP sends the node's sealed adapter env right after
-/// `hello_ok` and on every change, so a test that asserts on the next *data*
-/// message must not depend on where that frame happens to land.
+/// ADR 0028 / ADR 0012: the CP sends the node's sealed adapter env **and** its
+/// egress proxy pool right after `hello_ok` and on every change, so a test
+/// that asserts on the next *data* message must not depend on where those
+/// frames happen to land.
 async fn recv_data_msg(sock: &mut WsClient, timeout: Duration) -> Option<NodeWsMsg> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -125,7 +126,9 @@ async fn recv_data_msg(sock: &mut WsClient, timeout: Duration) -> Option<NodeWsM
             return None;
         }
         match recv_msg(sock, remaining).await {
-            Some(NodeWsMsg::AdapterEnvUpdate { .. }) => continue,
+            Some(NodeWsMsg::AdapterEnvUpdate { .. }) | Some(NodeWsMsg::ProxyUpdate { .. }) => {
+                continue
+            }
             other => return other,
         }
     }
@@ -428,5 +431,118 @@ async fn ws_reconnect_redelivers_unacked_assignment() {
     assert_eq!(
         assignments[0].fencing_token, stranded_token,
         "redelivery must keep the original fencing token"
+    );
+}
+
+async fn add_proxy(base: &str, token: &str, url: &str) -> i64 {
+    reqwest::Client::new()
+        .post(format!("{base}/v1/proxies"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "url": url }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_i64()
+        .expect("proxy id")
+}
+
+async fn remove_proxy(base: &str, token: &str, id: i64) {
+    let r = reqwest::Client::new()
+        .delete(format!("{base}/v1/proxies/{id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::OK, "proxy removal failed");
+}
+
+/// Next `proxy_update` frame, skipping the other post-hello pushes.
+async fn expect_proxy_update(sock: &mut WsClient) -> (Vec<String>, bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "no proxy_update within 5 s — the pool never reached the node"
+        );
+        match recv_msg(sock, remaining).await {
+            Some(NodeWsMsg::ProxyUpdate {
+                proxy_urls,
+                proxy_urls_complete,
+            }) => return (proxy_urls, proxy_urls_complete),
+            Some(_) => continue,
+            None => panic!("ws closed while waiting for proxy_update"),
+        }
+    }
+}
+
+/// ADR 0012 on the default transport: the CP-managed egress pool must reach a
+/// node that never polls.
+///
+/// It used to travel only in `PollResponse.proxy_urls`, and `ws`/`auto` nodes
+/// never poll — so on the default transport the node kept an empty pool and
+/// every agent request egressed direct, past the operator's proxy. Two halves:
+/// delivery with the connect frames, and delivery on a write while connected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn proxy_pool_reaches_a_ws_node_on_connect_and_on_write() {
+    let (base, token) = boot().await;
+    let (node_id, cred) = enroll(&base, &token, "ws-proxy", 1).await;
+
+    // Registered *before* the node connects: must arrive with the hello frames.
+    add_proxy(&base, &token, "http://proxy-a:3128").await;
+
+    let mut sock = ws_connect(&base, &cred).await;
+    send_hello(&mut sock, &node_id, 1).await;
+    expect_hello_ok(&mut sock).await;
+
+    let (urls, complete) = expect_proxy_update(&mut sock).await;
+    assert_eq!(urls, vec!["http://proxy-a:3128".to_string()]);
+    assert!(complete, "the connect push is the whole pool, not a delta");
+
+    // Registered while the node is connected: no poll is coming, so only the
+    // push can deliver it.
+    add_proxy(&base, &token, "http://proxy-b:3128").await;
+    let (urls, complete) = expect_proxy_update(&mut sock).await;
+    assert_eq!(
+        urls,
+        vec![
+            "http://proxy-a:3128".to_string(),
+            "http://proxy-b:3128".to_string()
+        ],
+        "the global pool is ordered by registration"
+    );
+    assert!(complete);
+
+    // Removing every proxy must be representable: empty + complete is "you
+    // have none". Without the flag the node cannot tell this from "nothing to
+    // say" and keeps egressing through a deleted proxy.
+    let ids: Vec<i64> = reqwest::Client::new()
+        .get(format!("{base}/v1/proxies"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    remove_proxy(&base, &token, ids[0]).await;
+    let (urls, complete) = expect_proxy_update(&mut sock).await;
+    assert_eq!(urls.len(), 1, "one proxy left after the first removal");
+    assert!(complete);
+    remove_proxy(&base, &token, ids[1]).await;
+    let (urls, complete) = expect_proxy_update(&mut sock).await;
+    assert!(urls.is_empty(), "the pool is empty, not stale: {urls:?}");
+    assert!(
+        complete,
+        "an empty pool must be marked complete or the node keeps the old list"
     );
 }

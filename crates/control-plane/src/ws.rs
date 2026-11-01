@@ -146,6 +146,35 @@ impl WsRegistry {
         }
     }
 
+    /// Push the current egress proxy pool to every connected node.
+    ///
+    /// The pool used to travel only in a poll response, and a node on
+    /// `ws`/`auto` never polls — so on the default transport the node kept an
+    /// empty pool and egressed **direct**, past the operator's proxy (ADR
+    /// 0012). Same shape as [`Self::push_adapter_env`]: best-effort, repaired
+    /// by the next connect.
+    pub async fn push_proxies(&self, store: &crate::store::Store) {
+        let targets: Vec<String> = {
+            let conns = self.conns.lock().await;
+            conns.keys().cloned().collect()
+        };
+        for node_id in targets {
+            match store.proxy_urls_for(&node_id).await {
+                Ok(proxy_urls) => {
+                    self.send(
+                        &node_id,
+                        &NodeWsMsg::ProxyUpdate {
+                            proxy_urls,
+                            proxy_urls_complete: true,
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => tracing::warn!(node_id = %node_id, "ws proxy push failed: {e}"),
+            }
+        }
+    }
+
     /// Number of connected WS nodes (surfaced in /metrics).
     pub async fn connection_count(&self) -> usize {
         self.conns.lock().await.len()
@@ -312,6 +341,26 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
         }
     }
 
+    // Same hole, same fix, for the egress proxy pool (ADR 0012): it travelled
+    // only in a poll response, so on this transport a node ran with an empty
+    // pool and every byte of agent traffic left the host directly. Sent
+    // unconditionally — an old node parses it as `Unknown` and ignores it.
+    match state.store.proxy_urls_for(&node_id).await {
+        Ok(proxy_urls) => {
+            let _ = state
+                .ws_registry
+                .send(
+                    &node_id,
+                    &NodeWsMsg::ProxyUpdate {
+                        proxy_urls,
+                        proxy_urls_complete: true,
+                    },
+                )
+                .await;
+        }
+        Err(e) => tracing::warn!(node_id = %node_id, "ws proxy pool on connect failed: {e}"),
+    }
+
     // A freshly connected node may already have free slots and queued work.
     // Reconnect pull for in-flight assignments: an assignment pushed to a
     // connection that died mid-delivery leaves the attempt `assigned`
@@ -433,6 +482,12 @@ async fn handle_client_msg(state: &Arc<AppState>, node_id: &str, msg: NodeWsMsg)
         NodeWsMsg::CancelAck { .. } => {}
         NodeWsMsg::Heartbeat { .. } => {
             state.assignment_notify.notify_waiters();
+        }
+        // A tag this build does not know (a newer node, or a typo). Logged by
+        // name rather than folded into the generic arm below, so a protocol
+        // mismatch is diagnosable instead of looking like a direction error.
+        NodeWsMsg::Unknown => {
+            tracing::warn!(node_id, "ws message with an unknown tag ignored")
         }
         _ => tracing::warn!(node_id, "unexpected ws message direction"),
     }

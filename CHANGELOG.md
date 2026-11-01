@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The CP-managed egress proxy pool now reaches a node on the default
+  transport** (ADR 0012). `proxy_urls` only ever travelled in a poll response,
+  and `Transport::Ws`/`Auto` never polls — so on the transport `auto` picks by
+  default, the pool was empty on every node and **all** agent egress went
+  direct, past the operator's proxy. `tests/e2e/run-proxy-failover.sh` was
+  pinned to `AGENTGRID_TRANSPORT=poll` (and was not in CI at all), which is why
+  nothing caught it.
+  - New `proxy_update` message on the node WS channel, sent right after
+    `hello_ok` and after every `POST`/`DELETE /v1/proxies`. It carries
+    `proxy_urls` plus a `proxy_urls_complete` flag, and the same flag is now in
+    `PollResponse`, because an empty list was ambiguous: the node had to treat
+    it as "nothing to say" (a legacy poll sends `[]` on every cycle), which made
+    removing the **last** proxy a no-op on a running node — it kept egressing
+    through a URL the operator had deleted.
+  - An unknown message type is now parsed as `NodeWsMsg::Unknown` and ignored
+    instead of failing the parse, so a control message from a newer control
+    plane cannot cost a node its session. This is what let the message ship
+    without a `NODE_PROTOCOL_VERSION` bump: a protocol-2 node logs one warning
+    and carries on, and the fleet is not degraded for a config push.
+  - Still direct by design: the **first** WS upgrade after the daemon starts.
+    The pool arrives inside the session it would have to proxy. A node that
+    needs a proxy before its first connect keeps using
+    `AGENTGRID_PROXY_URLS`.
+  - `run-proxy-failover.sh` now runs both legs — `ws` (delivery: connect push,
+    write push, and the empty pool that means "all removed") and `poll`
+    (traffic through A, failover to B, return to a revived A) — and both are in
+    CI. It also stopped scraping `pgrep` for the proxy PID, which is absent in
+    git-bash and would have made the kill a silent no-op.
+
 ## [0.8.0] - 2026-11-01
 
 ### Added

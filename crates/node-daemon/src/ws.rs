@@ -451,6 +451,26 @@ async fn handle_msg(
                 adapter_env_complete,
             );
         }
+        // ADR 0012: the egress proxy pool, pushed instead of polled. On this
+        // transport a poll never happens, so this is the only path by which
+        // the CP-managed pool reaches the daemon — without it the node kept an
+        // empty pool and every agent request egressed direct, past the
+        // operator's proxy.
+        Ok(NodeWsMsg::ProxyUpdate {
+            proxy_urls,
+            proxy_urls_complete,
+        }) => {
+            // Logged, because the effect of this push is invisible until the
+            // next egress: an operator asking "why is this node still direct"
+            // needs to see that the pool arrived, and whether the delivery was
+            // the whole pool or a delta.
+            tracing::info!(
+                urls = proxy_urls.len(),
+                complete = proxy_urls_complete,
+                "egress proxy pool from control plane"
+            );
+            cfg.proxies.update_from_cp(proxy_urls, proxy_urls_complete);
+        }
         Ok(other) => tracing::debug!("unexpected ws message: {other:?}"),
         Err(e) => tracing::warn!("bad ws message: {e}"),
     }

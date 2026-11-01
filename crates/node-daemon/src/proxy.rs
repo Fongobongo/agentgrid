@@ -41,11 +41,19 @@ impl ProxyPool {
     }
 
     /// Replace the CP-managed list. No-op when env override is configured.
-    /// Audit X-N1b: also a no-op on an empty delivery — the CP contract is
-    /// Empty=keep current, and legacy polls carry `[]` on every cycle.
-    pub fn update_from_cp(&self, urls: Vec<String>) {
+    ///
+    /// `complete` says whether `urls` is the node's whole pool. Without it an
+    /// empty delivery is ambiguous, and the old code resolved it as "nothing
+    /// to say" (audit X-N1b: legacy polls carry `[]` on every cycle). That
+    /// made removing the last proxy a no-op — the node kept egressing through
+    /// a URL the operator had deleted. A control plane that sets `complete`
+    /// means it: empty is then "you have none".
+    pub fn update_from_cp(&self, urls: Vec<String>, complete: bool) {
         let mut g = self.inner.lock().unwrap();
-        if !g.env_urls.is_empty() || urls.is_empty() {
+        if !g.env_urls.is_empty() {
+            return;
+        }
+        if urls.is_empty() && !complete {
             return;
         }
         // Keep liveness state for URLs that survive the update.
@@ -110,12 +118,58 @@ mod tests {
     #[test]
     fn cp_list_updates_unless_env_override() {
         let p = ProxyPool::new(vec![]);
-        p.update_from_cp(vec!["http://x:1".into()]);
+        p.update_from_cp(vec!["http://x:1".into()], true);
         assert_eq!(p.current().as_deref(), Some("http://x:1"));
 
         let env_p = ProxyPool::new(vec!["http://mine:1".into()]);
-        env_p.update_from_cp(vec!["http://x:1".into()]);
+        env_p.update_from_cp(vec!["http://x:1".into()], true);
         assert_eq!(env_p.current().as_deref(), Some("http://mine:1"));
+    }
+
+    /// A legacy poll carries `[]` every cycle, so an empty *incomplete*
+    /// delivery must keep the pool — otherwise a pre-0.9 control plane would
+    /// wipe it on the first poll after the node learned one over WS.
+    #[test]
+    fn empty_incomplete_keeps_the_pool() {
+        let p = ProxyPool::new(vec![]);
+        p.update_from_cp(vec!["http://x:1".into()], true);
+        p.update_from_cp(vec![], false);
+        assert_eq!(p.current().as_deref(), Some("http://x:1"));
+    }
+
+    /// Removing the last proxy is what an empty *complete* delivery means.
+    /// Before this, `ag proxy rm` of the final URL left every node egressing
+    /// through a proxy the control plane no longer knew about.
+    #[test]
+    fn empty_complete_clears_the_pool() {
+        let p = ProxyPool::new(vec![]);
+        p.update_from_cp(vec!["http://x:1".into()], true);
+        assert_eq!(p.current().as_deref(), Some("http://x:1"));
+        p.update_from_cp(vec![], true);
+        assert_eq!(
+            p.current(),
+            None,
+            "a removed proxy must not stay in rotation"
+        );
+        // `current()` alone is not proof: a `mark_dead` would hide a pool that
+        // still holds the URL. The pool itself must be empty.
+        assert!(
+            p.all().is_empty(),
+            "the pool must be empty, not merely quarantined: {:?}",
+            p.all()
+        );
+        // And it stays cleared for a later empty delivery.
+        p.update_from_cp(vec![], false);
+        assert!(p.all().is_empty());
+    }
+
+    /// The env override is the node admin's decision: it survives a complete
+    /// (even empty) delivery from the control plane.
+    #[test]
+    fn env_override_survives_a_complete_empty_delivery() {
+        let p = ProxyPool::new(vec!["http://mine:1".into()]);
+        p.update_from_cp(vec![], true);
+        assert_eq!(p.current().as_deref(), Some("http://mine:1"));
     }
 }
 

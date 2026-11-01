@@ -428,6 +428,16 @@ jobs:
       # "node came online" is also true when it ignored the proxy entirely.
       - name: ws transport through an HTTP CONNECT proxy
         run: bash tests/e2e/run-ws-proxy.sh
+      # ADR 0012 delivery on the transport `auto` actually picks. The pool used
+      # to travel only in a poll response, so a ws node never received it and
+      # egressed direct — this leg asserts the connect push, the push after a
+      # write, and the empty pool that means "the operator removed them all".
+      - name: egress proxy pool reaches a ws node
+        run: AGENTGRID_E2E_TRANSPORT=ws bash tests/e2e/run-proxy-failover.sh
+      # Same script, polling leg: real traffic through proxy A, failover to B
+      # when A dies, and back to A once the prober revives it.
+      - name: egress proxy failover (poll transport)
+        run: AGENTGRID_E2E_TRANSPORT=poll bash tests/e2e/run-proxy-failover.sh
       # One-button assembly: POST /v1/assembly with a goal → plan-stub
       # architect → auto-approve → workers → system collector. No LLM.
       - name: one-button assembly (goal in, merged project out)

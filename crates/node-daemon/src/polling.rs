@@ -178,7 +178,11 @@ pub async fn poll_loop_inner(
                 // gateway errors against it is over.
                 cfg.endpoints.note_success();
                 // CP-managed proxy list (env AGENTGRID_PROXY_URLS wins if set).
-                cfg.proxies.update_from_cp(pr.proxy_urls.clone());
+                // `complete` is what makes `ag proxy rm` of the *last* URL
+                // reach a running node; a pre-0.9 CP omits it and keeps the
+                // old "empty = nothing to say" behaviour.
+                cfg.proxies
+                    .update_from_cp(pr.proxy_urls.clone(), pr.proxy_urls_complete);
                 // Rebuild the client whenever the effective proxy changes:
                 // first list delivery, failover AND recovery back to a
                 // higher-priority revived proxy (prober/TTL revive).

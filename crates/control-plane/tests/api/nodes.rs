@@ -1356,3 +1356,92 @@ async fn rejected_assignment_is_terminal_without_budget() {
         .unwrap();
     assert_eq!(attempts, 1, "no budget means no second attempt");
 }
+
+/// ADR 0012: the poll delivery carries the pool's *completeness*, so removing
+/// the last proxy actually reaches a running node.
+///
+/// Before this the node treated every empty `proxy_urls` as "nothing to say"
+/// (legacy polls send `[]` on every cycle), which made `ag proxy rm` of the
+/// final URL a no-op: the node kept egressing through a proxy the operator had
+/// deleted. The flag is what makes an empty list mean "you have none".
+///
+/// Each poll is fed a queued task so it returns at once — a bare poll parks for
+/// the 25 s long-poll window, and three of those is a minute of suite time for
+/// three assertions.
+#[tokio::test]
+async fn poll_marks_the_proxy_pool_complete_so_removal_reaches_the_node() {
+    async fn poll_with_work(app: &Router, node_id: &str, cred: &str, prompt: &str) -> PollResponse {
+        create_task_with(app, prompt, 1, None).await;
+        for _ in 0..50 {
+            let req = PollRequest {
+                node_id: node_id.into(),
+                name: "node-proxy".into(),
+                adapters: vec!["mock".into()],
+                repositories: vec!["*".into()],
+                max_concurrency: 2,
+                protocol_version: None,
+            };
+            let resp = app
+                .clone()
+                .oneshot(post_auth(
+                    "/v1/node/poll",
+                    serde_json::to_string(&req).unwrap(),
+                    cred,
+                ))
+                .await
+                .unwrap();
+            let pr: PollResponse =
+                serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            if pr.assignment.is_some() {
+                return pr;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("task was never assigned to the node");
+    }
+
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let token = test_token(&app).await;
+    let (node_id, cred) = enroll(&app, "node-proxy", vec!["mock".into()], vec!["*".into()]).await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/proxies",
+            json!({ "url": "http://p1:3128" }).to_string(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let proxy_id = v["id"].as_i64().unwrap();
+
+    let pr = poll_with_work(&app, &node_id, &cred, "proxy one").await;
+    assert_eq!(pr.proxy_urls, vec!["http://p1:3128".to_string()]);
+    assert!(
+        pr.proxy_urls_complete,
+        "a successful query is a complete answer even when the pool is not empty"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(delete_auth(&format!("/v1/proxies/{proxy_id}"), &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let pr = poll_with_work(&app, &node_id, &cred, "proxy two").await;
+    assert!(
+        pr.proxy_urls.is_empty(),
+        "the removed proxy must not linger: {:?}",
+        pr.proxy_urls
+    );
+    assert!(
+        pr.proxy_urls_complete,
+        "empty + complete is the only way the node learns the pool is gone"
+    );
+}

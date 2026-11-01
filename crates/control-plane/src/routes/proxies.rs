@@ -62,7 +62,13 @@ pub async fn add_proxy(
         .add_proxy(&req.url, req.node_id.as_deref())
         .await
     {
-        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))),
+        Ok(id) => {
+            // A node on the WS transport never polls, so without this push a
+            // proxy registered while it is connected is invisible until it
+            // reconnects (ADR 0012 on the default transport).
+            state.ws_registry.push_proxies(&state.store).await;
+            (StatusCode::CREATED, Json(serde_json::json!({ "id": id })))
+        }
         Err(e) if e.to_string().contains("UNIQUE") => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "proxy already registered" })),
@@ -83,7 +89,13 @@ pub async fn remove_proxy(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "no such proxy" })),
         ),
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "removed": id }))),
+        Ok(_) => {
+            // Removing the last proxy is a real update now that the delivery
+            // is `complete`: the node clears its pool instead of keeping a
+            // URL the operator deleted.
+            state.ws_registry.push_proxies(&state.store).await;
+            (StatusCode::OK, Json(serde_json::json!({ "removed": id })))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),

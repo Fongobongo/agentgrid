@@ -203,11 +203,12 @@ pub async fn poll(
     // Failure must not break polling — an empty list means no update.
     // CP-pushed node config: egress proxies + adapter env (best-effort —
     // failures leave the node on its previous snapshot).
-    let proxy_urls = state
-        .store
-        .proxy_urls_for(&req.node_id)
-        .await
-        .unwrap_or_default();
+    let proxies = state.store.proxy_urls_for(&req.node_id).await;
+    // A failed query must not look like "your pool is empty": with the
+    // completeness flag set the node would drop its pool on a transient
+    // database error and egress direct.
+    let proxy_urls_complete = proxies.is_ok();
+    let proxy_urls = proxies.unwrap_or_default();
     // A failed query must not look like "this node has no entries": with
     // `adapter_env_complete` set the node would drop its whole snapshot on a
     // transient database error.
@@ -236,6 +237,7 @@ pub async fn poll(
                 assignment: None,
                 assignments: batch,
                 proxy_urls,
+                proxy_urls_complete,
                 adapter_env,
                 adapter_env_complete,
             };
@@ -248,6 +250,7 @@ pub async fn poll(
                 assignment: None,
                 assignments: Vec::new(),
                 proxy_urls,
+                proxy_urls_complete,
                 adapter_env,
                 adapter_env_complete,
             }),
@@ -260,6 +263,7 @@ pub async fn poll(
                     assignment: None,
                     assignments: Vec::new(),
                     proxy_urls,
+                    proxy_urls_complete,
                     adapter_env,
                     adapter_env_complete,
                 }),
