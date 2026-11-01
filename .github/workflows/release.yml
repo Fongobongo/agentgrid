@@ -99,12 +99,14 @@ jobs:
             cross build --release --target ${{ matrix.target }} \
               -p agentgrid-control-plane -p agentgrid-cli \
               -p agentgrid-node-daemon -p agentgrid-adapters \
-              -p agentgrid-gateway -p agentgrid-edge -p agentgrid-acp
+              -p agentgrid-gateway -p agentgrid-edge -p agentgrid-acp \
+              -p agentgrid-cred-gateway
           else
             cargo build --release --target ${{ matrix.target }} \
               -p agentgrid-control-plane -p agentgrid-cli \
               -p agentgrid-node-daemon -p agentgrid-adapters \
-              -p agentgrid-gateway -p agentgrid-edge -p agentgrid-acp
+              -p agentgrid-gateway -p agentgrid-edge -p agentgrid-acp \
+              -p agentgrid-cred-gateway
           fi
 
       - name: "glibc ceiling (the gnu tarball must start on Debian 11+)"
@@ -125,7 +127,7 @@ jobs:
           cd "target/${{ matrix.target }}/release"
           bad=""
           for b in agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway \
-                   agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude \
+                   agentgrid-cred-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude \
                    adapter-codex adapter-aider adapter-pi adapter-opencode; do
             [ -f "$b" ] || continue
             # Highest GLIBC_x.y the binary actually asks the loader for.
@@ -176,7 +178,7 @@ jobs:
           mkdir -p ../../.size-baseline
           BASE=../../.size-baseline/${{ matrix.target }}.tsv
           {
-            for b in agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi; do
+            for b in agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cred-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi; do
               [ -f "$b" ] || continue
               printf '%s\t%s\n' "$b" "$(stat -c%s "$b")"
             done
@@ -202,7 +204,7 @@ jobs:
         # architecture assertion instead.
         run: |
           cd "target/${{ matrix.target }}/release"
-          for b in ag agentgrid-control-plane agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-pi adapter-opencode; do
+          for b in ag agentgrid-control-plane agentgrid-node-daemon agentgrid-gateway agentgrid-cred-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-pi adapter-opencode; do
             if file -b "$b" | grep -q "x86-64"; then
               "./$b" --version
             else
@@ -225,7 +227,7 @@ jobs:
       - name: checksums (SHA256SUMS)
         run: |
           cd "target/${{ matrix.target }}/release"
-          sha256sum agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi adapter-pi \
+          sha256sum agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cred-gateway agentgrid-cp-edge agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi adapter-pi \
             > SHA256SUMS
           cat SHA256SUMS
 
@@ -344,10 +346,10 @@ jobs:
               # it or the published tarballs ship non-executable binaries
               # (first seen live on the v0.4.0 assets).
               chmod +x agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge \
-                agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi
+                agentgrid-cred-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi
               tar czf "$GITHUB_WORKSPACE/release-assets/agentgrid-$t.tar.gz" \
                 agentgrid-control-plane ag agentgrid-node-daemon agentgrid-gateway agentgrid-cp-edge \
-                agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi SHA256SUMS
+                agentgrid-cred-gateway agentgrid-acp-agent adapter-mock adapter-claude adapter-codex adapter-aider adapter-opencode adapter-pi SHA256SUMS
             )
           done
           ls -la release-assets

@@ -49,7 +49,11 @@
   `name=secret` (`AGENTGRID_CRED_GATEWAY_ROUTES` / `_KEYS` / `_ADMIN`).
   - The gateway refuses to start with an empty admin token or a route that has
     no key, does not follow redirects (reqwest would re-send the injected
-    header to the redirect target), and redacts keys from its `Debug`.
+    header to the redirect target), and redacts keys from its `Debug`. It ships
+    as `agentgrid-cred-gateway` in the release tarball and answers `--version`
+    like every other published binary (the release smoke test runs all of
+    them, and a binary that needed a full config to answer would fail the
+    release rather than the check).
   - **Fail-closed, with a message that names the fix.** A gateway entry that
     cannot be honoured fails the attempt with `infrastructure_failed` rather
     than degrading into "no credential" three layers down. Three refusals, in

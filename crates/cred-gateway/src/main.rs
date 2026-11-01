@@ -13,6 +13,14 @@ use agentgrid_cred_gateway::{router, Gateway};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Before the subscriber and before `from_env`: the release smoke test runs
+    // every published binary with `--version`, and a binary that needs a full
+    // config to answer it would fail the release rather than the check.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("agentgrid-cred-gateway {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
