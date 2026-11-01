@@ -189,6 +189,7 @@ dependencies = [
  "agentgrid-adapters",
  "agentgrid-common",
  "agentgrid-control-plane",
+ "agentgrid-cred-gateway",
  "agentgrid-edge",
  "agentgrid-skills",
  "anyhow",

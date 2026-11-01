@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use agentgrid_cred_gateway::{router, Gateway, Route};
 use axum::body::Bytes;
-use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::routing::any;
 use axum::{Json, Router};

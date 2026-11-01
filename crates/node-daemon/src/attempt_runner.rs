@@ -817,6 +817,56 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         cfg.base(),
         assignment.attempt_id
     );
+    // ADR 0029 option F/inject: one capability per `NAME@gateway=<route>` entry
+    // for the whole attempt, minted once and reused by every feedback round.
+    // Refused rather than downgraded — an entry that cannot be honoured must
+    // not quietly become "no credential" three layers down.
+    //
+    // Deliberately before the sink/flusher: an early return after `run_flusher`
+    // has been spawned would leave that task holding a sink clone for an
+    // attempt that is already over.
+    let gw_http = reqwest::Client::new();
+    let mut gateway_pairs: Vec<(String, String)> = Vec::new();
+    let capabilities = match crate::cred_gateway::apply(
+        &cfg,
+        &gw_http,
+        &assignment.attempt_id,
+        assignment.network_mode.as_deref(),
+        &mut gateway_pairs,
+    )
+    .await
+    {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            tracing::error!(
+                attempt_id = %assignment.attempt_id,
+                error = %e,
+                "gateway-delivered credential refused; failing the attempt"
+            );
+            report_complete(
+                &client,
+                &cfg.base(),
+                &assignment.attempt_id,
+                1,
+                None,
+                Some("infrastructure_failed".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                assignment.provenance.clone().or_else(provenance_from_env),
+                vec![],
+                0,
+                &cfg.completion_outbox,
+                &assignment.fencing_token,
+            )
+            .await;
+            drop_workspace_early(&ws, &assignment.attempt_id).await;
+            return Ok(());
+        }
+    };
+    let _revoke = crate::cred_gateway::RevokeOnDrop::new(gw_http, capabilities);
     let sink = EventSink::new(
         assignment.attempt_id.clone(),
         client.clone(),
@@ -929,11 +979,15 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // the loop first (as the unused_assignments lint itself verifies).
     #[allow(unused_assignments)]
     let mut last_spawn_env: Vec<(String, String)> = Vec::new();
+
     let mut validation_passed = loop {
         // Hardening P1 item 27: forward profile-declared secrets explicitly —
         // ProcessBackend env_clears the child, so daemon-env secrets must be
         // allowlisted here.
         let mut spawn_env = cfg.adapter_env.clone();
+        // ADR 0029: the capability, not the key — `gateway_pairs` holds what the
+        // gateway minted for this attempt.
+        spawn_env.extend(gateway_pairs.iter().cloned());
         // Egress proxy (pool with failover): route adapter/LLM traffic of the
         // attempt through it. Without any pool nothing is injected; operators
         // can still override per-node via AGENTGRID_PROXY_URLS.

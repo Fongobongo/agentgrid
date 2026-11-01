@@ -40,6 +40,23 @@ The daemon cannot verify the topology for you (it only knows a network name), so
 `tests/e2e/run-egress-isolation.sh` asserts it from the outside: a container on
 `agentgrid-egress` must fail to reach the internet without the proxy.
 
+## The credential gateway lives here too
+
+`agentgrid-cred-gateway` (ADR 0029) is the natural second tenant of this network:
+it is the only host a sandbox needs to reach besides the allowlisted domains.
+With it, `AGENTGRID_ADAPTER_ENV="ANTHROPIC_API_KEY@gateway=anthropic"` puts an
+opaque per-attempt capability in the sandbox instead of the key, and the gateway
+injects the real key on its own outbound leg — see
+[`docs/agent-ops.md`](../../docs/agent-ops.md#keeping-the-key-out-of-the-sandbox).
+
+It is **not** in the compose file above yet: adding it changes what `up -d`
+starts for every existing deployment, so it is an opt-in service for now. Put it
+on `agentgrid-egress` only (it needs no `outbound` membership of its own if it
+rides the proxy, and giving it one would put it back in the sandbox's blast
+radius). The daemon refuses a `@gateway` entry unless `network_mode=restricted`
+resolved to an egress network — which is why this section is in this file and
+not in the credential docs alone.
+
 ## Isolation guarantees
 
 - **restricted + proxy**: internet to allowlisted domains only, no LAN, and no

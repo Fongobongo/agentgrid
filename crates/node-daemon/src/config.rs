@@ -372,6 +372,12 @@ pub struct Config {
     pub repository_root: PathBuf,
     pub secrets: Vec<String>,
     pub adapter_env: Vec<(String, String)>,
+    /// ADR 0029 option F: `AGENTGRID_ADAPTER_ENV` entries written
+    /// `NAME@gateway=<route>`. The value is a **route name**, never a secret —
+    /// the provider key lives in the credential gateway, so the node does not
+    /// hold it at all. At attempt start each entry is replaced by a per-attempt
+    /// capability minted by the gateway (see `cred_gateway.rs`).
+    pub gateway_env: Vec<(String, String)>,
     pub sandbox: sandbox::SandboxKind,
     pub outbox_root: PathBuf,
     pub artifact_spool_root: PathBuf,
@@ -460,20 +466,61 @@ fn split_csv(env: &str, default: &str) -> Vec<String> {
         .unwrap_or_else(|| vec![default.to_string()])
 }
 
+/// Suffix that marks an `AGENTGRID_ADAPTER_ENV` entry as gateway-delivered
+/// (ADR 0029 option F). Spelled as a suffix on the variable name rather than a
+/// separate list so a key cannot be in two places with two answers.
+pub const GATEWAY_SUFFIX: &str = "@gateway";
+
 fn parse_env_pairs(env: &str) -> Vec<(String, String)> {
     std::env::var(env)
         .ok()
-        .map(|v| {
-            v.split([' ', ',', '\n'])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| {
-                    let (k, val) = s.split_once('=')?;
-                    Some((k.trim().to_string(), val.to_string()))
-                })
-                .collect()
-        })
+        .map(|v| split_env_pairs(&v))
         .unwrap_or_default()
+}
+
+/// Pure, so it can be tested without racing other tests over the process env.
+fn split_env_pairs(raw: &str) -> Vec<(String, String)> {
+    raw.split([' ', ',', '\n'])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let (k, val) = s.split_once('=')?;
+            // `NAME@gateway=route` is not a value for the agent: it is a
+            // delivery instruction (ADR 0029). Keeping it here would hand the
+            // agent the route name as if it were a credential.
+            if k.trim().ends_with(GATEWAY_SUFFIX) {
+                return None;
+            }
+            Some((k.trim().to_string(), val.to_string()))
+        })
+        .collect()
+}
+
+/// ADR 0029 option F. `ANTHROPIC_API_KEY@gateway=anthropic` means "this attempt
+/// gets a capability for route `anthropic` in `ANTHROPIC_API_KEY`, and the real
+/// key stays in the gateway". The value is a route name on purpose: a value
+/// that looked like a secret would be a secret on the node.
+fn parse_gateway_env(env: &str) -> Vec<(String, String)> {
+    std::env::var(env)
+        .ok()
+        .map(|v| split_gateway_pairs(&v))
+        .unwrap_or_default()
+}
+
+fn split_gateway_pairs(raw: &str) -> Vec<(String, String)> {
+    raw.split([' ', ',', '\n'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let (k, val) = s.split_once('=')?;
+            let name = k.trim().strip_suffix(GATEWAY_SUFFIX)?;
+            let route = val.trim();
+            if name.is_empty() || route.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), route.to_string()))
+        })
+        .collect()
 }
 
 fn hostname() -> Option<String> {
@@ -588,6 +635,7 @@ pub fn config_from_env() -> Config {
         ),
         secrets: split_csv("AGENTGRID_SECRETS", ""),
         adapter_env: parse_env_pairs("AGENTGRID_ADAPTER_ENV"),
+        gateway_env: parse_gateway_env("AGENTGRID_ADAPTER_ENV"),
         sandbox: sandbox::SandboxKind::from_env(),
         outbox_root: PathBuf::from(&data_dir).join("outbox"),
         artifact_spool_root: PathBuf::from(&data_dir).join("artifact-spool"),
@@ -920,6 +968,51 @@ mod tests {
             merged,
             vec!["ghp-local".to_string(), "sk-ant-pushed".to_string()],
             "the pushed key joins the list, the URL stays out, the duplicate is dropped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gateway_env_tests {
+    use super::*;
+
+    /// The marker must never leak into the agent's environment as a value: the
+    /// route name would look like a credential and the CLI would send it.
+    #[test]
+    fn a_gateway_entry_is_not_an_adapter_env_pair() {
+        let pairs = split_env_pairs("ANTHROPIC_API_KEY@gateway=anthropic,LOG_LEVEL=debug");
+        assert_eq!(pairs, vec![("LOG_LEVEL".to_string(), "debug".to_string())]);
+    }
+
+    #[test]
+    fn a_gateway_entry_keeps_the_env_name_and_the_route() {
+        let pairs = split_gateway_pairs("ANTHROPIC_API_KEY@gateway=anthropic");
+        assert_eq!(
+            pairs,
+            vec![("ANTHROPIC_API_KEY".to_string(), "anthropic".to_string())]
+        );
+    }
+
+    /// A route name is not a secret, but an empty one would mint against
+    /// nothing, and a bare `NAME@gateway` is a typo that must not silently
+    /// become an empty-string credential.
+    #[test]
+    fn a_gateway_entry_without_a_route_is_dropped() {
+        assert!(split_gateway_pairs("ANTHROPIC_API_KEY@gateway=").is_empty());
+        assert!(split_gateway_pairs("ANTHROPIC_API_KEY@gateway").is_empty());
+        assert!(split_gateway_pairs("@gateway=anthropic").is_empty());
+    }
+
+    #[test]
+    fn both_lists_can_come_from_one_variable() {
+        let raw = "ANTHROPIC_API_KEY@gateway=anthropic, HTTP_PROXY=http://p:3128";
+        assert_eq!(
+            split_gateway_pairs(raw),
+            vec![("ANTHROPIC_API_KEY".to_string(), "anthropic".to_string())]
+        );
+        assert_eq!(
+            split_env_pairs(raw),
+            vec![("HTTP_PROXY".to_string(), "http://p:3128".to_string())]
         );
     }
 }

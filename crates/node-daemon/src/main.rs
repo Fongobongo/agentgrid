@@ -25,6 +25,7 @@ mod command_guard;
 mod completion;
 mod config;
 mod config_error;
+mod cred_gateway;
 mod ctx;
 mod enrollment;
 pub mod evals;
@@ -159,6 +160,41 @@ async fn drive_acp_session(
     if let Some(gid) = &assignment.group_id {
         container_env.push(("AG_GROUP_ID".to_string(), gid.clone()));
     }
+    // ADR 0029 option F: `NAME@gateway=<route>` entries are replaced here by a
+    // per-attempt capability. Refused, never downgraded: if this cannot be
+    // honoured the attempt fails, because the alternative is handing the agent
+    // nothing and letting it fail later with a 401 that explains nothing.
+    //
+    // Its own client, not the daemon's: that one carries the node credential as
+    // a default `Authorization` header and is routed through the egress proxy
+    // pool. The gateway is a local peer, and neither of those belongs on a mint.
+    let gw_http = reqwest::Client::new();
+    let capabilities = match cred_gateway::apply(
+        cfg,
+        &gw_http,
+        &assignment.attempt_id,
+        assignment.network_mode.as_deref(),
+        &mut container_env,
+    )
+    .await
+    {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            tracing::error!(
+                attempt_id = %assignment.attempt_id,
+                error = %e,
+                "gateway-delivered credential refused"
+            );
+            return Ok(AcpResult {
+                success: false,
+                error_code: Some("infrastructure_failed".into()),
+                session_id: None,
+                rate_limited: false,
+            });
+        }
+    };
+    let _revoke = cred_gateway::RevokeOnDrop::new(gw_http, capabilities);
+
     let (program, args) = sandbox::sandbox_command(
         cfg.sandbox,
         &program,
@@ -1082,6 +1118,34 @@ async fn amain() -> Result<()> {
         adapters = ?cfg.adapters,
         "node daemon starting"
     );
+    // ADR 0029: "which entries are still plain `env`" has to be answerable
+    // without reading the unit file, because that is the difference between a
+    // key in the sandbox and a capability in the sandbox. Names and routes are
+    // not secrets (a route is a name the gateway already knows), so they can be
+    // logged; values never are, and are not read here.
+    if cfg.gateway_env.is_empty() {
+        if cfg.adapter_env.is_empty() {
+            tracing::info!("no adapter env entries");
+        } else {
+            tracing::warn!(
+                entries = cfg.adapter_env.len(),
+                names = ?cfg.adapter_env.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+                "every AGENTGRID_ADAPTER_ENV entry is delivered as a plain value: the \
+                 agent can read these (T13a). Write them `NAME@gateway=<route>` with \
+                 AGENTGRID_CRED_GATEWAY_URL set to keep the keys out of the sandbox"
+            );
+        }
+    } else {
+        tracing::info!(
+            gateway_delivered = ?cfg
+                .gateway_env
+                .iter()
+                .map(|(k, route)| format!("{k}->{route}"))
+                .collect::<Vec<_>>(),
+            plain = ?cfg.adapter_env.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            "adapter env delivery"
+        );
+    }
     polling::run_transport(cfg, cred).await
 }
 

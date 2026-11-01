@@ -40,6 +40,7 @@ pub(crate) fn cfg(server: &str, dir: &std::path::Path) -> Config {
         repository_root: dir.join("repos"),
         secrets: vec![],
         adapter_env: vec![],
+        gateway_env: vec![],
         sandbox: crate::sandbox::SandboxKind::None,
         outbox_root: dir.join("outbox"),
         artifact_spool_root: dir.join("spool"),

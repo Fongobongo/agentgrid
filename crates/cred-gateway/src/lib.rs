@@ -109,7 +109,7 @@ impl Gateway {
         if routes.is_empty() {
             anyhow::bail!("no routes configured (AGENTGRID_CRED_GATEWAY_ROUTES)");
         }
-        for (name, _) in routes.iter() {
+        for name in routes.keys() {
             if !keys.contains_key(name) {
                 anyhow::bail!("route '{name}' has no key (AGENTGRID_CRED_GATEWAY_KEYS)");
             }

@@ -603,6 +603,7 @@ mod tests {
             repository_root: cfg_repos,
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
+            gateway_env: vec![],
             adapter_env: vec![],
             outbox_root: std::env::temp_dir()
                 .join(format!("ag-acp-outbox-{}", uuid::Uuid::new_v4())),
@@ -749,6 +750,7 @@ mod tests {
                 env: rl_token_env.clone(),
                 tokens: vec!["tok-primary".into(), "tok-secondary".into()],
             }],
+            gateway_env: vec![],
             adapter_env: vec![
                 (rl_token_env.clone(), "tok-primary".into()),
                 // env_clear strips the daemon env; the marker must ride in
@@ -910,6 +912,7 @@ mod tests {
             repository_root: cfg_repos,
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
+            gateway_env: vec![],
             adapter_env: vec![("AG_FAKE_HANG".into(), "1".into())],
             outbox_root: std::env::temp_dir()
                 .join(format!("ag-acp-outbox-hang-{}", uuid::Uuid::new_v4())),
@@ -1039,6 +1042,7 @@ mod tests {
             repository_root: cfg_repos,
             secrets: vec![],
             sandbox: sandbox::SandboxKind::None,
+            gateway_env: vec![],
             adapter_env: vec![("AG_FAKE_HANG".into(), "1".into())],
             outbox_root: std::env::temp_dir()
                 .join(format!("ag-acp-outbox-cancel-{}", uuid::Uuid::new_v4())),
@@ -1236,6 +1240,7 @@ mod tests {
                 // Hardening P1 item 27: the child no longer inherits the
                 // daemon env — forward the fake agent's record path via the
                 // explicit allowlist instead of set_var in the parent.
+                gateway_env: vec![],
                 adapter_env: vec![(
                     "AG_FAKE_RECORD_PROMPT".to_string(),
                     record.to_string_lossy().to_string(),

@@ -36,4 +36,7 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 agentgrid-control-plane = { path = "../control-plane" }
+# ADR 0029: the daemon's client and the gateway are two halves of one contract
+# (mint body, capability header, revoke route). One test runs the real gateway.
+agentgrid-cred-gateway = { path = "../cred-gateway" }
 axum.workspace = true

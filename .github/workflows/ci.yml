@@ -516,6 +516,16 @@ jobs:
       - name: image smoke (musl scratch cp + glibc HEALTHCHECK)
         run: bash tests/e2e/run-image-smoke.sh
         timeout-minutes: 15
+      # ADR 0029 option F: `network_mode=restricted` is only a guarantee if the
+      # egress network is `internal`. The daemon cannot check that — it knows a
+      # network name, not the topology — so the topology is asserted from the
+      # outside here: the network is internal, a non-allowlisted domain is
+      # refused AND an allowlisted one passes (the second half is what catches
+      # a squid config that denies everything), and a container on the network
+      # with no proxy has no route out at all.
+      - name: egress isolation (internal network + allowlist actually enforced)
+        run: bash tests/e2e/run-egress-isolation.sh
+        timeout-minutes: 15
       # Stage 12 / ADR 0003: the memory-limit acceptance — a sandboxed attempt
       # that exceeds --memory is OOM-killed by the runtime and completes with
       # error_code=resource_limit (not agent_failed). Uses the ag-node:test

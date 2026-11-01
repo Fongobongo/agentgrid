@@ -36,6 +36,77 @@ Agents authenticate independently of agentgrid. Two delivery channels:
 
 Never put secrets in prompts or commit them; `.env` stays gitignored.
 
+### Keeping the key out of the sandbox
+
+Channel 2 hands the value to the agent, which means `docker inspect` and the
+agent's own `/proc/self/environ` both show a live key. If that matters, write
+the entry as a **route** instead of a value:
+
+```bash
+AGENTGRID_ADAPTER_ENV="ANTHROPIC_API_KEY@gateway=anthropic"
+```
+
+The value is the name of a route on a credential gateway, not a secret. At
+attempt start the node mints an opaque **capability** for that route and puts
+*that* in the agent's environment; the gateway swaps in the real key on its own
+outbound leg. The node never holds the key, so there is nothing on it to leak.
+
+The other half is the base URL — without it the capability is never presented
+and the CLI talks to the provider directly, gets a 401, and nothing says why:
+
+```bash
+AGENTGRID_ADAPTER_ENV="ANTHROPIC_API_KEY@gateway=anthropic,\
+ANTHROPIC_BASE_URL=http://egress-proxy:7845/p/anthropic"
+```
+
+`/p/<route>` is the gateway's proxy prefix. The capability arrives in the header
+the provider expects (`x-api-key` for Anthropic, `Authorization` for an
+OpenAI-shaped API) because the CLI is already configured with it — the SDK reads
+`ANTHROPIC_API_KEY` and sends it as `x-api-key`, which is exactly what the
+gateway validates. `Authorization: Bearer <capability>` is accepted as a
+fallback for clients that only speak that header.
+
+```bash
+# the sidecar (see deploy/egress-proxy/)
+AGENTGRID_CRED_GATEWAY_ADMIN=$(openssl rand -hex 32) \
+AGENTGRID_CRED_GATEWAY_ROUTES="anthropic|x-api-key|https://api.anthropic.com" \
+AGENTGRID_CRED_GATEWAY_KEYS="anthropic=sk-ant-..." \
+  agentgrid-cred-gateway
+```
+
+and on the node daemon:
+
+```bash
+AGENTGRID_CRED_GATEWAY_URL=http://egress-proxy:7845
+AGENTGRID_CRED_GATEWAY_ADMIN=<same token>
+AGENTGRID_CRED_GATEWAY_TTL_SECS=21600   # optional, 6 h default
+AGENTGRID_CRED_GATEWAY_QUOTA=200        # optional, requests per attempt
+```
+
+Capabilities are minted once per attempt (every feedback round reuses one),
+revoked when the attempt ends, and expire on their own if the daemon dies.
+
+It is **refused, not downgraded** — the attempt fails with
+`infrastructure_failed` and the log names the fix — when:
+
+- `AGENTGRID_CRED_GATEWAY_URL`/`_ADMIN` are unset (the attempt would have no
+  credential at all);
+- `AGENTGRID_SANDBOX` is not `docker` (without a separate PID namespace the
+  agent can read the daemon's own environment, so a capability buys nothing);
+- `network_mode=restricted` does not resolve to an egress network (the sandbox
+  must reach the gateway and nothing else).
+
+What it does **not** do: the agent still acts with a credential it holds while
+the attempt runs — the permitted provider channel is an exfiltration path no
+allowlist can tell from work (T13b). That is bounded by the quota, the TTL and
+route binding, not prevented. And an entry still written as `NAME=value` is
+still a key in the sandbox; only the marker changes anything.
+
+To see which is which without reading the unit file: the daemon logs the split
+at startup — a `WARN` naming every plain entry when nothing is gateway-delivered
+(that is T13a, unfixed), and an `INFO` with `NAME->route` beside the plain names
+when something is. Names and routes are not secrets; values are never logged.
+
 ## Unattended (headless) mode
 
 Real agents refuse destructive/interactive prompts unless explicitly told

@@ -1,10 +1,25 @@
 # ADR 0029: Adapter credentials do not enter the sandbox
 
-Status: **proposed** — nothing here is implemented. The threat it addresses is
-split in [`threat-model.md`](threat-model.md) as **T13a** (the secret is
-readable by the agent) and **T13b** (the agent acts with a credential it holds).
-T13a closes for `gateway` entries when option F ships; T13b is not closable by
-construction and is bounded instead.
+Status: **accepted; option F/inject is implemented, `exchange` is not.** The
+threat it addresses is split in [`threat-model.md`](threat-model.md) as
+**T13a** (the secret is readable by the agent) and **T13b** (the agent acts with
+a credential it holds). T13a closes **for `gateway` entries** — a plain
+`NAME=value` entry is still a key in the sandbox, so what ships is a mechanism
+plus a migration, not a switch. T13b is not closable by construction and is
+bounded instead (quota, TTL, route binding).
+
+What is in the tree as of this ADR:
+[`crates/cred-gateway/`](../../crates/cred-gateway) (the sidecar),
+[`crates/node-daemon/src/cred_gateway.rs`](../../crates/node-daemon/src/cred_gateway.rs)
+(the client: `settings` / `refusal` / `apply` / `revoke`), the
+`NAME@gateway=<route>` marker in
+[`crates/node-daemon/src/config.rs`](../../crates/node-daemon/src/config.rs),
+and the egress topology the refusal depends on
+([`deploy/egress-proxy/`](../../deploy/egress-proxy)). The mint happens once per
+attempt and is revoked on the way out; both the ACP path and the wrapper path
+refuse before spawning the agent. Option F/`exchange`, C3's TLS and the panel
+that shows which entries are still `env` are **not** built — see "Staged
+decision".
 
 ## Context
 
@@ -192,24 +207,34 @@ not**: the token it hands out is real, and it works from anywhere until it
 expires. So exchange mode requires the enforced-egress fix above; inject mode
 does not.
 
-## Premise check: `restricted` is not enforced today
+## Premise check: `restricted` was not enforced
 
-C and E both lean on `restricted` meaning "one reachable peer". It does not, in
+C and E both lean on `restricted` meaning "one reachable peer". It did not, in
 the shipped deploy. `resolved_network_mode` (`sandbox.rs:505`) attaches the
 sandbox to `$AGENTGRID_SANDBOX_EGRESS_NETWORK`, and
-`deploy/egress-proxy/docker-compose.yml` declares that network `internal: false`
-— a user-defined bridge with NAT, so a process that ignores `HTTP_PROXY` reaches
-the internet and the LAN directly. `deploy/egress-proxy/README.md` promises
+`deploy/egress-proxy/docker-compose.yml` declared that network `internal: false`
+— a user-defined bridge with NAT, so a process that ignores `HTTP_PROXY` reached
+the internet and the LAN directly. `deploy/egress-proxy/README.md` promised
 "internet to allowlisted domains only, no LAN", which is precisely the
-silently-unenforced state ADR 0023 exists to prevent.
+silently-unenforced state ADR 0023 exists to prevent. (Found while costing
+option E; it is the kind of claim that is only ever false in one direction.)
+
+**Fixed in the same change as this ADR's implementation.** The topology is two
+networks: `agentgrid-egress` (`internal: true`) holds the sandboxes and the
+proxy, `agentgrid-egress-outbound` holds the proxy alone. Squid's LAN rule was
+also asking the wrong question — `acl localnet src` matches the *client*, and
+every sandbox is a 172.16/12 client — so it refused all traffic; it is
+`acl lan_dst dst` now. Because the daemon can only check a network *name*, the
+guarantee is asserted from the outside by `tests/e2e/run-egress-isolation.sh`,
+which runs in CI.
 
 Consequence for this ADR: the gate in the decision ("`gateway` without
-`restricted` is refused") stays correct — it guarantees the sandbox can reach
-the gateway — but the *reason* changes from "the gateway is the only peer" to
-"the gateway is the only peer we put there". Fixing the topology (two networks:
-`internal: true` for squid + sandboxes, a second one for squid only) is a
-prerequisite, and it is worth doing on its own because the README currently
-claims a guarantee the compose file does not provide.
+`restricted` is refused") guarantees the sandbox can reach the gateway, and now
+the *reason* holds too — the gateway is the only peer there is, not merely the
+only peer we put there. Note the residual: the refusal trusts
+`$AGENTGRID_SANDBOX_EGRESS_NETWORK` to name a network that is actually internal.
+The daemon cannot tell, so an operator who points it at a non-internal bridge
+gets the advisory behaviour back with no warning.
 
 ## Decision (recommended)
 
@@ -219,6 +244,12 @@ next:
 1. **Fix the egress topology first** (see the premise check below): two
    networks, so `restricted` means what the README says. Independent of this
    ADR and worth doing regardless — but exchange mode cannot ship without it.
+   **Done.** `deploy/egress-proxy/docker-compose.yml` declares
+   `agentgrid-egress` (`internal: true`) and `agentgrid-egress-outbound`, and
+   `tests/e2e/run-egress-isolation.sh` asserts it from the outside in CI.
+   While doing it: `squid.allowlist.conf` had `acl localnet src` where it meant
+   `dst`, so the LAN rule refused every sandbox (they are all 172.16/12
+   clients) — including the domains the allowlist permits.
 2. **Ship the marker and the inject mode (F).** An entry marked `gateway` keeps
    the secret on the node, never places it in `container_env`, and the daemon
    **refuses** an attempt whose entries are `gateway` but whose `network_mode`
@@ -227,11 +258,17 @@ next:
    `*_KEY`/`*_TOKEN` name heuristic: a heuristic is exactly the "silently
    unenforced" state `validate_network_mode` exists to prevent (ADR 0023), and
    it fails in the direction that matters — a secret whose name does not match
-   the pattern is handed to the agent and nobody is told.
+   the pattern is handed to the agent and nobody is told. **Done** — except
+   that the marker value is a *route name*, not a secret, so the node does not
+   hold the key at all. That is what makes the refusal meaningful: the daemon
+   has nothing to leak.
 3. **Add per-attempt capabilities** to the inject mode: an opaque token per
    attempt, bound to it, revocable on cancel, with a quota. This is where the
    accounting and the trustworthy budget come from; a constant placeholder is a
-   working first version of step 2 and a dead end for everything else.
+   working first version of step 2 and a dead end for everything else. **Done**
+   — minted once per attempt (so every feedback round reuses one capability),
+   revoked through `RevokeOnDrop` on every exit path, and bounded by a TTL the
+   daemon always sends so a hard kill is still bounded.
 4. **Add the exchange mode** for secrets that have an exchange — starting with
    GitHub App installation tokens if and when git access moves off a static
    token. Not for provider keys, which have nothing to exchange.

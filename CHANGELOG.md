@@ -35,8 +35,61 @@
     `auth::node_route_is_public` is now the one list of them, and the contract
     test asks it instead of keeping a second copy that could drift.
 - `deploy/install-node.sh` takes `--data-dir`.
+- **Credentials that never enter the sandbox** (ADR 0029, threat-model T13a).
+  An `AGENTGRID_ADAPTER_ENV` entry may now be written `NAME@gateway=<route>`:
+  the value is a *route name*, not a secret. At attempt start the node asks a
+  new sidecar (`agentgrid-cred-gateway`) for a capability for that route and
+  puts **that** into the agent's environment, so the provider key never leaves
+  the gateway and the node never holds it either — that is the difference
+  between this and a credential broker, where something on the node still has
+  to be trusted with the secret. The capability is opaque, bound to one route,
+  expires (default 6 h) and carries a per-attempt request quota (optional);
+  it is revoked when the attempt ends and expires on its own if the daemon dies
+  first. Route configuration is `name|header|https://upstream`, keys are
+  `name=secret` (`AGENTGRID_CRED_GATEWAY_ROUTES` / `_KEYS` / `_ADMIN`).
+  - The gateway refuses to start with an empty admin token or a route that has
+    no key, does not follow redirects (reqwest would re-send the injected
+    header to the redirect target), and redacts keys from its `Debug`.
+  - **Fail-closed, with a message that names the fix.** A gateway entry that
+    cannot be honoured fails the attempt with `infrastructure_failed` rather
+    than degrading into "no credential" three layers down. Three refusals, in
+    the order an operator should fix them: no gateway configured; the node is
+    not running the docker sandbox (without a separate PID namespace the agent
+    can read the daemon's own environment, so a capability would buy nothing);
+    `network_mode=restricted` did not resolve to an egress network.
+  - **What this does not close.** T13b — the agent acting with a credential it
+    legitimately holds, spending the attempt's budget and using the permitted
+    provider channel as an exfiltration path — is not closable by
+    construction: acting is the product. It is bounded (quota, TTL, route
+    binding) and the residual is deliberate. "Closed" is also a property of
+    *configuration*, not of the mechanism: an entry still written as a plain
+    `NAME=value` is still a key in the sandbox. So the daemon now says which is
+    which at startup — a `WARN` naming every plain entry when nothing is
+    gateway-delivered, and a `INFO` listing `NAME->route` next to the plain
+    names when something is. Names and routes are not secrets; values are never
+    logged.
 
 ### Fixed
+
+- **`network_mode=restricted` was advisory in the shipped deploy.** The egress
+  compose file declared `agentgrid-egress` with `internal: false` — a
+  user-defined bridge *with* NAT — so a sandbox that ignored `HTTP_PROXY` and
+  opened a raw socket reached the internet and the LAN directly, and the
+  README's "allowlisted domains only, no LAN" was false. The topology is now
+  two networks: `agentgrid-egress` is `internal: true` and holds only the
+  sandboxes and the proxy (one reachable peer, no route anywhere else);
+  `agentgrid-egress-outbound` is the proxy's own way out and nothing else
+  joins it. A process that ignores the proxy env now gets `ENETUNREACH`.
+  - `squid.allowlist.conf` used `acl localnet src` + `http_access deny
+    localnet`, but `src` asks about the *client* — and every sandbox is a
+    172.16/12 client, so the rule refused all traffic including the allowlisted
+    domains. It is `acl lan_dst dst` now.
+  - `tests/e2e/run-egress-isolation.sh` (in CI, compose `e2e` job) asserts the
+    guarantee from the outside, because the daemon cannot: it knows a network
+    name, not the topology. It checks `Internal=true`, that a non-allowlisted
+    domain gets 403 **and an allowlisted one gets 200** (the second half is what
+    catches a config that denies everything), and that a container on the
+    network with no proxy has no route out.
 
 - **`AGENTGRID_ARTIFACT_ROOT` is honoured.** It was set by both Dockerfiles,
   both install scripts, all three HA compose files and described in the README
