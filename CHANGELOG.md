@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-01
+
 ### Fixed
 
 - **The CP-managed egress proxy pool now reaches a node on the default
