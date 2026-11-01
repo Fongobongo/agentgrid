@@ -559,6 +559,14 @@ paths:
         operators can spot fully-unrestricted nodes. Also `outbox_bytes` and
         `artifact_spool_bytes` (hardening P2 item 35): local storage pressure —
         a node whose spool grows is backing up and not draining.
+
+        `adapter_env_delivery` (ADR 0029) is `{plain, gateway}`: how many of the
+        node's **local** `AGENTGRID_ADAPTER_ENV` entries are handed to the agent
+        as plain values — readable inside the sandbox, threat-model T13a — and
+        how many are replaced by per-attempt capabilities minted by the
+        credential gateway. Counts only; names and values stay on the node.
+        Absent means the node has never reported (older binary, or no heartbeat
+        since upgrading), which is **not** the same claim as `plain: 0`.
   /v1/nodes/{id}:
     parameters:
       - name: id

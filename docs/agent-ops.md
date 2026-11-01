@@ -107,6 +107,13 @@ at startup — a `WARN` naming every plain entry when nothing is gateway-deliver
 (that is T13a, unfixed), and an `INFO` with `NAME->route` beside the plain names
 when something is. Names and routes are not secrets; values are never logged.
 
+The **Nodes** panel is the queryable version of the same fact: a node with any
+plain entry carries a warning badge with the count, a fully migrated one a
+neutral `N gateway` badge, and a node that has never reported carries nothing —
+the last case is not "clean", it is "unknown" (an older daemon, or one that has
+not beaten since upgrading). The counts travel in the heartbeat; the control
+plane never learns the names or the values.
+
 ## Unattended (headless) mode
 
 Real agents refuse destructive/interactive prompts unless explicitly told

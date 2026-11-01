@@ -17,9 +17,19 @@ What is in the tree as of this ADR:
 and the egress topology the refusal depends on
 ([`deploy/egress-proxy/`](../../deploy/egress-proxy)). The mint happens once per
 attempt and is revoked on the way out; both the ACP path and the wrapper path
-refuse before spawning the agent. Option F/`exchange`, C3's TLS and the panel
-that shows which entries are still `env` are **not** built — see "Staged
-decision".
+refuse before spawning the agent.
+
+**Which entries are still `env` is observable, and that took a report.** The
+marker lives in the daemon's environment, which the control plane never reads —
+so a panel cannot compute it, and `ag adapter-env ls` answers a different
+question (the CP-managed, sealed entries). The node therefore reports
+`adapter_env_delivery: {plain, gateway}` in its heartbeat, `GET /v1/nodes`
+carries it, and the Nodes panel renders a warning badge when anything is still
+plain. `None` (never reported) is deliberately distinct from `{plain: 0}`: a
+node on an older binary must not read as migrated. Counts only — the CP learns
+nothing about which variables exist.
+
+Option F/`exchange` and C3's TLS are **not** built — see "Staged decision".
 
 ## Context
 
@@ -281,6 +291,9 @@ next:
    entries are still `env`. T13b ("the agent acts with a credential it holds")
    cannot close — acting is the product — so it is bounded by the quota, the
    revocation and the provider-boundary accounting, and described that way.
+   **Done**: the "which entries are still `env`" half is the
+   `adapter_env_delivery` heartbeat report and the Nodes-panel badge, because a
+   status that is only in a log is a status nobody queries.
 8. **Do not ship B**, and do not describe anything as T13a mitigation unless the
    value never enters the sandbox.
 

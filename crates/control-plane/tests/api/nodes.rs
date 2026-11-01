@@ -25,6 +25,7 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
     // Heartbeat reports the node already at 90 MiB RSS. The gate forecast
     // for one new attempt is 256 MiB → 90 + 256 = 346 > 100 → reject.
     let hb = HeartbeatRequest {
+        adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-cap".into(),
         adapters: vec!["mock".into()],
@@ -209,6 +210,7 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
     // Heartbeat reporting max_rss_mib = 0 → CP must NOT overwrite the row
     // (CASE WHEN 0 > 0 path). The ceiling stays at the schema default.
     let hb_0 = HeartbeatRequest {
+        adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-ceiling".into(),
         adapters: vec!["mock".into()],
@@ -315,6 +317,7 @@ async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
     // 1. Heartbeat: node reports offline -> row flips + in-flight attempt
     //    is lost (the normal path, must keep working).
     let hb = agentgrid_common::HeartbeatRequest {
+        adapter_env_delivery: None,
         status: Some(agentgrid_common::NodeStatus::Offline),
         name: "node-race-hb".into(),
         adapters: vec!["mock".into()],
@@ -425,6 +428,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
 
     // Node reports offline -> its in-flight attempt is lost.
     let hb = HeartbeatRequest {
+        adapter_env_delivery: None,
         status: Some(NodeStatus::Offline),
         name: "node-o".into(),
         adapters: vec!["mock".into()],
@@ -512,6 +516,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         .oneshot(post_auth(
             "/v1/node/heartbeat",
             serde_json::to_string(&HeartbeatRequest {
+                adapter_env_delivery: None,
                 status: Some(NodeStatus::Online),
                 ..hb
             })
@@ -655,6 +660,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
     let (_node_id, cred) = enroll(&app, "n-disc", vec!["mock".into()], vec!["*".into()]).await;
 
     let hb = HeartbeatRequest {
+        adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "n-disc".into(),
         adapters: vec!["mock".into()],
@@ -781,6 +787,7 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
     let app = build_router(state);
     let (node_id, cred) = enroll(&app, "node-unsafe", vec!["mock".into()], vec!["*".into()]).await;
     let hb = HeartbeatRequest {
+        adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-unsafe".into(),
         adapters: vec!["mock".into()],
@@ -864,6 +871,7 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
     let (node_id, cred) = enroll(&app, "node-usage", vec!["mock".into()], vec!["*".into()]).await;
 
     let hb = HeartbeatRequest {
+        adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-usage".into(),
         adapters: vec!["mock".into()],

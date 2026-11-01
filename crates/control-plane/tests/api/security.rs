@@ -8,6 +8,7 @@ async fn revoked_node_gets_401() {
 
     // Heartbeat works before revoke.
     let hb = HeartbeatRequest {
+        adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-x".into(),
         adapters: vec!["mock".into()],

@@ -493,6 +493,14 @@ pub fn spawn_heartbeat(
                 applied_opencode_hash: crate::opencode_config::applied_hash(),
                 active_rss_mib: vmrss_mib,
                 max_rss_mib,
+                // ADR 0029: the panel cannot see this — the marker lives in
+                // this daemon's env, not in the control plane's store — so the
+                // node reports the split. Counts only: the names are the
+                // operator's, and the CP has no use for them.
+                adapter_env_delivery: Some(agentgrid_common::AdapterEnvDelivery {
+                    plain: cfg.adapter_env.len() as u32,
+                    gateway: cfg.gateway_env.len() as u32,
+                }),
             };
             // Captured before the request: the gateway branch rotates the
             // endpoint, and `cfg.base()` read afterwards names the one we moved

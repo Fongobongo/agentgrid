@@ -4265,6 +4265,7 @@ mod mem_gate_tests {
 
     fn hb(mem_mb: u64) -> HeartbeatRequest {
         HeartbeatRequest {
+            adapter_env_delivery: None,
             status: None,
             name: "n".into(),
             adapters: vec!["mock".into()],
@@ -4601,6 +4602,82 @@ mod mem_gate_tests {
         let all = s.list_nodes(None, None).await.unwrap();
         let n = all.iter().find(|x| x.id == node_id).unwrap();
         assert_eq!(n.repo_states.len(), 1);
+    }
+
+    /// ADR 0029: the node reports how many of its local adapter-env entries are
+    /// plain values versus gateway-delivered capabilities, and the panel reads
+    /// it off the node. The distinction that matters is `None` vs `Some(0/0)`:
+    /// a node that never reported must not look like a migrated one.
+    #[tokio::test]
+    async fn heartbeat_persists_adapter_env_delivery() {
+        use agentgrid_common::AdapterEnvDelivery;
+        let (s, node_id) = fresh().await;
+
+        // A fresh node has never reported it.
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(n.adapter_env_delivery, None, "unreported, not clean");
+
+        let mut req = hb(4096);
+        req.adapter_env_delivery = Some(AdapterEnvDelivery {
+            plain: 2,
+            gateway: 1,
+        });
+        s.heartbeat(&node_id, &req).await.unwrap();
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(
+            n.adapter_env_delivery,
+            Some(AdapterEnvDelivery {
+                plain: 2,
+                gateway: 1
+            })
+        );
+        // list_nodes carries it too — the panel reads that route.
+        let all = s.list_nodes(None, None).await.unwrap();
+        let n = all.iter().find(|x| x.id == node_id).unwrap();
+        assert_eq!(n.adapter_env_delivery.map(|d| d.plain), Some(2));
+
+        // Migrated: plain 0 with gateway > 0 is the "nothing to do" state and
+        // must stay distinguishable from never-reported.
+        let mut req = hb(4096);
+        req.adapter_env_delivery = Some(AdapterEnvDelivery {
+            plain: 0,
+            gateway: 3,
+        });
+        s.heartbeat(&node_id, &req).await.unwrap();
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(
+            n.adapter_env_delivery,
+            Some(AdapterEnvDelivery {
+                plain: 0,
+                gateway: 3
+            })
+        );
+
+        // A node downgraded to a binary that does not send the field goes back
+        // to "not reported": the information is gone, and stale counts would
+        // read as a clean node.
+        let mut req = hb(4096);
+        req.adapter_env_delivery = None;
+        s.heartbeat(&node_id, &req).await.unwrap();
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(n.adapter_env_delivery, None);
+    }
+
+    /// A corrupt blob must degrade to "not reported", never fail a listing:
+    /// the column is written by a node that could be a different version.
+    #[tokio::test]
+    async fn a_corrupt_delivery_blob_does_not_break_the_node_list() {
+        let (s, node_id) = fresh().await;
+        s.write_one(
+            sqlx::query("UPDATE nodes SET adapter_env_delivery = ? WHERE id = ?")
+                .bind("not json")
+                .bind(&node_id),
+        )
+        .await
+        .unwrap();
+        let all = s.list_nodes(None, None).await.unwrap();
+        let n = all.iter().find(|x| x.id == node_id).expect("node listed");
+        assert_eq!(n.adapter_env_delivery, None);
     }
 }
 

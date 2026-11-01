@@ -12,6 +12,51 @@ interface AccountUsage {
   rate_limited: number;
 }
 
+/**
+ * ADR 0029: how this node hands adapter credentials to the agent.
+ *
+ * The `NAME@gateway=<route>` marker lives in the *daemon's* environment, not in
+ * the control plane's store (ADR 0028 keeps values off the CP), so the panel
+ * cannot read the config — the node reports counts in its heartbeat and this is
+ * the only place the split becomes visible.
+ *
+ * Three states, and the third is not the second: `undefined`/`null` means the
+ * node has never reported (older binary, or it has not beaten since upgrading).
+ * Rendering that as "clean" would be a claim the panel cannot make.
+ */
+export function AdapterEnvBadge({
+  delivery,
+}: {
+  delivery?: { plain: number; gateway: number } | null;
+}) {
+  if (!delivery) return null;
+  if (delivery.plain > 0) {
+    return (
+      <span
+        className="badge warn"
+        title={
+          `${delivery.plain} of ${delivery.plain + delivery.gateway} AGENTGRID_ADAPTER_ENV entries are handed ` +
+          'to the agent as plain values, so the key is readable inside the sandbox (threat-model T13a). ' +
+          'Write them NAME@gateway=<route> and set AGENTGRID_CRED_GATEWAY_URL to keep the keys out.'
+        }
+      >
+        {delivery.plain} plain key{delivery.plain === 1 ? '' : 's'}
+      </span>
+    );
+  }
+  if (delivery.gateway > 0) {
+    return (
+      <span
+        className="badge ok"
+        title={`All ${delivery.gateway} adapter-env entries are gateway-delivered: the sandbox holds per-attempt capabilities, not keys`}
+      >
+        {delivery.gateway} gateway
+      </span>
+    );
+  }
+  return null;
+}
+
 export default function Nodes() {
   const [nodes, setNodes] = useState<NodeView[] | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -218,6 +263,7 @@ export default function Nodes() {
                       ⚠ unsafe
                     </span>
                   )}
+                  <AdapterEnvBadge delivery={n.adapter_env_delivery} />
                 </td>
                 <td>{n.adapters.join(', ') || '—'}</td>
                 <td>{n.repositories.join(', ') || '—'}</td>

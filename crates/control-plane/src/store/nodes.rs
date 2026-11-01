@@ -208,6 +208,12 @@ impl Store {
         // Plan 2.5 (#204): per-repository attach state as a JSON array —
         // same storage shape as `adapters`/`repositories` above.
         let repo_states = serde_json::to_string(&req.repo_states)?;
+        // ADR 0029: `None` writes NULL, not '{}' — "never reported" has to stay
+        // distinguishable from "reported, nothing plain" on the read side.
+        let adapter_env_delivery = match req.adapter_env_delivery {
+            Some(d) => Some(serde_json::to_string(&d)?),
+            None => None,
+        };
         let now = now_iso();
         let affected = self
             .write_one(
@@ -218,7 +224,7 @@ impl Store {
                load_avg = ?, free_disk_mb = ?, free_memory_mb = ?, cpu_count = ?, mem_available_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
                outbox_bytes = ?, artifact_spool_bytes = ?, \
-               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ? \
+               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ?, adapter_env_delivery = ? \
              WHERE id = ?",
                 )
                 // active_attempts is intentionally not heartbeat-settable: it is the
@@ -257,6 +263,12 @@ impl Store {
                 .bind(req.systemd_scope_supported as i64)
                 // Plan 2.5 (#204): per-repository attach state (JSON array).
                 .bind(&repo_states)
+                // ADR 0029: counts of plain vs gateway-delivered adapter env.
+                // Bound unconditionally, so a node downgraded to a binary that
+                // does not send the field flips back to NULL ("not reported").
+                // That is the honest answer — the information genuinely went
+                // away — and stale counts would read as a clean node.
+                .bind(&adapter_env_delivery)
                 .bind(node_id),
             )
             .await?

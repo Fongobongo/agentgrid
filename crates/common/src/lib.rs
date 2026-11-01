@@ -628,6 +628,13 @@ pub struct NodeView {
     /// nodes (unknown — not invalid).
     #[serde(default)]
     pub repo_states: Vec<RepoAttachView>,
+    /// ADR 0029: how many of the node's local `AGENTGRID_ADAPTER_ENV` entries
+    /// are plain values (readable inside the sandbox — T13a) versus
+    /// gateway-delivered capabilities. `None` = the node has never reported it
+    /// (legacy, or it has not beaten since upgrading); the panel says "not
+    /// reported" rather than "clean", because those are different claims.
+    #[serde(default)]
+    pub adapter_env_delivery: Option<AdapterEnvDelivery>,
 }
 
 /// Plan 2.5 (#204): one repository's attach state on a node. `state` is
@@ -1112,6 +1119,32 @@ pub struct HeartbeatRequest {
     /// ingest (`1` today). Absent on legacy nodes.
     #[serde(default)]
     pub supported_event_versions: Option<String>,
+    /// ADR 0029 observability: how this node delivers its **local**
+    /// `AGENTGRID_ADAPTER_ENV` entries. `None` on legacy nodes — "not
+    /// reported", which is deliberately distinguishable from "reported, and
+    /// nothing is a plain value". Without that distinction a node that never
+    /// sends the field would look exactly like a fully-migrated one.
+    #[serde(default)]
+    pub adapter_env_delivery: Option<AdapterEnvDelivery>,
+}
+
+/// ADR 0029: how the node hands adapter credentials to the agent.
+///
+/// **Counts only.** Names and values stay on the node: the control plane has no
+/// business knowing which variables exist, and ADR 0028 exists precisely to
+/// keep values off it. The counts are enough for the question that matters —
+/// "has this node finished migrating off plain values?" — because the operator
+/// can read the names in the unit file they wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AdapterEnvDelivery {
+    /// Entries handed to the agent as plain values: the key is readable inside
+    /// the sandbox (threat-model T13a, open for these).
+    #[serde(default)]
+    pub plain: u32,
+    /// Entries replaced by a per-attempt capability, so the real key never
+    /// enters the sandbox.
+    #[serde(default)]
+    pub gateway: u32,
 }
 
 /// Plan 1.8 (#15): per-account usage reported by a node in its heartbeat so
@@ -2087,6 +2120,7 @@ mod tests {
         };
         assert_eq!(round_trip(&er), er);
         let hb = HeartbeatRequest {
+            adapter_env_delivery: None,
             status: Some(NodeStatus::Online),
             name: "n".into(),
             adapters: vec!["mock".into()],

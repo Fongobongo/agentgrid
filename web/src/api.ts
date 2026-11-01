@@ -60,6 +60,10 @@ export interface NodeView {
   artifact_spool_bytes?: number;
   // Hardening P2 item 37: maintenance drain — no NEW assignments.
   drained?: boolean;
+  // ADR 0029: how the node delivers its local AGENTGRID_ADAPTER_ENV entries.
+  // Counts only (names and values stay on the node). `null`/absent means the
+  // node has never reported — which is NOT the same claim as plain === 0.
+  adapter_env_delivery?: { plain: number; gateway: number } | null;
   // Feature "opencode profiles": the opencode profile this node applies.
   opencode_profile_id?: string | null;
 }

@@ -1,0 +1,13 @@
+-- ADR 0029 observability: how a node delivers its *local* AGENTGRID_ADAPTER_ENV
+-- entries — plain values the agent can read (threat-model T13a) versus
+-- per-attempt capabilities minted by the credential gateway.
+--
+-- JSON `{"plain": n, "gateway": m}`, counts only. Names and values stay on the
+-- node: the control plane must not learn which variables exist, and ADR 0028
+-- exists to keep values off this side entirely.
+--
+-- NULL means "never reported" — a node that predates the field, or has not
+-- beaten since upgrading. That is deliberately not 0/0: the panel says "not
+-- reported" rather than claiming the node is clean, and those are different
+-- statements about the same node.
+ALTER TABLE nodes ADD COLUMN adapter_env_delivery TEXT;
