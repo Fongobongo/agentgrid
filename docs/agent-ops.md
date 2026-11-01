@@ -172,6 +172,12 @@ drops the old ciphertexts, and every secret has to be re-entered with
 `ag adapter-env set`. If the re-key fails — expired token, control plane
 unreachable — the old file is left untouched and still works.
 
+Re-keying a **healthy** node works too, but the running daemon keeps its old
+credential until it is restarted with the token, so do it as part of a planned
+restart. And if the restart happens without `AGENTGRID_REKEY=1`, the node is
+locked out and needs another re-key — the token is single-use, and the old
+credential is already dead.
+
 ## Skills: importing a pack
 
 The node discovers `SKILL.md` files under `<worktree>/.agents/skills` (project
