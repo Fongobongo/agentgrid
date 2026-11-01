@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-01
+
 ### Added
 
 - **A node's credential can be re-keyed without losing its identity or its
