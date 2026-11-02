@@ -7,6 +7,22 @@ use anyhow::Result;
 use sqlx::Row;
 use std::time::Duration;
 
+/// 30 days. Install attempts are an ops log, not state.
+const DEFAULT_INSTALL_RETENTION_HOURS: i64 = 24 * 30;
+
+/// How long finished install attempts are kept.
+///
+/// `AGENTGRID_INSTALL_RETENTION_HOURS=0` keeps every attempt forever, for a
+/// deployment that treats `node_installs` as an audit log. Read per tick
+/// rather than cached at startup so the two paths into [`Store::tick_maintenance`]
+/// — the 15 s loop and the reconcile at boot — cannot drift on the policy.
+fn install_retention_hours() -> i64 {
+    std::env::var("AGENTGRID_INSTALL_RETENTION_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(DEFAULT_INSTALL_RETENTION_HOURS)
+}
+
 impl Store {
     /// Background maintenance: revert unconfirmed assignments (lease expired)
     /// and mark silent nodes offline. Runs one tick. The background loop
@@ -43,6 +59,15 @@ impl Store {
         // Housekeeping: drop expired artifacts and truncate the WAL so the
         // database file does not grow without bound.
         let _ = self.cleanup_artifacts(168).await;
+        // Install attempts are an ops log, not state: the finished ones age
+        // out (30 days by default) so a long-lived control plane does not
+        // carry every install it ever ran. Rows still `issued` or `running`
+        // are exempt — they are the open questions, see `prune_installs`.
+        match self.prune_installs(install_retention_hours()).await {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(rows = n, "pruned finished install attempts"),
+            Err(e) => tracing::warn!("install retention failed: {e}"),
+        }
         let _ = self.wal_checkpoint().await;
         Ok(())
     }

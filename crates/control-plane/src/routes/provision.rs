@@ -242,6 +242,19 @@ impl ProvisioningRuntime {
     ///
     /// A no-op without a host, so the bare "give me a token" call keeps
     /// working for anything that just wants to enroll by hand.
+    ///
+    /// One open intent per (host, name): a caller that retries — or a script
+    /// that mints in a loop — would otherwise add a row per attempt, and these
+    /// rows are exempt from retention by design, so that is the one way this
+    /// table could grow without bound. The existing row is left exactly as it
+    /// was: it already says what is true ("a token went out, the host has not
+    /// arrived"), and refreshing `started_at` would make an intent that has
+    /// been open for three days look a minute old.
+    ///
+    /// The check reads the in-memory list, so it covers a retry against the
+    /// last few jobs — which is what a retry is. A duplicate is still possible
+    /// when the original has aged out of that window; it costs one extra row
+    /// saying the same thing, and enrollment closes both.
     pub fn record_intent(&self, host: Option<&str>, name: Option<&str>) {
         let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
             return;
@@ -251,6 +264,15 @@ impl ProvisioningRuntime {
             .filter(|n| !n.is_empty())
             .unwrap_or("remote-node")
             .to_string();
+        {
+            let jobs = self.jobs.lock().unwrap();
+            let open = jobs
+                .values()
+                .any(|j| j.state == JobState::Issued && j.host == host && j.name == name);
+            if open {
+                return;
+            }
+        }
         self.insert(InstallJob {
             id: uuid::Uuid::new_v4().to_string(),
             host: host.to_string(),
@@ -896,6 +918,78 @@ mod tests {
             .iter()
             .filter(|r| r.name.starts_with("filler-"))
             .all(|r| r.state == "issued"));
+    }
+
+    /// Retention: finished attempts age out, open questions do not. An `issued`
+    /// row answers "was this host ever configured?" and a `running` row is the
+    /// only trace of an install whose outcome was never learned, so neither may
+    /// be deleted by age — which is also what bounds the table.
+    #[tokio::test]
+    async fn retention_drops_finished_attempts_and_keeps_open_questions() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        let old = "2026-01-01T00:00:00+00:00";
+        let now = now_iso();
+        let row = |id: &str, st: &str, finished: Option<&str>| crate::store::InstallRecord {
+            id: id.into(),
+            host: "root@10.0.0.1".into(),
+            name: id.into(),
+            state: st.into(),
+            steps: vec![],
+            error: None,
+            server_url: None,
+            started_at: old.into(),
+            finished_at: finished.map(str::to_string),
+        };
+        for r in [
+            row("s-old", "succeeded", Some(old)),
+            row("f-old", "failed", Some(old)),
+            row("i-old", "issued", None),
+            row("r-old", "running", None),
+        ] {
+            state.store.put_install(&r).await.unwrap();
+        }
+        // A finished attempt inside the window stays.
+        let mut fresh = row("s-new", "succeeded", Some(&now));
+        fresh.started_at = now.clone();
+        state.store.put_install(&fresh).await.unwrap();
+
+        let pruned = state.store.prune_installs(24 * 30).await.unwrap();
+        assert_eq!(pruned, 2, "only the two finished, expired rows");
+        assert!(state.store.get_install("s-old").await.unwrap().is_none());
+        assert!(state.store.get_install("f-old").await.unwrap().is_none());
+        assert!(state.store.get_install("s-new").await.unwrap().is_some());
+        assert!(
+            state.store.get_install("i-old").await.unwrap().is_some(),
+            "an open intent is never aged out"
+        );
+        assert!(
+            state.store.get_install("r-old").await.unwrap().is_some(),
+            "a row whose outcome was never learned is never aged out"
+        );
+
+        // 0 disables retention entirely.
+        assert_eq!(state.store.prune_installs(0).await.unwrap(), 0);
+        assert!(state.store.get_install("s-new").await.unwrap().is_some());
+    }
+
+    /// A retried mint must not add a second open intent: `issued` rows are
+    /// exempt from retention, so a caller that retries in a loop would be the
+    /// one way this table grows without bound.
+    #[test]
+    fn a_second_mint_for_the_same_host_does_not_add_an_intent() {
+        let rt = runtime();
+        rt.record_intent(Some("root@10.0.0.5"), Some("web-1"));
+        rt.record_intent(Some("root@10.0.0.5"), Some("web-1"));
+        assert_eq!(rt.list().len(), 1, "a retry is the same open question");
+
+        // A different host under the same name is a different question.
+        rt.record_intent(Some("root@10.0.0.6"), Some("web-1"));
+        assert_eq!(rt.list().len(), 2);
+
+        // Once the host has arrived, a new mint is a new question (a rebuild).
+        rt.mark_enrolled("web-1", "node-1");
+        rt.record_intent(Some("root@10.0.0.5"), Some("web-1"));
+        assert_eq!(rt.list().len(), 3);
     }
 
     async fn wait_for_row(

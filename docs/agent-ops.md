@@ -653,6 +653,16 @@ A row still at `running` when the control plane starts again is shown as
 stored state is left alone on purpose: on an HA standby that row belongs to the
 leader, and a replica that "fixed" it would replicate the fix over a live job.
 
+Finished attempts are deleted automatically after 30 days
+(`AGENTGRID_INSTALL_RETENTION_HOURS`; `0` keeps every attempt forever). Only
+`succeeded` and `failed` are eligible. An `issued` row is the answer to "was
+this host ever configured?" and a `running` row is the only trace of an install
+whose outcome nobody learned, so both are kept however old they are — which is
+also what bounds the table: one open intent per host that has not arrived. The
+mint honours that from the other side and does not record a second intent for a
+host that already has one open, so a retried (or scripted) mint cannot grow the
+list either.
+
 `ag token create` passes no host and records nothing — it hands a token to a
 human who enrolls a machine by hand, and inventing a host record for that would
 be a lie.

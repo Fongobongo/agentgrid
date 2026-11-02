@@ -115,6 +115,39 @@ impl Store {
         Ok(closed)
     }
 
+    /// Drop finished attempts past the retention window.
+    ///
+    /// Only `succeeded` and `failed` are eligible. An `issued` row answers
+    /// "was this host ever configured?", and a `running` row is the only trace
+    /// of an install whose outcome was never learned — deleting either by age
+    /// would erase the fact this table exists to keep, so both are retained
+    /// indefinitely. That is also what keeps the table bounded: one open intent
+    /// per host that has not arrived, however old it is.
+    ///
+    /// `retention_hours <= 0` deletes nothing, which is the operator escape
+    /// hatch ("keep every attempt") and what a deployment that treats this as
+    /// an audit log would set.
+    ///
+    /// Timestamps are `to_rfc3339()` UTC throughout, so lexicographic order is
+    /// chronological order and the cutoff needs no parsing.
+    pub async fn prune_installs(&self, retention_hours: i64) -> Result<u64> {
+        if retention_hours <= 0 {
+            return Ok(0);
+        }
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(retention_hours)).to_rfc3339();
+        let res = self
+            .write_one(
+                sqlx::query(
+                    "DELETE FROM node_installs \
+                     WHERE state IN ('succeeded', 'failed') \
+                       AND COALESCE(finished_at, started_at) < ?",
+                )
+                .bind(&cutoff),
+            )
+            .await?;
+        Ok(res.rows_affected())
+    }
+
     pub async fn get_install(&self, id: &str) -> Result<Option<InstallRecord>> {
         let row = sqlx::query(
             "SELECT id, host, name, state, steps, error, server_url, started_at, finished_at \

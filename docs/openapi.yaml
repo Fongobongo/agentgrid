@@ -887,6 +887,11 @@ paths:
         at `running` after a restart is shown as `failed` with the reason — the
         process that was doing the work is gone — but the stored row keeps the
         raw state, because on an HA standby it belongs to the leader.
+
+        Finished attempts are pruned after 30 days
+        (`AGENTGRID_INSTALL_RETENTION_HOURS`, `0` = keep forever). `issued` and
+        `running` rows are never pruned by age: they are open questions, and the
+        open questions are the reason the table exists.
       responses:
         '200':
           description: Jobs with their steps and terminal state.

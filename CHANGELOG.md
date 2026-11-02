@@ -141,6 +141,16 @@
     twenty-entry panel window, so an intent that has aged out of the list is
     closed too. `deploy/compose/up.sh` names its two
     hosts at mint time for the same reason.
+  - **Retention is automatic, and it knows which rows are facts.** Finished
+    attempts are deleted after 30 days (`AGENTGRID_INSTALL_RETENTION_HOURS`, `0`
+    = keep forever) by the same 15 s maintenance tick that expires artifacts, so
+    a long-lived control plane does not carry every install it ever ran. `issued`
+    and `running` rows are never pruned by age — an `issued` row is the answer to
+    "was this host ever configured?" and a `running` row is the only trace of an
+    install whose outcome nobody learned. Those two are what bound the table
+    instead, together with a mint that no longer records a second intent for a
+    host that already has one open: `issued` rows are exempt from retention, so
+    a retried or scripted mint was the one way this table could grow unbounded.
 - **Control-plane peers have a liveness table.** `GET /v1/ha/status` knew the
   role, term and leader and nothing per peer, and it sits behind the cluster
   token, so no panel could read it: `ag cluster status` showed one replica's own
