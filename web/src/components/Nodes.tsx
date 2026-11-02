@@ -187,11 +187,12 @@ export function FleetSummary({ nodes }: { nodes: NodeView[] }) {
  * the node table above is keyed by enrollment, so a host whose install failed,
  * or whose daemon never reached the control plane, has no row there at all.
  *
- * Two limits, both stated in the UI because both change what the list means:
- * the jobs are in-memory (a control plane restart empties it), and a host
- * installed by hand with `ag nodes install` or by the install script never
- * appears here either — there is no inventory of hosts, only of hosts this
- * control plane provisioned itself.
+ * Two things make the list complete rather than partial: the rows are stored
+ * (`node_installs`), so a restart does not empty it, and an install that runs
+ * elsewhere — `ag nodes install` from an operator's laptop, the install script
+ * — leaves an `issued` row because the enrollment-token mint names the host.
+ * What is still not here: a host enrolled by hand with a bare `ag token
+ * create`, which by definition never named one.
  *
  * The `Enrolled?` column is the cross-reference that makes the list useful:
  * `succeeded` only means ssh finished, and the question an operator has is
