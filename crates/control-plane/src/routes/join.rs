@@ -189,10 +189,7 @@ fn join_line(server: &str, token: &str, relayed: bool) -> String {
 /// The error is `(status, message)` rather than a `Response`: `Response` is
 /// large enough that clippy's `result_large_err` objects to returning it, and
 /// the message is what the caller actually needs — `plain` builds the body.
-async fn resolve_relay(
-    state: &AppState,
-    selector: &str,
-) -> Result<JoinVia, (StatusCode, String)> {
+async fn resolve_relay(state: &AppState, selector: &str) -> Result<JoinVia, (StatusCode, String)> {
     let nodes = match state.store.list_nodes(None, Some(1000)).await {
         Ok(n) => n,
         Err(e) => {
