@@ -1,18 +1,20 @@
 # ADR 0029: Adapter credentials do not enter the sandbox
 
-Status: **accepted; option F/inject is implemented, `exchange` is not.** The
+Status: **accepted; option F is implemented in both modes (`inject` and
+`exchange`), and C3's TLS is implemented as a compatibility switch.** The
 threat it addresses is split in [`threat-model.md`](threat-model.md) as
 **T13a** (the secret is readable by the agent) and **T13b** (the agent acts with
 a credential it holds). T13a closes **for `gateway` entries** — a plain
 `NAME=value` entry is still a key in the sandbox, so what ships is a mechanism
 plus a migration, not a switch. T13b is not closable by construction and is
-bounded instead (quota, TTL, route binding).
+bounded instead (quota, TTL, route binding); for `exchange` entries it is
+bounded by the *provider* instead (an hour, one installation).
 
 What is in the tree as of this ADR:
 [`crates/cred-gateway/`](../../crates/cred-gateway) (the sidecar),
 [`crates/node-daemon/src/cred_gateway.rs`](../../crates/node-daemon/src/cred_gateway.rs)
 (the client: `settings` / `refusal` / `apply` / `revoke`), the
-`NAME@gateway=<route>` marker in
+`NAME@gateway=<route>` and `NAME@exchange=<route>` markers in
 [`crates/node-daemon/src/config.rs`](../../crates/node-daemon/src/config.rs),
 and the egress topology the refusal depends on
 ([`deploy/egress-proxy/`](../../deploy/egress-proxy)). The mint happens once per
@@ -23,13 +25,17 @@ refuse before spawning the agent.
 marker lives in the daemon's environment, which the control plane never reads —
 so a panel cannot compute it, and `ag adapter-env ls` answers a different
 question (the CP-managed, sealed entries). The node therefore reports
-`adapter_env_delivery: {plain, gateway}` in its heartbeat, `GET /v1/nodes`
-carries it, and the Nodes panel renders a warning badge when anything is still
-plain. `None` (never reported) is deliberately distinct from `{plain: 0}`: a
-node on an older binary must not read as migrated. Counts only — the CP learns
-nothing about which variables exist.
+`adapter_env_delivery: {plain, gateway, exchange}` in its heartbeat,
+`GET /v1/nodes` carries it, and the Nodes panel renders a warning badge when
+anything is still plain. `None` (never reported) is deliberately distinct from
+`{plain: 0}`: a node on an older binary must not read as migrated. `gateway` and
+`exchange` are counted apart because they are different promises — a capability
+is worthless outside the gateway, an exchanged token is not — and one number for
+both would report the safer mode's figure for the less safe one. Counts only —
+the CP learns nothing about which variables exist.
 
-Option F/`exchange` and C3's TLS are **not** built — see "Staged decision".
+C3's TLS is built (step 5) and exists for compatibility, not security; option D
+remains unbuilt and documented as the escape hatch. See "Staged decision".
 
 ## Context
 
@@ -281,9 +287,28 @@ next:
    daemon always sends so a hard kill is still bounded.
 4. **Add the exchange mode** for secrets that have an exchange — starting with
    GitHub App installation tokens if and when git access moves off a static
-   token. Not for provider keys, which have nothing to exchange.
+   token. Not for provider keys, which have nothing to exchange. **Done** —
+   `NAME@exchange=<route>`; the gateway signs an App assertion (RS256, `iss` =
+   the App id, 9 minutes) and swaps it for an installation token, and revokes it
+   at the provider when the attempt ends. The App key never leaves the gateway,
+   and an exchanged token is deliberately kept out of the capability table, so a
+   real provider token cannot be presented where a capability is expected. The
+   refusal is a *different* one from inject's, and says so: an exchanged token
+   works from anywhere until it expires, so it needs the enforced-egress
+   topology that step 1 built. The residual is the provider's own TTL — an
+   attempt longer than the token fails mid-run, and the daemon warns at mint
+   when the configured TTL exceeds the provider's window.
 5. **C3 (TLS + own CA) only if a CLI refuses an `http://` base URL.** It buys
    compatibility, not security: the agent's leg is inside the sandbox either way.
+   **Done**, as that compatibility switch and nothing more.
+   `AGENTGRID_CRED_GATEWAY_TLS_CERT`/`_KEY` serve the gateway over rustls (no
+   system OpenSSL); a half-configured pair is a startup error rather than a
+   silent fallback to plaintext. The CA reaches both ends that need it: the
+   daemon adds it to its own mint client, and bind-mounts it read-only into the
+   sandbox with every trust-store variable pointed at it. A configured CA that is
+   not a readable PEM fails the attempt up front, because docker turns a missing
+   bind source into an empty directory and the resulting handshake error names
+   the wrong thing.
 6. **Document D as the escape hatch**, for adapters that cannot take F, with its
    costs stated next to it. Not the default.
 7. **Close T13a, do not claim T13b.** The split matters: T13a ("the secret is
@@ -311,6 +336,12 @@ next:
   revocation, and it should be stated in the operator docs, not discovered.
 - D, if adopted later, puts a CA in every sandbox image: a supply-chain and
   trust-store change, not a config flag.
+- Exchange mode's ceiling is the **provider's** TTL, and there is no way to
+  extend it. So an attempt that outlives the token fails mid-run, with the
+  provider's own 401 — the alternative would be a long-lived credential, which
+  is the thing this mode exists to avoid. The daemon warns at mint when the
+  configured TTL exceeds what the provider gave, so the failure is a decision
+  the operator has already been told about rather than a mystery.
 - None of this makes `env` mode safe. The end state is that the exposure is
   *named per entry* instead of being uniform and undocumented.
 

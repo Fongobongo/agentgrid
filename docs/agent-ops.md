@@ -109,10 +109,82 @@ when something is. Names and routes are not secrets; values are never logged.
 
 The **Nodes** panel is the queryable version of the same fact: a node with any
 plain entry carries a warning badge with the count, a fully migrated one a
-neutral `N gateway` badge, and a node that has never reported carries nothing —
-the last case is not "clean", it is "unknown" (an older daemon, or one that has
-not beaten since upgrading). The counts travel in the heartbeat; the control
-plane never learns the names or the values.
+neutral `N gateway` badge, one whose entries are exchanged a `N exchanged`
+badge, and a node that has never reported carries nothing — the last case is not
+"clean", it is "unknown" (an older daemon, or one that has not beaten since
+upgrading). The counts travel in the heartbeat; the control plane never learns
+the names or the values.
+
+### Secrets that cannot be proxied: `@exchange`
+
+`@gateway` works because the sandbox's traffic goes *through* the gateway. A
+`git push` cannot: git speaks to GitHub itself, and rewriting its credential
+would mean terminating its TLS. For those secrets, write the entry as an
+exchange:
+
+```bash
+AGENTGRID_ADAPTER_ENV="GITHUB_TOKEN@exchange=github"
+```
+
+The gateway holds a GitHub App private key and, at attempt start, signs a
+short-lived assertion with it and swaps that assertion for an **installation
+token** — one hour, scoped to the installation's repositories. The sandbox gets
+that real token and talks to GitHub directly.
+
+```bash
+# on the gateway
+AGENTGRID_CRED_GATEWAY_EXCHANGE="github=github-app;app_id=123456;installation_id=78910;key=/etc/agentgrid/app.pem"
+```
+
+`api=` is optional and defaults to `https://api.github.com` (set it for GitHub
+Enterprise). `,` separates routes, `;` separates fields. The key is read once at
+startup, so a missing or non-PEM file refuses to start rather than failing an
+attempt an hour later.
+
+What this buys over the personal access token it replaces: the token expires on
+its own, it is scoped to one installation, and it is revoked when the attempt
+ends. What it does not buy: it is **real**, so it works from anywhere until it
+expires — which is why exchange is refused unless the sandbox is on the enforced
+egress network. An injected capability is worthless outside the gateway and
+survives advisory networking; an exchanged token does not.
+
+The provider decides the lifetime, not us. If the provider's window is shorter
+than `AGENTGRID_CRED_GATEWAY_TTL_SECS`, the daemon logs a warning at mint — an
+attempt that outlives the token starts failing mid-run with the provider's own
+401, and that is worth knowing before it happens rather than after.
+
+### TLS to the gateway (`AGENTGRID_CRED_GATEWAY_CA`)
+
+Some CLIs refuse an `http://` base URL. Serving the gateway over TLS is for that
+compatibility only — the agent's leg is inside the sandbox either way, so
+terminating TLS here hides nothing from the agent. It is not a security upgrade;
+do not reach for it as one.
+
+```bash
+# on the gateway: both or neither, never one
+AGENTGRID_CRED_GATEWAY_TLS_CERT=/etc/agentgrid/gw.pem
+AGENTGRID_CRED_GATEWAY_TLS_KEY=/etc/agentgrid/gw-key.pem
+# on the daemon: the CA that signed it, for both ends of the connection
+AGENTGRID_CRED_GATEWAY_CA=/etc/agentgrid/gw-ca.pem
+```
+
+Setting only one of `_TLS_CERT`/`_TLS_KEY` is a startup error, not a quiet
+fallback to plaintext: a gateway that came up unencrypted because one variable
+name was mistyped would still work, so nobody would notice.
+
+The daemon does two things with the CA. It trusts it itself, because the mint
+call is also HTTPS; and it bind-mounts it read-only into the sandbox at
+`/etc/agentgrid/gateway-ca.pem`, pointing every trust-store variable the CLIs in
+our images consult at that path (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+`CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`). Miss one and that
+client fails with an unknown-issuer error that names nothing useful. The mount
+happens only for `restricted` attempts, since an unrestricted one has no gateway
+to talk to.
+
+A configured CA that is not a readable PEM fails the attempt up front. This
+matters more than it looks: docker turns a missing bind source into an empty
+*directory* at the mount point, so the alternative is a directory where a
+certificate belongs and a handshake error that points at the wrong thing.
 
 ## Unattended (headless) mode
 

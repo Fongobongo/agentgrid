@@ -11,7 +11,7 @@ import type { ClusterPeer, ClusterStatus, InstallJob, NodeView } from './api';
 // rendered to static markup; it is a pure function of its props, so that is the
 // whole behaviour.
 
-function render(delivery?: { plain: number; gateway: number } | null) {
+function render(delivery?: { plain: number; gateway: number; exchange?: number } | null) {
   return renderToStaticMarkup(<AdapterEnvBadge delivery={delivery} />);
 }
 
@@ -38,6 +38,23 @@ describe('AdapterEnvBadge', () => {
   });
 
   /**
+   * Exchange is a different promise from gateway, so it must not borrow the
+   * gateway badge's wording: "the sandbox holds per-attempt capabilities, not
+   * keys" would be false when it holds a real provider token.
+   */
+  it('names exchanged entries apart from gateway ones', () => {
+    const html = render({ plain: 0, gateway: 0, exchange: 2 });
+    expect(html).toContain('2 exchanged');
+    expect(html).toContain('real provider-issued token');
+    expect(html).not.toContain('badge ok');
+  });
+
+  it('counts exchange entries in the total a warning reports', () => {
+    // 1 plain + 2 gateway + 1 exchange = 4, not 3.
+    expect(render({ plain: 1, gateway: 2, exchange: 1 })).toContain('1 of 4');
+  });
+
+  /**
    * The distinction the whole feature rests on. A node that never reported must
    * render nothing — showing "clean" for it would be a claim the panel cannot
    * make, and it is exactly the state a node running an older binary is in.
@@ -49,6 +66,14 @@ describe('AdapterEnvBadge', () => {
 
   it('renders nothing for a node with no adapter env at all', () => {
     expect(render({ plain: 0, gateway: 0 })).toBe('');
+  });
+
+  /// An older node sends no `exchange` field at all; that must read as "none
+  /// reported", not break the badge or inflate the total.
+  it('renders the gateway badge when the node predates the exchange field', () => {
+    const html = render({ plain: 0, gateway: 2 });
+    expect(html).toContain('2 gateway');
+    expect(html).not.toContain('exchanged');
   });
 });
 

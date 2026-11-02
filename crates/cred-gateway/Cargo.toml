@@ -15,9 +15,21 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+# Exchange mode (ADR 0029 F/exchange): the GitHub App assertion is an RS256 JWT,
+# and the token's real expiry comes back as an RFC 3339 timestamp.
+jsonwebtoken.workspace = true
+chrono.workspace = true
+# C3: TLS termination with no system OpenSSL, the same pair the control plane
+# already uses for `AGENTGRID_TLS_CERT`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+tokio-rustls = "0.26"
 
 [dev-dependencies]
 tower.workspace = true
+tempfile = "3"
+# Decoding the App assertion in the exchange tests, without pulling a JWT
+# verifier in: the fake provider does not check the signature.
+base64.workspace = true
 
 [[bin]]
 name = "agentgrid-cred-gateway"

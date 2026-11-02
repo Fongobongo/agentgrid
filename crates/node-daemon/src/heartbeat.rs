@@ -511,6 +511,7 @@ pub fn spawn_heartbeat(
                 adapter_env_delivery: Some(agentgrid_common::AdapterEnvDelivery {
                     plain: cfg.adapter_env.len() as u32,
                     gateway: cfg.gateway_env.len() as u32,
+                    exchange: cfg.exchange_env.len() as u32,
                 }),
                 // ADR 0012 reachability: the control plane cannot see a
                 // forward proxy, so "am I connected directly?" has no observer

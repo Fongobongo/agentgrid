@@ -63,7 +63,7 @@ export interface NodeView {
   // ADR 0029: how the node delivers its local AGENTGRID_ADAPTER_ENV entries.
   // Counts only (names and values stay on the node). `null`/absent means the
   // node has never reported — which is NOT the same claim as plain === 0.
-  adapter_env_delivery?: { plain: number; gateway: number } | null;
+  adapter_env_delivery?: { plain: number; gateway: number; exchange?: number } | null;
   // ADR 0026 reachability: relays the last heartbeat crossed, as observed by
   // the control plane from the header a relay stamps (0 = none). `null` =
   // no heartbeat since the column existed.

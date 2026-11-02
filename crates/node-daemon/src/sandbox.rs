@@ -32,6 +32,14 @@
 //! user write access there (e.g. `useradd -r -m agentgrid-worker` +
 //! `setfacl -R -m u:agentgrid-worker:rwx <workspace-root>`).
 
+/// Node-side path to the CA that signed the credential gateway's certificate
+/// (ADR 0029 C3). Set only when the gateway is served over TLS.
+pub const GATEWAY_CA_ENV: &str = "AGENTGRID_CRED_GATEWAY_CA";
+
+/// Where that CA appears inside the sandbox. One fixed path, because the trust
+/// variables below all have to agree on it.
+pub const GATEWAY_CA_IN_CONTAINER: &str = "/etc/agentgrid/gateway-ca.pem";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxKind {
     None,
@@ -931,6 +939,33 @@ fn docker_run_head(
             }
         }
     }
+    // ADR 0029 step 5 ("C3"): the gateway may be served over TLS with the
+    // operator's own CA, for a CLI that refuses an `http://` base URL. That only
+    // works if the sandbox trusts the CA, and every CLI in our images reads a
+    // different variable — so one read-only mount, pointed at by all of them.
+    //
+    // `restricted` only: the gateway is a peer of the sandbox on the egress
+    // network, and an unrestricted attempt has no gateway to talk to.
+    if network_mode == Some("restricted") {
+        if let Some(ca) = env_nonempty(GATEWAY_CA_ENV) {
+            v.push("-v".to_string());
+            v.push(format!("{ca}:{GATEWAY_CA_IN_CONTAINER}:ro"));
+            for key in [
+                // OpenSSL-backed clients (curl, python's ssl, most CLIs).
+                "SSL_CERT_FILE",
+                // python-requests, which ignores SSL_CERT_FILE.
+                "REQUESTS_CA_BUNDLE",
+                "CURL_CA_BUNDLE",
+                // Node, which ignores all of the above.
+                "NODE_EXTRA_CA_CERTS",
+                // git, which has its own.
+                "GIT_SSL_CAINFO",
+            ] {
+                v.push("--env".to_string());
+                v.push(format!("{key}={GATEWAY_CA_IN_CONTAINER}"));
+            }
+        }
+    }
     if std::env::var("AGENTGRID_SANDBOX_READ_ONLY")
         .map(|x| x == "1" || x.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -1592,6 +1627,7 @@ mod tests {
             "AGENTGRID_SANDBOX_EGRESS_PROXY",
             "AGENTGRID_RUN_AS_USER",
             "AGENTGRID_SANDBOX",
+            GATEWAY_CA_ENV,
         ] {
             std::env::remove_var(k);
         }
@@ -1927,6 +1963,74 @@ mod tests {
             !a[art_idx].ends_with(":ro"),
             "artifact mount stays read-write under --read-only"
         );
+    }
+
+    /// ADR 0029 C3: the sandbox must trust the CA that signed the gateway's
+    /// certificate. Every CLI in our images reads a different variable, so the
+    /// one file is pointed at by all of them; missing any one of them is a
+    /// connection that fails with an unknown-issuer error naming nothing useful.
+    #[test]
+    fn docker_mounts_the_gateway_ca_and_points_every_trust_store_at_it() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        std::env::set_var(GATEWAY_CA_ENV, "/host/gw-ca.pem");
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            Some("restricted"),
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert!(
+            a.contains(&format!("/host/gw-ca.pem:{GATEWAY_CA_IN_CONTAINER}:ro")),
+            "the CA must be mounted read-only: {a:?}"
+        );
+        for key in [
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+            "GIT_SSL_CAINFO",
+        ] {
+            assert!(
+                a.contains(&format!("{key}={GATEWAY_CA_IN_CONTAINER}")),
+                "{key} must point at the mounted CA: {a:?}"
+            );
+        }
+    }
+
+    /// The gateway is a peer of the sandbox only on the egress network. An
+    /// unrestricted attempt has no gateway to talk to, so a CA there would be a
+    /// mount the agent could read for no reason.
+    #[test]
+    fn the_gateway_ca_is_not_mounted_outside_restricted_mode() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        std::env::set_var(GATEWAY_CA_ENV, "/host/gw-ca.pem");
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert!(
+            !a.iter().any(|x| x.contains("gw-ca.pem")),
+            "no CA mount without restricted networking: {a:?}"
+        );
+        assert!(!a.iter().any(|x| x.starts_with("SSL_CERT_FILE=")));
     }
 
     #[test]

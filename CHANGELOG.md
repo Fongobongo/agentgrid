@@ -4,6 +4,35 @@
 
 ### Added
 
+- **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**
+  `@gateway` keeps the key out of the sandbox by making the sandbox talk to the
+  gateway — which does not work for a `git push`, where git speaks to the
+  provider itself. Write the entry `GITHUB_TOKEN@exchange=github` instead and the
+  gateway signs a GitHub App assertion (RS256) and swaps it for an **installation
+  token**: one hour, scoped to the installation, revoked when the attempt ends.
+  The App key never leaves the gateway, and exchanged tokens are kept out of the
+  capability table on purpose, so a real provider token cannot be presented where
+  a capability is expected. The refusal is its own, because the trade is its own:
+  a capability is worthless outside the gateway, an exchanged token is not, so
+  exchange requires the enforced-egress topology. The provider sets the TTL, so
+  the daemon warns at mint when an attempt may outlive the token instead of
+  letting it fail mid-run unexplained. `adapter_env_delivery` gained an
+  `exchange` count and the Nodes panel an `N exchanged` badge — counted apart
+  from `gateway`, since one number for both would report the safer mode's figure
+  for the less safe one.
+
+- **TLS to the credential gateway (ADR 0029 C3).** Some CLIs refuse an `http://`
+  base URL; `AGENTGRID_CRED_GATEWAY_TLS_CERT`/`_KEY` serve the gateway over
+  rustls for that compatibility, not as a security upgrade — the agent's leg is
+  inside the sandbox either way. Setting one without the other is a startup
+  error rather than a quiet fallback to plaintext. The CA reaches both ends that
+  need it: the daemon adds it to its own mint client and bind-mounts it
+  read-only into the sandbox, with `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+  `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO` all pointed at it.
+  A configured CA that is not a readable PEM fails the attempt up front, because
+  docker turns a missing bind source into an empty directory and the handshake
+  error that follows names the wrong thing.
+
 - **`ag nodes probe --host user@host` — the reachability check on a host you can
   only ssh to.** The probe needs no credential and no enrollment, but running it
   on a remote host meant `scp` and `ssh` by hand, which is the step people skip

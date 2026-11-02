@@ -4625,6 +4625,7 @@ mod mem_gate_tests {
         req.adapter_env_delivery = Some(AdapterEnvDelivery {
             plain: 2,
             gateway: 1,
+            exchange: 0,
         });
         s.heartbeat(&node_id, &req).await.unwrap();
         let n = s.get_node(&node_id).await.unwrap().expect("node");
@@ -4632,13 +4633,19 @@ mod mem_gate_tests {
             n.adapter_env_delivery,
             Some(AdapterEnvDelivery {
                 plain: 2,
-                gateway: 1
+                gateway: 1,
+                exchange: 0
             })
         );
         // list_nodes carries it too — the panel reads that route.
         let all = s.list_nodes(None, None).await.unwrap();
         let n = all.iter().find(|x| x.id == node_id).unwrap();
         assert_eq!(n.adapter_env_delivery.map(|d| d.plain), Some(2));
+        // `exchange` is a third category, not a synonym for `gateway`: the panel
+        // reports the two apart because a capability and a real token are
+        // different promises. If the store dropped it, every exchanged entry
+        // would read as an injected one.
+        assert_eq!(n.adapter_env_delivery.map(|d| d.exchange), Some(0));
 
         // Migrated: plain 0 with gateway > 0 is the "nothing to do" state and
         // must stay distinguishable from never-reported.
@@ -4646,6 +4653,7 @@ mod mem_gate_tests {
         req.adapter_env_delivery = Some(AdapterEnvDelivery {
             plain: 0,
             gateway: 3,
+            exchange: 1,
         });
         s.heartbeat(&node_id, &req).await.unwrap();
         let n = s.get_node(&node_id).await.unwrap().expect("node");
@@ -4653,8 +4661,15 @@ mod mem_gate_tests {
             n.adapter_env_delivery,
             Some(AdapterEnvDelivery {
                 plain: 0,
-                gateway: 3
+                gateway: 3,
+                exchange: 1
             })
+        );
+        let n = s.get_node(&node_id).await.unwrap().expect("node");
+        assert_eq!(
+            n.adapter_env_delivery.map(|d| d.exchange),
+            Some(1),
+            "the exchange count must survive the heartbeat round trip"
         );
 
         // A node downgraded to a binary that does not send the field goes back

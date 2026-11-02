@@ -825,18 +825,25 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
     // Deliberately before the sink/flusher: an early return after `run_flusher`
     // has been spawned would leave that task holding a sink clone for an
     // attempt that is already over.
-    let gw_http = reqwest::Client::new();
     let mut gateway_pairs: Vec<(String, String)> = Vec::new();
-    let capabilities = match crate::cred_gateway::apply(
-        &cfg,
-        &gw_http,
-        &assignment.attempt_id,
-        assignment.network_mode.as_deref(),
-        &mut gateway_pairs,
-    )
-    .await
-    {
-        Ok(tokens) => tokens,
+    // One fallible step for both halves: building the client can fail (a
+    // configured CA that is not a readable PEM), and so can the mint. Both are
+    // the same answer — the attempt has no credential, so it does not run.
+    let gateway = async {
+        let http = crate::cred_gateway::client()?;
+        let tokens = crate::cred_gateway::apply(
+            &cfg,
+            &http,
+            &assignment.attempt_id,
+            assignment.network_mode.as_deref(),
+            &mut gateway_pairs,
+        )
+        .await?;
+        Ok::<_, anyhow::Error>((http, tokens))
+    }
+    .await;
+    let (gw_http, capabilities) = match gateway {
+        Ok(v) => v,
         Err(e) => {
             tracing::error!(
                 attempt_id = %assignment.attempt_id,

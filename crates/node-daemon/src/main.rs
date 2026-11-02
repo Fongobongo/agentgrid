@@ -169,17 +169,23 @@ async fn drive_acp_session(
     // Its own client, not the daemon's: that one carries the node credential as
     // a default `Authorization` header and is routed through the egress proxy
     // pool. The gateway is a local peer, and neither of those belongs on a mint.
-    let gw_http = reqwest::Client::new();
-    let capabilities = match cred_gateway::apply(
-        cfg,
-        &gw_http,
-        &assignment.attempt_id,
-        assignment.network_mode.as_deref(),
-        &mut container_env,
-    )
-    .await
-    {
-        Ok(tokens) => tokens,
+    // Building it is fallible because a configured CA that is not a readable PEM
+    // has to fail here rather than at the first mint.
+    let gateway = async {
+        let http = cred_gateway::client()?;
+        let tokens = cred_gateway::apply(
+            cfg,
+            &http,
+            &assignment.attempt_id,
+            assignment.network_mode.as_deref(),
+            &mut container_env,
+        )
+        .await?;
+        Ok::<_, anyhow::Error>((http, tokens))
+    }
+    .await;
+    let (gw_http, capabilities) = match gateway {
+        Ok(v) => v,
         Err(e) => {
             tracing::error!(
                 attempt_id = %assignment.attempt_id,
@@ -1235,7 +1241,7 @@ async fn amain() -> Result<()> {
     // key in the sandbox and a capability in the sandbox. Names and routes are
     // not secrets (a route is a name the gateway already knows), so they can be
     // logged; values never are, and are not read here.
-    if cfg.gateway_env.is_empty() {
+    if cfg.gateway_env.is_empty() && cfg.exchange_env.is_empty() {
         if cfg.adapter_env.is_empty() {
             tracing::info!("no adapter env entries");
         } else {
@@ -1251,6 +1257,11 @@ async fn amain() -> Result<()> {
         tracing::info!(
             gateway_delivered = ?cfg
                 .gateway_env
+                .iter()
+                .map(|(k, route)| format!("{k}->{route}"))
+                .collect::<Vec<_>>(),
+            exchanged = ?cfg
+                .exchange_env
                 .iter()
                 .map(|(k, route)| format!("{k}->{route}"))
                 .collect::<Vec<_>>(),

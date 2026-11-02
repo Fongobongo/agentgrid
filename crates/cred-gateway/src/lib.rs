@@ -1,9 +1,15 @@
-//! Credential gateway (ADR 0029, option F/inject).
+//! Credential gateway (ADR 0029, option F).
 //!
-//! The sandbox never holds a provider key. It holds a **capability**: an opaque
-//! string minted for one attempt, with a TTL and an optional request quota. The
-//! gateway validates it, swaps it for the real credential on its own outbound
-//! leg, and streams the answer back.
+//! Two modes, chosen per route, because the question that separates them is
+//! *can the consumer's traffic be proxied?*
+//!
+//! - **inject** — the sandbox holds a **capability**: an opaque string minted
+//!   for one attempt, with a TTL and an optional request quota. The gateway
+//!   validates it, swaps it for the real credential on its own outbound leg, and
+//!   streams the answer back. The provider key never leaves this process.
+//! - **exchange** — the gateway mints a **real, short-lived, provider-issued**
+//!   token and hands it over, for a consumer that talks to the provider itself
+//!   and cannot be proxied (git push). See [`exchange`].
 //!
 //! Why this shape rather than a broker (ADR 0029, option E): the adapter is a
 //! wrapper, so the process that talks to the provider is a third-party CLI we
@@ -31,6 +37,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+
+pub mod exchange;
+pub mod tls;
+
+pub use exchange::{parse_exchange, Minted, PemKey, Provider};
 
 /// Request bodies are buffered before forwarding: the upstream is an LLM API,
 /// so the payload is a prompt (large, but not unbounded), and buffering keeps
@@ -70,11 +81,25 @@ struct Cap {
     used: u32,
 }
 
+/// An exchanged token, kept only so `DELETE /tokens/{t}` can reach the provider
+/// that issued it. Deliberately *not* in `caps`: a real provider token must
+/// never be accepted as a capability on `/p/{route}`, where it would be swapped
+/// for another provider's key.
+struct ExchangeHandle {
+    route: String,
+    provider: Provider,
+    expires: Instant,
+}
+
 pub struct Gateway {
     routes: HashMap<String, Route>,
     keys: HashMap<String, String>,
+    /// Exchange routes: nothing is proxied for these, so they have no header and
+    /// no upstream — only a provider that mints on demand.
+    exchange: HashMap<String, Provider>,
     admin: String,
     caps: Mutex<HashMap<String, Cap>>,
+    exchanges: Mutex<HashMap<String, ExchangeHandle>>,
     http: reqwest::Client,
 }
 
@@ -84,34 +109,72 @@ impl std::fmt::Debug for Gateway {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Gateway")
             .field("routes", &self.routes.keys().collect::<Vec<_>>())
+            .field("exchange", &self.exchange.keys().collect::<Vec<_>>())
             .field("keys", &format_args!("<{} redacted>", self.keys.len()))
             .field("admin", &"<redacted>")
             .field(
                 "caps",
                 &self.caps.lock().map(|c| c.len()).unwrap_or_default(),
             )
+            .field(
+                "exchanges",
+                &self.exchanges.lock().map(|c| c.len()).unwrap_or_default(),
+            )
             .finish()
     }
 }
 
 impl Gateway {
-    /// Fails closed: a route without a key, or an empty admin token, is a
-    /// configuration mistake that must not start a proxy that would either
-    /// forward an empty credential or accept anonymous minting.
+    /// Inject routes only. Kept as its own constructor so a caller that does not
+    /// need exchange cannot accidentally pass it the wrong map.
     pub fn new(
         routes: HashMap<String, Route>,
         keys: HashMap<String, String>,
         admin: String,
     ) -> anyhow::Result<Self> {
+        Self::build(routes, keys, HashMap::new(), admin)
+    }
+
+    pub fn new_with_exchange(
+        routes: HashMap<String, Route>,
+        keys: HashMap<String, String>,
+        exchange: HashMap<String, Provider>,
+        admin: String,
+    ) -> anyhow::Result<Self> {
+        Self::build(routes, keys, exchange, admin)
+    }
+
+    /// Fails closed: a route without a key, or an empty admin token, is a
+    /// configuration mistake that must not start a proxy that would either
+    /// forward an empty credential or accept anonymous minting.
+    fn build(
+        routes: HashMap<String, Route>,
+        keys: HashMap<String, String>,
+        exchange: HashMap<String, Provider>,
+        admin: String,
+    ) -> anyhow::Result<Self> {
         if admin.trim().is_empty() {
             anyhow::bail!("AGENTGRID_CRED_GATEWAY_ADMIN is empty: the mint API would be open");
         }
-        if routes.is_empty() {
-            anyhow::bail!("no routes configured (AGENTGRID_CRED_GATEWAY_ROUTES)");
+        if routes.is_empty() && exchange.is_empty() {
+            anyhow::bail!(
+                "no routes configured (AGENTGRID_CRED_GATEWAY_ROUTES or \
+                 AGENTGRID_CRED_GATEWAY_EXCHANGE)"
+            );
         }
         for name in routes.keys() {
             if !keys.contains_key(name) {
                 anyhow::bail!("route '{name}' has no key (AGENTGRID_CRED_GATEWAY_KEYS)");
+            }
+        }
+        // The two namespaces share one mint endpoint and one revoke endpoint, so
+        // a shared name would make "which mode is this?" depend on lookup order.
+        for name in exchange.keys() {
+            if routes.contains_key(name) {
+                anyhow::bail!(
+                    "route '{name}' is declared both inject (AGENTGRID_CRED_GATEWAY_ROUTES) \
+                     and exchange (AGENTGRID_CRED_GATEWAY_EXCHANGE)"
+                );
             }
         }
         let http = reqwest::Client::builder()
@@ -123,8 +186,10 @@ impl Gateway {
         Ok(Self {
             routes,
             keys,
+            exchange,
             admin,
             caps: Mutex::new(HashMap::new()),
+            exchanges: Mutex::new(HashMap::new()),
             http,
         })
     }
@@ -132,8 +197,9 @@ impl Gateway {
     pub fn from_env() -> anyhow::Result<Self> {
         let routes = parse_routes(&env("AGENTGRID_CRED_GATEWAY_ROUTES").unwrap_or_default())?;
         let keys = parse_keys(&env("AGENTGRID_CRED_GATEWAY_KEYS").unwrap_or_default());
+        let exchange = parse_exchange(&env("AGENTGRID_CRED_GATEWAY_EXCHANGE").unwrap_or_default())?;
         let admin = env("AGENTGRID_CRED_GATEWAY_ADMIN").unwrap_or_default();
-        Self::new(routes, keys, admin)
+        Self::build(routes, keys, exchange, admin)
     }
 }
 
@@ -172,6 +238,61 @@ async fn mint(
 ) -> Response {
     if !admin_ok(&gw, &headers) {
         return problem(StatusCode::UNAUTHORIZED, "admin token required");
+    }
+    // Exchange first: the namespaces cannot overlap (`build` refuses that), so
+    // the order only decides which message an unknown route gets.
+    if let Some(provider) = gw.exchange.get(&req.route) {
+        let minted = match provider.mint(&gw.http).await {
+            Ok(m) => m,
+            Err(e) => {
+                // The provider's own error text, never the App key: it never
+                // left this process, and `PemKey`'s Debug is redacted anyway.
+                tracing::warn!(route = %req.route, error = %e, "exchange failed");
+                return problem(StatusCode::BAD_GATEWAY, &format!("exchange failed: {e}"));
+            }
+        };
+        // The provider bounds this, not us: `ttl_secs` is a request. Saying so
+        // once, loudly, is the difference between "the operator knows a long
+        // attempt will fail mid-run" and "git push mysteriously 401s".
+        if minted.expires_in < req.ttl_secs {
+            tracing::warn!(
+                route = %req.route,
+                provider_ttl = minted.expires_in,
+                requested = req.ttl_secs,
+                "the provider's token expires before the requested TTL: an attempt \
+                 longer than the provider's window will fail mid-run"
+            );
+        }
+        let token = minted.token.clone();
+        {
+            let mut xs = gw.exchanges.lock().expect("exchanges lock");
+            let now = Instant::now();
+            xs.retain(|_, h| h.expires > now);
+            xs.insert(
+                token.clone(),
+                ExchangeHandle {
+                    route: req.route.clone(),
+                    provider: provider.clone(),
+                    expires: now + Duration::from_secs(minted.expires_in.max(1)),
+                },
+            );
+        }
+        tracing::info!(
+            route = %req.route,
+            attempt = %req.attempt_id,
+            provider = provider.name(),
+            expires_in = minted.expires_in,
+            "token exchanged"
+        );
+        return (
+            StatusCode::OK,
+            Json(MintResponse {
+                token,
+                route: req.route,
+                expires_in: minted.expires_in,
+            }),
+        )
+            .into_response();
     }
     if !gw.routes.contains_key(&req.route) {
         return problem(StatusCode::NOT_FOUND, "unknown route");
@@ -212,6 +333,14 @@ async fn revoke(
 ) -> Response {
     if !admin_ok(&gw, &headers) {
         return problem(StatusCode::UNAUTHORIZED, "admin token required");
+    }
+    // An exchanged token is revoked at the provider; a capability is revoked
+    // here. Same endpoint, because the daemon does not distinguish them either.
+    let exchange = gw.exchanges.lock().expect("exchanges lock").remove(&token);
+    if let Some(handle) = exchange {
+        handle.provider.revoke(&gw.http, &token).await;
+        tracing::info!(route = %handle.route, "exchanged token revoked at the provider");
+        return StatusCode::NO_CONTENT.into_response();
     }
     let removed = gw.caps.lock().expect("caps lock").remove(&token).is_some();
     if removed {
@@ -517,5 +646,93 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    // ----- exchange mode (ADR 0029 F/exchange) -----
+
+    fn exchange_provider() -> (Provider, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("app.pem");
+        std::fs::write(
+            &key,
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let mut map = parse_exchange(&format!(
+            "github=github-app;app_id=1;installation_id=2;key={}",
+            key.display()
+        ))
+        .unwrap();
+        (map.remove("github").unwrap(), dir)
+    }
+
+    /// An exchange-only gateway is a valid configuration: git access is the case
+    /// this mode exists for, and it needs no provider proxy at all.
+    #[test]
+    fn an_exchange_only_gateway_starts() {
+        let (provider, _dir) = exchange_provider();
+        let mut exchange = HashMap::new();
+        exchange.insert("github".to_string(), provider);
+        let gw = Gateway::new_with_exchange(HashMap::new(), HashMap::new(), exchange, "a".into());
+        assert!(gw.is_ok(), "{:?}", gw.err());
+    }
+
+    /// The two namespaces share the mint and revoke endpoints, so one name in
+    /// both would make the mode depend on lookup order.
+    #[test]
+    fn a_name_declared_in_both_namespaces_is_refused() {
+        let (provider, _dir) = exchange_provider();
+        let routes = parse_routes("github|authorization|https://api.github.com").unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("github".to_string(), "k".to_string());
+        let mut exchange = HashMap::new();
+        exchange.insert("github".to_string(), provider);
+        let err = Gateway::new_with_exchange(routes, keys, exchange, "a".into()).unwrap_err();
+        assert!(err.to_string().contains("both"), "{err}");
+    }
+
+    /// The property that makes the two modes safe to keep in one process: a real
+    /// provider token must not be accepted where a capability is expected. If it
+    /// were, an exchanged token would be swapped for *another* provider's key.
+    #[tokio::test]
+    async fn an_exchanged_token_is_not_a_capability() {
+        let (provider, _dir) = exchange_provider();
+        let routes = parse_routes("anthropic|x-api-key|https://api.anthropic.com").unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("anthropic".to_string(), "sk-ant-real".to_string());
+        let mut exchange = HashMap::new();
+        exchange.insert("github".to_string(), provider.clone());
+        let gw =
+            Arc::new(Gateway::new_with_exchange(routes, keys, exchange, "admin".into()).unwrap());
+
+        // What `mint` would store for an exchange route.
+        const REAL: &str = "ghs_realtoken";
+        gw.exchanges.lock().unwrap().insert(
+            REAL.to_string(),
+            ExchangeHandle {
+                route: "github".to_string(),
+                provider,
+                expires: Instant::now() + Duration::from_secs(60),
+            },
+        );
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("x-api-key", REAL)
+            .body(Body::empty())
+            .unwrap();
+        let resp = proxy(
+            State(gw.clone()),
+            Path(("anthropic".to_string(), "v1/messages".to_string())),
+            RawQuery(None),
+            req,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "an exchanged token was accepted as a capability"
+        );
     }
 }

@@ -560,13 +560,19 @@ paths:
         `artifact_spool_bytes` (hardening P2 item 35): local storage pressure —
         a node whose spool grows is backing up and not draining.
 
-        `adapter_env_delivery` (ADR 0029) is `{plain, gateway}`: how many of the
-        node's **local** `AGENTGRID_ADAPTER_ENV` entries are handed to the agent
-        as plain values — readable inside the sandbox, threat-model T13a — and
-        how many are replaced by per-attempt capabilities minted by the
-        credential gateway. Counts only; names and values stay on the node.
+        `adapter_env_delivery` (ADR 0029) is `{plain, gateway, exchange}`: how
+        many of the node's **local** `AGENTGRID_ADAPTER_ENV` entries are handed
+        to the agent as plain values — readable inside the sandbox,
+        threat-model T13a — how many are replaced by per-attempt capabilities
+        minted by the credential gateway, and how many are replaced by a **real,
+        short-lived, provider-issued** token. The last two are counted apart on
+        purpose: a capability is worthless outside the gateway, while an
+        exchanged token works from anywhere until the provider expires it, so
+        adding them together would report the safer mode's number for the less
+        safe one. Counts only; names and values stay on the node.
         Absent means the node has never reported (older binary, or no heartbeat
-        since upgrading), which is **not** the same claim as `plain: 0`.
+        since upgrading), which is **not** the same claim as `plain: 0`. A node
+        that predates exchange mode reports no `exchange` field at all.
 
         Reachability (ADR 0026 + ADR 0012): `relay_hops` is how many forwarders
         the last heartbeat crossed before it arrived — `0` when none did — and

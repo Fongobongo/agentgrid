@@ -1289,6 +1289,14 @@ pub struct AdapterEnvDelivery {
     /// enters the sandbox.
     #[serde(default)]
     pub gateway: u32,
+    /// Entries replaced by a **real, short-lived, provider-issued** token
+    /// (ADR 0029 F/exchange). Counted apart from `gateway` because the two are
+    /// different promises: a capability is worthless outside the gateway, an
+    /// exchanged token works from anywhere until the provider expires it. A
+    /// panel that added them together would report the safer number for the
+    /// less safe mode.
+    #[serde(default)]
+    pub exchange: u32,
 }
 
 /// Plan 1.8 (#15): per-account usage reported by a node in its heartbeat so

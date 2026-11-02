@@ -27,20 +27,45 @@ interface AccountUsage {
 export function AdapterEnvBadge({
   delivery,
 }: {
-  delivery?: { plain: number; gateway: number } | null;
+  delivery?: { plain: number; gateway: number; exchange?: number } | null;
 }) {
   if (!delivery) return null;
+  // Older nodes do not send `exchange` at all, and "absent" must not read as
+  // zero-of-a-third-kind — it just is not there.
+  const exchange = delivery.exchange ?? 0;
+  const total = delivery.plain + delivery.gateway + exchange;
   if (delivery.plain > 0) {
     return (
       <span
         className="badge warn"
         title={
-          `${delivery.plain} of ${delivery.plain + delivery.gateway} AGENTGRID_ADAPTER_ENV entries are handed ` +
+          `${delivery.plain} of ${total} AGENTGRID_ADAPTER_ENV entries are handed ` +
           'to the agent as plain values, so the key is readable inside the sandbox (threat-model T13a). ' +
-          'Write them NAME@gateway=<route> and set AGENTGRID_CRED_GATEWAY_URL to keep the keys out.'
+          'Write them NAME@gateway=<route> (a capability, the key never enters the sandbox) or ' +
+          'NAME@exchange=<route> (a real short-lived token, for consumers that cannot be proxied), ' +
+          'and set AGENTGRID_CRED_GATEWAY_URL.'
         }
       >
         {delivery.plain} plain key{delivery.plain === 1 ? '' : 's'}
+      </span>
+    );
+  }
+  // Exchanged entries are *not* the same promise as gateway ones: the sandbox
+  // holds a real provider token that works from anywhere until it expires. They
+  // are counted and shown apart so this badge never reports the safer mode's
+  // wording for the less safe one.
+  if (exchange > 0) {
+    return (
+      <span
+        className="badge"
+        title={
+          `${exchange} of ${total} adapter-env entries are exchanged: the sandbox holds a real ` +
+          'provider-issued token, scoped and expired by the provider itself (an hour, one ' +
+          'repository, for a GitHub App installation). It is revoked when the attempt ends, but ' +
+          'unlike a capability it does work outside the gateway until then.'
+        }
+      >
+        {exchange} exchanged
       </span>
     );
   }

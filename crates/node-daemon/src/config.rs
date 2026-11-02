@@ -378,6 +378,12 @@ pub struct Config {
     /// hold it at all. At attempt start each entry is replaced by a per-attempt
     /// capability minted by the gateway (see `cred_gateway.rs`).
     pub gateway_env: Vec<(String, String)>,
+    /// ADR 0029 option F/**exchange**: `AGENTGRID_ADAPTER_ENV` entries written
+    /// `NAME@exchange=<route>`. Unlike `@gateway`, the sandbox is handed a
+    /// **real, provider-issued** token, because the consumer cannot be proxied
+    /// (git push is the case). The provider key never leaves the gateway; the
+    /// token it mints is short-lived and scoped by the provider itself.
+    pub exchange_env: Vec<(String, String)>,
     pub sandbox: sandbox::SandboxKind,
     pub outbox_root: PathBuf,
     pub artifact_spool_root: PathBuf,
@@ -471,6 +477,12 @@ fn split_csv(env: &str, default: &str) -> Vec<String> {
 /// separate list so a key cannot be in two places with two answers.
 pub const GATEWAY_SUFFIX: &str = "@gateway";
 
+/// Suffix that marks an entry as **exchanged** (ADR 0029 option F/exchange):
+/// the gateway mints a real short-lived provider token and the sandbox uses it
+/// directly, because the consumer (git, a CLI that cannot be proxied) talks to
+/// the provider itself.
+pub const EXCHANGE_SUFFIX: &str = "@exchange";
+
 fn parse_env_pairs(env: &str) -> Vec<(String, String)> {
     std::env::var(env)
         .ok()
@@ -487,8 +499,10 @@ fn split_env_pairs(raw: &str) -> Vec<(String, String)> {
             let (k, val) = s.split_once('=')?;
             // `NAME@gateway=route` is not a value for the agent: it is a
             // delivery instruction (ADR 0029). Keeping it here would hand the
-            // agent the route name as if it were a credential.
-            if k.trim().ends_with(GATEWAY_SUFFIX) {
+            // agent the route name as if it were a credential. Same for
+            // `@exchange`, and leaving it here would be worse: the agent would
+            // get the route name where a real token is expected.
+            if k.trim().ends_with(GATEWAY_SUFFIX) || k.trim().ends_with(EXCHANGE_SUFFIX) {
                 return None;
             }
             Some((k.trim().to_string(), val.to_string()))
@@ -508,12 +522,33 @@ fn parse_gateway_env(env: &str) -> Vec<(String, String)> {
 }
 
 fn split_gateway_pairs(raw: &str) -> Vec<(String, String)> {
+    split_marked_pairs(raw, GATEWAY_SUFFIX)
+}
+
+/// ADR 0029 option F/exchange. `GITHUB_TOKEN@exchange=github` means "this
+/// attempt gets a real, one-hour, repo-scoped GitHub token in `GITHUB_TOKEN`".
+/// The route name is still not a secret — the App key stays in the gateway.
+fn parse_exchange_env(env: &str) -> Vec<(String, String)> {
+    std::env::var(env)
+        .ok()
+        .map(|v| split_exchange_pairs(&v))
+        .unwrap_or_default()
+}
+
+fn split_exchange_pairs(raw: &str) -> Vec<(String, String)> {
+    split_marked_pairs(raw, EXCHANGE_SUFFIX)
+}
+
+/// Both markers have the same shape — `NAME<suffix>=route` — and the same
+/// failure mode: a bare `NAME@gateway` or an empty route is a typo, and
+/// guessing at it would mean either a missing credential or a bogus one.
+fn split_marked_pairs(raw: &str, suffix: &str) -> Vec<(String, String)> {
     raw.split([' ', ',', '\n'])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .filter_map(|s| {
             let (k, val) = s.split_once('=')?;
-            let name = k.trim().strip_suffix(GATEWAY_SUFFIX)?;
+            let name = k.trim().strip_suffix(suffix)?;
             let route = val.trim();
             if name.is_empty() || route.is_empty() {
                 return None;
@@ -636,6 +671,7 @@ pub fn config_from_env() -> Config {
         secrets: split_csv("AGENTGRID_SECRETS", ""),
         adapter_env: parse_env_pairs("AGENTGRID_ADAPTER_ENV"),
         gateway_env: parse_gateway_env("AGENTGRID_ADAPTER_ENV"),
+        exchange_env: parse_exchange_env("AGENTGRID_ADAPTER_ENV"),
         sandbox: sandbox::SandboxKind::from_env(),
         outbox_root: PathBuf::from(&data_dir).join("outbox"),
         artifact_spool_root: PathBuf::from(&data_dir).join("artifact-spool"),
@@ -1013,6 +1049,52 @@ mod gateway_env_tests {
         assert_eq!(
             split_env_pairs(raw),
             vec![("HTTP_PROXY".to_string(), "http://p:3128".to_string())]
+        );
+    }
+
+    /// Leaving an `@exchange` entry in the plain list would be worse than the
+    /// `@gateway` case: the agent would receive the route name in the variable
+    /// where a real token is expected, and fail with an authentication error
+    /// that says nothing about the marker.
+    #[test]
+    fn an_exchange_entry_is_not_an_adapter_env_pair() {
+        let pairs = split_env_pairs("GITHUB_TOKEN@exchange=github,LOG_LEVEL=debug");
+        assert_eq!(pairs, vec![("LOG_LEVEL".to_string(), "debug".to_string())]);
+    }
+
+    #[test]
+    fn the_two_markers_do_not_see_each_other() {
+        // Same variable, both markers, one env: each parser takes only its own.
+        let raw = "ANTHROPIC_API_KEY@gateway=anthropic,GITHUB_TOKEN@exchange=github";
+        assert_eq!(
+            split_gateway_pairs(raw),
+            vec![("ANTHROPIC_API_KEY".to_string(), "anthropic".to_string())]
+        );
+        assert_eq!(
+            split_exchange_pairs(raw),
+            vec![("GITHUB_TOKEN".to_string(), "github".to_string())]
+        );
+        assert!(
+            split_env_pairs(raw).is_empty(),
+            "neither marker may survive as a plain value"
+        );
+    }
+
+    #[test]
+    fn an_exchange_entry_without_a_route_is_dropped() {
+        assert!(split_exchange_pairs("GITHUB_TOKEN@exchange=").is_empty());
+        assert!(split_exchange_pairs("GITHUB_TOKEN@exchange").is_empty());
+        assert!(split_exchange_pairs("@exchange=github").is_empty());
+    }
+
+    /// `@gateway` is a suffix, not a substring: a variable whose name merely
+    /// contains the word is an ordinary value.
+    #[test]
+    fn a_name_that_merely_contains_a_marker_is_a_plain_pair() {
+        let pairs = split_env_pairs("MY_gateway_KEY=abc");
+        assert_eq!(
+            pairs,
+            vec![("MY_gateway_KEY".to_string(), "abc".to_string())]
         );
     }
 }
