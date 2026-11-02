@@ -11,7 +11,8 @@
 #      that request itself, so the 403 is a real status code;
 #   3. the same over https/CONNECT, which is what an agent actually does, and
 #      where the refusal arrives as `%{http_connect}` rather than `%{http_code}`;
-#   4. an allowlisted domain passes. That one catches a squid config that denies
+#   4. an allowlisted domain is allowed — asserted on the CONNECT reply, not on
+#      the origin's status. That one catches a squid config that denies
 #      everything (the `acl localnet src` + `deny localnet` bug: every sandbox is
 #      a 172.16/12 *client*, so the rule refused all traffic);
 #   5. with no proxy at all, nothing gets out — the old single-network compose
@@ -77,9 +78,20 @@ for _ in $(seq 1 10); do
 done
 [ "$connect" = "403" ] || { dump_diagnostics; fail "an https CONNECT to a non-allowlisted domain was answered '$connect', expected 403"; }
 
-code=$(docker run --rm --network "$NET" -e https_proxy="$PROXY" "$CURL_IMAGE" \
-  -s -o /dev/null -w '%{http_code}' --max-time 10 https://api.github.com/ 2>/dev/null || true)
-[ "$code" = "200" ] || { dump_diagnostics; fail "an allowlisted domain returned '$code' through the proxy, expected 200 — the allowlist denies everything (check the src/dst acls)"; }
+# The proxy's *decision*, not the origin's opinion. Asserting
+# `%{http_code} = 200` made this test depend on GitHub's rate limiter: an
+# unauthenticated request from a CI runner gets a 403 from api.github.com
+# itself, while squid's own log says `TCP_TUNNEL/200` — the tunnel opened and
+# the config is fine. `%{http_connect}` is the CONNECT reply, which is squid's
+# answer and the only thing this test can speak for.
+allow=""
+for _ in $(seq 1 10); do
+  allow=$(docker run --rm --network "$NET" -e https_proxy="$PROXY" "$CURL_IMAGE" \
+    -s -o /dev/null -w '%{http_connect}' --max-time 10 https://api.github.com/ 2>/dev/null || true)
+  [ "$allow" = "200" ] && break
+  sleep 2
+done
+[ "$allow" = "200" ] || { dump_diagnostics; fail "an allowlisted domain was refused at the CONNECT ('$allow'), expected 200 — the allowlist denies everything (check the src/dst acls)"; }
 
 echo ">> and nothing gets out around it"
 if docker run --rm --network "$NET" "$CURL_IMAGE" -sS --max-time 5 https://api.github.com/ >/dev/null 2>&1; then
