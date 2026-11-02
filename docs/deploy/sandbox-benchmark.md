@@ -16,12 +16,16 @@ cold-start cost. Run it before deciding whether to pre-warm containers.
 
 ```bash
 # First with the node under AGENTGRID_SANDBOX=none (legacy).
-AGENTGRID_CONTROL=http://127.0.0.1:7800 \
-AG_AGENT_API_TOKEN=<token> \
+AGENTGRID_SERVER=http://127.0.0.1:7800 \
+AGENTGRID_API_TOKEN=<token> \
 ./deploy/sandbox-benchmark.sh 5
 # Restart the node daemon with AGENTGRID_SANDBOX=docker and press Enter to
 # record the sandbox= docker section.
 ```
+
+`AGENTGRID_SERVER` is the same variable `ag --server` reads. The older
+spellings (`AGENTGRID_CONTROL`, `AG_AGENT_API_TOKEN`) are still accepted and
+print a rename warning.
 
 3. The full-wall time per mode is the `submit_ms` average. Isolating the
    pure container-start overhead needs the node's spawn span — grep for a

@@ -4,13 +4,17 @@
 # Measures the submit→running latency the control plane assigns a task and a
 # node daemon turns around for `sandbox=none` (legacy) vs `sandbox=docker`
 # (sandbox_command prefix), per AGENTGRID_SANDBOX mode. Needs a running
-# control plane + one node daemon already configured; AGENTGRID_CONTROL
-# + AG_AGENT_API_TOKEN must be in env (or flags).
+# control plane + one node daemon already configured; AGENTGRID_SERVER
+# + AGENTGRID_API_TOKEN must be in env.
 #
 # Usage:
-#   AGENTGRID_CONTROL=http://127.0.0.1:7800 \
-#   AG_AGENT_API_TOKEN=<token> \
+#   AGENTGRID_SERVER=http://127.0.0.1:7800 \
+#   AGENTGRID_API_TOKEN=<token> \
 #   ./deploy/sandbox-benchmark.sh [iterations]
+#
+# AGENTGRID_SERVER is the same variable `ag --server` reads, so an operator
+# who already exports it needs only the token. The pre-rename spellings
+# (AGENTGRID_CONTROL, AG_AGENT_API_TOKEN) still work and warn.
 #
 # Output: per-iteration Microsoft-format rows `sandbox=<m> iter=<n> submit_ms=<t>`,
 # plus a final summary line per mode. Podman gets the same row because
@@ -25,15 +29,26 @@
 
 set -euo pipefail
 
-CONTROL=${AGENTGRID_CONTROL:-http://127.0.0.1:7800}
-TOKEN=${AG_AGENT_API_TOKEN:-}
+CONTROL=${AGENTGRID_SERVER:-}
+if [[ -z "$CONTROL" && -n "${AGENTGRID_CONTROL:-}" ]]; then
+    echo "sandbox-benchmark: AGENTGRID_CONTROL is now AGENTGRID_SERVER" >&2
+    CONTROL=$AGENTGRID_CONTROL
+fi
+CONTROL=${CONTROL:-http://127.0.0.1:7800}
+
+TOKEN=${AGENTGRID_API_TOKEN:-}
+if [[ -z "$TOKEN" && -n "${AG_AGENT_API_TOKEN:-}" ]]; then
+    echo "sandbox-benchmark: AG_AGENT_API_TOKEN is now AGENTGRID_API_TOKEN" >&2
+    TOKEN=$AG_AGENT_API_TOKEN
+fi
+
 ITER=${1:-5}
 ADAPTER=${ADAPTER:-mock}
 PROMPT=${PROMPT:-"sandbox cold-start benchmark"}
 REPO=${REPO:-"https://example.invalid/x"}
 
 if [[ -z "$TOKEN" ]]; then
-    echo "AG_AGENT_API_TOKEN is required" >&2; exit 1
+    echo "AGENTGRID_API_TOKEN is required" >&2; exit 1
 fi
 
 bench() {
