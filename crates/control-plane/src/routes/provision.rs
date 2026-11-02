@@ -86,6 +86,14 @@ pub struct ProvisioningRuntime {
     /// panel cannot interpret. `None` until [`Self::hydrate`] attaches a store,
     /// which is also what the tests use.
     persist: Option<tokio::sync::mpsc::UnboundedSender<Persist>>,
+    /// The table, when there is one.
+    ///
+    /// Held so the *table* can answer "is this host already configured?" —
+    /// [`Self::record_intent`] used to ask the job list, which is capped at
+    /// twenty entries and therefore stopped answering correctly exactly when it
+    /// was busy. `None` without [`Self::hydrate`], which is what the unit tests
+    /// that do not need a database use.
+    store: Option<crate::store::Store>,
 }
 
 /// What the writer task does with the database.
@@ -99,6 +107,10 @@ enum Persist {
     Enrolled {
         name: String,
         node_id: String,
+    },
+    /// Delete one attempt.
+    Forgot {
+        id: String,
     },
 }
 
@@ -115,6 +127,7 @@ impl ProvisioningRuntime {
             node_binary: resolve_node_binary(),
             jobs: std::sync::Mutex::new(HashMap::new()),
             persist: None,
+            store: None,
         }
     }
 
@@ -139,6 +152,7 @@ impl ProvisioningRuntime {
                 tracing::warn!(error = %e, "could not load install jobs; the panel starts empty")
             }
         }
+        self.store = Some(store.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Persist>();
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -159,6 +173,11 @@ impl ProvisioningRuntime {
                                 error = %e,
                                 "could not close the issued install rows for an enrolled host"
                             ),
+                        }
+                    }
+                    Persist::Forgot { id } => {
+                        if let Err(e) = store.delete_install(&id).await {
+                            tracing::warn!(job = %id, error = %e, "could not delete an install row");
                         }
                     }
                 }
@@ -251,29 +270,35 @@ impl ProvisioningRuntime {
     /// arrived"), and refreshing `started_at` would make an intent that has
     /// been open for three days look a minute old.
     ///
-    /// The check reads the in-memory list, so it covers a retry against the
-    /// last few jobs — which is what a retry is. A duplicate is still possible
-    /// when the original has aged out of that window; it costs one extra row
-    /// saying the same thing, and enrollment closes both.
-    pub fn record_intent(&self, host: Option<&str>, name: Option<&str>) {
+    /// The **table** decides, via the partial unique index from migration 0101
+    /// — not the job list. The list is capped at twenty entries, so a guard that
+    /// read it stopped guarding exactly when the list was busy: the original
+    /// intent would have aged out and a second row would be created. Asking the
+    /// table costs one insert that mostly does nothing, and it is the same
+    /// answer whether this replica or another one created the intent.
+    ///
+    /// Returns whether an intent is now on record because of this call.
+    pub async fn record_intent(&self, host: Option<&str>, name: Option<&str>) -> bool {
         let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
-            return;
+            return false;
         };
         let name = name
             .map(str::trim)
             .filter(|n| !n.is_empty())
             .unwrap_or("remote-node")
             .to_string();
+        // Fast path: a retry almost always lands while the original is still in
+        // the list, and skipping the round-trip for that is free.
         {
             let jobs = self.jobs.lock().unwrap();
             let open = jobs
                 .values()
                 .any(|j| j.state == JobState::Issued && j.host == host && j.name == name);
             if open {
-                return;
+                return false;
             }
         }
-        self.insert(InstallJob {
+        let job = InstallJob {
             id: uuid::Uuid::new_v4().to_string(),
             host: host.to_string(),
             name,
@@ -283,7 +308,43 @@ impl ProvisioningRuntime {
             server_url: None,
             started_at: now_iso(),
             finished_at: None,
-        });
+        };
+        match &self.store {
+            Some(store) => match store.record_install_intent(&record(&job)).await {
+                // The row is already written, so only the panel's copy is left.
+                Ok(true) => {
+                    self.insert_local(job);
+                    true
+                }
+                // Another replica, or a row that aged out of this replica's
+                // list, already holds the intent. Nothing to add anywhere.
+                Ok(false) => false,
+                // A broken store must not also blind the panel: the intent is
+                // still true, it just is not durable.
+                Err(e) => {
+                    tracing::warn!(host = %job.host, error = %e, "could not record an install intent");
+                    self.insert(job);
+                    true
+                }
+            },
+            None => {
+                self.insert(job);
+                true
+            }
+        }
+    }
+
+    /// Forget one attempt, in the panel and in the table.
+    ///
+    /// Returns whether the job was known here. A row can exist in the table and
+    /// not in this list (it aged out of the twenty-entry window), so the caller
+    /// checks the store too before deciding it never existed.
+    pub fn forget(&self, id: &str) -> bool {
+        let known = self.jobs.lock().unwrap().remove(id).is_some();
+        if let Some(tx) = &self.persist {
+            let _ = tx.send(Persist::Forgot { id: id.to_string() });
+        }
+        known
     }
 
     pub fn node_binary(&self) -> Option<&PathBuf> {
@@ -291,6 +352,16 @@ impl ProvisioningRuntime {
     }
 
     fn insert(&self, job: InstallJob) {
+        self.insert_with(job, true);
+    }
+
+    /// Insert without queueing a write — for a row the caller has just written
+    /// itself, where a second upsert of the same content would be noise.
+    fn insert_local(&self, job: InstallJob) {
+        self.insert_with(job, false);
+    }
+
+    fn insert_with(&self, job: InstallJob, persist: bool) {
         let id = job.id.clone();
         {
             let mut jobs = self.jobs.lock().unwrap();
@@ -310,7 +381,9 @@ impl ProvisioningRuntime {
             }
             jobs.insert(id.clone(), job);
         }
-        self.save(&id);
+        if persist {
+            self.save(&id);
+        }
     }
 
     fn push_step(&self, id: &str, message: &str) {
@@ -691,6 +764,55 @@ pub async fn list_installs(
     Json(state.provisioning.list())
 }
 
+/// `DELETE /v1/node-installs/{id}` — forget one attempt (admin).
+///
+/// The record of a host that will never arrive. Retention deliberately leaves
+/// `issued` rows alone — they are the answer to "was this host ever
+/// configured?" — so removing a decommissioned host has to be an explicit act,
+/// and this is it. The counterpart for a host that *did* enroll is
+/// `DELETE /v1/nodes/{id}` (revoke), which is a different question: there the
+/// node exists and its history has to stay.
+///
+/// A `running` row is refused rather than deleted: the control plane is
+/// installing right now, this row is the only place that shows it, and the
+/// install thread would rewrite the row the moment it finished anyway.
+pub async fn forget_install(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthedUser>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    if let Some(job) = state.provisioning.get(&id) {
+        if job.state == JobState::Running {
+            return StatusCode::CONFLICT;
+        }
+    }
+    // The row can exist in the table and not in this replica's list: the list is
+    // the newest twenty, and a decommissioned host's intent is often older than
+    // that. Ask the table before claiming it never existed.
+    let in_table = match state.store.get_install(&id).await {
+        Ok(found) => found.is_some(),
+        Err(e) => {
+            tracing::error!("forget_install: reading the row failed: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+    let known = state.provisioning.forget(&id);
+    if !in_table && !known {
+        return StatusCode::NOT_FOUND;
+    }
+    let _ = state
+        .store
+        .audit(
+            "user",
+            Some(auth.username.as_str()),
+            "node_install.forget",
+            Some(&id),
+            None,
+        )
+        .await;
+    StatusCode::NO_CONTENT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +823,7 @@ mod tests {
             node_binary: None,
             jobs: std::sync::Mutex::new(HashMap::new()),
             persist: None,
+            store: None,
         }
     }
 
@@ -975,21 +1098,177 @@ mod tests {
     /// A retried mint must not add a second open intent: `issued` rows are
     /// exempt from retention, so a caller that retries in a loop would be the
     /// one way this table grows without bound.
-    #[test]
-    fn a_second_mint_for_the_same_host_does_not_add_an_intent() {
+    #[tokio::test]
+    async fn a_second_mint_for_the_same_host_does_not_add_an_intent() {
         let rt = runtime();
-        rt.record_intent(Some("root@10.0.0.5"), Some("web-1"));
-        rt.record_intent(Some("root@10.0.0.5"), Some("web-1"));
+        assert!(rt.record_intent(Some("root@10.0.0.5"), Some("web-1")).await);
+        assert!(!rt.record_intent(Some("root@10.0.0.5"), Some("web-1")).await);
         assert_eq!(rt.list().len(), 1, "a retry is the same open question");
 
         // A different host under the same name is a different question.
-        rt.record_intent(Some("root@10.0.0.6"), Some("web-1"));
+        assert!(rt.record_intent(Some("root@10.0.0.6"), Some("web-1")).await);
         assert_eq!(rt.list().len(), 2);
 
         // Once the host has arrived, a new mint is a new question (a rebuild).
         rt.mark_enrolled("web-1", "node-1");
-        rt.record_intent(Some("root@10.0.0.5"), Some("web-1"));
+        assert!(rt.record_intent(Some("root@10.0.0.5"), Some("web-1")).await);
         assert_eq!(rt.list().len(), 3);
+    }
+
+    /// The table is the authority, not the twenty-entry list. A duplicate is
+    /// refused even when the list knows nothing about the original — the case
+    /// the previous in-memory guard could not see.
+    #[tokio::test]
+    async fn the_table_refuses_a_duplicate_the_list_cannot_see() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        let rt = ProvisioningRuntime::from_env()
+            .hydrate(state.store.clone())
+            .await;
+        assert!(rt.record_intent(Some("root@10.0.0.7"), Some("web-9")).await);
+
+        // Simulate the intent having aged out of the panel's window: the list is
+        // empty, the row is not.
+        rt.jobs.lock().unwrap().clear();
+        assert!(
+            !rt.record_intent(Some("root@10.0.0.7"), Some("web-9")).await,
+            "the table already holds this open intent"
+        );
+        let rows = state.store.list_installs(50).await.unwrap();
+        assert_eq!(rows.iter().filter(|r| r.name == "web-9").count(), 1);
+        assert!(
+            rt.list().is_empty(),
+            "and the panel must not gain a phantom"
+        );
+
+        // A different host still gets its own row.
+        assert!(rt.record_intent(Some("root@10.0.0.8"), Some("web-9")).await);
+        assert_eq!(state.store.list_installs(50).await.unwrap().len(), 2);
+    }
+
+    /// Forgetting a record removes it from the table and from the panel; a row
+    /// the list does not hold (aged out) still deletes.
+    #[tokio::test]
+    async fn forgetting_removes_the_row_wherever_it_lives() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        let rt = ProvisioningRuntime::from_env()
+            .hydrate(state.store.clone())
+            .await;
+        assert!(
+            rt.record_intent(Some("root@10.0.0.9"), Some("gone-1"))
+                .await
+        );
+        let id = rt.list()[0].id.clone();
+
+        assert!(rt.forget(&id));
+        assert!(rt.list().is_empty());
+        for _ in 0..100 {
+            if state.store.get_install(&id).await.unwrap().is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            state.store.get_install(&id).await.unwrap().is_none(),
+            "the row must be gone from the table too"
+        );
+        assert!(
+            !rt.forget(&id),
+            "forgetting twice reports the second as unknown"
+        );
+    }
+
+    /// A job in flight is not deletable: the control plane is installing right
+    /// now, this row is the only place that shows it, and the install thread
+    /// would rewrite it the moment it finished anyway.
+    #[tokio::test]
+    async fn a_running_install_cannot_be_forgotten() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        state
+            .provisioning
+            .insert(job("live", "2026-01-01T00:00:00Z", JobState::Running));
+        let auth = crate::auth::AuthedUser {
+            username: "op".into(),
+            role: agentgrid_common::ROLE_ADMIN.into(),
+        };
+
+        let code = forget_install(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Path("live".to_string()),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(state.provisioning.get("live").is_some());
+
+        // The same row once it has finished is forgettable.
+        state.provisioning.finish("live", Err("ssh refused".into()));
+        let code = forget_install(
+            State(state.clone()),
+            Extension(auth),
+            Path("live".to_string()),
+        )
+        .await;
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        assert!(state.provisioning.get("live").is_none());
+    }
+
+    /// The migration that makes open intents unique has to clean up after the
+    /// release that allowed duplicates: it runs on databases that already have
+    /// them. Getting the cleanup wrong would either fail the migration or
+    /// delete intents that are still live, so the statement is exercised
+    /// against planted duplicates rather than assumed correct.
+    #[tokio::test]
+    async fn the_open_intent_migration_collapses_existing_duplicates() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        // Restore the old shape: no constraint, so duplicates can exist.
+        sqlx::query("DROP INDEX IF EXISTS idx_node_installs_open_intent")
+            .execute(&state.store.pool)
+            .await
+            .unwrap();
+        for (id, host, name, started) in [
+            ("old", "root@10.0.0.1", "dup", "2026-01-01T00:00:00+00:00"),
+            ("new", "root@10.0.0.1", "dup", "2026-01-02T00:00:00+00:00"),
+            (
+                "solo",
+                "root@10.0.0.2",
+                "other",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        ] {
+            state
+                .store
+                .put_install(&crate::store::InstallRecord {
+                    id: id.into(),
+                    host: host.into(),
+                    name: name.into(),
+                    state: "issued".into(),
+                    steps: vec![],
+                    error: None,
+                    server_url: None,
+                    started_at: started.into(),
+                    finished_at: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        // The migration body, verbatim. Run whole rather than split on ';':
+        // the comments in that file contain semicolons, and a split would
+        // silently execute a fragment.
+        let sql = include_str!("../../migrations/0101_node_installs_open_intent.sql");
+        sqlx::raw_sql(sql).execute(&state.store.pool).await.unwrap();
+
+        let rows = state.store.list_installs(50).await.unwrap();
+        assert_eq!(rows.len(), 2, "one row per (host, name) must remain");
+        assert!(
+            rows.iter().any(|r| r.id == "new"),
+            "the newest duplicate is the one an operator expects to see"
+        );
+        assert!(!rows.iter().any(|r| r.id == "old"));
+        assert!(
+            rows.iter().any(|r| r.id == "solo"),
+            "a lone intent is untouched"
+        );
     }
 
     async fn wait_for_row(

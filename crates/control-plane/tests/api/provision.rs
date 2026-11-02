@@ -133,3 +133,80 @@ async fn cluster_status_is_operator_readable_and_empty_in_single_mode() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// A host that was configured and will never arrive has to be removable. An
+/// `issued` row is exempt from retention on purpose — it is the answer to "was
+/// this host ever configured?" — so without this endpoint the only way to clear
+/// a decommissioned host's record is hand-written SQL, and the panel keeps a
+/// row nobody can act on.
+#[tokio::test]
+async fn an_install_record_can_be_forgotten() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let tok = test_token(&app).await;
+
+    // The mint is what records the intent: naming the host is the whole point.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/enrollment-token",
+            body_json(&serde_json::json!({
+                "host": "root@10.0.0.44",
+                "name": "dead-1"
+            })),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/node-installs", &tok))
+        .await
+        .unwrap();
+    let jobs: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let id = jobs[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(jobs[0]["state"], serde_json::json!("issued"));
+    assert_eq!(jobs[0]["name"], serde_json::json!("dead-1"));
+
+    let resp = app
+        .clone()
+        .oneshot(delete_auth(&format!("/v1/node-installs/{id}"), &tok))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth(&format!("/v1/node-installs/{id}"), &tok))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/node-installs", &tok))
+        .await
+        .unwrap();
+    let jobs: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(jobs, serde_json::json!([]));
+}
+
+/// Deleting something that was never there is a 404, not a 204: the CLI and the
+/// panel both tell the operator "removed" or "no such record", and a silent
+/// success on a typo would leave the row they meant to delete in place.
+#[tokio::test]
+async fn forgetting_an_unknown_record_is_404() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    let tok = test_token(&app).await;
+
+    let resp = app
+        .oneshot(delete_auth("/v1/node-installs/no-such-id", &tok))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

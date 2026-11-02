@@ -37,6 +37,16 @@ pub(crate) enum NodeSub {
     /// `credential.json` — revoking and re-enrolling would give the node a new
     /// id and drop every sealed secret with it.
     Rekey { node_id: String },
+    /// Delete a node-install record: the trace of a host that was configured
+    /// and will never arrive.
+    ///
+    /// Those records are kept indefinitely on purpose — they answer "was this
+    /// host ever configured?", which is the one question the node list cannot
+    /// answer, because a host whose daemon never enrolled has no node row at
+    /// all. Removing one is therefore an explicit act. This deletes the install
+    /// attempt only; a node that did enroll is a different object, and its
+    /// history is revoked, not deleted.
+    Forget { install_id: String },
 }
 
 /// Transport used for the node -> control-plane runtime link.
@@ -132,7 +142,22 @@ pub(crate) async fn cmd_nodes(
             cmd_node_drain(client, base, &node_id, undrain).await
         }
         NodeSub::Rekey { node_id } => cmd_node_rekey(client, base, json, &node_id).await,
+        NodeSub::Forget { install_id } => cmd_node_forget(client, base, &install_id).await,
     }
+}
+
+/// Delete one install record (a host that was configured and will never
+/// arrive). 404 is reported as "not found" rather than a silent success: a
+/// typo must not read as "removed".
+async fn cmd_node_forget(client: &reqwest::Client, base: &str, install_id: &str) -> Result<()> {
+    let resp = client
+        .delete(format!("{base}/v1/node-installs/{install_id}"))
+        .send()
+        .await
+        .context("node-install forget request failed")?;
+    err_if_fail(resp.status(), "node-install forget")?;
+    println!("forgot install record {install_id}");
+    Ok(())
 }
 
 /// Competitor-gap feature (project brain): rebuild AGENTS-BRAIN.md from a

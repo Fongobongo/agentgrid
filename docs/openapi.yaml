@@ -945,6 +945,29 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404':
           description: No such job — or it was evicted from the ring.
+    delete:
+      summary: Forget one install record (admin)
+      description: |
+        Delete the trace of a host that was configured and will never arrive.
+        `issued` rows are exempt from retention on purpose — they answer "was
+        this host ever configured?" — so a decommissioned host's record has to
+        be removed explicitly, and this is the way to do it.
+
+        Not to be confused with `DELETE /v1/nodes/{id}`, which revokes a node
+        that *did* enroll and keeps its history. This deletes the record of a
+        host that never became a node.
+
+        A `running` row is refused: the control plane is installing right now,
+        that row is the only place it shows, and the install thread would
+        rewrite it the moment it finished.
+      responses:
+        '204':
+          description: Deleted, from the table and from the panel.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: No such install record.
+        '409':
+          description: The install is running; let it finish (or fail), then forget it.
   /v1/node/skills-trust:
     get:
       summary: "Node-readable copy of the operator skill trust ledger"

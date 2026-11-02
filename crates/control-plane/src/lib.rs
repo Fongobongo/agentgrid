@@ -664,7 +664,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/node-installs/{id}",
-            get(routes::provision::get_install),
+            get(routes::provision::get_install).delete(routes::provision::forget_install),
         )
         .route(
             "/v1/nodes/{id}",

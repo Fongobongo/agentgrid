@@ -257,6 +257,41 @@ describe('InstallAttempts — issued', () => {
 });
 
 /**
+ * A host that is gone for good has to be removable, because `issued` rows are
+ * exempt from retention: without a delete they sit in the list forever and the
+ * only way out is SQL. The server refuses a running install (409), so the
+ * button must not offer it either.
+ */
+describe('InstallAttempts — forgetting a record', () => {
+  it('offers the action only when there is something to do', () => {
+    const plain = renderToStaticMarkup(<InstallAttempts jobs={[job({})]} nodes={[]} />);
+    expect(plain).not.toContain('>forget<');
+
+    const html = renderToStaticMarkup(
+      <InstallAttempts jobs={[job({ state: 'issued' })]} nodes={[]} onForget={() => undefined} />,
+    );
+    expect(html).toContain('>forget<');
+    expect(html).toContain('Delete this record');
+  });
+
+  it('disables the action for an install that is running right now', () => {
+    const html = renderToStaticMarkup(
+      <InstallAttempts jobs={[job({ state: 'running' })]} nodes={[]} onForget={() => undefined} />,
+    );
+    expect(html).toContain('disabled');
+    expect(html).toContain('deleting the record would hide it');
+  });
+
+  it('says which record is being deleted', () => {
+    const j = job({ state: 'issued' });
+    const html = renderToStaticMarkup(
+      <InstallAttempts jobs={[j]} nodes={[]} onForget={() => undefined} forgetting={j.id} />,
+    );
+    expect(html).toContain('forgetting…');
+  });
+});
+
+/**
  * HA peers. The point of the section is that a peer nobody can reach is still
  * on the page, and that the page admits whose view it is — only the leader
  * probes everyone.

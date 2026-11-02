@@ -115,6 +115,52 @@ impl Store {
         Ok(closed)
     }
 
+    /// Record an open intent for a host, unless one is already open.
+    ///
+    /// Returns `true` when this call created the row. `ON CONFLICT DO NOTHING`
+    /// without a target covers the partial unique index from migration 0101, so
+    /// the check and the insert are one statement: two control planes — or one
+    /// whose job list has aged the original out of its twenty-entry window —
+    /// cannot both create an intent for the same host.
+    ///
+    /// `state`, `error`, `server_url` and `finished_at` are written literally
+    /// rather than bound: an intent is by definition open, and letting a caller
+    /// pass those through would make this method a second, weaker
+    /// [`Self::put_install`].
+    pub async fn record_install_intent(&self, r: &InstallRecord) -> Result<bool> {
+        let res = self
+            .write_one(
+                sqlx::query(
+                    "INSERT INTO node_installs \
+                     (id, host, name, state, steps, error, server_url, started_at, finished_at) \
+                     VALUES (?, ?, ?, 'issued', ?, NULL, NULL, ?, NULL) \
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(&r.id)
+                .bind(&r.host)
+                .bind(&r.name)
+                .bind(serde_json::to_string(&r.steps)?)
+                .bind(&r.started_at),
+            )
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Remove one attempt. `false` when there was no such row.
+    ///
+    /// This is the counterpart to retention: an `issued` row never ages out, so
+    /// a host that was configured and then decommissioned would otherwise sit in
+    /// the table — and in the panel — forever, removable only by hand-written
+    /// SQL. Deleting a `running` row is refused one layer up, at the HTTP
+    /// boundary, because that is where the difference between "an old record"
+    /// and "a job in flight" is known.
+    pub async fn delete_install(&self, id: &str) -> Result<bool> {
+        let res = self
+            .write_one(sqlx::query("DELETE FROM node_installs WHERE id = ?").bind(id))
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Drop finished attempts past the retention window.
     ///
     /// Only `succeeded` and `failed` are eligible. An `issued` row answers

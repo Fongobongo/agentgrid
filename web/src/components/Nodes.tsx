@@ -1,5 +1,5 @@
 import { useEffect, useState, Fragment } from 'react';
-import { drainNode, getJson, getOpencodeAudit, getProvisioning, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, ProvisioningInfo, listOpencodeProfiles, postJson, revokeNode, listInstallJobs, InstallJob, InstallState, getClusterStatus, ClusterStatus, ClusterPeer } from '../api';
+import { drainNode, getJson, getOpencodeAudit, getProvisioning, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, ProvisioningInfo, listOpencodeProfiles, postJson, revokeNode, listInstallJobs, forgetInstallJob, InstallJob, InstallState, getClusterStatus, ClusterStatus, ClusterPeer } from '../api';
 import InstallNode from './InstallNode';
 import { ConfirmModal } from './Modal';
 import { ErrorBox, Loading, StatusBadge, TimeAgo, fmtTime, useLiveRefresh } from './util';
@@ -301,7 +301,23 @@ export function ClusterPeers({ status }: { status: ClusterStatus | null }) {
   );
 }
 
-export function InstallAttempts({ jobs, nodes }: { jobs: InstallJob[]; nodes: NodeView[] }) {
+export function InstallAttempts({
+  jobs,
+  nodes,
+  onForget,
+  forgetting,
+}: {
+  jobs: InstallJob[];
+  nodes: NodeView[];
+  /**
+   * Delete the record of a host that will never arrive. Omitted by the tests
+   * that only render the table, which is why the action column is conditional:
+   * a button that cannot do anything should not be drawn.
+   */
+  onForget?: (id: string) => void;
+  /** The id currently being deleted, so its button can say so. */
+  forgetting?: string | null;
+}) {
   if (jobs.length === 0) return null;
   const enrolled = (name: string) => nodes.find((n) => n.name === name);
   return (
@@ -312,7 +328,9 @@ export function InstallAttempts({ jobs, nodes }: { jobs: InstallJob[]; nodes: No
         them. <code>issued</code> means only that an enrollment token went out — the install ran
         somewhere else (an operator&apos;s laptop, a shell script) and nothing has been heard since;
         those rows are how a host that was configured and never came up stays visible. A host with
-        no node row below is configured but not available.
+        no node row below is configured but not available. Finished attempts age out after 30 days;
+        an <code>issued</code> row does not — it is the answer to &ldquo;was this host ever
+        configured?&rdquo; — so a host that is gone for good has to be forgotten by hand.
       </p>
       <table className="grid">
         <thead>
@@ -323,6 +341,7 @@ export function InstallAttempts({ jobs, nodes }: { jobs: InstallJob[]; nodes: No
             <th>Enrolled?</th>
             <th>Started</th>
             <th>Error</th>
+            {onForget && <th />}
           </tr>
         </thead>
         <tbody>
@@ -353,6 +372,24 @@ export function InstallAttempts({ jobs, nodes }: { jobs: InstallJob[]; nodes: No
                 </td>
                 <td>{fmtTime(j.started_at)}</td>
                 <td>{j.error ?? '—'}</td>
+                {onForget && (
+                  <td>
+                    <button
+                      onClick={() => onForget(j.id)}
+                      // A running install is refused by the server too (409):
+                      // the row is the only place that shows the work, and the
+                      // install thread would rewrite it when it finished.
+                      disabled={j.state === 'running' || forgetting === j.id}
+                      title={
+                        j.state === 'running'
+                          ? 'This install is running right now — deleting the record would hide it'
+                          : 'Delete this record. The host disappears from this table; a node that enrolled is untouched.'
+                      }
+                    >
+                      {forgetting === j.id ? 'forgetting…' : 'forget'}
+                    </button>
+                  </td>
+                )}
               </tr>
             );
           })}
@@ -392,6 +429,8 @@ export default function Nodes() {
   // been configured at all. `issued` rows come from a token mint that named a
   // host — an install that ran somewhere else and never reported back.
   const [installs, setInstalls] = useState<InstallJob[]>([]);
+  // Which install record is being deleted right now (its button shows it).
+  const [forgetBusy, setForgetBusy] = useState<string | null>(null);
   // HA only: what this replica knows about its peers. `null` in single mode or
   // on an older control plane, in which case the section renders nothing.
   const [cluster, setCluster] = useState<ClusterStatus | null>(null);
@@ -458,6 +497,23 @@ export default function Nodes() {
     } catch (e) {
       setAuditRows({ nodeId, rows: [] });
       setError(e);
+    }
+  };
+
+  // Delete the record of a host that will never arrive. `issued` rows are
+  // exempt from retention on purpose, so this is the only way out of the list
+  // for a decommissioned host — and the server refuses it for a running install
+  // (409), which is why the button is disabled for that state too.
+  const forgetJob = async (id: string) => {
+    setForgetBusy(id);
+    try {
+      await forgetInstallJob(id);
+      toast.ok('Install record deleted');
+      load();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setForgetBusy(null);
     }
   };
 
@@ -722,7 +778,12 @@ export default function Nodes() {
         </tbody>
       </table>
       <ClusterPeers status={cluster} />
-      <InstallAttempts jobs={installs} nodes={nodes} />
+      <InstallAttempts
+        jobs={installs}
+        nodes={nodes}
+        onForget={forgetJob}
+        forgetting={forgetBusy}
+      />
       {confirming && (
         <ConfirmModal
           title="Revoke node"

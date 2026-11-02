@@ -151,6 +151,23 @@
     instead, together with a mint that no longer records a second intent for a
     host that already has one open: `issued` rows are exempt from retention, so
     a retried or scripted mint was the one way this table could grow unbounded.
+  - **One open intent per host, enforced by the table.** The first version of
+    that guard read the control plane's job list, which holds twenty entries — so
+    it stopped guarding exactly when the list was busy with other installs, and
+    the row it was supposed to find had aged out. A partial unique index on
+    `(host, name) WHERE state = 'issued'` (migration 0101, after collapsing
+    duplicates an older database may already hold) makes the insert itself
+    decide, and `INSERT … ON CONFLICT DO NOTHING` reports whether the intent is
+    new. Same answer on every replica, no window to fall out of.
+  - **A host that is gone for good can be forgotten.** `DELETE
+    /v1/node-installs/{id}` (`ag nodes forget <id>`, a `forget` button in the
+    panel) deletes one record, from the table and from the list. Retention
+    deliberately never removes an `issued` row, so without this a decommissioned
+    host's record is permanent and the only way out is hand-written SQL. It is
+    the counterpart of `DELETE /v1/nodes/{id}`: that one revokes a node that
+    enrolled and keeps its history, this one deletes the trace of a host that
+    never became a node. A `running` row is refused with 409 — the control plane
+    is installing right now and that row is the only place it shows.
 - **Control-plane peers have a liveness table.** `GET /v1/ha/status` knew the
   role, term and leader and nothing per peer, and it sits behind the cluster
   token, so no panel could read it: `ag cluster status` showed one replica's own

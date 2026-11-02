@@ -658,10 +658,20 @@ Finished attempts are deleted automatically after 30 days
 `succeeded` and `failed` are eligible. An `issued` row is the answer to "was
 this host ever configured?" and a `running` row is the only trace of an install
 whose outcome nobody learned, so both are kept however old they are — which is
-also what bounds the table: one open intent per host that has not arrived. The
-mint honours that from the other side and does not record a second intent for a
-host that already has one open, so a retried (or scripted) mint cannot grow the
-list either.
+also what bounds the table: one open intent per host that has not arrived. That
+"one" is enforced by the table (a partial unique index on `(host, name)` where
+`state = 'issued'`), not by the panel's job list: the list holds twenty entries,
+so a guard that read it stopped guarding exactly when it was busy. A second mint
+for a host that already has an open intent writes nothing, and says so by
+returning 200 with the same token as any other mint.
+
+A host that is gone for good is removed explicitly: `DELETE
+/v1/node-installs/{id}`, `ag nodes forget <id>`, or `forget` in the panel. The
+pair matters — `DELETE /v1/nodes/{id}` revokes a node that *did* enroll and
+keeps its history; this deletes the record of a host that never became one, and
+it is the only way out for a decommissioned host, because `issued` rows never
+age out. A `running` row is refused with 409: the control plane is installing
+right now, and that row is the only place it shows.
 
 `ag token create` passes no host and records nothing — it hands a token to a
 human who enrolls a machine by hand, and inventing a host record for that would

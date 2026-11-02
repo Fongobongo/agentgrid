@@ -164,7 +164,8 @@ pub async fn create_enrollment_token(
     if let Ok(req) = serde_json::from_slice::<EnrollTokenRequest>(&body) {
         state
             .provisioning
-            .record_intent(req.host.as_deref(), req.name.as_deref());
+            .record_intent(req.host.as_deref(), req.name.as_deref())
+            .await;
     }
     Ok(out)
 }

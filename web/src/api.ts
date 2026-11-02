@@ -1253,6 +1253,22 @@ export function listInstallJobs(): Promise<InstallJob[]> {
   return getJson<InstallJob[]>("/v1/node-installs");
 }
 
+/**
+ * Delete one install record — the trace of a host that was configured and will
+ * never arrive. These rows are kept indefinitely on purpose (they answer "was
+ * this host ever configured?"), so removing one is an explicit act. 409 means
+ * the install is running right now and must not be deleted out from under it.
+ */
+export async function forgetInstallJob(id: string): Promise<void> {
+  const r = await req("DELETE", `/v1/node-installs/${encodeURIComponent(id)}`);
+  // Reachable despite the disabled button: the row was `issued` when the table
+  // rendered and the install started before the click. "DELETE … -> 409" would
+  // tell an operator nothing.
+  if (r.status === 409)
+    throw new ApiError(409, "this install is running right now — let it finish, then forget it");
+  await reqOk(r);
+}
+
 export interface EnrollTokenView {
   token: string;
   expires_at: string;
