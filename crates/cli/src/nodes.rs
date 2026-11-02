@@ -246,6 +246,24 @@ async fn cmd_node_add(
     if out.get("via").is_none() {
         println!("--via <node> — `ag nodes ls` shows which nodes can carry the traffic.");
     }
+    // A revoked relay is refused by the control plane, so anything else here is
+    // a warning rather than a refusal: an offline relay may be back by the time
+    // the operator pastes the line. Saying nothing would be the worse choice —
+    // the command is minted for a host nobody can log into.
+    if let Some(via) = out.get("via") {
+        let status = via.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if !status.is_empty() && status != "online" {
+            println!();
+            println!(
+                "Warning: that relay is {status} — last heartbeat {}.",
+                via.get("last_heartbeat_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("never")
+            );
+            println!("Add --probe to the line above to stop before installing anything if");
+            println!("the new host cannot reach it.");
+        }
+    }
     println!();
     println!("The host appears in `ag nodes ls` once it enrolls; until then it is an");
     println!("`issued` row in the install list.");
@@ -651,12 +669,25 @@ fn relay_cell(n: &serde_json::Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    if url.is_empty() {
+    if !url.is_empty() {
+        return url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .to_string();
+    }
+    // Listening but announcing nothing is not the same as not being a relay,
+    // and it used to render as the same `-`. It is a relay that will never be
+    // used until AGENTGRID_RELAY_ADVERTISE says where to dial it.
+    let listen = n
+        .get("relay_listen")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if listen.is_empty() {
         return "-".to_string();
     }
-    url.trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .to_string()
+    let port = listen.rsplit(':').next().unwrap_or(listen);
+    format!(":{port} (no advertise)")
 }
 
 /// ADR 0026 + ADR 0012: how this node reaches the control plane.
@@ -809,6 +840,30 @@ mod relay_cell_tests {
         assert_eq!(
             relay_cell(&json!({ "relay_url": "https://relay.example.com" })),
             "relay.example.com"
+        );
+    }
+
+    /// A relay that listens and announces nothing is running and useless, and
+    /// it used to render as `-` — the same as a node that is not a relay at
+    /// all. The operator then went looking for a variable they had already set.
+    #[test]
+    fn a_relay_that_announces_nothing_is_not_shown_as_no_relay() {
+        assert_eq!(
+            relay_cell(&json!({ "relay_listen": "0.0.0.0:7900" })),
+            ":7900 (no advertise)"
+        );
+        // A dialable address wins: the listen address is not what anyone dials.
+        assert_eq!(
+            relay_cell(&json!({
+                "relay_url": "http://node-a.internal:7900",
+                "relay_listen": "0.0.0.0:7900",
+            })),
+            "node-a.internal:7900"
+        );
+        // Neither field is still "not a relay".
+        assert_eq!(
+            relay_cell(&json!({ "relay_url": null, "relay_listen": null })),
+            "-"
         );
     }
 }

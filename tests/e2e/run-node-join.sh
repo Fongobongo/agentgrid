@@ -4,14 +4,15 @@
 #
 #   bash tests/e2e/run-node-join.sh
 #
-# The join runs in `--dry-run`: it fetches the bundle manifest, downloads every
-# file it would install, verifies each against the manifest's SHA-256 and prints
-# the installer command it would run. Installing for real needs root, systemd
-# and an `agentgrid` user; that half is `deploy/install-node.sh`, which
-# `run-clean-host.sh` exercises on a clean host. What this script proves is the
-# part that is new and could silently be wrong: the four endpoints, the
-# allowlist, and that the bytes a host downloads are the bytes the control plane
-# hashed.
+# The join runs in `--dry-run --probe`: it fetches the bundle manifest,
+# downloads every file it would install, verifies each against the manifest's
+# SHA-256, runs the verified daemon against the control plane to report what the
+# host can actually reach, and prints the installer command it would run.
+# Installing for real needs root, systemd and an `agentgrid` user; that half is
+# `deploy/install-node.sh`, which `run-clean-host.sh` exercises on a clean host.
+# What this script proves is the part that is new and could silently be wrong:
+# the four endpoints, the allowlist, that the bytes a host downloads are the
+# bytes the control plane hashed, and that `--probe` really executes them.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -76,13 +77,20 @@ grep -q "SERVER=\"$BASE\"" <<<"$script" || fail "the script does not default to 
 curl -fsS "$BASE/v1/node/install.sh" | grep -q -- '--staging' || fail "install.sh is not the installer"
 echo "   one line, no URL to type"
 
-echo ">> dry run: fetch, verify, stop"
-out="$(bash "$ROOT/deploy/join-node.sh" --server "$BASE" --token "$ENROLL_TOKEN" --dry-run --adapters mock 2>&1)" || {
+echo ">> dry run: fetch, verify, probe, stop"
+out="$(bash "$ROOT/deploy/join-node.sh" --server "$BASE" --token "$ENROLL_TOKEN" --dry-run --probe --adapters mock 2>&1)" || {
   echo "$out"; fail "the join script failed"; }
 grep -q "dry run: 2 file(s) verified" <<<"$out" || { echo "$out"; fail "expected 2 verified files"; }
 grep -q -- '--staging' <<<"$out" || { echo "$out"; fail "no installer command printed"; }
 grep -q -- "--token $ENROLL_TOKEN" <<<"$out" || { echo "$out"; fail "the token was not passed through"; }
+# `--probe` runs the daemon the script just verified, before anything is
+# installed. A direct join reports hops=0; through a relay the same line would
+# read hops=1, which is the whole point of the flag.
+grep -q "probing from this host" <<<"$out" || { echo "$out"; fail "--probe did not run"; }
+grep -q "CONTROL PLANE" <<<"$out" || { echo "$out"; fail "the probe printed no control-plane line"; }
+grep -q "hops=0" <<<"$out" || { echo "$out"; fail "a direct join must report no forwarder"; }
 echo "   daemon + adapter-mock downloaded and verified"
+echo "   the staged daemon reached the control plane before installing anything"
 
 echo ">> a digest that does not match the bytes is refused"
 # The control plane hashes a file when it builds the manifest and reads it again

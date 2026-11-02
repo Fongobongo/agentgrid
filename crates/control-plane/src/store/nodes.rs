@@ -235,6 +235,16 @@ impl Store {
             .map(|u| u.trim_end_matches('/'))
             .filter(|u| !u.is_empty())
             .map(str::to_string);
+        // Where it listens. No normalisation beyond trimming: this is a bind
+        // address the operator typed (`0.0.0.0:7900`), shown back verbatim so
+        // the panel can say "it listens there, and nobody can dial it" without
+        // inventing a URL out of it.
+        let relay_listen = req
+            .relay_listen
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string);
         let now = now_iso();
         let affected = self
             .write_one(
@@ -245,7 +255,7 @@ impl Store {
                load_avg = ?, free_disk_mb = ?, free_memory_mb = ?, cpu_count = ?, mem_available_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
                outbox_bytes = ?, artifact_spool_bytes = ?, \
-               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ?, adapter_env_delivery = ?, egress_proxy = ?, relay_hops = ?, relay_url = ? \
+               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ?, adapter_env_delivery = ?, egress_proxy = ?, relay_hops = ?, relay_url = ?, relay_listen = ? \
              WHERE id = ?",
                 )
                 // active_attempts is intentionally not heartbeat-settable: it is the
@@ -299,6 +309,9 @@ impl Store {
                 // stops relaying clears it on the next beat instead of leaving
                 // an address behind that no longer answers.
                 .bind(&relay_url)
+                // ...and the bind address, bound the same way: a node that
+                // stops listening stops claiming to.
+                .bind(&relay_listen)
                 .bind(node_id),
             )
             .await?

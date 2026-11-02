@@ -140,9 +140,12 @@ function JoinSection({
   const [busy, setBusy] = useState(false);
 
   // A node with no announced address cannot carry a join, so it is not offered.
-  // Showing it greyed out would invite the question "why not" that the answer
-  // already covers: `AGENTGRID_RELAY_ADVERTISE` was never set.
+  // A node that listens and announces nothing is *also* not offered, but it is
+  // named below instead of being silently absent: the fix is a different
+  // variable, and "no relay here" would send the operator to set the one they
+  // already set.
   const relays = nodes.filter((n) => n.relay_url);
+  const silentRelays = nodes.filter((n) => !n.relay_url && n.relay_listen);
 
   const mint = async () => {
     setBusy(true);
@@ -186,17 +189,31 @@ function JoinSection({
           {relays.map((n) => (
             <option key={n.id} value={n.id}>
               {n.name} — {(n.relay_url ?? '').replace(/^https?:\/\//, '')}
+              {n.status === 'online' ? '' : ` (${n.status})`}
             </option>
           ))}
         </select>
       </label>
       {relays.length === 0 && (
         <p className="muted">
-          No node announces a relay address yet. On a node that can reach both
-          this control plane and the new host, set{' '}
-          <code>AGENTGRID_RELAY_LISTEN=0.0.0.0:7900</code> and{' '}
-          <code>AGENTGRID_RELAY_ADVERTISE=http://&lt;that-host&gt;:7900</code>,
-          restart it, and it will appear here.
+          {silentRelays.length > 0 ? (
+            <>
+              {silentRelays.map((n) => n.name).join(', ')}{' '}
+              {silentRelays.length === 1 ? 'listens' : 'listen'} for relay traffic
+              but {silentRelays.length === 1 ? 'announces' : 'announce'} no address
+              anyone can dial. Set <code>AGENTGRID_RELAY_ADVERTISE</code> on{' '}
+              {silentRelays.length === 1 ? 'that node' : 'those nodes'} to the
+              address other hosts should dial, and let it beat once.
+            </>
+          ) : (
+            <>
+              No node announces a relay address yet. On a node that can reach
+              both this control plane and the new host, set{' '}
+              <code>AGENTGRID_RELAY_LISTEN=0.0.0.0:7900</code> and{' '}
+              <code>AGENTGRID_RELAY_ADVERTISE=http://&lt;that-host&gt;:7900</code>,
+              restart it, and it will appear here.
+            </>
+          )}
         </p>
       )}
       {err ? <ErrorBox err={err} /> : null}
@@ -212,6 +229,19 @@ function JoinSection({
             </button>{' '}
             <button onClick={() => setView(null)}>hide</button>
           </div>
+          {/* A revoked relay is refused by the control plane, so this is only
+              ever "offline"/"degraded": the command is still built, because the
+              node may be back by the time it is pasted. Saying nothing would be
+              the worse choice — the line is for a host nobody can log into. */}
+          {view.via && view.via.status !== 'online' ? (
+            <p className="muted">
+              <span className="badge warn">{view.via.status}</span> That relay last
+              reached this control plane at{' '}
+              {view.via.last_heartbeat_at || 'never'}. Add <code>--probe</code> to
+              the line above to stop before installing anything if it is not
+              relaying.
+            </p>
+          ) : null}
         </>
       ) : (
         <button disabled={busy} onClick={mint}>

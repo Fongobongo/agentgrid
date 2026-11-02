@@ -33,7 +33,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agentgrid_common::{JoinCommandResponse, JoinVia};
+use agentgrid_common::{JoinCommandResponse, JoinVia, NodeStatus};
 use axum::body::Body;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -175,55 +175,92 @@ fn join_line(server: &str, token: &str, relayed: bool) -> String {
 
 /// Find the node whose relay should carry the join, by id or by name.
 ///
-/// Two refusals are deliberate:
+/// Three refusals are deliberate:
 ///
 /// - **Unknown node → 404.** The selector names something that is not in the
 ///   fleet; a fallback to a direct join would build a command for a host that
 ///   cannot use it.
+/// - **Revoked node → 409.** A revoked credential cannot reach the control
+///   plane, so the relay is gone by definition. Building the command anyway
+///   moves the failure onto the host the operator cannot log into.
 /// - **Known node, no announced relay → 409.** The node exists but cannot carry
 ///   traffic (no `AGENTGRID_RELAY_LISTEN`, or a `0.0.0.0` listen with no
 ///   `AGENTGRID_RELAY_ADVERTISE`). Silently going direct is the failure this
 ///   whole path exists to remove: the operator asked for a relay *because* the
 ///   host cannot reach the control plane.
 ///
+/// `offline` is deliberately **not** a refusal: a relay that just went quiet
+/// may be back by the time the operator pastes the line, and refusing would
+/// make the endpoint guess. The status travels in the response instead, so the
+/// CLI and the panel can warn.
+///
 /// The error is `(status, message)` rather than a `Response`: `Response` is
 /// large enough that clippy's `result_large_err` objects to returning it, and
 /// the message is what the caller actually needs — `plain` builds the body.
 async fn resolve_relay(state: &AppState, selector: &str) -> Result<JoinVia, (StatusCode, String)> {
-    let nodes = match state.store.list_nodes(None, Some(1000)).await {
+    // By id, then by name. Not a scan of `list_nodes`: that caps at 1000 rows,
+    // so on a larger fleet a valid `--via <name>` came back as "no such node".
+    let looked_up = match state.store.get_node(selector).await {
+        Ok(Some(n)) => Ok(Some(n)),
+        Ok(None) => state.store.get_node_by_name(selector).await,
+        Err(e) => Err(e),
+    };
+    let node = match looked_up {
         Ok(n) => n,
         Err(e) => {
-            tracing::error!("list_nodes failed: {e}");
+            tracing::error!("relay lookup failed: {e}");
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 "could not read the node list".to_string(),
             ));
         }
     };
-    let Some(node) = nodes
-        .iter()
-        .find(|n| n.id == selector || n.name == selector)
-    else {
+    let Some(node) = node else {
         return Err((
             StatusCode::NOT_FOUND,
             format!("no node with id or name {selector:?}"),
         ));
     };
-    let Some(url) = node.relay_url.clone() else {
+
+    if node.status == NodeStatus::Revoked {
         return Err((
             StatusCode::CONFLICT,
             format!(
-                "node {:?} is not a relay: it announces no dialable address. Set \
-                 AGENTGRID_RELAY_LISTEN (and AGENTGRID_RELAY_ADVERTISE if it listens on \
-                 0.0.0.0) on that node and let it beat once.",
+                "node {:?} is revoked: a revoked credential cannot reach this control \
+                 plane, so it cannot carry another host's join. Re-key it \
+                 (`ag nodes rekey`) or name a different relay.",
                 node.name
             ),
         ));
+    }
+
+    let Some(url) = node.relay_url.clone() else {
+        // Two ways to have no dialable address, and they need different fixes.
+        // A node that *listens* but announces nothing is a half-configured
+        // relay; a node that does not listen is not a relay at all. Saying
+        // "set AGENTGRID_RELAY_LISTEN" to the first one sends the operator to a
+        // variable they already set.
+        let advice = match node.relay_listen.as_deref() {
+            Some(listen) => format!(
+                "it listens on {listen} but announces no dialable address — set \
+                 AGENTGRID_RELAY_ADVERTISE to the address other hosts should dial"
+            ),
+            None => "set AGENTGRID_RELAY_LISTEN (and AGENTGRID_RELAY_ADVERTISE if it \
+                     listens on 0.0.0.0)"
+                .to_string(),
+        };
+        return Err((
+            StatusCode::CONFLICT,
+            format!("node {:?} is not a relay: {advice}.", node.name),
+        ));
     };
+
     Ok(JoinVia {
         node_id: node.id.clone(),
         name: node.name.clone(),
         relay_url: url,
+        status: node.status,
+        last_heartbeat_at: node.last_heartbeat_at.clone(),
     })
 }
 

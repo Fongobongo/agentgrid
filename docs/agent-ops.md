@@ -167,6 +167,17 @@ log, where a token outlives its TTL. Add `--dry-run` to fetch and verify
 everything without installing, `--adapters mock,opencode` to pick what to
 install, or `--server <url>` when the script was not fetched from the CP.
 
+Add `--probe` to check the path **before** anything is installed:
+
+```bash
+curl -fsSL <server>/v1/node/join.sh | sudo bash -s -- --token <t> --probe
+```
+
+It runs the daemon it just verified against `probe --server <server>` and stops
+if this host cannot reach it. Through a relay the `CONTROL PLANE` line reports
+`hops=1` — which is the only way to tell a relay that forwards from a proxy that
+merely listens. Works with `--dry-run` too, and needs no root.
+
 **1b. When the host cannot reach the control plane at all**, the line has to
 name something the host *can* reach — a sibling node's relay (ADR 0026). Ask
 for it by name and the control plane substitutes the address:
@@ -190,17 +201,23 @@ without an advertise value the node announces **nothing** rather than guessing
 a hostname that would only be wrong on the other machine. The announced URL is
 what `ag nodes ls` shows in `RELAY` and what `--via` resolves to.
 
-Three refusals, all deliberate:
+Every refusal is deliberate:
 
 | what you asked for | what you get |
 | --- | --- |
 | a node id or name that does not exist | `404` |
-| a node that announces no relay address | `409`, naming both env vars |
+| a **revoked** node | `409` — its credential is dead, so it cannot reach the CP and cannot carry a join; the message names `ag nodes rekey` |
+| a node that listens but announces nothing | `409` naming `AGENTGRID_RELAY_ADVERTISE` — not the variable you already set |
+| a node that is not a relay at all | `409` naming `AGENTGRID_RELAY_LISTEN` |
+| an **offline** relay | `200`, with its `status` and `last_heartbeat_at` — a warning, not a refusal: it may be back before you paste the line |
 | a token minted for a request that was then refused | nothing — the token is minted *after* the relay resolves |
 
 There is no silent fallback to a direct join. You asked for a relay *because*
 the direct path does not work, so a quietly direct command is one that fails
-later, on a machine you cannot inspect.
+later, on a machine you cannot inspect. The same reasoning is why a revoked
+relay is refused rather than offered: it is not a slower path, it is no path.
+An offline one is different — it is a warning, and `--probe` (above) turns that
+warning into a stop before anything is installed.
 
 **2. From the panel.** `Nodes → Install node…`. The control plane runs the
 install itself over ssh: verify (or pin) the host key, copy
@@ -626,8 +643,15 @@ ag nodes ls
 node **claims** other hosts should dial to reach the control plane through it.
 The control plane cannot verify it — a relay exists precisely so that the peers
 who can reach it are the ones that cannot reach the control plane — so it is
-shown as an address, never as a health state. `-` means "not a relay, or a
-relay nobody can dial". It is what `ag nodes add --via` resolves against.
+shown as an address, never as a health state. `-` means "not a relay". It is
+what `ag nodes add --via` resolves against.
+
+One more state, added because it was the invisible one: `:7900 (no advertise)`.
+That node **is** running a relay — `AGENTGRID_RELAY_LISTEN` is set — and
+announces no address anyone can dial, because `AGENTGRID_RELAY_ADVERTISE` is
+not. It rendered as `-` before, exactly like a node that is not a relay, so the
+only advice an operator could find sent them to the variable they had already
+set.
 
 `?` is not `direct`: it means no heartbeat has carried either fact yet (a row
 older than the migration). The panel renders the same three states as badges.

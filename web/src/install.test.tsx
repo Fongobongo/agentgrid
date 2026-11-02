@@ -138,6 +138,29 @@ describe('the relay picker', () => {
     expect(html).toContain('AGENTGRID_RELAY_LISTEN');
     expect(html).toContain('AGENTGRID_RELAY_ADVERTISE');
   });
+
+  // "No relay here" and "a relay that listens and announces nothing" need
+  // different answers. The second one is a node with AGENTGRID_RELAY_LISTEN set
+  // and no advertise address — telling its operator to set the listen variable
+  // is the loop this replaces.
+  it('names a relay that listens but announces nothing instead of saying there is none', () => {
+    const html = render({ enabled: false, node_binary: null, reason: 'off' }, [
+      { id: 'n3', name: 'half', relay_url: null, relay_listen: '0.0.0.0:7900' },
+    ] as unknown as NodeView[]);
+    expect(html).toContain('half');
+    expect(html).toContain('AGENTGRID_RELAY_ADVERTISE');
+    expect(html).not.toContain('No node announces a relay address yet');
+  });
+
+  // Offline is transient, so it stays selectable — the relay may be back by the
+  // time the line is pasted — but the picker must not present it as healthy.
+  it('marks a relay that is not online and still offers it', () => {
+    const html = render({ enabled: false, node_binary: null, reason: 'off' }, [
+      { id: 'n4', name: 'flaky', relay_url: 'http://flaky:7900', status: 'offline' },
+    ] as unknown as NodeView[]);
+    expect(html).toContain('flaky');
+    expect(html).toContain('(offline)');
+  });
 });
 
 describe('InstallNode when the control plane cannot install', () => {

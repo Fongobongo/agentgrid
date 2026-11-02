@@ -673,7 +673,7 @@ impl Store {
         const MAX_NODES: i64 = 1000;
         let limit = limit.unwrap_or(100).min(MAX_NODES as u64) as i64;
         let mut sql = String::from(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery, relay_hops, egress_proxy, relay_url \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery, relay_hops, egress_proxy, relay_url, relay_listen \
              FROM nodes WHERE 1=1",
         );
         if after.is_some() {
@@ -693,10 +693,33 @@ impl Store {
     /// `None` when the id is unknown.
     pub async fn get_node(&self, node_id: &str) -> Result<Option<NodeView>> {
         let row = sqlx::query(
-            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery, relay_hops, egress_proxy, relay_url \
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery, relay_hops, egress_proxy, relay_url, relay_listen \
              FROM nodes WHERE id = ?",
         )
         .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_node_view))
+    }
+
+    /// Single node by name, for the selectors that accept "id or name".
+    ///
+    /// `nodes.name` is not unique — enrollment matches on it, so duplicates are
+    /// practically impossible but not enforced — and a selector that silently
+    /// picked one of two would be a guess. The freshest heartbeat is the
+    /// defensible pick: of two nodes with the same name, that is the one most
+    /// likely to answer. An id remains the unambiguous way to name a node.
+    ///
+    /// Exists instead of scanning `list_nodes`: that call caps at `MAX_NODES`
+    /// (1000), so a fleet larger than that turned a perfectly valid `--via`
+    /// selector into a 404 that read as "no such node".
+    pub async fn get_node_by_name(&self, name: &str) -> Result<Option<NodeView>> {
+        let row = sqlx::query(
+            "SELECT id, name, status, adapters, repositories, max_concurrency, active_attempts, last_heartbeat_at, agent_version, load_avg, free_disk_mb, free_memory_mb, cpu_count, mem_available_mb, unsafe_active, permission_interception, outbox_bytes, artifact_spool_bytes, outbox_rows, outbox_oldest_pending_age_ms, outbox_corruption_count, outbox_completion_rows, repo_lock_wait_ms, sandbox_backend, enforced_limits, drained, created_at, systemd_scope_supported, repo_states, adapter_env_delivery, relay_hops, egress_proxy, relay_url, relay_listen \
+             FROM nodes WHERE name = ? \
+             ORDER BY COALESCE(last_heartbeat_at, '') DESC, created_at DESC LIMIT 1",
+        )
+        .bind(name)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.as_ref().map(row_to_node_view))
@@ -1307,6 +1330,14 @@ fn row_to_node_view(r: &sqlx::sqlite::SqliteRow) -> NodeView {
         // that never said where".
         relay_url: r
             .try_get::<Option<String>, _>("relay_url")
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty()),
+        // ...and where it listens, so "never said where" is distinguishable
+        // from "never listened at all". Same empty-string treatment: a blank
+        // bind address is not an address.
+        relay_listen: r
+            .try_get::<Option<String>, _>("relay_listen")
             .ok()
             .flatten()
             .filter(|s| !s.is_empty()),

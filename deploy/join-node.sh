@@ -27,12 +27,13 @@ DATA_DIR=""
 BIN_DIR=""
 DRY_RUN=0
 KEEP=0
+PROBE=0
 
 usage() {
   cat >&2 <<EOF
 usage: join.sh --token <enrollment-token> [--server <url>] [--name <node>]
                [--adapters mock[,claude,...]] [--data-dir <dir>] [--bin-dir <dir>]
-               [--dry-run] [--keep]
+               [--dry-run] [--probe] [--keep]
 
   --token      enrollment token (single-use, expires in 10 minutes)
   --server     control plane URL (default: ${SERVER})
@@ -40,6 +41,9 @@ usage: join.sh --token <enrollment-token> [--server <url>] [--name <node>]
   --data-dir   node data directory (default: the installer's /var/lib/agentgrid)
   --bin-dir    where the binaries go (default: /usr/local/bin)
   --dry-run    fetch and verify everything, install nothing
+  --probe      check what this host can actually reach, before installing
+               anything. Through a relay the CONTROL PLANE line reports
+               hops=1, which is the proof that the relay forwards
   --keep       keep the staging directory (for debugging a failed install)
 EOF
   exit 2
@@ -54,6 +58,7 @@ while [ $# -gt 0 ]; do
     --data-dir) DATA_DIR="${2:-}"; shift 2 2>/dev/null || usage;;
     --bin-dir)  BIN_DIR="${2:-}";  shift 2 2>/dev/null || usage;;
     --dry-run)  DRY_RUN=1; shift 1;;
+    --probe)    PROBE=1; shift 1;;
     --keep)     KEEP=1; shift 1;;
     -h|--help)  usage;;
     *) echo "join.sh: unknown argument '$1'" >&2; usage;;
@@ -145,6 +150,25 @@ if ! ( cd "$STAGE" && sha256sum -c --quiet checksums.txt ); then
   echo "         Nothing was installed. Re-run; if it repeats, the control plane's" >&2
   echo "         AGENTGRID_NODE_DIST changed while this host was downloading." >&2
   exit 1
+fi
+
+# Ask the host itself what it can reach, using the binary we just verified and
+# before anything is installed. `--server` is the URL this host was told to dial:
+# if that is a relay, the probe's CONTROL PLANE line reports hops=1, which is the
+# only way to tell a relay that forwards from a proxy that merely listens. The
+# probe needs no token and no credential, so this adds no trust in the bundle
+# beyond the SHA-256 already checked.
+if [ "$PROBE" = "1" ]; then
+  echo ">> probing from this host: what can it reach?"
+  chmod +x "$STAGE/agentgrid-node-daemon"
+  if ! "$STAGE/agentgrid-node-daemon" probe --server "$SERVER"; then
+    echo "join.sh: this host cannot reach $SERVER. Nothing was installed." >&2
+    echo "         If the control plane is unreachable from here, the join has to" >&2
+    echo "         go through a relay: on the control plane, run" >&2
+    echo "           ag nodes add --name $NAME --via <node>" >&2
+    echo "         and paste the line it prints instead of this one." >&2
+    exit 1
+  fi
 fi
 
 echo ">> fetching the installer"

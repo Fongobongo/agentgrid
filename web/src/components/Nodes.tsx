@@ -132,12 +132,34 @@ export function ReachBadge({
  *
  * The address is the node's own announcement, not something the control plane
  * checked — a relay exists to be reachable from where the control plane is not,
- * so the only party who can verify it is a host that dials it (`ag net probe`).
- * Shown because it is the answer to "which node do I use for a host behind a
- * firewall": the same list the join modal offers as `--via`.
+ * so the only party who can verify it is a host that dials it
+ * (`agentgrid-node-daemon probe --relay`). Shown because it is the answer to
+ * "which node do I use for a host behind a firewall": the same list the join
+ * modal offers as `--via`.
+ *
+ * The second state is the one that used to be invisible: a node that *listens*
+ * but announces nothing. It is running a relay that will never be used, and it
+ * rendered exactly like a node that is not a relay at all — so the operator was
+ * told to set a variable they had already set.
  */
-export function RelayBadge({ url }: { url?: string | null }) {
-  if (!url) return null;
+export function RelayBadge({ url, listen }: { url?: string | null; listen?: string | null }) {
+  if (!url) {
+    if (!listen) return null;
+    return (
+      <span
+        className="badge warn"
+        title={
+          `This node listens for relay traffic on ${listen} but announces no address ` +
+          'anyone can dial, so no join can go through it. A 0.0.0.0 bind means "every ' +
+          'interface on this machine", which is not an address the joining host can use: ' +
+          'set AGENTGRID_RELAY_ADVERTISE to the address other hosts should dial, and let ' +
+          'it beat once.'
+        }
+      >
+        relay: no advertise
+      </span>
+    );
+  }
   return (
     <span
       className="badge ok"
@@ -665,7 +687,7 @@ export default function Nodes() {
                   )}
                   <AdapterEnvBadge delivery={n.adapter_env_delivery} />
                   <ReachBadge relayHops={n.relay_hops} egressProxy={n.egress_proxy} />
-                  <RelayBadge url={n.relay_url} />
+                  <RelayBadge url={n.relay_url} listen={n.relay_listen} />
                 </td>
                 <td>{n.adapters.join(', ') || '—'}</td>
                 <td>{n.repositories.join(', ') || '—'}</td>

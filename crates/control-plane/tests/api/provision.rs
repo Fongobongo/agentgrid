@@ -366,6 +366,141 @@ async fn a_node_that_is_not_a_relay_cannot_carry_a_join() {
     );
 }
 
+/// A revoked node's credential is dead, so it cannot reach this control plane —
+/// which means it cannot carry anyone else's traffic either. Building the
+/// command anyway moves the failure onto the host the operator cannot log into,
+/// which is the same reason an unknown `--via` is not quietly replaced by a
+/// direct join.
+#[tokio::test]
+async fn a_revoked_relay_cannot_carry_a_join() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+    let (node_id, _cred) = enroll(&app, "relay-a", vec!["mock".into()], vec!["*".into()]).await;
+    sqlx::query("UPDATE nodes SET relay_url = ?, status = 'revoked' WHERE id = ?")
+        .bind("http://node-a.internal:7900")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/join-command",
+            body_json(&json!({ "name": "behind-nat", "via": "relay-a" })),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = String::from_utf8(
+        to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("revoked"),
+        "the refusal must say why, not just 'not a relay': {body}"
+    );
+    assert!(
+        body.contains("ag nodes rekey"),
+        "a revoked node comes back by re-keying, so name the repair: {body}"
+    );
+}
+
+/// "Not a relay" and "a relay nobody can dial" need different fixes. Telling
+/// the operator to set `AGENTGRID_RELAY_LISTEN` when they already did is how a
+/// half-configured relay stays half-configured: the variable is set, the daemon
+/// is running, and nothing works.
+#[tokio::test]
+async fn a_relay_that_listens_but_announces_nothing_says_so() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+    let (node_id, _cred) = enroll(&app, "relay-a", vec!["mock".into()], vec!["*".into()]).await;
+    sqlx::query("UPDATE nodes SET relay_listen = ? WHERE id = ?")
+        .bind("0.0.0.0:7900")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/join-command",
+            body_json(&json!({ "name": "behind-nat", "via": "relay-a" })),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = String::from_utf8(
+        to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("0.0.0.0:7900"),
+        "the refusal should quote the bind address it saw: {body}"
+    );
+    assert!(
+        body.contains("AGENTGRID_RELAY_ADVERTISE"),
+        "the missing variable is the advertise one: {body}"
+    );
+    assert!(
+        !body.contains("set AGENTGRID_RELAY_LISTEN"),
+        "sending them to the variable they already set is the bug this fixes: {body}"
+    );
+}
+
+/// `offline` is transient — a relay that just went quiet may be back by the time
+/// the line is pasted — so it is a warning, not a refusal. But it has to reach
+/// the client: the command is minted for a host nobody can inspect.
+#[tokio::test]
+async fn an_offline_relay_is_carried_with_its_status() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+    let (node_id, _cred) = enroll(&app, "relay-a", vec!["mock".into()], vec!["*".into()]).await;
+    sqlx::query("UPDATE nodes SET relay_url = ?, status = 'offline' WHERE id = ?")
+        .bind("http://node-a.internal:7900")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/join-command",
+            body_json(&json!({ "name": "behind-nat", "via": "relay-a" })),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an offline relay is still offered: it may be back before the line is used"
+    );
+    let out: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(out["via"]["status"], "offline");
+    assert!(
+        !out["via"]["last_heartbeat_at"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
+        "the warning needs the age to be useful: {out}"
+    );
+}
+
 #[tokio::test]
 async fn a_join_through_a_node_that_does_not_exist_is_404() {
     let state = AppState::open_temp().await.unwrap();

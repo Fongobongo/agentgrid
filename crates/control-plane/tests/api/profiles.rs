@@ -1053,6 +1053,7 @@ async fn opencode_heartbeat_drift_audit() {
     // Send a heartbeat claiming a different applied hash than the profile's.
     let hb = agentgrid_common::HeartbeatRequest {
         relay_url: None,
+        relay_listen: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "drift-node".into(),

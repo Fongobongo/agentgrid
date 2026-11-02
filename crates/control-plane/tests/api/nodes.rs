@@ -26,6 +26,7 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
     // for one new attempt is 256 MiB → 90 + 256 = 346 > 100 → reject.
     let hb = HeartbeatRequest {
         relay_url: None,
+        relay_listen: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-cap".into(),
@@ -214,6 +215,7 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
     // (CASE WHEN 0 > 0 path). The ceiling stays at the schema default.
     let hb_0 = HeartbeatRequest {
         relay_url: None,
+        relay_listen: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-ceiling".into(),
@@ -324,6 +326,7 @@ async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
     //    is lost (the normal path, must keep working).
     let hb = agentgrid_common::HeartbeatRequest {
         relay_url: None,
+        relay_listen: None,
         adapter_env_delivery: None,
         status: Some(agentgrid_common::NodeStatus::Offline),
         name: "node-race-hb".into(),
@@ -438,6 +441,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
     // Node reports offline -> its in-flight attempt is lost.
     let hb = HeartbeatRequest {
         relay_url: None,
+        relay_listen: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Offline),
         name: "node-o".into(),
@@ -529,6 +533,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
             "/v1/node/heartbeat",
             serde_json::to_string(&HeartbeatRequest {
                 relay_url: None,
+                relay_listen: None,
                 adapter_env_delivery: None,
                 status: Some(NodeStatus::Online),
                 ..hb
@@ -674,6 +679,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
 
     let hb = HeartbeatRequest {
         relay_url: None,
+        relay_listen: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "n-disc".into(),
@@ -804,6 +810,7 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
     let (node_id, cred) = enroll(&app, "node-unsafe", vec!["mock".into()], vec!["*".into()]).await;
     let hb = HeartbeatRequest {
         relay_url: None,
+        relay_listen: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-unsafe".into(),
@@ -891,6 +898,7 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
 
     let hb = HeartbeatRequest {
         relay_url: None,
+        relay_listen: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-usage".into(),
@@ -1722,7 +1730,7 @@ async fn a_relay_announcement_survives_the_heartbeat_and_clears_when_it_stops() 
     let app = build_router(state.clone());
     let (_node_id, cred) = enroll(&app, "relay-a", vec!["mock".into()], vec!["*".into()]).await;
 
-    let body = |relay_url: Option<&str>| {
+    let body = |relay_url: Option<&str>, relay_listen: Option<&str>| {
         let mut v = serde_json::json!({
             "status": "online",
             "name": "relay-a",
@@ -1734,6 +1742,9 @@ async fn a_relay_announcement_survives_the_heartbeat_and_clears_when_it_stops() 
         if let Some(url) = relay_url {
             v["relay_url"] = serde_json::json!(url);
         }
+        if let Some(l) = relay_listen {
+            v["relay_listen"] = serde_json::json!(l);
+        }
         serde_json::to_string(&v).unwrap()
     };
 
@@ -1741,7 +1752,7 @@ async fn a_relay_announcement_survives_the_heartbeat_and_clears_when_it_stops() 
         .clone()
         .oneshot(post_auth(
             "/v1/node/heartbeat",
-            body(Some("http://node-a.internal:7900/")),
+            body(Some("http://node-a.internal:7900/"), Some(" 0.0.0.0:7900 ")),
             &cred,
         ))
         .await
@@ -1758,13 +1769,56 @@ async fn a_relay_announcement_survives_the_heartbeat_and_clears_when_it_stops() 
         Some("http://node-a.internal:7900"),
         "the trailing slash is dropped: every URL built from this appends its own path"
     );
+    let listen: Option<String> =
+        sqlx::query_scalar("SELECT relay_listen FROM nodes WHERE name = ?")
+            .bind("relay-a")
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        listen.as_deref(),
+        Some("0.0.0.0:7900"),
+        "trimmed and otherwise kept verbatim: this is a bind address, not a URL to normalise"
+    );
 
-    // The relay was taken down (or the advertise variable was removed). The
-    // next beat must clear the column — a stale address would send the next
-    // joining host to a port nobody listens on.
+    // The advertise variable was removed while the relay kept running. This is
+    // the state that used to be invisible — the node still listens, so it is
+    // still a relay, and the address is gone, so nobody can dial it. Both
+    // columns have to say exactly that.
     let resp = app
         .clone()
-        .oneshot(post_auth("/v1/node/heartbeat", body(None), &cred))
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            body(None, Some("0.0.0.0:7900")),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored: Option<String> = sqlx::query_scalar("SELECT relay_url FROM nodes WHERE name = ?")
+        .bind("relay-a")
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    let listen: Option<String> =
+        sqlx::query_scalar("SELECT relay_listen FROM nodes WHERE name = ?")
+            .bind("relay-a")
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, None, "the announcement is gone");
+    assert_eq!(
+        listen.as_deref(),
+        Some("0.0.0.0:7900"),
+        "but the node still listens — that is the difference the panel has to show"
+    );
+
+    // The relay was taken down entirely. The next beat must clear both columns —
+    // a stale address would send the next joining host to a port nobody listens
+    // on.
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/node/heartbeat", body(None, None), &cred))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1774,10 +1828,17 @@ async fn a_relay_announcement_survives_the_heartbeat_and_clears_when_it_stops() 
         .fetch_one(&state.store.pool)
         .await
         .unwrap();
+    let listen: Option<String> =
+        sqlx::query_scalar("SELECT relay_listen FROM nodes WHERE name = ?")
+            .bind("relay-a")
+            .fetch_one(&state.store.pool)
+            .await
+            .unwrap();
     assert_eq!(
         stored, None,
         "a node that stopped relaying must not keep advertising an address"
     );
+    assert_eq!(listen, None, "...nor claim to still be listening");
 }
 
 /// The hop counter travels on the request, so until it was echoed the only

@@ -564,6 +564,7 @@ async fn race_fresh_heartbeat_beats_offline_sweep() {
             &node_id,
             &agentgrid_common::HeartbeatRequest {
                 relay_url: None,
+                relay_listen: None,
                 adapter_env_delivery: None,
                 status: Some(agentgrid_common::NodeStatus::Online),
                 name: "node-race3".into(),

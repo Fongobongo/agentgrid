@@ -64,8 +64,28 @@ pub struct RelayConfig {
 /// loop is cut in milliseconds rather than by a timeout.
 pub const DEFAULT_MAX_HOPS: u32 = 3;
 
+/// `AGENTGRID_RELAY_LISTEN` — the address the relay binds.
+pub const LISTEN_ENV: &str = "AGENTGRID_RELAY_LISTEN";
+
 /// `AGENTGRID_RELAY_ADVERTISE` — the address peers should dial.
 pub const ADVERTISE_ENV: &str = "AGENTGRID_RELAY_ADVERTISE";
+
+/// The bind address the heartbeat carries, read from the environment.
+///
+/// Reported alongside the announcement so the control plane can tell "not a
+/// relay" from "a relay nobody can dial". The second is a `0.0.0.0` listen with
+/// no advertise address, and until this existed it looked exactly like the
+/// first in `ag nodes ls`, in the panel and in the `--via` refusal — which sent
+/// the operator to set a variable they had already set.
+///
+/// Infallible for the same reason as [`announce_from_env`]: the heartbeat runs
+/// every ten seconds and must not be where a configuration error surfaces.
+pub fn listen_from_env() -> Option<String> {
+    std::env::var(LISTEN_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
 
 /// The announcement the heartbeat carries, read from the environment.
 ///
@@ -74,7 +94,7 @@ pub const ADVERTISE_ENV: &str = "AGENTGRID_RELAY_ADVERTISE";
 /// already refuses to start the daemon on a malformed value. `None` here means
 /// "nothing to announce", which is what a non-relaying node sends.
 pub fn announce_from_env() -> Option<String> {
-    let listen = std::env::var("AGENTGRID_RELAY_LISTEN").ok();
+    let listen = std::env::var(LISTEN_ENV).ok();
     let advertise = std::env::var(ADVERTISE_ENV).ok();
     announced_url(listen.as_deref(), advertise.as_deref())
         .ok()
@@ -259,7 +279,7 @@ impl RelayConfig {
     }
 
     pub fn from_env() -> Result<Option<Self>> {
-        let listen = std::env::var("AGENTGRID_RELAY_LISTEN").ok();
+        let listen = std::env::var(LISTEN_ENV).ok();
         let allow = std::env::var("AGENTGRID_RELAY_ALLOW").ok();
         let max_hops = std::env::var("AGENTGRID_RELAY_MAX_HOPS").ok();
         let advertise = std::env::var(ADVERTISE_ENV).ok();
@@ -597,8 +617,12 @@ mod tests {
     fn announce_from_env_is_silent_without_a_listen_address() {
         // Not `set_var`: this test asserts the unset path, and the process
         // environment is shared with every test running beside it.
-        if std::env::var("AGENTGRID_RELAY_LISTEN").is_err() {
+        if std::env::var(LISTEN_ENV).is_err() {
             assert_eq!(announce_from_env(), None);
+            // The bind address is reported separately, and "nothing" there is
+            // also None rather than an empty string: the control plane reads
+            // NULL as "not a relay", and `""` would render as a relay.
+            assert_eq!(listen_from_env(), None);
         }
     }
 }

@@ -602,6 +602,13 @@ paths:
         `POST /v1/nodes/join-command` names when a host cannot connect
         directly.
 
+        `relay_listen` is where that relay **binds** (`AGENTGRID_RELAY_LISTEN`,
+        e.g. `0.0.0.0:7900`), reported separately so the two ways of having no
+        dialable address stay distinguishable: no `relay_listen` at all means
+        "not a relay", while a `relay_listen` with a `null` `relay_url` means "a
+        relay nobody can dial" — running, and useless until
+        `AGENTGRID_RELAY_ADVERTISE` says where to reach it. Both are claims.
+
         The list is every enrolled node in every state — `offline`, `degraded`,
         `revoked` included. A node is flipped to `offline` after 30 s without a
         heartbeat. A host that was configured but never enrolled has no row
@@ -1026,11 +1033,19 @@ paths:
         nothing dials it, unlike `POST /v1/node-installs`, which needs ssh
         *to* the host and therefore cannot run from the host itself.
 
+        `via` carries the relay's `status` and `last_heartbeat_at` as they were
+        when the command was built. A **revoked** relay is refused outright (its
+        credential is dead, so it cannot reach the control plane and cannot
+        carry anyone else's join), but an **offline** one is only reported: it
+        may be back before the line is pasted, and refusing would make this
+        endpoint guess. The client is expected to warn — the command is minted
+        for a host nobody can log into.
+
         A static segment wins over `/v1/nodes/{id}` in axum's router, so this
         path is reachable even though the pattern also matches.
       responses:
         '200':
-          description: '`{token, expires_at, command, server, via?}` — `via` is `{node_id, name, relay_url}` when the join goes through a relay.'
+          description: '`{token, expires_at, command, server, via?}` — `via` is `{node_id, name, relay_url, status, last_heartbeat_at}` when the join goes through a relay.'
         '400':
           description: No `name` (an unparseable body is treated as empty and fails the same way).
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -1038,9 +1053,12 @@ paths:
           description: '`via` names no node, by id or by name.'
         '409':
           description: |
-            `via` names a node that announces no dialable relay address — no
-            `AGENTGRID_RELAY_LISTEN`, or a `0.0.0.0` listen with no
-            `AGENTGRID_RELAY_ADVERTISE`. Set it on that node and let it beat.
+            `via` names a node that cannot carry the join. Either it is
+            **revoked** — a revoked credential cannot reach this control plane,
+            so its relay is gone by definition — or it announces no dialable
+            relay address. The refusal names the repair: `ag nodes rekey` for
+            the first, and `AGENTGRID_RELAY_ADVERTISE` (if it already listens)
+            or `AGENTGRID_RELAY_LISTEN` (if it does not) for the second.
         '503':
           description: Could not read the node list, or could not mint a token.
   /v1/node/skills-trust:

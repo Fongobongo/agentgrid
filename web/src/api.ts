@@ -76,9 +76,13 @@ export interface NodeView {
   // (`AGENTGRID_RELAY_LISTEN` + `AGENTGRID_RELAY_ADVERTISE`). A node claim:
   // the control plane cannot verify an address whose point is to be reachable
   // from where it is not. `null` = not a relay, or one with no dialable
-  // address — the two look the same here on purpose, because neither can carry
-  // a join.
+  // address — `relay_listen` below tells those two apart.
   relay_url?: string | null;
+  // Where this node *listens* for relay traffic (AGENTGRID_RELAY_LISTEN).
+  // Present with relay_url null is the one state worth naming out loud: a relay
+  // that is running and announcing nothing, which needs
+  // AGENTGRID_RELAY_ADVERTISE rather than AGENTGRID_RELAY_LISTEN.
+  relay_listen?: string | null;
   // Feature "opencode profiles": the opencode profile this node applies.
   opencode_profile_id?: string | null;
 }
@@ -1303,6 +1307,11 @@ export interface JoinVia {
   node_id: string;
   name: string;
   relay_url: string;
+  // The relay's status when the command was built. `revoked` never reaches the
+  // client (the control plane refuses it); `offline` does, and is worth showing
+  // — the command is minted for a host nobody can log into.
+  status: string;
+  last_heartbeat_at: string;
 }
 
 /**

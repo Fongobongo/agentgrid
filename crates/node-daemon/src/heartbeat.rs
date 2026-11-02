@@ -395,6 +395,11 @@ pub fn spawn_heartbeat(
                 // re-read every beat so an operator can add the advertise
                 // variable and restart without a control-plane change.
                 relay_url: crate::relay::announce_from_env(),
+                // ...and where it listens. Sent even when nothing is announced:
+                // a `0.0.0.0` bind with no advertise address is a relay that
+                // will never be used, and this is the only way the control
+                // plane can say so instead of showing an empty cell.
+                relay_listen: crate::relay::listen_from_env(),
                 status: Some(status),
                 name: cfg.node_name.clone(),
                 adapters: cfg.adapters.iter().map(|s| s.id.clone()).collect(),

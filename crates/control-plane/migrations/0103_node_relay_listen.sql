@@ -1,0 +1,15 @@
+-- Where a node listens for relay traffic, separately from the address it
+-- announces.
+--
+-- 0102 collapsed "not a relay" and "a relay nobody can dial" into
+-- `relay_url IS NULL`, on the grounds that the control plane had nothing useful
+-- to do with the difference. It does: the two need different fixes, and the
+-- operator was shown an empty cell either way. A node with
+-- `AGENTGRID_RELAY_LISTEN=0.0.0.0:7900` and no `AGENTGRID_RELAY_ADVERTISE` is
+-- running a relay that will never be used, and nothing in `ag nodes ls`, in the
+-- panel or in the `--via` refusal said so — it sent the operator to
+-- `AGENTGRID_RELAY_LISTEN`, which they had already set.
+--
+-- NULL = not a relay at all. Non-NULL with `relay_url` NULL = a relay nobody can
+-- dial. Both are claims: a bind address cannot be verified either.
+ALTER TABLE nodes ADD COLUMN relay_listen TEXT;

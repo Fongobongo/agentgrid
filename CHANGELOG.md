@@ -277,6 +277,36 @@
   `deploy/install-node.sh` no longer sets the variable: the node daemon never
   read it either (its spool is `AGENTGRID_DATA_DIR/artifact-spool`).
 
+### Fixed
+
+- **`ag nodes add --via` found the relay by scanning the fleet, and the scan is
+  capped at 1000 nodes.** On a larger fleet a perfectly valid selector came back
+  as `404 no node with id or name`, which reads as "no such node" and is not.
+  It now resolves by id, then by name (`get_node_by_name`); names are not unique
+  in the schema, so a shared name resolves to the freshest heartbeat — of two
+  nodes with one name, the one most likely to answer.
+- **A revoked node was offered as a relay.** Its credential is dead, so it
+  cannot reach the control plane and cannot carry a join: the command would have
+  failed on the host nobody can log into. That is now a `409` naming `ag nodes
+  rekey`. An **offline** relay is not refused — it may be back before the line
+  is pasted — but `via.status` and `via.last_heartbeat_at` now travel with the
+  command, and both the CLI and the panel warn.
+- **A relay that listens and announces nothing looked exactly like a node that
+  is not a relay.** `AGENTGRID_RELAY_LISTEN=0.0.0.0:7900` with no
+  `AGENTGRID_RELAY_ADVERTISE` is a relay that will never be used, and it
+  rendered as `-` in `ag nodes ls`, as nothing in the panel, and as "set
+  `AGENTGRID_RELAY_LISTEN`" in the `--via` refusal — the variable its operator
+  had already set. The heartbeat now reports the bind address too
+  (`nodes.relay_listen`, migration 0103), so the column shows
+  `:7900 (no advertise)`, the panel shows an amber badge, and the `409` names
+  `AGENTGRID_RELAY_ADVERTISE`.
+- **`join.sh --probe`**: check what the host can actually reach before anything
+  is installed. It runs the daemon it just verified against
+  `probe --server <server>` and stops if the host cannot reach it; through a
+  relay the `CONTROL PLANE` line reports `hops=1`, which is the only way to tell
+  a relay that forwards from a proxy that merely listens. Needs no root, works
+  with `--dry-run`.
+
 ## [0.8.1] - 2026-11-01
 
 ### Fixed

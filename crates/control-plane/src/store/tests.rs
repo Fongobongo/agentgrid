@@ -4266,6 +4266,7 @@ mod mem_gate_tests {
     fn hb(mem_mb: u64) -> HeartbeatRequest {
         HeartbeatRequest {
             relay_url: None,
+            relay_listen: None,
             adapter_env_delivery: None,
             status: None,
             name: "n".into(),
@@ -5029,6 +5030,40 @@ mod rekey_tests {
             s.node_id_for_credential(&out.credential).await.unwrap(),
             Some(node),
             "the new credential must resolve to the same node"
+        );
+    }
+
+    /// `nodes.name` is not unique, and a selector that accepts "id or name" has
+    /// to return one answer. The freshest heartbeat is the defensible pick — of
+    /// two nodes sharing a name it is the one most likely to answer — and an id
+    /// remains the unambiguous way to name a node.
+    ///
+    /// This lookup exists instead of scanning `list_nodes`, which caps at 1000
+    /// rows: on a larger fleet a perfectly valid `--via <name>` came back as
+    /// "no such node".
+    #[tokio::test]
+    async fn a_name_shared_by_two_nodes_resolves_to_the_freshest_heartbeat() {
+        let s = fresh().await;
+        let stale = enroll(&s, "dup", None).await;
+        let fresh_one = enroll(&s, "dup", None).await;
+        sqlx::query("UPDATE nodes SET last_heartbeat_at = ? WHERE id = ?")
+            .bind("2020-01-01T00:00:00Z")
+            .bind(&stale)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE nodes SET last_heartbeat_at = ? WHERE id = ?")
+            .bind("2030-01-01T00:00:00Z")
+            .bind(&fresh_one)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let found = s.get_node_by_name("dup").await.unwrap().unwrap();
+        assert_eq!(found.id, fresh_one, "the freshest heartbeat wins");
+        assert!(
+            s.get_node_by_name("nobody").await.unwrap().is_none(),
+            "an unknown name is None, not an error"
         );
     }
 

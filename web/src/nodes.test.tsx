@@ -376,6 +376,7 @@ describe('RelayBadge', () => {
     // Most nodes. A badge on every row would say nothing.
     expect(renderToStaticMarkup(<RelayBadge url={null} />)).toBe('');
     expect(renderToStaticMarkup(<RelayBadge url="" />)).toBe('');
+    expect(renderToStaticMarkup(<RelayBadge url={null} listen={null} />)).toBe('');
   });
 
   it('names the address and says the control plane did not verify it', () => {
@@ -387,5 +388,17 @@ describe('RelayBadge', () => {
     expect(html).toContain('cannot verify');
     // And it has to point at the thing it is useful for.
     expect(html).toContain('ag nodes add --via');
+  });
+
+  // A relay that listens and announces nothing is running and useless. It used
+  // to render exactly like a node that is not a relay, so the operator was sent
+  // to set AGENTGRID_RELAY_LISTEN — the one variable they had already set.
+  it('distinguishes "listening but announcing nothing" from "not a relay"', () => {
+    const html = renderToStaticMarkup(<RelayBadge url={null} listen="0.0.0.0:7900" />);
+    expect(html).toContain('no advertise');
+    expect(html).toContain('0.0.0.0:7900');
+    expect(html).toContain('AGENTGRID_RELAY_ADVERTISE');
+    // The address is not offered as dialable: this is a bind address.
+    expect(html).toContain('badge warn');
   });
 });

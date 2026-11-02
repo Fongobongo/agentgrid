@@ -666,6 +666,17 @@ pub struct NodeView {
     /// or a relay that never stated a dialable address.
     #[serde(default)]
     pub relay_url: Option<String>,
+    /// Where this node *listens* for relay traffic, exactly as configured
+    /// (`AGENTGRID_RELAY_LISTEN`, e.g. `0.0.0.0:7900`).
+    ///
+    /// Reported separately from `relay_url` because "listening" and "announcing
+    /// an address someone can dial" are different facts, and only the second
+    /// makes a usable relay. Carrying both is what turns a half-configured
+    /// relay — a `0.0.0.0` bind with no advertise address — from an empty cell
+    /// into a stated problem. Not a dialable address by definition: this is a
+    /// bind address, not a URL.
+    #[serde(default)]
+    pub relay_listen: Option<String>,
 }
 
 /// Plan 2.5 (#204): one repository's attach state on a node. `state` is
@@ -1017,6 +1028,17 @@ pub struct JoinVia {
     /// relay exists precisely to be reachable from where the control plane is
     /// not.
     pub relay_url: String,
+    /// The relay's status at the moment the command was built.
+    ///
+    /// `revoked` is refused outright: that node cannot reach the control plane,
+    /// so it cannot carry anyone else's traffic. `offline` is only a warning —
+    /// it is transient, and an operator who names a relay deliberately knows
+    /// more than the row does — but it is carried here so the warning can be
+    /// printed before the command fails on a host nobody can log into.
+    pub status: NodeStatus,
+    /// When this relay last reached the control plane, verbatim rather than
+    /// turned into an age: the operator's clock is the one that matters.
+    pub last_heartbeat_at: String,
 }
 
 /// Periodic node health/capability report.
@@ -1232,15 +1254,22 @@ pub struct HeartbeatRequest {
     /// precisely so that the peers who can reach it are the ones who cannot
     /// reach the control plane — so the only source is the node itself. That is
     /// why the panel and `ag nodes ls` print it as an announcement rather than
-    /// as a reachable address, and why `ag net probe` exists: the one party who
-    /// can check it is a host that tries.
+    /// as a reachable address, and why `agentgrid-node-daemon probe` exists: the
+    /// one party who can check it is a host that tries.
     ///
     /// `None` = this node is not a relay, or it is one whose dialable address
     /// nobody stated (a `0.0.0.0` listen with no advertise address — the host's
     /// own name is a guess that fails on the *other* machine, which is the worst
-    /// place to find out).
+    /// place to find out). `relay_listen` tells those two apart.
     #[serde(default)]
     pub relay_url: Option<String>,
+    /// Where this node listens for relay traffic (`AGENTGRID_RELAY_LISTEN`).
+    ///
+    /// Present with `relay_url: null` is the one state worth naming out loud: a
+    /// relay that is running and announcing nothing. "Not a relay" has neither
+    /// field, and the fix for each is a different variable.
+    #[serde(default)]
+    pub relay_listen: Option<String>,
 }
 
 /// ADR 0029: how the node hands adapter credentials to the agent.
@@ -2236,6 +2265,7 @@ mod tests {
         assert_eq!(round_trip(&er), er);
         let hb = HeartbeatRequest {
             relay_url: None,
+            relay_listen: None,
             adapter_env_delivery: None,
             status: Some(NodeStatus::Online),
             name: "n".into(),
