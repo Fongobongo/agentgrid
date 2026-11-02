@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { AdapterEnvBadge, ClusterPeers, FleetSummary, InstallAttempts, ReachBadge } from './components/Nodes';
+import { AdapterEnvBadge, ClusterPeers, FleetSummary, InstallAttempts, ReachBadge, RelayBadge } from './components/Nodes';
 import type { ClusterPeer, ClusterStatus, InstallJob, NodeView } from './api';
 
 // ADR 0029 observability. The badge is the only place an operator can see
@@ -368,5 +368,24 @@ describe('ClusterPeers', () => {
     expect(html).toContain('standby');
     expect(html).toContain('this');
     expect(html).toContain('already runs');
+  });
+});
+
+describe('RelayBadge', () => {
+  it('renders nothing for a node that is not a relay', () => {
+    // Most nodes. A badge on every row would say nothing.
+    expect(renderToStaticMarkup(<RelayBadge url={null} />)).toBe('');
+    expect(renderToStaticMarkup(<RelayBadge url="" />)).toBe('');
+  });
+
+  it('names the address and says the control plane did not verify it', () => {
+    const html = renderToStaticMarkup(<RelayBadge url="http://node-a.internal:7900" />);
+    expect(html).toContain('relay');
+    expect(html).toContain('http://node-a.internal:7900');
+    // The address is a node claim: a relay is reachable from where the control
+    // plane is not, so "we saw it work" would be a lie the panel cannot back.
+    expect(html).toContain('cannot verify');
+    // And it has to point at the thing it is useful for.
+    expect(html).toContain('ag nodes add --via');
   });
 });

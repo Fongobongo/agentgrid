@@ -33,10 +33,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agentgrid_common::{JoinCommandResponse, JoinVia};
 use axum::body::Body;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use sha2::{Digest, Sha256};
 
 use crate::routes::provision::node_dist_dir;
@@ -59,6 +61,173 @@ pub async fn join_script(headers: HeaderMap) -> Response {
 /// `GET /v1/node/install.sh`
 pub async fn install_script() -> Response {
     script_response(INSTALL_SH.to_string())
+}
+
+/// Body of `POST /v1/nodes/join-command`.
+#[derive(serde::Deserialize)]
+pub struct JoinCommandRequest {
+    /// The name the daemon will register under. Required: the whole point of
+    /// this endpoint over a bare token mint is that the control plane knows
+    /// what it is adding, and an unnamed join leaves a record nobody can match
+    /// when the host arrives.
+    #[serde(default)]
+    pub name: String,
+    /// `user@host[:port]` as the operator sees the host. Only used to make the
+    /// install record readable — nothing dials it.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Node id or name whose relay should carry the join, for a host that
+    /// cannot reach this control plane directly.
+    #[serde(default)]
+    pub via: Option<String>,
+}
+
+/// `POST /v1/nodes/join-command`
+///
+/// Builds the one line an operator pastes on the new host, and records the
+/// intent so a host that never arrives stays visible.
+///
+/// The `--via` case is the reason this is a server endpoint rather than string
+/// formatting in the panel: only the control plane knows which nodes announced
+/// a relay address, and the address is what the command has to name. Doing it
+/// client-side would mean the panel had to list nodes and pick one — the same
+/// decision, in a place with less information.
+pub async fn join_command(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // Parsed by hand for the same reason the token mint does it: a proxy that
+    // adds a content-type, or an older client sending nothing, must not turn a
+    // helpful endpoint into a 400. An unparseable body is treated as empty,
+    // which then fails the `name` check below with a message that says what to
+    // send.
+    let req = serde_json::from_slice::<JoinCommandRequest>(&body).unwrap_or(JoinCommandRequest {
+        name: String::new(),
+        host: None,
+        via: None,
+    });
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return plain(
+            StatusCode::BAD_REQUEST,
+            "{\"name\"} is required: it is the name the daemon registers under, and the \
+             install record is matched by it when the host arrives",
+        );
+    }
+
+    // Resolve the relay before minting anything: a token that is spent nowhere
+    // is worse than a refused request.
+    let via = match req.via.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        None => None,
+        Some(selector) => match resolve_relay(&state, selector).await {
+            Ok(v) => Some(v),
+            Err((code, msg)) => return plain(code, &msg),
+        },
+    };
+
+    let (token, expires_at) = match state.store.create_enrollment_token().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("create_enrollment_token failed: {e}");
+            return plain(StatusCode::INTERNAL_SERVER_ERROR, "could not mint a token");
+        }
+    };
+    // The record exists so that "configured but never arrived" is a fact in the
+    // database. `host` may be absent, but the name is what enrollment matches
+    // on, so the row closes when the host shows up.
+    state
+        .provisioning
+        .record_intent(req.host.as_deref(), Some(&name))
+        .await;
+
+    let (server, via) = match via {
+        Some(v) => (v.relay_url.clone(), Some(v)),
+        None => (public_url(&headers), None),
+    };
+    let command = join_line(&server, &token, via.is_some());
+    Json(JoinCommandResponse {
+        token,
+        expires_at,
+        command,
+        server,
+        via,
+    })
+    .into_response()
+}
+
+/// The shell line, and the one place its shape is decided.
+///
+/// `--server` is passed explicitly **only** when the join goes through a relay.
+/// It looks redundant there — the script fetched through the relay already
+/// defaults to it — but the default is `AGENTGRID_PUBLIC_URL` when the operator
+/// set one, and that address is exactly the one the new host cannot reach. A
+/// redundant flag is cheaper than an install that fails at the last step on a
+/// machine the operator cannot inspect.
+fn join_line(server: &str, token: &str, relayed: bool) -> String {
+    let base = server.trim_end_matches('/');
+    let mut line = format!("curl -fsSL {base}/v1/node/join.sh | sudo bash -s -- --token {token}");
+    if relayed {
+        line.push_str(&format!(" --server {base}"));
+    }
+    line
+}
+
+/// Find the node whose relay should carry the join, by id or by name.
+///
+/// Two refusals are deliberate:
+///
+/// - **Unknown node → 404.** The selector names something that is not in the
+///   fleet; a fallback to a direct join would build a command for a host that
+///   cannot use it.
+/// - **Known node, no announced relay → 409.** The node exists but cannot carry
+///   traffic (no `AGENTGRID_RELAY_LISTEN`, or a `0.0.0.0` listen with no
+///   `AGENTGRID_RELAY_ADVERTISE`). Silently going direct is the failure this
+///   whole path exists to remove: the operator asked for a relay *because* the
+///   host cannot reach the control plane.
+///
+/// The error is `(status, message)` rather than a `Response`: `Response` is
+/// large enough that clippy's `result_large_err` objects to returning it, and
+/// the message is what the caller actually needs — `plain` builds the body.
+async fn resolve_relay(
+    state: &AppState,
+    selector: &str,
+) -> Result<JoinVia, (StatusCode, String)> {
+    let nodes = match state.store.list_nodes(None, Some(1000)).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!("list_nodes failed: {e}");
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "could not read the node list".to_string(),
+            ));
+        }
+    };
+    let Some(node) = nodes
+        .iter()
+        .find(|n| n.id == selector || n.name == selector)
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no node with id or name {selector:?}"),
+        ));
+    };
+    let Some(url) = node.relay_url.clone() else {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "node {:?} is not a relay: it announces no dialable address. Set \
+                 AGENTGRID_RELAY_LISTEN (and AGENTGRID_RELAY_ADVERTISE if it listens on \
+                 0.0.0.0) on that node and let it beat once.",
+                node.name
+            ),
+        ));
+    };
+    Ok(JoinVia {
+        node_id: node.id.clone(),
+        name: node.name.clone(),
+        relay_url: url,
+    })
 }
 
 fn script_response(body: String) -> Response {

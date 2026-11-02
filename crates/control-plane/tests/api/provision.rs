@@ -210,3 +210,194 @@ async fn forgetting_an_unknown_record_is_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+/// The command an operator pastes on the new host. Two properties matter and
+/// neither is cosmetic: it has to name the token it minted, and it must not
+/// carry a `--server` when the host can reach the control plane — the script's
+/// own default is the URL this control plane serves itself with, which is the
+/// right answer until a relay is involved.
+#[tokio::test]
+async fn a_join_command_names_the_control_plane_when_no_relay_is_asked_for() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/join-command",
+            body_json(&json!({ "name": "web-3", "host": "root@10.0.0.7" })),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let out: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let token = out["token"].as_str().expect("a token");
+    let command = out["command"].as_str().expect("a command");
+    assert!(command.contains("/v1/node/join.sh"), "got: {command}");
+    assert!(
+        command.contains(token),
+        "the command must spend its own token"
+    );
+    assert!(
+        !command.contains("--server"),
+        "a direct join takes the script's default server, got: {command}"
+    );
+    assert_eq!(out["via"], serde_json::Value::Null);
+    assert_eq!(out["server"], out["server"].as_str().unwrap_or(""));
+
+    // The record exists: a host that is configured and never arrives has to be
+    // a fact in the database, not a memory of the request.
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT name, state FROM node_installs")
+        .fetch_all(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "web-3");
+    assert_eq!(rows[0].1, "issued");
+}
+
+/// A host that cannot reach the control plane is joined through a sibling.
+/// The relay is the server for **both** halves of the line — the script is
+/// fetched through it and the daemon keeps dialling it — and `--server` is
+/// spelled out even though the fetched script would default to it, because
+/// `AGENTGRID_PUBLIC_URL` overrides that default with the one address the new
+/// host cannot reach.
+#[tokio::test]
+async fn a_join_through_a_relay_names_the_relay_as_the_server() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+    let (node_id, _cred) = enroll(&app, "relay-a", vec!["mock".into()], vec!["*".into()]).await;
+    sqlx::query("UPDATE nodes SET relay_url = ? WHERE id = ?")
+        .bind("http://node-a.internal:7900")
+        .bind(&node_id)
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/join-command",
+            body_json(&json!({ "name": "behind-nat", "via": "relay-a" })),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let out: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    assert_eq!(out["server"], "http://node-a.internal:7900");
+    assert_eq!(out["via"]["name"], "relay-a");
+    assert_eq!(out["via"]["relay_url"], "http://node-a.internal:7900");
+    let command = out["command"].as_str().unwrap();
+    assert_eq!(
+        command.matches("http://node-a.internal:7900").count(),
+        2,
+        "the relay is both where the script is fetched and what the daemon dials: {command}"
+    );
+    assert!(
+        command.contains("--server http://node-a.internal:7900"),
+        "an explicit --server survives AGENTGRID_PUBLIC_URL: {command}"
+    );
+    assert!(
+        !command.contains("/v1/nodes/join-command"),
+        "the command must fetch the script, not this endpoint: {command}"
+    );
+}
+
+/// Asking for a relay that cannot relay is the one case where falling back to
+/// a direct join would be actively harmful: the operator asked *because* the
+/// host cannot reach the control plane, so a silently direct command is a
+/// command that fails on a machine they cannot inspect.
+#[tokio::test]
+async fn a_node_that_is_not_a_relay_cannot_carry_a_join() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+    let (_id, _cred) = enroll(&app, "plain-node", vec!["mock".into()], vec!["*".into()]).await;
+    // `enroll` mints and spends a token of its own; the count has to be read
+    // before the request to mean anything.
+    let tokens_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enrollment_tokens")
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/join-command",
+            body_json(&json!({ "name": "behind-nat", "via": "plain-node" })),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = String::from_utf8(
+        to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("AGENTGRID_RELAY_LISTEN"),
+        "the refusal must name what to set: {body}"
+    );
+
+    // Nothing was minted: a token that is spent nowhere is worse than a refusal.
+    let tokens_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enrollment_tokens")
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM node_installs")
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "a refused join must not leave an install record");
+    assert_eq!(
+        tokens_after, tokens_before,
+        "a refused join must not leave a live token"
+    );
+}
+
+#[tokio::test]
+async fn a_join_through_a_node_that_does_not_exist_is_404() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+
+    let resp = app
+        .oneshot(post_auth(
+            "/v1/nodes/join-command",
+            body_json(&json!({ "name": "behind-nat", "via": "no-such-node" })),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// The name is what enrollment matches the install record on. A nameless join
+/// would mint a token and leave a row nobody can close when the host arrives,
+/// which is the permanently-open row this table was fixed to stop producing.
+#[tokio::test]
+async fn a_join_command_without_a_name_is_refused() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+
+    for body in [json!({}), json!({ "name": "  " })] {
+        let resp = app
+            .clone()
+            .oneshot(post_auth("/v1/nodes/join-command", body_json(&body), &tok))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}

@@ -61,6 +61,7 @@ async fn migrations_serve_legacy_happy_path() {
 
     // 3. Heartbeat → node online (migration 0001 + later alters).
     let hb = HeartbeatRequest {
+        relay_url: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "n1".into(),

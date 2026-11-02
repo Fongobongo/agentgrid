@@ -4265,6 +4265,7 @@ mod mem_gate_tests {
 
     fn hb(mem_mb: u64) -> HeartbeatRequest {
         HeartbeatRequest {
+            relay_url: None,
             adapter_env_delivery: None,
             status: None,
             name: "n".into(),

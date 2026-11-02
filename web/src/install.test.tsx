@@ -5,6 +5,7 @@ import InstallNode, {
   installCommand,
   joinCommand,
 } from './components/InstallNode';
+import type { NodeView } from './api';
 
 // No DOM in this project (vitest runs in the node environment), so the modal is
 // rendered to static markup. That is enough for the branch that matters most:
@@ -12,9 +13,12 @@ import InstallNode, {
 // AGENTGRID_PROVISION_ENABLED), the panel must still hand the operator a
 // command that works, and it must be the same configuration the form holds.
 
-function render(info: { enabled: boolean; node_binary: string | null; reason: string | null }) {
+function render(
+  info: { enabled: boolean; node_binary: string | null; reason: string | null },
+  nodes: NodeView[] = [],
+) {
   return renderToStaticMarkup(
-    <InstallNode info={info} onClose={() => {}} onInstalled={() => {}} />,
+    <InstallNode info={info} nodes={nodes} onClose={() => {}} onInstalled={() => {}} />,
   );
 }
 
@@ -99,6 +103,40 @@ describe('joinCommand', () => {
     expect(joinCommand('https://cp.example.com/', 't')).toContain(
       'https://cp.example.com/v1/node/join.sh',
     );
+  });
+
+  // The one difference a relayed join has, and the reason it is not left to
+  // the script's default: that default is AGENTGRID_PUBLIC_URL, which is the
+  // address the host cannot reach — that is why it needs a relay.
+  it('names the relay as the server when the join goes through one', () => {
+    const cmd = joinCommand('http://node-a:7900', 't', true);
+    expect(cmd).toContain('curl -fsSL http://node-a:7900/v1/node/join.sh');
+    expect(cmd).toContain('--server http://node-a:7900');
+  });
+});
+
+describe('the relay picker', () => {
+  const nodes = [
+    { id: 'n1', name: 'plain', relay_url: null },
+    { id: 'n2', name: 'relay-a', relay_url: 'http://node-a:7900' },
+  ] as unknown as NodeView[];
+
+  it('offers only nodes that announce a dialable address', () => {
+    const html = render(
+      { enabled: false, node_binary: null, reason: 'off' },
+      nodes,
+    );
+    expect(html).toContain('relay-a');
+    // A node that is not a relay cannot carry the join; offering it would only
+    // produce a 409 after the operator pressed the button.
+    expect(html).not.toContain('plain');
+    expect(html).toContain('node-a:7900');
+  });
+
+  it('says how to make one when the fleet has no relay', () => {
+    const html = render({ enabled: false, node_binary: null, reason: 'off' }, []);
+    expect(html).toContain('AGENTGRID_RELAY_LISTEN');
+    expect(html).toContain('AGENTGRID_RELAY_ADVERTISE');
   });
 });
 

@@ -54,6 +54,9 @@ pub struct RelayConfig {
     /// self-loop check only sees a direct self-reference, so the chain needs a
     /// counter that travels with the request.
     pub max_hops: u32,
+    /// The URL other nodes should dial, when one can be stated. See
+    /// [`announced_url`].
+    pub announce: Option<String>,
 }
 
 /// Default `AGENTGRID_RELAY_MAX_HOPS`: enough for the chain an operator
@@ -61,23 +64,141 @@ pub struct RelayConfig {
 /// loop is cut in milliseconds rather than by a timeout.
 pub const DEFAULT_MAX_HOPS: u32 = 3;
 
+/// `AGENTGRID_RELAY_ADVERTISE` — the address peers should dial.
+pub const ADVERTISE_ENV: &str = "AGENTGRID_RELAY_ADVERTISE";
+
+/// The announcement the heartbeat carries, read from the environment.
+///
+/// Infallible on purpose: the heartbeat must not be the place a configuration
+/// error surfaces (it would repeat every ten seconds), and [`RelayConfig`]
+/// already refuses to start the daemon on a malformed value. `None` here means
+/// "nothing to announce", which is what a non-relaying node sends.
+pub fn announce_from_env() -> Option<String> {
+    let listen = std::env::var("AGENTGRID_RELAY_LISTEN").ok();
+    let advertise = std::env::var(ADVERTISE_ENV).ok();
+    announced_url(listen.as_deref(), advertise.as_deref())
+        .ok()
+        .flatten()
+}
+
+/// Where other nodes should dial this node's relay.
+///
+/// `AGENTGRID_RELAY_LISTEN=0.0.0.0:7900` says "listen everywhere", which is not
+/// an address anyone can dial. The control plane needs the *dialable* one — it
+/// is what `ag nodes add --via` hands to the joining host — and only the
+/// operator knows it, so it is stated separately:
+///
+/// ```text
+/// AGENTGRID_RELAY_LISTEN=0.0.0.0:7900
+/// AGENTGRID_RELAY_ADVERTISE=http://node-a.internal:7900
+/// ```
+///
+/// With a concrete listen address the advertise value is redundant and is
+/// derived. With `0.0.0.0` and no advertise value nothing is announced: a
+/// guessed hostname fails on the *other* machine, which is the worst possible
+/// place to discover a wrong address — the joining host has no shell there and
+/// the operator has no control-plane view of it yet.
+pub fn announced_url(listen: Option<&str>, advertise: Option<&str>) -> Result<Option<String>> {
+    let listen = listen.map(str::trim).filter(|s| !s.is_empty());
+    let advertise = advertise.map(str::trim).filter(|s| !s.is_empty());
+    let Some(listen) = listen else {
+        if advertise.is_some() {
+            anyhow::bail!(
+                "AGENTGRID_RELAY_ADVERTISE is set but AGENTGRID_RELAY_LISTEN is not — \
+                 this node does not relay, so there is nothing to announce"
+            );
+        }
+        return Ok(None);
+    };
+    if let Some(raw) = advertise {
+        return Ok(Some(normalise_advertise(raw)?));
+    }
+    let addr: SocketAddr = listen.parse().with_context(|| {
+        format!("AGENTGRID_RELAY_LISTEN={listen:?} is not an address:port pair")
+    })?;
+    if addr.ip().is_unspecified() {
+        // Listening on every interface. Say so once at the caller (which knows
+        // whether it is startup or a heartbeat) and announce nothing.
+        return Ok(None);
+    }
+    // `SocketAddr`'s Display brackets an IPv6 address, which is exactly what a
+    // URL authority needs.
+    Ok(Some(format!("http://{addr}")))
+}
+
+/// `host:port` → `http://host:port`; a path or a non-HTTP scheme is refused.
+///
+/// A path would be silently swallowed: every use of this URL appends
+/// `/v1/node/join.sh` (or a bundle path) to it, so `http://a:7900/relay` would
+/// become `http://a:7900/relay/v1/node/join.sh` and 404 on a host that cannot
+/// ask anyone why. Refusing is louder and cheaper than debugging that.
+///
+/// Parsed by hand rather than with a URL crate: this is the only place in the
+/// workspace that needs one, and the grammar it accepts is deliberately tiny —
+/// scheme, host, optional port, nothing else.
+fn normalise_advertise(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    // A single trailing slash is the same address written differently, and the
+    // store trims it anyway; two would be a path.
+    let body = raw.strip_suffix('/').unwrap_or(raw);
+    let (scheme, authority) = match body.split_once("://") {
+        Some((s, rest)) => (s, rest),
+        // Bare `host:port`, which is what an operator copies out of `ip a`.
+        None => ("http", body),
+    };
+    if scheme != "http" && scheme != "https" {
+        anyhow::bail!(
+            "AGENTGRID_RELAY_ADVERTISE={raw:?} must be http:// or https:// — a relay speaks \
+             plain HTTP and the joining host has no way to negotiate anything else"
+        );
+    }
+    if authority.contains('/') {
+        anyhow::bail!(
+            "AGENTGRID_RELAY_ADVERTISE={raw:?} must not carry a path: every URL built from it \
+             appends its own (/v1/node/join.sh, /v1/node/bundle), so a path here breaks both"
+        );
+    }
+    // `host` or `host:port`, where the port has to be a port. A bare `http://`
+    // lands here as `authority == "http:"` (the scheme's own colon), which the
+    // port parse refuses — otherwise the most obvious typo would be accepted as
+    // the host "http".
+    let host = match authority.rsplit_once(':') {
+        Some((h, p)) => {
+            p.parse::<u16>().with_context(|| {
+                format!(
+                    "AGENTGRID_RELAY_ADVERTISE={raw:?} has a port that is not a number \
+                     (write http://host:7900, and bracket an IPv6 address)"
+                )
+            })?;
+            h
+        }
+        None => authority,
+    };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.is_empty() || bare.contains(':') || bare.contains(' ') {
+        anyhow::bail!(
+            "AGENTGRID_RELAY_ADVERTISE={raw:?} has no usable host — write http://host:7900 \
+             (bracket an IPv6 address: http://[fd00::1]:7900)"
+        );
+    }
+    Ok(format!("{scheme}://{authority}"))
+}
+
 impl RelayConfig {
-    /// Parse `AGENTGRID_RELAY_LISTEN` / `AGENTGRID_RELAY_ALLOW` values.
+    /// Parse the `AGENTGRID_RELAY_*` values.
     ///
     /// Split out from [`from_env`] so it can be tested without mutating the
-    /// process environment (which races across tests).
-    /// Parse `AGENTGRID_RELAY_LISTEN` / `AGENTGRID_RELAY_ALLOW` /
-    /// `AGENTGRID_RELAY_MAX_HOPS` values.
-    ///
-    /// Split out from [`from_env`] so it can be tested without mutating the
-    /// process environment (which races across tests). A value below 1 is
+    /// process environment (which races across tests). A hop limit below 1 is
     /// refused rather than clamped: `0` would mean "refuse every request",
     /// which is a relay that is listening and useless, and the operator would
-    /// be looking at a `508` storm to find that out.
+    /// be looking at a `508` storm to find that out. The announce address is
+    /// validated here for the same reason — a relay nobody can name is a relay
+    /// only its own host knows about.
     pub fn parse(
         listen: Option<&str>,
         allow: Option<&str>,
         max_hops: Option<&str>,
+        advertise: Option<&str>,
     ) -> Result<Option<Self>> {
         let listen = listen.map(str::trim).filter(|s| !s.is_empty());
         let Some(listen) = listen else {
@@ -95,8 +216,15 @@ impl RelayConfig {
                      nothing would relay"
                 );
             }
+            if advertise.map(str::trim).is_some_and(|a| !a.is_empty()) {
+                anyhow::bail!(
+                    "AGENTGRID_RELAY_ADVERTISE is set but AGENTGRID_RELAY_LISTEN is not — \
+                     this node does not relay, so there is nothing to announce"
+                );
+            }
             return Ok(None);
         };
+        let raw_listen = listen;
         let listen: SocketAddr = listen.parse().with_context(|| {
             format!("AGENTGRID_RELAY_LISTEN={listen:?} is not an address:port pair")
         })?;
@@ -117,10 +245,16 @@ impl RelayConfig {
                 n
             }
         };
+        // Validated (not just stored) at startup: a malformed announce address
+        // is a relay that no other host can be told about, and the operator
+        // would otherwise only learn it from a join command that never
+        // appears.
+        let announce = announced_url(Some(raw_listen), advertise)?;
         Ok(Some(Self {
             listen,
             allow,
             max_hops,
+            announce,
         }))
     }
 
@@ -128,7 +262,13 @@ impl RelayConfig {
         let listen = std::env::var("AGENTGRID_RELAY_LISTEN").ok();
         let allow = std::env::var("AGENTGRID_RELAY_ALLOW").ok();
         let max_hops = std::env::var("AGENTGRID_RELAY_MAX_HOPS").ok();
-        Self::parse(listen.as_deref(), allow.as_deref(), max_hops.as_deref())
+        let advertise = std::env::var(ADVERTISE_ENV).ok();
+        Self::parse(
+            listen.as_deref(),
+            allow.as_deref(),
+            max_hops.as_deref(),
+            advertise.as_deref(),
+        )
     }
 }
 
@@ -191,6 +331,21 @@ pub async fn start(cfg: &Config, relay: RelayConfig) -> Result<()> {
              can reach the control plane through this node"
         );
     }
+    match &relay.announce {
+        Some(url) => tracing::info!(
+            listen = %relay.listen,
+            announce = %url,
+            "peer relay announces {url}: a host that cannot reach the control plane can be \
+             joined through this node (`ag nodes add --via`)"
+        ),
+        None => tracing::warn!(
+            listen = %relay.listen,
+            "peer relay announces no address: AGENTGRID_RELAY_LISTEN is 0.0.0.0 and \
+             AGENTGRID_RELAY_ADVERTISE is unset, so no other host can be told where this \
+             relay is — set AGENTGRID_RELAY_ADVERTISE=http://<this-host>:{}",
+            relay.listen.port()
+        ),
+    }
     let edge = agentgrid_edge::Edge::new(agentgrid_edge::EdgeConfig {
         // Re-read per request: `base()` already moved if a leader hint
         // arrived, so the relay follows the control plane without a TTL.
@@ -225,15 +380,17 @@ mod tests {
 
     #[test]
     fn unset_listen_means_no_relay() {
-        assert!(RelayConfig::parse(None, None, None).unwrap().is_none());
-        assert!(RelayConfig::parse(Some("  "), None, None)
+        assert!(RelayConfig::parse(None, None, None, None)
+            .unwrap()
+            .is_none());
+        assert!(RelayConfig::parse(Some("  "), None, None, None)
             .unwrap()
             .is_none());
     }
 
     #[test]
     fn allow_without_listen_is_a_loud_mistake() {
-        let err = RelayConfig::parse(None, Some("10.0.0.0/8"), None).unwrap_err();
+        let err = RelayConfig::parse(None, Some("10.0.0.0/8"), None, None).unwrap_err();
         assert!(
             format!("{err}").contains("AGENTGRID_RELAY_LISTEN"),
             "the message must name the missing variable: {err}"
@@ -245,7 +402,7 @@ mod tests {
         // Same reasoning as the allowlist: the operator configured a relay
         // limit, so a daemon that starts with no relay is not what they asked
         // for and must not be silently accepted.
-        let err = RelayConfig::parse(None, None, Some("5")).unwrap_err();
+        let err = RelayConfig::parse(None, None, Some("5"), None).unwrap_err();
         assert!(
             format!("{err}").contains("AGENTGRID_RELAY_LISTEN"),
             "the message must name the missing variable: {err}"
@@ -254,7 +411,7 @@ mod tests {
 
     #[test]
     fn listen_parses_with_and_without_an_allowlist() {
-        let r = RelayConfig::parse(Some("0.0.0.0:7900"), None, None)
+        let r = RelayConfig::parse(Some("0.0.0.0:7900"), None, None, None)
             .unwrap()
             .expect("relay");
         assert_eq!(r.listen.port(), 7900);
@@ -268,18 +425,24 @@ mod tests {
             Some("10.0.0.5:7900"),
             Some("10.0.0.0/8, 192.168.1.7"),
             Some("5"),
+            None,
         )
         .unwrap()
         .expect("relay");
         assert_eq!(r.allow.len(), 2);
         assert_eq!(r.max_hops, 5);
+        assert_eq!(
+            r.announce.as_deref(),
+            Some("http://10.0.0.5:7900"),
+            "a concrete listen address is dialable, so it is announced as-is"
+        );
     }
 
     #[test]
     fn zero_hops_is_refused_not_clamped() {
         // 0 would mean "508 for every request" — a relay that listens and is
         // useless, which the operator would diagnose from a 508 storm.
-        let err = RelayConfig::parse(Some("0.0.0.0:7900"), None, Some("0")).unwrap_err();
+        let err = RelayConfig::parse(Some("0.0.0.0:7900"), None, Some("0"), None).unwrap_err();
         assert!(
             format!("{err}").contains("508"),
             "the message must say what 0 would do: {err}"
@@ -289,7 +452,7 @@ mod tests {
     #[test]
     fn a_nonsense_hop_limit_is_refused() {
         for bad in ["-1", "three", "1.5", " "] {
-            let r = RelayConfig::parse(Some("0.0.0.0:7900"), None, Some(bad));
+            let r = RelayConfig::parse(Some("0.0.0.0:7900"), None, Some(bad), None);
             // Whitespace means "unset" and falls back to the default; anything
             // else must be an error rather than a silent default.
             if bad.trim().is_empty() {
@@ -302,9 +465,9 @@ mod tests {
 
     #[test]
     fn bad_addresses_are_rejected() {
-        assert!(RelayConfig::parse(Some("7900"), None, None).is_err());
-        assert!(RelayConfig::parse(Some("localhost:7900"), None, None).is_err());
-        assert!(RelayConfig::parse(Some("127.0.0.1:7900"), Some("nope"), None).is_err());
+        assert!(RelayConfig::parse(Some("7900"), None, None, None).is_err());
+        assert!(RelayConfig::parse(Some("localhost:7900"), None, None, None).is_err());
+        assert!(RelayConfig::parse(Some("127.0.0.1:7900"), Some("nope"), None, None).is_err());
     }
 
     #[test]
@@ -332,5 +495,110 @@ mod tests {
             Some(("cp.internal".into(), 443))
         );
         assert_eq!(host_port("http://[::1]:7900"), Some(("::1".into(), 7900)));
+    }
+
+    /// The announcement is what makes `ag nodes add --via` possible: without a
+    /// dialable address the control plane cannot name this relay, and the
+    /// operator has to hand out the address out of band — which is the state
+    /// this field exists to end.
+    #[test]
+    fn a_concrete_listen_address_is_announced_as_is() {
+        assert_eq!(
+            announced_url(Some("10.0.0.5:7900"), None)
+                .unwrap()
+                .as_deref(),
+            Some("http://10.0.0.5:7900")
+        );
+        // IPv6 needs the brackets a URL authority requires; `SocketAddr`'s
+        // Display already writes them.
+        assert_eq!(
+            announced_url(Some("[fd00::1]:7900"), None)
+                .unwrap()
+                .as_deref(),
+            Some("http://[fd00::1]:7900")
+        );
+    }
+
+    /// `0.0.0.0` says "listen everywhere", which is not an address. Guessing
+    /// the host's own name produces a URL that fails on the *other* machine —
+    /// the one place the operator cannot see the error — so nothing is
+    /// announced and `start()` warns with the variable to set.
+    #[test]
+    fn listening_everywhere_without_an_advertise_value_announces_nothing() {
+        assert_eq!(announced_url(Some("0.0.0.0:7900"), None).unwrap(), None);
+        assert_eq!(announced_url(Some("[::]:7900"), None).unwrap(), None);
+        // Whitespace is "unset", not an address.
+        assert_eq!(
+            announced_url(Some("0.0.0.0:7900"), Some("  ")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_explicit_advertise_value_wins_over_the_listen_address() {
+        assert_eq!(
+            announced_url(Some("0.0.0.0:7900"), Some("http://node-a.internal:7900"))
+                .unwrap()
+                .as_deref(),
+            Some("http://node-a.internal:7900")
+        );
+        // A bare host:port is the common case (the operator copied it from
+        // `ip a`), so the scheme is filled in rather than refused.
+        assert_eq!(
+            announced_url(Some("0.0.0.0:7900"), Some("node-a.internal:7900"))
+                .unwrap()
+                .as_deref(),
+            Some("http://node-a.internal:7900")
+        );
+    }
+
+    /// Every URL built from the announcement appends its own path. A path here
+    /// would 404 on a host that cannot ask anyone why, so it is refused at
+    /// startup instead.
+    #[test]
+    fn an_advertise_value_with_a_path_is_refused() {
+        let err = announced_url(Some("0.0.0.0:7900"), Some("http://a:7900/relay"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("path"), "the message must say why: {err}");
+
+        for bad in ["http://", "://a:7900", "http://a:7900/relay"] {
+            assert!(
+                announced_url(Some("0.0.0.0:7900"), Some(bad)).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        // A scheme that is not HTTP cannot be spoken by the joining host.
+        assert!(announced_url(Some("0.0.0.0:7900"), Some("ftp://a:7900")).is_err());
+        // One trailing slash is the same address written differently, not a
+        // path — refusing it would fail an install over punctuation.
+        assert_eq!(
+            announced_url(Some("0.0.0.0:7900"), Some("https://a:7900/"))
+                .unwrap()
+                .as_deref(),
+            Some("https://a:7900")
+        );
+    }
+
+    #[test]
+    fn advertising_without_relaying_is_a_loud_mistake() {
+        let err = RelayConfig::parse(None, None, None, Some("http://a:7900"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("AGENTGRID_RELAY_LISTEN"),
+            "the message must name the missing variable: {err}"
+        );
+    }
+
+    /// The heartbeat path must never be where a config error surfaces: it runs
+    /// every ten seconds, and `RelayConfig` has already refused to start.
+    #[test]
+    fn announce_from_env_is_silent_without_a_listen_address() {
+        // Not `set_var`: this test asserts the unset path, and the process
+        // environment is shared with every test running beside it.
+        if std::env::var("AGENTGRID_RELAY_LISTEN").is_err() {
+            assert_eq!(announce_from_env(), None);
+        }
     }
 }

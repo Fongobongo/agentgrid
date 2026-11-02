@@ -17,6 +17,36 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{is_safe_opaque_id, AppState};
 
+/// How many relays the request crossed, echoed back on the response.
+///
+/// The header a relay stamps travels on the *request*, so the only party who
+/// could see it was the control plane. That made "am I actually going through
+/// the relay, or is something else answering?" unanswerable from the client
+/// side — a probe could dial a relay and get a `200` from whatever the relay
+/// happened to forward to, including itself.
+///
+/// Echoing it makes the path checkable by the one party that cares: a host
+/// asking `agentgrid-node-daemon probe --relay <url>` can see the count it was
+/// *served with*. Always written, including `0` — an absent header has to mean
+/// "this control plane does not echo", not "no relay", or the two would be
+/// indistinguishable and the probe would guess.
+pub async fn echo_relay_hops(req: Request<Body>, next: Next) -> Response {
+    let hops = req
+        .headers()
+        .get(crate::routes::nodes::RELAY_HOPS_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let mut res = next.run(req).await;
+    if let Ok(value) = header::HeaderValue::from_str(&hops.to_string()) {
+        res.headers_mut().insert(
+            header::HeaderName::from_static(crate::routes::nodes::RELAY_HOPS_HEADER),
+            value,
+        );
+    }
+    res
+}
+
 pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Response {
     let mut res = next.run(req).await;
     let headers = res.headers_mut();

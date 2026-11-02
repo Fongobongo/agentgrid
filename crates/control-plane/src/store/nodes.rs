@@ -223,6 +223,18 @@ impl Store {
         // unconditionally (0 when absent), so a row stops being NULL as soon as
         // it beats once — "0 hops" is an observation, not a missing value.
         let relay_hops = req.relay_hops.map(i64::from);
+        // The relay announcement, trimmed and normalised at the boundary: a
+        // node that sends "" is saying "not a relay", which must land as NULL
+        // rather than as an address the panel would render as a link to
+        // nowhere. A trailing slash is dropped because the join command appends
+        // `/v1/node/join.sh` to it.
+        let relay_url = req
+            .relay_url
+            .as_deref()
+            .map(str::trim)
+            .map(|u| u.trim_end_matches('/'))
+            .filter(|u| !u.is_empty())
+            .map(str::to_string);
         let now = now_iso();
         let affected = self
             .write_one(
@@ -233,7 +245,7 @@ impl Store {
                load_avg = ?, free_disk_mb = ?, free_memory_mb = ?, cpu_count = ?, mem_available_mb = ?, last_heartbeat_at = ?, \
                unsafe_active = ?, permission_interception = ?, \
                outbox_bytes = ?, artifact_spool_bytes = ?, \
-               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ?, adapter_env_delivery = ?, egress_proxy = ?, relay_hops = ? \
+               outbox_rows = ?, outbox_oldest_pending_age_ms = ?, outbox_corruption_count = ?, outbox_completion_rows = ?, repo_lock_wait_ms = ?, sandbox_backend = ?, enforced_limits = ?, repo_cache_bytes = ?, workspace_bytes = ?, network_mode = ?, active_rss_mib = ?, max_rss_mib = CASE WHEN ? > 0 THEN ? ELSE max_rss_mib END, systemd_scope_supported = ?, repo_states = ?, adapter_env_delivery = ?, egress_proxy = ?, relay_hops = ?, relay_url = ? \
              WHERE id = ?",
                 )
                 // active_attempts is intentionally not heartbeat-settable: it is the
@@ -283,6 +295,10 @@ impl Store {
                 // what this control plane observed on this very request.
                 .bind(egress_proxy)
                 .bind(relay_hops)
+                // The relay announcement. Bound unconditionally so a node that
+                // stops relaying clears it on the next beat instead of leaving
+                // an address behind that no longer answers.
+                .bind(&relay_url)
                 .bind(node_id),
             )
             .await?

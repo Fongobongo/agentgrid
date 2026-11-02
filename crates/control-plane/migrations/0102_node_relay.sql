@@ -1,0 +1,14 @@
+-- A node that carries other nodes' control-plane traffic announces the address
+-- they should dial.
+--
+-- The peer relay itself is not new (`AGENTGRID_RELAY_LISTEN`, `crates/edge`);
+-- what was missing is that the control plane could not name one. A host behind
+-- a firewall has to point at a sibling instead of at the control plane, and the
+-- operator had to know that sibling's address out of band — so "install a node
+-- that cannot reach the control plane" was a procedure, not a command.
+--
+-- NULL = not a relay, or a relay that never stated a dialable address. The two
+-- are deliberately one value here: the control plane has nothing useful to do
+-- with "it relays, but nobody can dial it", and a `0.0.0.0:7900` listen is
+-- exactly that. The node decides — see `AGENTGRID_RELAY_ADVERTISE`.
+ALTER TABLE nodes ADD COLUMN relay_url TEXT;

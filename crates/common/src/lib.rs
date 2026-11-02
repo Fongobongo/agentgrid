@@ -657,6 +657,15 @@ pub struct NodeView {
     /// verify it. `None` = never reported.
     #[serde(default)]
     pub egress_proxy: Option<bool>,
+    /// This node can carry other nodes' traffic, and this is the address they
+    /// should dial — the announcement that makes `ag nodes add --via` possible.
+    ///
+    /// A claim by the node, like `egress_proxy`, and for the same reason: the
+    /// control plane cannot check an address whose entire purpose is to be
+    /// reachable from somewhere the control plane is not. `None` = not a relay,
+    /// or a relay that never stated a dialable address.
+    #[serde(default)]
+    pub relay_url: Option<String>,
 }
 
 /// Plan 2.5 (#204): one repository's attach state on a node. `state` is
@@ -975,6 +984,41 @@ pub struct EnrollResponse {
     pub credential: String,
 }
 
+/// `POST /v1/nodes/join-command` — the one line to run on a host that is not
+/// reachable *from* here.
+///
+/// The control plane does not ssh anywhere; the host fetches what it needs from
+/// the control plane it is joining. When the host cannot reach the control
+/// plane at all, `server` is a **sibling node's relay** instead: the same
+/// script, fetched through the sibling, and the daemon keeps dialling the
+/// sibling afterwards.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinCommandResponse {
+    /// Single-use enrollment token, already embedded in `command`.
+    pub token: String,
+    pub expires_at: String,
+    /// The exact shell line, ready to paste on the new host.
+    pub command: String,
+    /// The URL the joining host dials: the control plane, or a relay.
+    pub server: String,
+    /// The node carrying the traffic, when the command was built through one.
+    /// `None` = the host dials the control plane itself.
+    #[serde(default)]
+    pub via: Option<JoinVia>,
+}
+
+/// The relay a join command was built through.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinVia {
+    pub node_id: String,
+    pub name: String,
+    /// The address the joining host dials. This is the *relay's own claim*
+    /// (`relay_url` on the node), not something the control plane verified — a
+    /// relay exists precisely to be reachable from where the control plane is
+    /// not.
+    pub relay_url: String,
+}
+
 /// Periodic node health/capability report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeartbeatRequest {
@@ -1180,6 +1224,23 @@ pub struct HeartbeatRequest {
     /// receiver (only tests reach that state).
     #[serde(skip)]
     pub relay_hops: Option<u32>,
+    /// This node carries other nodes' control-plane traffic, and this is the
+    /// URL they should dial (`AGENTGRID_RELAY_ADVERTISE`, or the listen address
+    /// when it is concrete enough to dial).
+    ///
+    /// **A claim.** The control plane cannot verify it — a relay exists
+    /// precisely so that the peers who can reach it are the ones who cannot
+    /// reach the control plane — so the only source is the node itself. That is
+    /// why the panel and `ag nodes ls` print it as an announcement rather than
+    /// as a reachable address, and why `ag net probe` exists: the one party who
+    /// can check it is a host that tries.
+    ///
+    /// `None` = this node is not a relay, or it is one whose dialable address
+    /// nobody stated (a `0.0.0.0` listen with no advertise address — the host's
+    /// own name is a guess that fails on the *other* machine, which is the worst
+    /// place to find out).
+    #[serde(default)]
+    pub relay_url: Option<String>,
 }
 
 /// ADR 0029: how the node hands adapter credentials to the agent.
@@ -2174,6 +2235,7 @@ mod tests {
         };
         assert_eq!(round_trip(&er), er);
         let hb = HeartbeatRequest {
+            relay_url: None,
             adapter_env_delivery: None,
             status: Some(NodeStatus::Online),
             name: "n".into(),

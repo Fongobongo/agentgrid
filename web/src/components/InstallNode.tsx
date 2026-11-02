@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ApiError,
-  createEnrollmentToken,
   getInstallJob,
   InstallJob,
   InstallNodeRequest,
+  joinCommand as requestJoinCommand,
+  JoinCommandView,
+  NodeView,
   ProvisioningInfo,
   startNodeInstall,
 } from '../api';
@@ -93,16 +95,18 @@ export function installCommand(f: InstallForm): string {
 }
 
 /**
- * The pull-based join: one line, run on the new host.
+ * The pull-based join, as a shell line.
  *
- * The token is an argument, not a query parameter. A query string lands in the
- * control plane's access log on every request, and an enrollment token in a log
- * is a token that outlives its ten minutes. `bash -s --` is what lets a piped
- * script take arguments at all.
+ * Kept as a pure function even though the control plane now builds the real
+ * command: the two forms have to agree, and this is the string the docs and
+ * `deploy/join-node.sh` show. `relayed` reproduces the one difference — a join
+ * through a sibling spells out `--server`, because the script's own default is
+ * `AGENTGRID_PUBLIC_URL`, which is the address the host cannot reach.
  */
-export function joinCommand(server: string, token: string): string {
+export function joinCommand(server: string, token: string, relayed = false): string {
   const base = (server || 'https://cp.example.com').replace(/\/+$/, '');
-  return `curl -fsSL ${base}/v1/node/join.sh | sudo bash -s -- --token ${quote(token)}`;
+  const server_arg = relayed ? ` --server ${base}` : '';
+  return `curl -fsSL ${base}/v1/node/join.sh | sudo bash -s -- --token ${quote(token)}${server_arg}`;
 }
 
 /**
@@ -110,20 +114,46 @@ export function joinCommand(server: string, token: string): string {
  *
  * Rendered in both modes: the join does not depend on
  * `AGENTGRID_PROVISION_ENABLED`, because nothing on this side reaches into the
- * host — the host reaches here, which it has to do anyway to work. The token is
- * minted on demand rather than on mount so a modal left open does not leave a
- * live credential in the DOM after its ten minutes.
+ * host — the host reaches here, which it has to do anyway to work.
+ *
+ * The relay picker is the whole reason this calls the server instead of
+ * formatting a string: a host behind a firewall cannot fetch the script from a
+ * control plane it cannot reach, so the line it runs points at a sibling node
+ * that can carry the traffic. Only the control plane knows which nodes
+ * announced one, so the command is built there.
+ *
+ * The token is minted on demand rather than on mount so a modal left open does
+ * not leave a live credential in the DOM after its ten minutes.
  */
-function JoinSection({ server }: { server: string }) {
-  const [token, setToken] = useState<string | null>(null);
+function JoinSection({
+  server,
+  name,
+  nodes,
+}: {
+  server: string;
+  name: string;
+  nodes: NodeView[];
+}) {
+  const [via, setVia] = useState('');
+  const [view, setView] = useState<JoinCommandView | null>(null);
   const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+
+  // A node with no announced address cannot carry a join, so it is not offered.
+  // Showing it greyed out would invite the question "why not" that the answer
+  // already covers: `AGENTGRID_RELAY_ADVERTISE` was never set.
+  const relays = nodes.filter((n) => n.relay_url);
 
   const mint = async () => {
     setBusy(true);
     setErr(null);
     try {
-      setToken((await createEnrollmentToken()).token);
+      setView(
+        await requestJoinCommand({
+          name: name.trim() || 'remote-node',
+          via: via || undefined,
+        }),
+      );
     } catch (e) {
       setErr(e);
     } finally {
@@ -140,17 +170,47 @@ function JoinSection({ server }: { server: string }) {
         itself. It fetches the daemon from this control plane, verifies every
         byte against the bundle&apos;s SHA-256 and starts it.
       </p>
+      <label>
+        Reach this control plane through
+        <select
+          value={via}
+          disabled={busy}
+          onChange={(e) => {
+            setVia(e.target.value);
+            // The old command names the old route; keeping it on screen after
+            // the picker changed is how an operator pastes the wrong one.
+            setView(null);
+          }}
+        >
+          <option value="">directly (the host can reach {server || 'this URL'})</option>
+          {relays.map((n) => (
+            <option key={n.id} value={n.id}>
+              {n.name} — {(n.relay_url ?? '').replace(/^https?:\/\//, '')}
+            </option>
+          ))}
+        </select>
+      </label>
+      {relays.length === 0 && (
+        <p className="muted">
+          No node announces a relay address yet. On a node that can reach both
+          this control plane and the new host, set{' '}
+          <code>AGENTGRID_RELAY_LISTEN=0.0.0.0:7900</code> and{' '}
+          <code>AGENTGRID_RELAY_ADVERTISE=http://&lt;that-host&gt;:7900</code>,
+          restart it, and it will appear here.
+        </p>
+      )}
       {err ? <ErrorBox err={err} /> : null}
-      {token ? (
+      {view ? (
         <>
-          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-            {joinCommand(server, token)}
-          </pre>
+          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{view.command}</pre>
           <div className="muted">
-            <button onClick={() => navigator.clipboard?.writeText(joinCommand(server, token)).catch(() => undefined)}>
+            {view.via
+              ? `Through ${view.via.name} (${view.via.relay_url}) — the host dials that node, not this one. `
+              : ''}
+            <button onClick={() => navigator.clipboard?.writeText(view.command).catch(() => undefined)}>
               copy join command
             </button>{' '}
-            <button onClick={() => setToken(null)}>hide</button>
+            <button onClick={() => setView(null)}>hide</button>
           </div>
         </>
       ) : (
@@ -164,10 +224,13 @@ function JoinSection({ server }: { server: string }) {
 
 export default function InstallNode({
   info,
+  nodes = [],
   onClose,
   onInstalled,
 }: {
   info: ProvisioningInfo | null;
+  /** The fleet, for the relay picker. Absent = no relay is offered. */
+  nodes?: NodeView[];
   onClose: () => void;
   onInstalled: () => void;
 }) {
@@ -267,7 +330,7 @@ export default function InstallNode({
             <div className="muted">
               <button onClick={() => copy(installCommand(f))}>copy command</button>
             </div>
-            <JoinSection server={f.server} />
+            <JoinSection server={f.server} name={f.name} nodes={nodes} />
           </>
         }
         actions={<button onClick={onClose}>Close</button>}
@@ -419,7 +482,7 @@ export default function InstallNode({
           {job.error ? <ErrorBox err={new ApiError(0, job.error)} /> : null}
         </div>
       ) : null}
-      <JoinSection server={f.server} />
+      <JoinSection server={f.server} name={f.name} nodes={nodes} />
     </>
   );
 

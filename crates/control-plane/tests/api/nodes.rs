@@ -25,6 +25,7 @@ async fn capacity_pressure_gate_uses_heartbeat_rss() {
     // Heartbeat reports the node already at 90 MiB RSS. The gate forecast
     // for one new attempt is 256 MiB → 90 + 256 = 346 > 100 → reject.
     let hb = HeartbeatRequest {
+        relay_url: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-cap".into(),
@@ -212,6 +213,7 @@ async fn heartbeat_max_rss_mib_overrides_schema_default_only_when_set() {
     // Heartbeat reporting max_rss_mib = 0 → CP must NOT overwrite the row
     // (CASE WHEN 0 > 0 path). The ceiling stays at the schema default.
     let hb_0 = HeartbeatRequest {
+        relay_url: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-ceiling".into(),
@@ -321,6 +323,7 @@ async fn heartbeat_sweep_skips_node_reonlined_in_race_window() {
     // 1. Heartbeat: node reports offline -> row flips + in-flight attempt
     //    is lost (the normal path, must keep working).
     let hb = agentgrid_common::HeartbeatRequest {
+        relay_url: None,
         adapter_env_delivery: None,
         status: Some(agentgrid_common::NodeStatus::Offline),
         name: "node-race-hb".into(),
@@ -434,6 +437,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
 
     // Node reports offline -> its in-flight attempt is lost.
     let hb = HeartbeatRequest {
+        relay_url: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Offline),
         name: "node-o".into(),
@@ -524,6 +528,7 @@ async fn node_offline_loses_attempt_then_retry_succeeds() {
         .oneshot(post_auth(
             "/v1/node/heartbeat",
             serde_json::to_string(&HeartbeatRequest {
+                relay_url: None,
                 adapter_env_delivery: None,
                 status: Some(NodeStatus::Online),
                 ..hb
@@ -668,6 +673,7 @@ async fn heartbeat_auto_fills_skill_trust_ledger() {
     let (_node_id, cred) = enroll(&app, "n-disc", vec!["mock".into()], vec!["*".into()]).await;
 
     let hb = HeartbeatRequest {
+        relay_url: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "n-disc".into(),
@@ -797,6 +803,7 @@ async fn heartbeat_persists_unsafe_active_and_interception() {
     let app = build_router(state);
     let (node_id, cred) = enroll(&app, "node-unsafe", vec!["mock".into()], vec!["*".into()]).await;
     let hb = HeartbeatRequest {
+        relay_url: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-unsafe".into(),
@@ -883,6 +890,7 @@ async fn node_account_usage_endpoint_returns_heartbeat_reported_usage() {
     let (node_id, cred) = enroll(&app, "node-usage", vec!["mock".into()], vec!["*".into()]).await;
 
     let hb = HeartbeatRequest {
+        relay_url: None,
         adapter_env_delivery: None,
         status: Some(NodeStatus::Online),
         name: "node-usage".into(),
@@ -1699,4 +1707,128 @@ async fn enrolling_a_node_closes_the_install_row_that_named_it() {
     // A different host's row is not touched: the match is by name, and closing
     // an unrelated install would hide exactly the host that is still missing.
     assert_eq!(row("untouched").await.unwrap().state, "issued");
+}
+
+/// A node that carries other nodes' traffic has to be nameable by the control
+/// plane, or "join a host that cannot reach me" stays an out-of-band
+/// instruction. The announcement is a claim — the control plane cannot dial an
+/// address whose whole point is to be reachable from where it is not — so the
+/// test pins the two properties the join command depends on: it survives the
+/// round trip, and a node that stops relaying clears it instead of leaving an
+/// address behind that no longer answers.
+#[tokio::test]
+async fn a_relay_announcement_survives_the_heartbeat_and_clears_when_it_stops() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let (_node_id, cred) = enroll(&app, "relay-a", vec!["mock".into()], vec!["*".into()]).await;
+
+    let body = |relay_url: Option<&str>| {
+        let mut v = serde_json::json!({
+            "status": "online",
+            "name": "relay-a",
+            "adapters": ["mock"],
+            "repositories": ["*"],
+            "max_concurrency": 2,
+            "agent_version": "t",
+        });
+        if let Some(url) = relay_url {
+            v["relay_url"] = serde_json::json!(url);
+        }
+        serde_json::to_string(&v).unwrap()
+    };
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/node/heartbeat",
+            body(Some("http://node-a.internal:7900/")),
+            &cred,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored: Option<String> = sqlx::query_scalar("SELECT relay_url FROM nodes WHERE name = ?")
+        .bind("relay-a")
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.as_deref(),
+        Some("http://node-a.internal:7900"),
+        "the trailing slash is dropped: every URL built from this appends its own path"
+    );
+
+    // The relay was taken down (or the advertise variable was removed). The
+    // next beat must clear the column — a stale address would send the next
+    // joining host to a port nobody listens on.
+    let resp = app
+        .clone()
+        .oneshot(post_auth("/v1/node/heartbeat", body(None), &cred))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored: Option<String> = sqlx::query_scalar("SELECT relay_url FROM nodes WHERE name = ?")
+        .bind("relay-a")
+        .fetch_one(&state.store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored, None,
+        "a node that stopped relaying must not keep advertising an address"
+    );
+}
+
+/// The hop counter travels on the request, so until it was echoed the only
+/// party who could read it was this control plane. A host asking "am I really
+/// going through the relay?" had to assume that a `200` from the relay's URL
+/// meant the relay forwarded it — and a plain HTTP proxy, an L4 balancer or a
+/// stale address all answer `200` without relaying anything.
+///
+/// Always echoed, including `0`: an absent header has to mean "this control
+/// plane does not echo", or a probe cannot tell "no relay" from "too old to
+/// say", and would report a healthy relay as broken after a rollback.
+#[tokio::test]
+async fn the_observed_hop_count_is_echoed_back_on_the_response() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+
+    // A relay that forwarded stamped 2 on the way in.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health/live")
+                .header("x-agentgrid-relay-hops", "2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-agentgrid-relay-hops")
+            .and_then(|v| v.to_str().ok()),
+        Some("2")
+    );
+
+    // No header in: the echo says 0, which is the observation, not a silence.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health/live")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers()
+            .get("x-agentgrid-relay-hops")
+            .and_then(|v| v.to_str().ok()),
+        Some("0"),
+        "an absent header must read as an observation, not as an old control plane"
+    );
 }

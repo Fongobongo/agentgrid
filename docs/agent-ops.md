@@ -167,6 +167,41 @@ log, where a token outlives its TTL. Add `--dry-run` to fetch and verify
 everything without installing, `--adapters mock,opencode` to pick what to
 install, or `--server <url>` when the script was not fetched from the CP.
 
+**1b. When the host cannot reach the control plane at all**, the line has to
+name something the host *can* reach — a sibling node's relay (ADR 0026). Ask
+for it by name and the control plane substitutes the address:
+
+```bash
+ag nodes add --name behind-nat --via node-a
+#   curl -fsSL http://node-a.internal:7900/v1/node/join.sh \
+#     | sudo bash -s -- --token <t> --server http://node-a.internal:7900
+```
+
+Two things have to be true on the sibling first:
+
+```bash
+AGENTGRID_RELAY_LISTEN=0.0.0.0:7900        # carry other nodes' CP traffic
+AGENTGRID_RELAY_ADVERTISE=http://node-a.internal:7900
+```
+
+`AGENTGRID_RELAY_ADVERTISE` is not optional there. A `0.0.0.0` listen means
+"every interface on *this* machine", which is not an address anyone can dial:
+without an advertise value the node announces **nothing** rather than guessing
+a hostname that would only be wrong on the other machine. The announced URL is
+what `ag nodes ls` shows in `RELAY` and what `--via` resolves to.
+
+Three refusals, all deliberate:
+
+| what you asked for | what you get |
+| --- | --- |
+| a node id or name that does not exist | `404` |
+| a node that announces no relay address | `409`, naming both env vars |
+| a token minted for a request that was then refused | nothing — the token is minted *after* the relay resolves |
+
+There is no silent fallback to a direct join. You asked for a relay *because*
+the direct path does not work, so a quietly direct command is one that fails
+later, on a machine you cannot inspect.
+
 **2. From the panel.** `Nodes → Install node…`. The control plane runs the
 install itself over ssh: verify (or pin) the host key, copy
 `agentgrid-node-daemon`, write a `0600` env file with a one-shot token, start
@@ -578,13 +613,21 @@ is the point:
 
 ```bash
 ag nodes ls
-# ... SPOOL  REACH        REPOS
-#     -      direct       -
-#     -      relay×2      -
-#     -      proxy        3/3
-#     -      relay×1+proxy 3/3
-#     -      ?            -     <- no heartbeat since the columns existed
+# ... SPOOL  REACH        RELAY                     REPOS
+#     -      direct       -                         -
+#     -      relay×2      -                         -
+#     -      proxy        -                         3/3
+#     -      relay×1+proxy -                       3/3
+#     -      direct       node-a.internal:7900      3/3   <- carries other nodes
+#     -      ?            -                         -     <- no heartbeat since the columns existed
 ```
+
+`RELAY` is a third fact, and the weakest of the three: `relay_url` is what the
+node **claims** other hosts should dial to reach the control plane through it.
+The control plane cannot verify it — a relay exists precisely so that the peers
+who can reach it are the ones that cannot reach the control plane — so it is
+shown as an address, never as a health state. `-` means "not a relay, or a
+relay nobody can dial". It is what `ag nodes add --via` resolves against.
 
 `?` is not `direct`: it means no heartbeat has carried either fact yet (a row
 older than the migration). The panel renders the same three states as badges.
@@ -601,9 +644,71 @@ rule out an L4 balancer or a generic HTTP proxy in front of the control plane:
 those do not stamp, and at layer 4 there is nothing to stamp with. Read
 `relay×N` as "N AgentGrid forwarders carried this".
 
+Since 0.8.2 every response also echoes the count it observed in
+`x-agentgrid-relay-hops`, always written — `0` included. That is what lets a
+client check its own path (`agentgrid-node-daemon probe --relay`), and it is
+why an *absent* header means "this control plane is too old to echo", never
+"zero hops".
+
 The egress-proxy claim is re-evaluated every heartbeat from the pool's *current*
 entry, so a pool whose every entry is dead reports `false` on the next beat: the
 node has fallen back to direct egress, and the badge disappears with it.
+
+## What can *this host* reach?
+
+Everything above is the control plane's view of a node. The complementary
+question — from this host, what is reachable, and through what? — cannot be
+answered from there, and it is the one that matters while you are standing on a
+host that is not a node yet.
+
+The probe lives in `agentgrid-node-daemon` and needs no credential, no
+enrollment and no root:
+
+```bash
+agentgrid-node-daemon probe --server https://cp.example.com:7800
+agentgrid-node-daemon probe --relay http://node-a.internal:7900 --host db.internal:5432
+```
+
+On a host with nothing installed, copy the binary from a sibling (`scp
+node-a:/usr/local/bin/agentgrid-node-daemon .`) or fetch it through the relay
+you are testing. It is dispatched before the daemon's root check, which is the
+only way it can run on a fresh host — exactly when it is most useful.
+
+Output is grouped by question, and the exit code is 1 when any check fails, so
+it belongs in a script:
+
+```text
+CONTROL PLANE:
+  https://cp.example.com:7800  ok     41 ms  v0.8.2 (node protocol v2), hops=0
+
+RELAY:
+  http://node-a.internal:7900  ok      8 ms  forwards, hops=1
+```
+
+`--relay` is the check with no equivalent anywhere else: it asks that URL to
+carry a request *to* a control plane, then reads back the hop count the control
+plane observed. `hops=1` means it relayed. A URL that answers with `hops=0` is
+listening but **not** relaying — a plain HTTP proxy, an L4 balancer, or the
+control plane itself. A response with no hop header at all is not a failure
+either: the control plane is then too old to echo, so the probe says it cannot
+tell rather than turning every relay red on a rollback.
+
+`--proxy` is opt-in for a reason worth knowing: the daemon honours
+`HTTP_PROXY`/`HTTPS_PROXY` for its own outbound traffic, and a probe that
+inherited them would measure the *proxy's* reachability. The question is what
+this host can reach.
+
+| flag | what it answers |
+| --- | --- |
+| `--server` | can this host reach a control plane, and which version is it |
+| `--relay` | does that URL actually forward to the control plane |
+| `--gateway` | is the credential gateway up (`/health` → `ok: true`) |
+| `--host` | raw TCP to anything: a sibling's relay port, an ssh endpoint, a database |
+
+All four are repeatable. `--server` defaults to `AGENTGRID_SERVER` /
+`AGENTGRID_SERVERS` and `--gateway` to `AGENTGRID_CRED_GATEWAY_URL`, so on a
+host that is already a node the bare command checks the configured set. Add
+`--json` for scripts, `--timeout <secs>` to change the 5 s per-check limit.
 
 ## A host that was configured and never arrived
 

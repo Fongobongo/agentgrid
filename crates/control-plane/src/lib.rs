@@ -732,6 +732,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // purpose — see `auth::node_route_is_public`.
         .route("/v1/node/join.sh", get(routes::join::join_script))
         .route("/v1/node/install.sh", get(routes::join::install_script))
+        // The one line to paste on a host that cannot reach this control plane
+        // directly: names a sibling's relay as the server, and records the
+        // intent so the host stays visible if it never arrives.
+        .route("/v1/nodes/join-command", post(routes::join::join_command))
         .route("/v1/node/bundle", get(routes::join::bundle_manifest))
         .route("/v1/node/bundle/{name}", get(routes::join::bundle_file))
         .route("/v1/node/poll", post(routes::events::poll))
@@ -862,6 +866,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn(
             middleware::security_headers_middleware,
         ))
+        // Reachability is a diagnostic both ends have to be able to read: the
+        // relay stamps the request, this echoes the count back so a host can
+        // prove which path its request actually took.
+        .layer(axum::middleware::from_fn(middleware::echo_relay_hops))
         // Hardening P2 item 19/35: outermost layer so every log line inside a
         // request (auth, handler, store) carries a stable `request_id`. The
         // JSON formatter attaches the current span to each event, so the id is

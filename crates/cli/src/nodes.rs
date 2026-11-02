@@ -16,6 +16,28 @@ pub(crate) struct NodeArgs {
 pub(crate) enum NodeSub {
     /// List registered nodes.
     List,
+    /// Print the one-line command that adds a host to this control plane.
+    ///
+    /// `install` pushes from here over SSH and needs credentials *to* the host.
+    /// This is the other direction: the host fetches what it needs from the
+    /// control plane it is joining, so the only requirement is that the host
+    /// can reach something — with `--via`, a sibling node's relay, for a host
+    /// that cannot reach the control plane at all.
+    Add {
+        /// Node name the daemon registers under. The install record is matched
+        /// by it when the host arrives.
+        #[arg(long)]
+        name: String,
+        /// user@host or user@host:port. Recorded so the install list says which
+        /// machine this is; nothing dials it.
+        #[arg(long)]
+        host: Option<String>,
+        /// Node id or name whose relay carries the join. Use it when the new
+        /// host cannot reach this control plane directly: `ag nodes ls` shows
+        /// which nodes announce a relay in the RELAY column.
+        #[arg(long)]
+        via: Option<String>,
+    },
     /// Provision a remote host as a node over SSH and link it to this control plane.
     Install(Box<NodeInstallArgs>),
     /// Diagnose a node: fetch its control-plane view and surface known
@@ -136,6 +158,9 @@ pub(crate) async fn cmd_nodes(
 ) -> Result<()> {
     match a.command {
         NodeSub::List => cmd_node_list(client, base, json).await,
+        NodeSub::Add { name, host, via } => {
+            cmd_node_add(client, base, json, &name, host.as_deref(), via.as_deref()).await
+        }
         NodeSub::Install(i) => cmd_node_install(client, base, *i).await,
         NodeSub::Doctor { node_id } => cmd_node_doctor(client, base, &node_id).await,
         NodeSub::Drain { node_id, undrain } => {
@@ -144,6 +169,87 @@ pub(crate) async fn cmd_nodes(
         NodeSub::Rekey { node_id } => cmd_node_rekey(client, base, json, &node_id).await,
         NodeSub::Forget { install_id } => cmd_node_forget(client, base, &install_id).await,
     }
+}
+
+/// Ask the control plane for the one line that joins a new host.
+///
+/// The command is built server-side rather than formatted here: only the
+/// control plane knows which nodes announced a relay address, and `--via` is
+/// resolved against that list. Formatting it locally would mean the CLI picked
+/// a relay from a list it had to fetch anyway, with less information.
+async fn cmd_node_add(
+    client: &reqwest::Client,
+    base: &str,
+    json: bool,
+    name: &str,
+    host: Option<&str>,
+    via: Option<&str>,
+) -> Result<()> {
+    let mut body = serde_json::json!({ "name": name });
+    if let Some(h) = host.map(str::trim).filter(|h| !h.is_empty()) {
+        body["host"] = serde_json::json!(h);
+    }
+    if let Some(v) = via.map(str::trim).filter(|v| !v.is_empty()) {
+        body["via"] = serde_json::json!(v);
+    }
+    let resp = client
+        .post(format!("{base}/v1/nodes/join-command"))
+        .json(&body)
+        .send()
+        .await
+        .context("join-command request failed")?;
+    // 409 means "that node cannot relay" and 404 "no such node"; both carry the
+    // server's own explanation, which is better than anything reconstructed
+    // here from a status code.
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
+        let detail = detail.trim();
+        anyhow::bail!(
+            "could not build a join command (HTTP {status}){}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    let out: serde_json::Value = resp.json().await.context("parse join command")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    let command = out
+        .get("command")
+        .and_then(|v| v.as_str())
+        .context("join-command response missing 'command'")?;
+    let expires = out
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    println!("Run this on the new host ({name}), as root. The token is single-use");
+    println!("and expires at {expires}:");
+    println!();
+    println!("  {command}");
+    println!();
+    match out.get("via").and_then(|v| v.as_object()) {
+        Some(via) => println!(
+            "It dials {} ({}) — this control plane is not reachable from that host.",
+            via.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+            via.get("relay_url").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        None => println!(
+            "It dials this control plane ({}). If the host cannot reach it, re-run with",
+            out.get("server").and_then(|v| v.as_str()).unwrap_or(base)
+        ),
+    }
+    if out.get("via").is_none() {
+        println!("--via <node> — `ag nodes ls` shows which nodes can carry the traffic.");
+    }
+    println!();
+    println!("The host appears in `ag nodes ls` once it enrolls; until then it is an");
+    println!("`issued` row in the install list.");
+    Ok(())
 }
 
 /// Delete one install record (a host that was configured and will never
@@ -451,8 +557,18 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         return Ok(());
     }
     println!(
-        "{:<36} {:<10} {:<8} {:<6} {:<10} {:<12} {:<14} {:<12} {:<12} {:<10}",
-        "ID", "STATUS", "ACTIVE", "MAX", "DISK", "INTERCEPT", "UNSAFE", "SPOOL", "REACH", "REPOS"
+        "{:<36} {:<10} {:<8} {:<6} {:<10} {:<12} {:<14} {:<12} {:<12} {:<22} {:<10}",
+        "ID",
+        "STATUS",
+        "ACTIVE",
+        "MAX",
+        "DISK",
+        "INTERCEPT",
+        "UNSAFE",
+        "SPOOL",
+        "REACH",
+        "RELAY",
+        "REPOS"
     );
     for n in &nodes {
         let id = n.get("id").and_then(|v| v.as_str()).unwrap_or("-");
@@ -498,6 +614,7 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
         // Plan 2.5 (#204): per-repository attach state — `ready/total`,
         // with `!` when any repo is cloning/invalid (details in JSON).
         let reach = reach_cell(n);
+        let relay = relay_cell(n);
         let repos = n.get("repo_states").and_then(|v| v.as_array());
         let repo_cell = match repos {
             None => "-".to_string(),
@@ -515,10 +632,31 @@ async fn cmd_node_list(client: &reqwest::Client, base: &str, json: bool) -> Resu
             }
         };
         println!(
-            "{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10} {intercept:<12} {unsafe_flag:<14} {spool:<12} {reach:<12} {repo_cell:<10}"
+            "{id:<36} {st:<10} {active:<8} {max:<6} {disk:<10} {intercept:<12} {unsafe_flag:<14} {spool:<12} {reach:<12} {relay:<22} {repo_cell:<10}"
         );
     }
     Ok(())
+}
+
+/// Does this node carry other nodes' traffic, and where do they dial it?
+///
+/// This is the announcement a host that cannot reach the control plane is
+/// joined through (`ag nodes add --via`), so it is the answer to "which of my
+/// nodes can I use as a stepping stone" without opening the panel. `-` is "not
+/// a relay"; the scheme is always http and is dropped to keep the column
+/// readable.
+fn relay_cell(n: &serde_json::Value) -> String {
+    let url = n
+        .get("relay_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if url.is_empty() {
+        return "-".to_string();
+    }
+    url.trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .to_string()
 }
 
 /// ADR 0026 + ADR 0012: how this node reaches the control plane.
@@ -645,6 +783,32 @@ mod reach_cell_tests {
         assert_eq!(
             reach_cell(&json!({ "relay_hops": 1, "egress_proxy": true })),
             "relay×1+proxy"
+        );
+    }
+}
+
+#[cfg(test)]
+mod relay_cell_tests {
+    use super::relay_cell;
+    use serde_json::json;
+
+    /// `ag nodes ls` is how an operator finds a stepping stone for a host that
+    /// cannot reach the control plane, so the RELAY column has to say "not a
+    /// relay" differently from "a relay with no dialable address" — the second
+    /// one looks configured and is useless.
+    #[test]
+    fn relay_cell_shows_the_dialable_address_only_when_there_is_one() {
+        assert_eq!(relay_cell(&json!({})), "-");
+        assert_eq!(relay_cell(&json!({ "relay_url": null })), "-");
+        assert_eq!(relay_cell(&json!({ "relay_url": "" })), "-");
+        assert_eq!(
+            relay_cell(&json!({ "relay_url": "http://node-a.internal:7900" })),
+            "node-a.internal:7900",
+            "the scheme is the same for every relay; the address is the information"
+        );
+        assert_eq!(
+            relay_cell(&json!({ "relay_url": "https://relay.example.com" })),
+            "relay.example.com"
         );
     }
 }

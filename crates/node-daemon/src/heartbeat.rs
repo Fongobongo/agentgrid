@@ -389,6 +389,12 @@ pub fn spawn_heartbeat(
                 // enroll, so a node that predates sealing is reachable as soon
                 // as it upgrades. The store compares before writing.
                 public_key: crate::config::process_credential().and_then(|c| c.public_key()),
+                // The peer relay's dialable address, if this node runs one
+                // (`AGENTGRID_RELAY_LISTEN`). It is what the control plane
+                // offers as `--via` when a host cannot reach it directly, and
+                // re-read every beat so an operator can add the advertise
+                // variable and restart without a control-plane change.
+                relay_url: crate::relay::announce_from_env(),
                 status: Some(status),
                 name: cfg.node_name.clone(),
                 adapters: cfg.adapters.iter().map(|s| s.id.clone()).collect(),

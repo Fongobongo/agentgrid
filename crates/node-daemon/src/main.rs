@@ -38,6 +38,7 @@ mod notes;
 mod opencode_config;
 mod outbox;
 mod polling;
+mod probe;
 mod process_supervisor;
 mod profiles;
 mod proxy;
@@ -800,17 +801,50 @@ fn tokio_runtime() -> tokio::runtime::Runtime {
         .expect("tokio runtime")
 }
 
+/// `agentgrid-node-daemon probe …`
+fn probe_main(args: &[String]) -> Result<()> {
+    let Some(parsed) = probe::parse_args(args)? else {
+        print!("{}", probe::USAGE);
+        return Ok(());
+    };
+    let env = probe::EnvSnapshot::from_env();
+    let parsed = probe::with_env_defaults(parsed, &env);
+    let outcomes = tokio_runtime().block_on(probe::run(&parsed))?;
+    if parsed.json {
+        println!("{}", probe::render_json(&outcomes, &env));
+    } else {
+        print!("{}", probe::render_text(&outcomes, &env));
+    }
+    // Non-zero when anything failed: a probe that reports a dead control plane
+    // and exits 0 is a probe no script can use. The report is already printed,
+    // so the message only has to carry the count.
+    let failed = outcomes.iter().filter(|o| !o.ok).count();
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} check(s) failed", outcomes.len());
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     // Hardening P2 item 30: the release smoke test invokes `--version` on
     // every published binary. The daemon otherwise takes no CLI args, so an
     // unrecognized flag used to be ignored and the daemon booted for real
     // (probing adapters, pruning workspaces, then failing to enroll) —
     // handle it explicitly before any startup side effects.
-    for a in std::env::args().skip(1) {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    for a in &argv {
         if a == "--version" || a == "-V" {
             println!("agentgrid-node-daemon {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+    }
+    // Reachability probe, dispatched before anything else — including the root
+    // check. It is a read-only network diagnostic, it needs no credential, and
+    // the moment it is most useful is *before* this host is a node (choosing a
+    // relay for `ag nodes add --via`), which is also the moment there is no
+    // service user to run it as.
+    if argv.first().map(String::as_str) == Some("probe") {
+        return probe_main(&argv[1..]);
     }
     tracing_subscriber::fmt()
         .json()

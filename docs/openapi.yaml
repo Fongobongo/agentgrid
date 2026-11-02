@@ -583,6 +583,25 @@ paths:
         It does not rule out an L4 balancer or a generic HTTP proxy: those do
         not stamp, and at layer 4 there is nothing to stamp with.
 
+        Every response also echoes the count it observed in
+        `x-agentgrid-relay-hops`, always present (including `0`). That is what
+        makes "did a relay actually carry this?" answerable from the client
+        side: a caller that dialled a relay and got `0` is talking to the relay
+        directly, and a caller that gets no header at all is talking to a
+        control plane too old to echo, not through zero hops.
+
+        `relay_url` is this node's announced relay endpoint — the address other
+        hosts should dial to reach this control plane through it, from
+        `AGENTGRID_RELAY_ADVERTISE` or a concrete listen address. **A claim**,
+        like `egress_proxy` and unlike `relay_hops`: the control plane cannot
+        verify an address whose entire purpose is to be reachable from hosts
+        that cannot reach the control plane. `null` means the node is not a
+        relay, or is one nobody can dial — a `0.0.0.0` listen with no
+        `AGENTGRID_RELAY_ADVERTISE` announces nothing, because a guessed
+        hostname would fail on the other machine, not on this one. It is what
+        `POST /v1/nodes/join-command` names when a host cannot connect
+        directly.
+
         The list is every enrolled node in every state — `offline`, `degraded`,
         `revoked` included. A node is flipped to `offline` after 30 s without a
         heartbeat. A host that was configured but never enrolled has no row
@@ -968,6 +987,62 @@ paths:
           description: No such install record.
         '409':
           description: The install is running; let it finish (or fail), then forget it.
+  /v1/nodes/join-command:
+    post:
+      summary: Mint a token and the exact line that joins a host to this control plane
+      description: |
+        The server-side half of the pull-based join. Returns a fresh single-use
+        enrollment token (ten minutes) already substituted into the one shell
+        line an operator pastes on the new host:
+
+        ```sh
+        curl -fsSL <server>/v1/node/join.sh | sudo bash -s -- --token <t>
+        ```
+
+        It is an endpoint rather than string formatting in the panel because
+        `via` needs the fleet: only the control plane knows which nodes
+        announced a dialable relay address, and that address is what the
+        command has to name.
+
+        `via` is a node **id or name** whose relay carries the join, for a host
+        that cannot reach this control plane directly. `server` in the response
+        is then the relay's URL, and the line carries `--server <relay>` as
+        well. That flag looks redundant — the script fetched through the relay
+        already defaults to its own server — but the default is
+        `AGENTGRID_PUBLIC_URL` when an operator set one, and that address is
+        exactly the one the new host cannot reach. A redundant flag is cheaper
+        than an install that fails at the last step on a machine the operator
+        cannot inspect.
+
+        A refused `via` is never downgraded to a direct join. The operator
+        asked for a relay *because* the direct path does not work, so a
+        silently direct command is a command that fails later and elsewhere.
+
+        The token is minted **after** the relay resolves, so a refusal cannot
+        leave a token that is spent nowhere behind. `name` is required — it is
+        what the daemon registers under, and an `issued` row is recorded in
+        `node_installs` so a host that was configured and never arrived stays
+        visible (see `GET /v1/node-installs`). `host` is display-only:
+        nothing dials it, unlike `POST /v1/node-installs`, which needs ssh
+        *to* the host and therefore cannot run from the host itself.
+
+        A static segment wins over `/v1/nodes/{id}` in axum's router, so this
+        path is reachable even though the pattern also matches.
+      responses:
+        '200':
+          description: '`{token, expires_at, command, server, via?}` — `via` is `{node_id, name, relay_url}` when the join goes through a relay.'
+        '400':
+          description: No `name` (an unparseable body is treated as empty and fails the same way).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: '`via` names no node, by id or by name.'
+        '409':
+          description: |
+            `via` names a node that announces no dialable relay address — no
+            `AGENTGRID_RELAY_LISTEN`, or a `0.0.0.0` listen with no
+            `AGENTGRID_RELAY_ADVERTISE`. Set it on that node and let it beat.
+        '503':
+          description: Could not read the node list, or could not mint a token.
   /v1/node/skills-trust:
     get:
       summary: "Node-readable copy of the operator skill trust ledger"

@@ -4,6 +4,39 @@
 
 ### Added
 
+- **Joining a host that cannot reach the control plane — and finding out what a
+  host can reach.** The pull-based join had no way to *ask for* its command and
+  no way to name a relay, so "install through a sibling" was an out-of-band
+  procedure. Three pieces close that:
+  - `POST /v1/nodes/join-command` (`ag nodes add --name X [--via node-a]`)
+    returns the exact line to paste, with a fresh token already in it. `--via`
+    takes a node id or name and the line dials **that node's** relay. Built
+    server-side rather than formatted in the CLI, because only the control plane
+    knows which nodes announced a dialable relay address. An unknown `--via` is
+    a `404`; a known node that announces no relay is a `409` naming both
+    variables. There is no silent fallback to a direct join — the operator asked
+    for a relay *because* the direct path does not work. The token is minted
+    after the relay resolves, so a refusal cannot leave a token spent nowhere.
+  - **Nodes announce their relay** (`AGENTGRID_RELAY_ADVERTISE`, or derived from
+    a concrete listen address) on the heartbeat → `nodes.relay_url` →
+    `NodeView.relay_url` → the `RELAY` column in `ag nodes ls` and a badge in
+    the panel. A `0.0.0.0` listen with no advertise announces **nothing**: it
+    means "every interface on this machine", not an address anyone can dial, and
+    a guessed hostname would be wrong on the *other* machine. Like
+    `egress_proxy`, the address is a claim the control plane cannot verify.
+  - **`agentgrid-node-daemon probe`** answers "what can this host reach" from
+    the host: `--server`, `--relay`, `--gateway`, `--host`, all repeatable,
+    `--json`, exit code 1 on any failure. It needs no credential, no enrollment
+    and no root — it is dispatched before the daemon's root check, because the
+    moment it is most useful is *before* the host is a node. `--relay` is the
+    check with no equivalent elsewhere: it makes the URL carry a request to a
+    control plane and reads back the hop count, so `hops=0` distinguishes a
+    forwarder from a plain proxy that merely listens. The control plane now
+    echoes the count it observed on **every** response
+    (`x-agentgrid-relay-hops`, always written, `0` included), so an absent
+    header means "too old to echo" rather than "zero hops". The probe ignores
+    `HTTP_PROXY`/`HTTPS_PROXY` by default and takes `--proxy` to opt in: a probe
+    that inherited them would measure the proxy's reachability, not the host's.
 - **One-line node join — the pull-based twin of `ag nodes install`.** The push
   path needs ssh *to* the host, so it is exactly wrong where a fleet grows: a
   host behind NAT, a host with no sshd, a host another team owns. This inverts

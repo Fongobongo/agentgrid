@@ -21,7 +21,7 @@ use crate::AppState;
 /// literal rather than shared, because the control plane does not depend on
 /// the forwarder — and a `const` in a crate it never links would be a
 /// dependency added to share one string.
-const RELAY_HOPS_HEADER: &str = "x-agentgrid-relay-hops";
+pub(crate) const RELAY_HOPS_HEADER: &str = "x-agentgrid-relay-hops";
 
 /// Relay hops this request crossed, per the header a relay stamped.
 ///

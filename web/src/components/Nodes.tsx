@@ -128,6 +128,33 @@ export function ReachBadge({
 }
 
 /**
+ * "This node can carry a join."
+ *
+ * The address is the node's own announcement, not something the control plane
+ * checked — a relay exists to be reachable from where the control plane is not,
+ * so the only party who can verify it is a host that dials it (`ag net probe`).
+ * Shown because it is the answer to "which node do I use for a host behind a
+ * firewall": the same list the join modal offers as `--via`.
+ */
+export function RelayBadge({ url }: { url?: string | null }) {
+  if (!url) return null;
+  return (
+    <span
+      className="badge ok"
+      title={
+        `This node relays other nodes' control-plane traffic at ${url}, and announced that ` +
+        'address itself (AGENTGRID_RELAY_LISTEN / AGENTGRID_RELAY_ADVERTISE). A host that ' +
+        'cannot reach this control plane can be joined through it: ag nodes add --via ' +
+        '<this node>. The control plane cannot verify the address — it is reachable from ' +
+        'places this control plane is not, which is the point.'
+      }
+    >
+      relay
+    </span>
+  );
+}
+
+/**
  * Fleet reachability at a glance: what exists, and how much of it is answering.
  *
  * `revoked` is counted separately from `offline` on purpose — one is "we cut it
@@ -600,6 +627,7 @@ export default function Nodes() {
       {installOpen && (
         <InstallNode
           info={prov}
+          nodes={nodes}
           onClose={() => setInstallOpen(false)}
           onInstalled={load}
         />
@@ -637,6 +665,7 @@ export default function Nodes() {
                   )}
                   <AdapterEnvBadge delivery={n.adapter_env_delivery} />
                   <ReachBadge relayHops={n.relay_hops} egressProxy={n.egress_proxy} />
+                  <RelayBadge url={n.relay_url} />
                 </td>
                 <td>{n.adapters.join(', ') || '—'}</td>
                 <td>{n.repositories.join(', ') || '—'}</td>

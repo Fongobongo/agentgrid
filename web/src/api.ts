@@ -72,6 +72,13 @@ export interface NodeView {
   // entry in rotation, so it is not connected directly. A node claim — the
   // control plane cannot see a forward proxy. `null` = never reported.
   egress_proxy?: boolean | null;
+  // This node carries other nodes' traffic, and this is the address they dial
+  // (`AGENTGRID_RELAY_LISTEN` + `AGENTGRID_RELAY_ADVERTISE`). A node claim:
+  // the control plane cannot verify an address whose point is to be reachable
+  // from where it is not. `null` = not a relay, or one with no dialable
+  // address — the two look the same here on purpose, because neither can carry
+  // a join.
+  relay_url?: string | null;
   // Feature "opencode profiles": the opencode profile this node applies.
   opencode_profile_id?: string | null;
 }
@@ -1289,4 +1296,53 @@ export async function createEnrollmentToken(): Promise<EnrollTokenView> {
       `POST /v1/nodes/enrollment-token -> ${r.status}`,
     );
   return r.json();
+}
+
+/** The relay a join command was built through. */
+export interface JoinVia {
+  node_id: string;
+  name: string;
+  relay_url: string;
+}
+
+/**
+ * A ready-to-paste join line, built by the control plane.
+ *
+ * Built server-side rather than assembled here because only the control plane
+ * knows which nodes announced a relay address — `via` is resolved against the
+ * fleet, and the command's `--server` is that address.
+ */
+export interface JoinCommandView {
+  token: string;
+  expires_at: string;
+  command: string;
+  server: string;
+  via?: JoinVia | null;
+}
+
+export interface JoinCommandRequest {
+  name: string;
+  host?: string;
+  via?: string;
+}
+
+/**
+ * Mint a token and build the join line in one step.
+ *
+ * `via` names a node whose relay carries the join, for a host that cannot
+ * reach this control plane. A node that announces no relay address is a 409,
+ * not a silent fallback to a direct join: the operator asked for a relay
+ * *because* the host cannot reach us, so a direct command is a command that
+ * fails where they cannot look.
+ */
+export async function joinCommand(r: JoinCommandRequest): Promise<JoinCommandView> {
+  const res = await req("POST", "/v1/nodes/join-command", r);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(
+      res.status,
+      detail.trim() || `POST /v1/nodes/join-command -> ${res.status}`,
+    );
+  }
+  return res.json();
 }
