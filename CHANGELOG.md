@@ -102,18 +102,54 @@
     a legend, because "no badge" would otherwise be an unexplained blank. A
     fleet line above the table counts reachable/offline/revoked and how many
     nodes are relayed, proxied or unknown.
-  - **What it does not claim:** a standalone `agentgrid-cp-edge` in front of the
-    control plane does not stamp the hop header (`EdgeConfig::max_hops = None`),
-    so `relay_hops: 0` does not prove there is no forwarder in the path.
-- **Hosts that were configured but never enrolled are visible.** The node list
-  is keyed by enrollment, so a host whose install failed — or whose daemon never
-  reached the control plane — had no row anywhere in the UI; the install jobs
-  existed at `GET /v1/node-installs` but nothing rendered them. The Nodes page
-  now lists them with the cross-reference that matters (`succeeded` only means
-  ssh finished): `never enrolled`, or the node's live status with its last
-  heartbeat. The list is in-memory and the UI says so, and a host installed by
-  hand never appears in it — there is no inventory of hosts, only of hosts the
-  control plane provisioned itself.
+  - **Every forwarder stamps, not just relays.** `EdgeConfig::max_hops` used to
+    double as "stamp at all": the standalone `agentgrid-cp-edge` ran with
+    `None`, left the header alone, and every node behind it read as directly
+    connected — the one question the header exists to answer. The limit and the
+    stamp are now separate concerns; an edge reports `1`, so `relay_hops: 0`
+    means "no AgentGrid forwarder in the path" without qualification. An L4
+    balancer or a third-party HTTP proxy is still invisible — at layer 4 there
+    is nothing to stamp with — and that limit is stated where an operator meets
+    it.
+- **Hosts that were configured but never enrolled are visible, and stay
+  visible.** The node list is keyed by enrollment, so a host whose install
+  failed — or whose daemon never reached the control plane — had no row anywhere
+  in the UI; the install jobs existed at `GET /v1/node-installs` but nothing
+  rendered them. The Nodes page now lists them with the cross-reference that
+  matters (`succeeded` only means ssh finished): `never enrolled`, or the node's
+  live status with its last heartbeat.
+  - **Durable.** The jobs were a `HashMap`, so a restart erased the only
+    evidence that anyone had tried. They are a table (`node_installs`) written
+    through on every transition. A row still at `running` after a restart is
+    shown as failed with the reason — the process doing the work is gone — while
+    the stored row keeps the raw state, because on an HA standby it belongs to
+    the leader and "fixing" it would replicate over a live job.
+  - **`issued`, for installs that happen elsewhere.** `ag nodes install` runs ssh
+    from the operator's laptop and the install script runs on the host, so
+    neither ever calls `/v1/node-installs`: the token mint was the only thing the
+    control plane saw. The mint now takes an optional `{host, name}` and records
+    an `issued` row, so a host somebody configured and never got running is a
+    row in the panel instead of a memory. A body that does not parse is ignored
+    rather than refused — the token still gets minted, and nothing in it is
+    trusted for authorization. `ag token create` passes no host and records
+    nothing.
+- **Control-plane peers have a liveness table.** `GET /v1/ha/status` knew the
+  role, term and leader and nothing per peer, and it sits behind the cluster
+  token, so no panel could read it: `ag cluster status` showed one replica's own
+  state, and a peer that had stopped answering was invisible until quorum broke.
+  - `HaStatus.peers` lists every configured peer with `last_ok_unix`, `age_secs`,
+    `applied_seq` and a `state` of `up` / `stale` / `down` / `never`, plus any
+    peer that talked to us without being configured — a stale peer list is a real
+    condition, and hiding it would make the answer lie by omission.
+  - The observations come from the exchanges consensus already makes (the
+    leader's heartbeat fan-out, an inbound heartbeat, a vote request), not from a
+    separate probe: nothing to configure, and no probe that can disagree with the
+    failure detector. `stale` is one miss or no contact for two election
+    timeouts; `down` is repeated failures.
+  - `GET /v1/cluster/status` is the same body for an operator (JWT, read-only),
+    which is what the panel and `ag cluster status` read. It is a view from *one*
+    replica — only the leader fans out to every peer, so a standby shows `never`
+    for the rest, and says so instead of papering over it.
 
 ### Fixed
 

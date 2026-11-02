@@ -194,6 +194,57 @@ fn print_status(out: &Value, json: bool) {
     if let Some(err) = out.get("error").and_then(Value::as_str) {
         println!("error={err}");
     }
+    let peers = out
+        .get("peers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if peers.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "{:<12} {:<8} {:<8} {:<8} {:<8} URL",
+        "PEER", "ROLE", "STATE", "AGE", "SEQ"
+    );
+    for p in &peers {
+        let g = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("-");
+        let seq = p
+            .get("applied_seq")
+            .and_then(Value::as_u64)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{:<12} {:<8} {:<8} {:<8} {:<8} {}",
+            g("id"),
+            g("role"),
+            g("state"),
+            fmt_age(p.get("age_secs").and_then(Value::as_i64)),
+            seq,
+            g("url"),
+        );
+    }
+    // The two things a table cannot say and an operator will otherwise
+    // misread: what the words mean, and whose eyes these are.
+    println!(
+        "\nup = last exchange succeeded; stale = one miss, or no contact for two election \
+         timeouts; down = repeated failures; never = no exchange yet."
+    );
+    println!(
+        "Seen from {} — only the leader probes every peer, so a standby shows `never` for \
+         peers it has not heard from.",
+        s("node_id")
+    );
+}
+
+/// Seconds as an operator reads them. `-` for a peer that has never answered.
+fn fmt_age(secs: Option<i64>) -> String {
+    match secs {
+        None => "-".into(),
+        Some(a) if a < 60 => format!("{a}s"),
+        Some(a) if a < 3600 => format!("{}m", a / 60),
+        Some(a) => format!("{}h", a / 3600),
+    }
 }
 
 fn print_result(out: &Value, json: bool, verb: &str) {
@@ -209,4 +260,22 @@ fn print_result(out: &Value, json: bool, verb: &str) {
         out.get("role").and_then(Value::as_str).unwrap_or("-"),
         out.get("epoch").and_then(Value::as_u64).unwrap_or(0),
     );
+}
+
+#[cfg(test)]
+mod peer_table_tests {
+    use super::fmt_age;
+
+    /// A peer that has never answered must not read as "0s ago", which is what
+    /// `unwrap_or_default` would produce and what an operator would misread as
+    /// a healthy peer.
+    #[test]
+    fn a_peer_that_never_answered_has_no_age() {
+        assert_eq!(fmt_age(None), "-");
+        assert_eq!(fmt_age(Some(0)), "0s");
+        assert_eq!(fmt_age(Some(59)), "59s");
+        assert_eq!(fmt_age(Some(60)), "1m");
+        assert_eq!(fmt_age(Some(3599)), "59m");
+        assert_eq!(fmt_age(Some(3600)), "1h");
+    }
 }

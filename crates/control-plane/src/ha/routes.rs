@@ -93,6 +93,18 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// `GET /v1/cluster/status` — the same body as `/v1/ha/status`, for an
+/// operator.
+///
+/// The peer route is behind the cluster token because peers must not be able to
+/// be impersonated by a user session; but an operator with a JWT can already
+/// create enrollment tokens and read every task, so refusing them the cluster's
+/// own liveness table protected nothing and left `ag cluster status` as the only
+/// view of a peer that stopped answering. Read-only: nothing here mutates.
+pub async fn cluster_status(State(state): State<Arc<AppState>>) -> Response {
+    status(State(state)).await
+}
+
 async fn vote(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VoteRequest>,

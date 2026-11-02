@@ -44,6 +44,11 @@ const KEPT_JOBS: usize = 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
+    /// An enrollment token was minted for this host and nothing else has been
+    /// heard. Every install path mints one — the panel, `ag nodes install` and
+    /// the install script — so this is the only state that can represent a host
+    /// configured from somewhere that is not this control plane.
+    Issued,
     Running,
     Succeeded,
     Failed,
@@ -64,7 +69,7 @@ pub struct InstallJob {
     pub finished_at: Option<String>,
 }
 
-/// In-memory install jobs plus the resolved node binary.
+/// Install jobs: the live view in memory, every transition written through.
 ///
 /// `std::sync::Mutex`, not a tokio one: the install runs on a blocking thread
 /// (it spawns ssh/scp), so it must be able to append a step without a runtime
@@ -73,6 +78,14 @@ pub struct ProvisioningRuntime {
     pub enabled: bool,
     node_binary: Option<PathBuf>,
     jobs: std::sync::Mutex<HashMap<String, InstallJob>>,
+    /// One queue for every transition, drained by a single writer.
+    ///
+    /// Not `tokio::spawn` per write: the steps of one install arrive from a
+    /// blocking thread in order, and a snapshot that commits after a later one
+    /// would leave a finished job reading as `running` — the exact state the
+    /// panel cannot interpret. `None` until [`Self::hydrate`] attaches a store,
+    /// which is also what the tests use.
+    persist: Option<tokio::sync::mpsc::UnboundedSender<InstallJob>>,
 }
 
 impl ProvisioningRuntime {
@@ -87,7 +100,87 @@ impl ProvisioningRuntime {
             enabled,
             node_binary: resolve_node_binary(),
             jobs: std::sync::Mutex::new(HashMap::new()),
+            persist: None,
         }
+    }
+
+    /// Load the recent attempts and start writing transitions through.
+    ///
+    /// A row still marked `running` belongs to a process that is gone — this
+    /// one has just started and has no install thread for it — so it is shown
+    /// as failed with that explanation. It is deliberately **not** rewritten in
+    /// the database: on an HA standby that row belongs to the leader, and a
+    /// replica that "fixed" it would replicate the fix over a job that is still
+    /// running. Leaving the raw state alone keeps the row honest — "we never
+    /// learned the outcome" — while the panel says what an operator needs.
+    pub async fn hydrate(mut self, store: crate::store::Store) -> Self {
+        match store.list_installs(KEPT_JOBS as i64).await {
+            Ok(rows) => {
+                let mut jobs = self.jobs.lock().unwrap();
+                for r in rows {
+                    jobs.insert(r.id.clone(), interrupted_if_running(r));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not load install jobs; the panel starts empty")
+            }
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<InstallJob>();
+        tokio::spawn(async move {
+            while let Some(job) = rx.recv().await {
+                if let Err(e) = store.put_install(&record(&job)).await {
+                    tracing::warn!(job = %job.id, error = %e, "could not persist an install job");
+                }
+            }
+        });
+        self.persist = Some(tx);
+        self
+    }
+
+    /// Queue the current state of one job for the writer.
+    fn save(&self, id: &str) {
+        let Some(tx) = &self.persist else {
+            return;
+        };
+        // Clone under the lock, send outside it: the writer task may be holding
+        // no lock at all, but a send while holding one is still a deadlock
+        // waiting for the first reentrant call.
+        let job = self.jobs.lock().unwrap().get(id).cloned();
+        if let Some(job) = job {
+            let _ = tx.send(job);
+        }
+    }
+
+    /// Record that an enrollment token was minted for a host.
+    ///
+    /// Every install path mints one — the panel, `ag nodes install` from an
+    /// operator's laptop, and the install script — so this is what makes a host
+    /// that was configured *elsewhere* visible here. Nothing will ever finish
+    /// such a row: it stays `issued`, which is the honest description of "a
+    /// token went out and no node came back".
+    ///
+    /// A no-op without a host, so the bare "give me a token" call keeps
+    /// working for anything that just wants to enroll by hand.
+    pub fn record_intent(&self, host: Option<&str>, name: Option<&str>) {
+        let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let name = name
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or("remote-node")
+            .to_string();
+        self.insert(InstallJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            host: host.to_string(),
+            name,
+            state: JobState::Issued,
+            steps: Vec::new(),
+            error: None,
+            server_url: None,
+            started_at: now_iso(),
+            finished_at: None,
+        });
     }
 
     pub fn node_binary(&self) -> Option<&PathBuf> {
@@ -95,41 +188,56 @@ impl ProvisioningRuntime {
     }
 
     fn insert(&self, job: InstallJob) {
-        let mut jobs = self.jobs.lock().unwrap();
-        if jobs.len() >= KEPT_JOBS {
-            // Drop the oldest *finished* job; a running one is never evicted.
-            let victim = jobs
-                .values()
-                .filter(|j| j.state != JobState::Running)
-                .min_by(|a, b| a.started_at.cmp(&b.started_at))
-                .map(|j| j.id.clone());
-            if let Some(id) = victim {
-                jobs.remove(&id);
+        let id = job.id.clone();
+        {
+            let mut jobs = self.jobs.lock().unwrap();
+            if jobs.len() >= KEPT_JOBS {
+                // Drop the oldest *finished* job; a running one is never
+                // evicted. The row stays in the database — this is a cap on
+                // what the panel renders, not on what is known, and the next
+                // start hydrates the same newest [`KEPT_JOBS`] rows.
+                let victim = jobs
+                    .values()
+                    .filter(|j| j.state != JobState::Running)
+                    .min_by(|a, b| a.started_at.cmp(&b.started_at))
+                    .map(|j| j.id.clone());
+                if let Some(id) = victim {
+                    jobs.remove(&id);
+                }
             }
+            jobs.insert(id.clone(), job);
         }
-        jobs.insert(job.id.clone(), job);
+        self.save(&id);
     }
 
     fn push_step(&self, id: &str, message: &str) {
-        if let Some(job) = self.jobs.lock().unwrap().get_mut(id) {
-            job.steps.push(message.to_string());
+        {
+            let mut jobs = self.jobs.lock().unwrap();
+            if let Some(job) = jobs.get_mut(id) {
+                job.steps.push(message.to_string());
+            }
         }
+        self.save(id);
     }
 
     fn finish(&self, id: &str, outcome: Result<String, String>) {
-        if let Some(job) = self.jobs.lock().unwrap().get_mut(id) {
-            job.finished_at = Some(now_iso());
-            match outcome {
-                Ok(server_url) => {
-                    job.state = JobState::Succeeded;
-                    job.server_url = Some(server_url);
-                }
-                Err(e) => {
-                    job.state = JobState::Failed;
-                    job.error = Some(e);
+        {
+            let mut jobs = self.jobs.lock().unwrap();
+            if let Some(job) = jobs.get_mut(id) {
+                job.finished_at = Some(now_iso());
+                match outcome {
+                    Ok(server_url) => {
+                        job.state = JobState::Succeeded;
+                        job.server_url = Some(server_url);
+                    }
+                    Err(e) => {
+                        job.state = JobState::Failed;
+                        job.error = Some(e);
+                    }
                 }
             }
         }
+        self.save(id);
     }
 
     pub fn get(&self, id: &str) -> Option<InstallJob> {
@@ -169,6 +277,65 @@ fn resolve_node_binary() -> Option<PathBuf> {
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+fn state_str(s: JobState) -> &'static str {
+    match s {
+        JobState::Issued => "issued",
+        JobState::Running => "running",
+        JobState::Succeeded => "succeeded",
+        JobState::Failed => "failed",
+    }
+}
+
+fn parse_state(s: &str) -> JobState {
+    match s {
+        "issued" => JobState::Issued,
+        "running" => JobState::Running,
+        "succeeded" => JobState::Succeeded,
+        // Anything unrecognised reads as failed: a job this binary cannot
+        // interpret must not render as in-progress, which is the one state that
+        // implies "wait".
+        _ => JobState::Failed,
+    }
+}
+
+fn record(job: &InstallJob) -> crate::store::InstallRecord {
+    crate::store::InstallRecord {
+        id: job.id.clone(),
+        host: job.host.clone(),
+        name: job.name.clone(),
+        state: state_str(job.state).to_string(),
+        steps: job.steps.clone(),
+        error: job.error.clone(),
+        server_url: job.server_url.clone(),
+        started_at: job.started_at.clone(),
+        finished_at: job.finished_at.clone(),
+    }
+}
+
+/// What the panel should say about a row whose install thread no longer exists.
+const INTERRUPTED: &str = "the control plane restarted while this install was running, so the \
+                            outcome was never reported; check whether the node enrolled";
+
+fn interrupted_if_running(r: crate::store::InstallRecord) -> InstallJob {
+    let mut state = parse_state(&r.state);
+    let mut error = r.error;
+    if state == JobState::Running {
+        state = JobState::Failed;
+        error = Some(INTERRUPTED.to_string());
+    }
+    InstallJob {
+        id: r.id,
+        host: r.host,
+        name: r.name,
+        state,
+        steps: r.steps,
+        error,
+        server_url: r.server_url,
+        started_at: r.started_at,
+        finished_at: r.finished_at,
+    }
 }
 
 /// Body of `POST /v1/node-installs`.
@@ -430,6 +597,7 @@ mod tests {
             enabled: true,
             node_binary: None,
             jobs: std::sync::Mutex::new(HashMap::new()),
+            persist: None,
         }
     }
 
@@ -504,5 +672,111 @@ mod tests {
         rt.insert(job("new", "2026-01-01T00:01:00Z", JobState::Running));
         assert_eq!(rt.list().len(), KEPT_JOBS + 1);
         assert!(rt.get("j0").is_some());
+    }
+
+    /// The reason this table exists: a host that was provisioned and never
+    /// came up has no `nodes` row, so the install attempt is the only record
+    /// that anyone tried. It has to survive the process that ran it.
+    #[tokio::test]
+    async fn a_finished_job_survives_a_restart() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        let rt = ProvisioningRuntime::from_env()
+            .hydrate(state.store.clone())
+            .await;
+
+        rt.insert(job("j2", "2026-01-01T00:00:00Z", JobState::Running));
+        rt.push_step("j2", "ssh ok");
+        rt.finish("j2", Ok("http://cp:8080".into()));
+
+        // The writer is a task of its own; wait for it rather than assuming a
+        // yield is enough on a loaded machine.
+        let row = wait_for_row(&state.store, "j2", "succeeded").await;
+        assert_eq!(row.steps, vec!["ssh ok".to_string()]);
+        assert_eq!(row.server_url.as_deref(), Some("http://cp:8080"));
+        assert!(row.finished_at.is_some());
+
+        // And a fresh runtime sees it without any in-memory help.
+        let restarted = ProvisioningRuntime::from_env()
+            .hydrate(state.store.clone())
+            .await;
+        let back = restarted.get("j2").expect("job hydrated");
+        assert_eq!(back.state, JobState::Succeeded);
+        assert_eq!(back.steps, vec!["ssh ok".to_string()]);
+    }
+
+    /// A row still marked `running` was written by a process that is gone. The
+    /// panel must not show it as in progress — nothing is going to finish it —
+    /// but the database must keep the raw state, because on an HA standby that
+    /// row belongs to the leader and a "fix" would replicate over a live job.
+    #[tokio::test]
+    async fn a_running_row_from_a_dead_process_reads_as_interrupted() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        state
+            .store
+            .put_install(&crate::store::InstallRecord {
+                id: "j3".into(),
+                host: "root@10.0.0.9".into(),
+                name: "ghost".into(),
+                state: "running".into(),
+                steps: vec!["scp ok".into()],
+                error: None,
+                server_url: None,
+                started_at: "2026-01-01T00:00:00Z".into(),
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        let rt = ProvisioningRuntime::from_env()
+            .hydrate(state.store.clone())
+            .await;
+        let shown = rt.get("j3").expect("hydrated");
+        assert_eq!(shown.state, JobState::Failed);
+        assert!(shown.error.unwrap().contains("restarted"));
+        assert_eq!(shown.steps, vec!["scp ok".to_string()]);
+
+        let raw = state.store.get_install("j3").await.unwrap().unwrap();
+        assert_eq!(raw.state, "running", "the row must not be rewritten");
+    }
+
+    /// A row this binary cannot parse must not render as in progress.
+    #[tokio::test]
+    async fn an_unrecognised_state_reads_as_failed() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        state
+            .store
+            .put_install(&crate::store::InstallRecord {
+                id: "j4".into(),
+                host: "root@10.0.0.10".into(),
+                name: "future".into(),
+                state: "paused_for_review".into(),
+                steps: vec![],
+                error: None,
+                server_url: None,
+                started_at: "2026-01-01T00:00:00Z".into(),
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+        let rt = ProvisioningRuntime::from_env()
+            .hydrate(state.store.clone())
+            .await;
+        assert_eq!(rt.get("j4").unwrap().state, JobState::Failed);
+    }
+
+    async fn wait_for_row(
+        store: &crate::store::Store,
+        id: &str,
+        state: &str,
+    ) -> crate::store::InstallRecord {
+        for _ in 0..100 {
+            if let Some(row) = store.get_install(id).await.unwrap() {
+                if row.state == state {
+                    return row;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("install job {id} never reached {state}");
     }
 }

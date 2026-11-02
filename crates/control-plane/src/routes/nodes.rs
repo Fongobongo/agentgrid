@@ -128,10 +128,27 @@ pub async fn list_audit_handler(
     }
 }
 
+/// Optional body of `POST /v1/nodes/enrollment-token`.
+///
+/// A host that was installed from an operator's laptop or from the install
+/// script never touches `/v1/node-installs`, so the control plane used to learn
+/// nothing about it: the token went out and that was the end of it. Naming the
+/// host here turns the mint into a record — an `issued` install row that the
+/// panel can show, and that a restart no longer erases.
+#[derive(serde::Deserialize)]
+pub struct EnrollTokenRequest {
+    /// `user@host` or `user@host:port`, as the installer sees it.
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 pub async fn create_enrollment_token(
     State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
 ) -> Result<Json<EnrollTokenResponse>, StatusCode> {
-    state
+    let out = state
         .store
         .create_enrollment_token()
         .await
@@ -139,7 +156,17 @@ pub async fn create_enrollment_token(
         .map_err(|e| {
             tracing::error!("create_enrollment_token failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
-        })
+        })?;
+    // The body is advisory metadata, parsed by hand rather than extracted: a
+    // token mint that failed because a proxy added a `content-type` header, or
+    // because an older client sent no body at all, would be a worse outcome
+    // than a missing host record. Nothing here is trusted for authorization.
+    if let Ok(req) = serde_json::from_slice::<EnrollTokenRequest>(&body) {
+        state
+            .provisioning
+            .record_intent(req.host.as_deref(), req.name.as_deref());
+    }
+    Ok(out)
 }
 
 /// Mint a one-time **re-key** token for an existing node (admin).

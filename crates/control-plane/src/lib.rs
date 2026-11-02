@@ -296,6 +296,12 @@ impl AppState {
             notify_webhook.clone(),
         );
         let scheduler = services::SchedulerService::new(store.clone(), assignment_notify.clone());
+        // Install attempts outlive the process: they are the only record of a
+        // host that was provisioned and never enrolled, and a restart used to
+        // erase them.
+        let provisioning = routes::provision::ProvisioningRuntime::from_env()
+            .hydrate(store.clone())
+            .await;
         let state = Arc::new(Self {
             store,
             ha,
@@ -318,7 +324,7 @@ impl AppState {
             account_usage: std::sync::Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
-            provisioning: std::sync::Arc::new(routes::provision::ProvisioningRuntime::from_env()),
+            provisioning: std::sync::Arc::new(provisioning),
         });
         // Plan 0.3 2.2: push assignments to connected WS nodes on every
         // scheduler wake. Harmless when no node is connected (tests).
@@ -635,6 +641,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::maintenance::storage_gc_handler),
         )
         .route("/v1/nodes", get(routes::nodes::list_nodes))
+        // The peer RPC surface (`/v1/ha/…`) needs the cluster token, which a
+        // panel does not have. This is the same status for an operator: read
+        // only, JWT-authenticated, and the only way to see peer liveness
+        // without an ssh session.
+        .route("/v1/cluster/status", get(ha::routes::cluster_status))
         .route(
             "/v1/nodes/enrollment-token",
             post(routes::nodes::create_enrollment_token),

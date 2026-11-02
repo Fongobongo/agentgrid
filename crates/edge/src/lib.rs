@@ -80,16 +80,17 @@ pub struct EdgeConfig {
     /// operator's network policy, and wrong for a node-hosted relay — the
     /// daemon warns when it starts one without a list.
     pub allowed_sources: Vec<Cidr>,
-    /// Maximum number of relays a request may pass through, or `None` to leave
-    /// the hop header alone.
+    /// Maximum number of relays a request may pass through, or `None` for no
+    /// limit.
     ///
-    /// `None` keeps the standalone edge exactly as it was: it forwards to the
-    /// control plane, which ignores the header, so counting would only add a
-    /// header nothing reads. A node relay is different — relays can be chained
-    /// (C → B → A → control plane) and the chain is a loop the moment two
-    /// operators point their relays at each other. With a limit set, the
-    /// forwarder stamps `incoming + 1` on every request and answers `508` when
-    /// the count has reached it.
+    /// The forwarder stamps `incoming + 1` on every request either way; the
+    /// limit only decides when to answer `508`. The two are separate on
+    /// purpose: a node relay is one hop in a chain that can loop (C → B → A →
+    /// control plane, with two operators pointing their relays at each other),
+    /// so it needs a limit, and the standalone edge in front of a control plane
+    /// is the first hop and needs none. Both need to be *visible* — the control
+    /// plane reads the count to answer "is this node connected directly?", and
+    /// an edge that stayed silent would make its nodes look direct.
     pub max_hops: Option<u32>,
 }
 
@@ -290,6 +291,17 @@ pub async fn serve(edge: Arc<Edge>, listener: tokio::net::TcpListener) -> anyhow
     Ok(())
 }
 
+/// The count already on the request, or 0.
+///
+/// Nonsense reads as 0 rather than as an error: a client can send anything in
+/// this header, and a hand-edited value must not be able to take a request out
+/// of the chain.
+fn seen_hops(header: Option<&str>) -> u32 {
+    header
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 /// How many relays a request will have crossed once this one is done.
 ///
 /// `Err` carries the count that was already on the request, which is what the
@@ -297,7 +309,7 @@ pub async fn serve(edge: Arc<Edge>, listener: tokio::net::TcpListener) -> anyhow
 /// the arithmetic — the part that can be wrong in a way no `curl` reveals — is
 /// testable without a router.
 fn next_hop(seen: Option<&str>, max: u32) -> Result<u32, u32> {
-    let seen = seen.and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
+    let seen = seen_hops(seen);
     if seen >= max {
         return Err(seen);
     }
@@ -331,51 +343,55 @@ async fn guard_sources(
 /// direct case (a relay whose upstream is itself); the chain case needs a
 /// value that travels *with the request*, which is what the header is.
 ///
-/// `max_hops = None` leaves the request untouched — the standalone edge in
-/// front of a control plane has nothing to count, and changing what it sends
-/// upstream for no reason is how a proxy starts breaking servers.
+/// **Every forwarder stamps, with or without `max_hops`.** The two jobs are
+/// separate: the limit cuts loops, the stamp makes the hop visible. An edge
+/// that leaves the header alone because it has nothing to count is
+/// indistinguishable, from the control plane's side, from a node on the same
+/// switch — and "is this node connected directly?" is a question operators
+/// ask about the edge as often as about a relay. So a standalone edge in front
+/// of a control plane reports `1`, and `0` upstream means what it says: no
+/// AgentGrid forwarder in the path.
 async fn guard_hops(State(state): State<Arc<Edge>>, mut req: Request, next: Next) -> Response {
-    let Some(max) = state.max_hops else {
-        return next.run(req).await;
-    };
     let seen_header = req
         .headers()
         .get(HOPS_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    match next_hop(seen_header.as_deref(), max) {
-        Ok(next_hop) => {
-            // Replaces whatever the client sent, so the value upstream sees is
-            // ours and cannot be reset to 0 by the next hop's peer.
-            if let Ok(value) = axum::http::HeaderValue::from_str(&next_hop.to_string()) {
-                req.headers_mut()
-                    .insert(HeaderName::from_static(HOPS_HEADER), value);
+    let next_hop = match state.max_hops {
+        Some(max) => match next_hop(seen_header.as_deref(), max) {
+            Ok(n) => n,
+            Err(seen) => {
+                state
+                    .metrics
+                    .loop_detected_total
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    hops = seen,
+                    max,
+                    path = %req.uri().path(),
+                    "forwarder refused a request that already crossed every allowed relay \
+                     — the chain of relays is a loop"
+                );
+                return (
+                    StatusCode::LOOP_DETECTED,
+                    format!(
+                        "relay loop: this request already crossed {seen} relay(s) and the limit \
+                         is {max} ({HOPS_HEADER}); check that no relay forwards to another relay \
+                         that forwards back to it"
+                    ),
+                )
+                    .into_response();
             }
-            next.run(req).await
-        }
-        Err(seen) => {
-            state
-                .metrics
-                .loop_detected_total
-                .fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                hops = seen,
-                max,
-                path = %req.uri().path(),
-                "forwarder refused a request that already crossed every allowed relay \
-                 — the chain of relays is a loop"
-            );
-            (
-                StatusCode::LOOP_DETECTED,
-                format!(
-                    "relay loop: this request already crossed {seen} relay(s) and the limit is \
-                     {max} ({HOPS_HEADER}); check that no relay forwards to another relay that \
-                     forwards back to it"
-                ),
-            )
-                .into_response()
-        }
+        },
+        None => seen_hops(seen_header.as_deref()).saturating_add(1),
+    };
+    // Replaces whatever the client sent, so the value upstream sees is ours and
+    // cannot be reset to 0 by the next hop's peer.
+    if let Ok(value) = axum::http::HeaderValue::from_str(&next_hop.to_string()) {
+        req.headers_mut()
+            .insert(HeaderName::from_static(HOPS_HEADER), value);
     }
+    next.run(req).await
 }
 
 async fn ready(State(edge): State<Arc<Edge>>) -> Response {
@@ -1050,10 +1066,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_limit_the_header_is_left_exactly_as_sent() {
-        // The standalone edge in front of a control plane: nothing to count,
-        // and a forwarder that rewrites headers for no reason is how a proxy
-        // starts breaking the server behind it.
+    async fn without_a_limit_the_forwarder_still_stamps_its_own_hop() {
+        // The standalone edge in front of a control plane: nothing to refuse,
+        // but the hop still has to be visible. Leaving the header alone made
+        // every node behind an edge look directly connected, which is the one
+        // question this header exists to answer.
         let (upstream, _hits) = start_hop_echo_upstream().await;
         let base = start_forwarder(fixed_edge_with_hops(&upstream, None)).await;
 
@@ -1066,7 +1083,7 @@ mod tests {
             .text()
             .await
             .expect("body");
-        assert_eq!(body, "7", "no limit configured = no rewriting");
+        assert_eq!(body, "8", "an edge in the path is a hop, limit or not");
 
         let body = local_http()
             .get(format!("{base}/v1/tasks"))
@@ -1076,7 +1093,39 @@ mod tests {
             .text()
             .await
             .expect("body");
-        assert_eq!(body, "-", "and no header is invented");
+        assert_eq!(body, "1", "a request with no header enters the chain at 1");
+
+        // Nonsense is not a way to skip being counted.
+        let body = local_http()
+            .get(format!("{base}/v1/tasks"))
+            .header(HOPS_HEADER, "many")
+            .send()
+            .await
+            .expect("request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "1");
+    }
+
+    #[tokio::test]
+    async fn a_chained_edge_counts_on_top_of_the_relay_before_it() {
+        // Node → relay (limit 3) → edge (no limit) → control plane. The control
+        // plane must see 2, not 1: a limit on one hop says nothing about the
+        // hops after it.
+        let (upstream, _hits) = start_hop_echo_upstream().await;
+        let inner = start_forwarder(fixed_edge_with_hops(&upstream, None)).await;
+        let outer = start_forwarder(fixed_edge_with_hops(&inner, Some(3))).await;
+
+        let body = local_http()
+            .get(format!("{outer}/v1/tasks"))
+            .send()
+            .await
+            .expect("request")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "2");
     }
 
     #[tokio::test]
@@ -1172,8 +1221,20 @@ mod tests {
 
         let resp = proxy(State(e.clone()), get_request("/v1/tasks")).await;
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(e.metrics.upstream_timeouts_total.load(Ordering::Relaxed), 2);
+        // Exactly one request failed, and it retried once first — those are
+        // properties of the forwarder.
         assert_eq!(e.metrics.upstream_errors_total.load(Ordering::Relaxed), 1);
+        assert_eq!(e.metrics.retries_total.load(Ordering::Relaxed), 1);
+        // How the two attempts failed is *not* a property: the upstream holds
+        // the socket open, but whether the client sees the deadline or a reset
+        // first depends on the OS and on whether the connection was reused from
+        // leader discovery. Asserting `timeouts == 2` made this test fail about
+        // one run in three on Windows while the behaviour was correct.
+        let timeouts = e.metrics.upstream_timeouts_total.load(Ordering::Relaxed);
+        assert!(
+            timeouts <= 2,
+            "two attempts cannot produce {timeouts} timeouts"
+        );
     }
 
     #[tokio::test]

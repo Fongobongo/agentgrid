@@ -333,9 +333,13 @@ async fn cmd_node_install(client: &reqwest::Client, base: &str, a: NodeInstallAr
     // The binary path is resolved here, not in the shared crate: the control
     // plane resolves its copy from its own distribution directory instead.
     let binary = resolve_node_binary(a.binary.as_deref())?;
-    let token = create_enrollment_token(client, base).await?;
     let target = a.target();
     let plan = a.plan(binary);
+    // Name the host at mint time: this install runs from here, not from the
+    // control plane, so the token is the only thing the CP will ever hear about
+    // it. Without this, a host that was installed and never came up had no
+    // record anywhere.
+    let token = create_enrollment_token(client, base, Some(&target.host), Some(&plan.name)).await?;
     let mut say = |m: &str| println!("   {m}");
     let outcome = agentgrid_provision::install(&target, &plan, &token, &mut say)?;
     println!(

@@ -98,3 +98,38 @@ async fn install_list_is_empty_and_not_an_error() {
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(jobs, serde_json::json!([]));
 }
+
+/// `GET /v1/cluster/status` is the operator's way to the peer table: the peer
+/// RPC route is behind the cluster token, which no panel has. Single mode has
+/// no peers, and the route must not leak the cluster's state to an
+/// unauthenticated caller.
+#[tokio::test]
+async fn cluster_status_is_operator_readable_and_empty_in_single_mode() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/cluster/status", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(v["role"], serde_json::json!("single"));
+    assert_eq!(v["peers"], serde_json::json!([]));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/v1/cluster/status")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

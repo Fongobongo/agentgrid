@@ -1,5 +1,5 @@
 import { useEffect, useState, Fragment } from 'react';
-import { drainNode, getJson, getOpencodeAudit, getProvisioning, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, ProvisioningInfo, listOpencodeProfiles, postJson, revokeNode, listInstallJobs, InstallJob } from '../api';
+import { drainNode, getJson, getOpencodeAudit, getProvisioning, listNodes, NodeView, OpencodeAuditEntry, OpencodeProfile, ProvisioningInfo, listOpencodeProfiles, postJson, revokeNode, listInstallJobs, InstallJob, InstallState, getClusterStatus, ClusterStatus, ClusterPeer } from '../api';
 import InstallNode from './InstallNode';
 import { ConfirmModal } from './Modal';
 import { ErrorBox, Loading, StatusBadge, TimeAgo, fmtTime, useLiveRefresh } from './util';
@@ -197,6 +197,109 @@ export function FleetSummary({ nodes }: { nodes: NodeView[] }) {
  * `succeeded` only means ssh finished, and the question an operator has is
  * whether the daemon is now talking to us.
  */
+export function installBadgeClass(state: InstallState): string {
+  switch (state) {
+    case 'failed':
+      return 'badge err';
+    case 'issued':
+      return 'badge warn';
+    case 'succeeded':
+      return 'badge ok';
+    default:
+      return 'badge';
+  }
+}
+
+/**
+ * `issued` is not a failure and must not be read as one: it is the state of a
+ * host whose install never reported back, which is exactly the case this table
+ * exists to surface.
+ */
+export function installBadgeTitle(state: InstallState): string | undefined {
+  if (state === 'issued') {
+    return 'An enrollment token was minted for this host and nothing has enrolled since — the install has not run yet, or it stopped before the daemon started';
+  }
+  return undefined;
+}
+
+export function peerBadgeClass(state: ClusterPeer['state']): string {
+  switch (state) {
+    case 'up':
+      return 'badge ok';
+    case 'stale':
+      return 'badge warn';
+    case 'down':
+      return 'badge err';
+    default:
+      // `never` is normal on a standby: nothing there probes anyone. Painting
+      // it red would make a healthy cluster look broken.
+      return 'badge';
+  }
+}
+
+/** Seconds as a person reads them; `never` when there has been no contact. */
+export function peerAgeLabel(secs: number | null): string {
+  if (secs === null) return 'never';
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  return `${Math.floor(secs / 3600)}h ago`;
+}
+
+/**
+ * HA peers, as seen from the replica serving this page.
+ *
+ * The view is deliberately local: only the leader fans out to every peer, so a
+ * standby legitimately knows about one. Rendering a cluster-wide picture from
+ * here would be an invention; saying "seen from X" is not.
+ */
+export function ClusterPeers({ status }: { status: ClusterStatus | null }) {
+  if (!status || status.peers.length === 0) return null;
+  return (
+    <section>
+      <h3>Control-plane peers</h3>
+      <p className="muted">
+        This replica is <strong>{status.role}</strong> in term {status.term}
+        {status.leader_id ? (
+          <>
+            {' '}· leader <code>{status.leader_id}</code>
+          </>
+        ) : null}
+        . Liveness comes from the consensus exchanges the protocol already runs, not from a
+        separate probe — so these are the peers <em>this</em> replica has actually talked to. A
+        peer that has never answered is still listed: unreachable and nonexistent are different
+        problems.
+      </p>
+      <table className="grid">
+        <thead>
+          <tr>
+            <th>Peer</th>
+            <th>Role</th>
+            <th>State</th>
+            <th>Last seen</th>
+            <th>Applied seq</th>
+          </tr>
+        </thead>
+        <tbody>
+          {status.peers.map((p) => (
+            <tr key={p.id}>
+              <td>
+                <code>{p.id}</code>
+                {p.url ? <span className="muted"> {p.url}</span> : null}
+              </td>
+              <td>{p.role}</td>
+              <td>
+                <span className={peerBadgeClass(p.state)}>{p.state}</span>
+              </td>
+              <td>{peerAgeLabel(p.age_secs)}</td>
+              <td>{p.applied_seq ?? '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
 export function InstallAttempts({ jobs, nodes }: { jobs: InstallJob[]; nodes: NodeView[] }) {
   if (jobs.length === 0) return null;
   const enrolled = (name: string) => nodes.find((n) => n.name === name);
@@ -204,10 +307,11 @@ export function InstallAttempts({ jobs, nodes }: { jobs: InstallJob[]; nodes: No
     <section>
       <h3>Install attempts</h3>
       <p className="muted">
-        Hosts this control plane provisioned over ssh. In memory only — a control plane restart
-        forgets them, and a host installed by hand (<code>ag nodes install</code> or the install
-        script) never appears here. A host with no node row below was configured but is not
-        available.
+        Every host this control plane has seen an install for. Stored, so a restart does not forget
+        them. <code>issued</code> means only that an enrollment token went out — the install ran
+        somewhere else (an operator&apos;s laptop, a shell script) and nothing has been heard since;
+        those rows are how a host that was configured and never came up stays visible. A host with
+        no node row below is configured but not available.
       </p>
       <table className="grid">
         <thead>
@@ -228,7 +332,9 @@ export function InstallAttempts({ jobs, nodes }: { jobs: InstallJob[]; nodes: No
                 <td><code>{j.host}</code></td>
                 <td>{j.name}</td>
                 <td>
-                  <span className={j.state === 'failed' ? 'badge err' : 'badge'}>{j.state}</span>
+                  <span className={installBadgeClass(j.state)} title={installBadgeTitle(j.state)}>
+                    {j.state}
+                  </span>
                 </td>
                 <td>
                   {node ? (
@@ -280,11 +386,14 @@ export default function Nodes() {
   const [installOpen, setInstallOpen] = useState(false);
   const [prov, setProv] = useState<ProvisioningInfo | null>(null);
   const [usageRows, setUsageRows] = useState<AccountUsage[] | null>(null);
-  // Hosts this control plane was asked to turn into nodes. Unlike the node
-  // list this is **not** durable: the jobs live in the control plane's memory,
-  // so a restart forgets them. It is still the only evidence a host exists
-  // before it enrolls, which is why it is rendered rather than hidden.
+  // Hosts this control plane has seen an install for. Durable since 0.8.2: a
+  // restart used to forget them, which erased the only evidence that a host had
+  // been configured at all. `issued` rows come from a token mint that named a
+  // host — an install that ran somewhere else and never reported back.
   const [installs, setInstalls] = useState<InstallJob[]>([]);
+  // HA only: what this replica knows about its peers. `null` in single mode or
+  // on an older control plane, in which case the section renders nothing.
+  const [cluster, setCluster] = useState<ClusterStatus | null>(null);
 
   const load = () => {
     listNodes()
@@ -295,6 +404,7 @@ export default function Nodes() {
       .catch(setError);
     listOpencodeProfiles().then(setProfiles).catch(() => undefined);
     listInstallJobs().then(setInstalls).catch(() => undefined);
+    getClusterStatus().then(setCluster).catch(() => undefined);
     if (auditNode) {
       getOpencodeAudit(auditNode)
         .then((rows) => setAuditRows({ nodeId: auditNode, rows }))
@@ -610,6 +720,7 @@ export default function Nodes() {
           ))}
         </tbody>
       </table>
+      <ClusterPeers status={cluster} />
       <InstallAttempts jobs={installs} nodes={nodes} />
       {confirming && (
         <ConfirmModal

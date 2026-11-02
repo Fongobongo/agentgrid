@@ -37,6 +37,8 @@ mod maintenance;
 // streaming-artifact handle the download handlers consume.
 pub use artifacts::compress_if_worthwhile_pub;
 pub use artifacts::{ArtifactBlob, OpenArtifact};
+mod installs;
+pub use installs::InstallRecord;
 mod nodes;
 pub(crate) mod opencode_profiles;
 mod profiles;

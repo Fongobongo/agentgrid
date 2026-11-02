@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { AdapterEnvBadge, FleetSummary, InstallAttempts, ReachBadge } from './components/Nodes';
-import type { InstallJob, NodeView } from './api';
+import { AdapterEnvBadge, ClusterPeers, FleetSummary, InstallAttempts, ReachBadge } from './components/Nodes';
+import type { ClusterPeer, ClusterStatus, InstallJob, NodeView } from './api';
 
 // ADR 0029 observability. The badge is the only place an operator can see
 // whether a node's adapter credentials are still readable inside the sandbox —
@@ -225,5 +225,113 @@ describe('InstallAttempts', () => {
     );
     expect(html).toContain('badge err');
     expect(html).toContain('ssh: connect to host');
+  });
+});
+
+/**
+ * `issued` is the state a host is in when an enrollment token went out and
+ * nothing came back — the case the table exists for. It must not read as a
+ * failure (the install may still be running elsewhere) and must not read as
+ * success.
+ */
+describe('InstallAttempts — issued', () => {
+  it('marks a token-only row as a warning and still says never enrolled', () => {
+    const html = renderToStaticMarkup(
+      <InstallAttempts jobs={[job({ name: 'edge-1', state: 'issued' })]} nodes={[]} />,
+    );
+    expect(html).toContain('badge warn');
+    expect(html).not.toContain('badge err');
+    expect(html).toContain('never enrolled');
+    expect(html).toContain('An enrollment token was minted');
+  });
+
+  it('stops claiming the list is memory-only', () => {
+    // The old copy said a restart forgets these; that is no longer true and a
+    // stale warning is worse than none.
+    const html = renderToStaticMarkup(
+      <InstallAttempts jobs={[job({ name: 'edge-1', state: 'issued' })]} nodes={[]} />,
+    );
+    expect(html).not.toContain('In memory only');
+    expect(html).toContain('Stored');
+  });
+});
+
+/**
+ * HA peers. The point of the section is that a peer nobody can reach is still
+ * on the page, and that the page admits whose view it is — only the leader
+ * probes everyone.
+ */
+function peer(over: Partial<ClusterPeer>): ClusterPeer {
+  return {
+    id: 'cp-b',
+    url: 'http://cp-b:7800',
+    role: 'data',
+    last_ok_unix: null,
+    age_secs: null,
+    state: 'never',
+    applied_seq: null,
+    consecutive_failures: 0,
+    ...over,
+  };
+}
+
+function cluster(over: Partial<ClusterStatus>): ClusterStatus {
+  return {
+    node_id: 'cp-a',
+    cluster_id: 'prod',
+    role: 'leader',
+    term: 3,
+    epoch: 1,
+    leader_id: 'cp-a',
+    leader_url: 'http://cp-a:7800',
+    applied_seq: 10,
+    peers: [],
+    ...over,
+  };
+}
+
+describe('ClusterPeers', () => {
+  it('renders nothing in single mode, where there are no peers', () => {
+    expect(renderToStaticMarkup(<ClusterPeers status={null} />)).toBe('');
+    expect(renderToStaticMarkup(<ClusterPeers status={cluster({})} />)).toBe('');
+  });
+
+  it('lists a peer that has never answered instead of hiding it', () => {
+    const html = renderToStaticMarkup(
+      <ClusterPeers status={cluster({ peers: [peer({})] })} />,
+    );
+    expect(html).toContain('cp-b');
+    expect(html).toContain('never');
+    expect(html).not.toContain('badge err');
+  });
+
+  it('separates stale from down, and says how old the contact is', () => {
+    const html = renderToStaticMarkup(
+      <ClusterPeers
+        status={cluster({
+          peers: [
+            peer({ id: 'cp-b', state: 'stale', age_secs: 90, last_ok_unix: 1 }),
+            peer({ id: 'cp-c', state: 'down', age_secs: 7200, consecutive_failures: 4 }),
+            peer({ id: 'cp-d', state: 'up', age_secs: 2, applied_seq: 41 }),
+          ],
+        })}
+      />,
+    );
+    expect(html).toContain('badge warn');
+    expect(html).toContain('badge err');
+    expect(html).toContain('1m ago');
+    expect(html).toContain('2h ago');
+    expect(html).toContain('41');
+  });
+
+  it('says whose view this is', () => {
+    // A standby showing `never` for a peer it has not heard from is correct;
+    // without this line it reads as a broken cluster.
+    const html = renderToStaticMarkup(
+      <ClusterPeers status={cluster({ role: 'standby', peers: [peer({})] })} />,
+    );
+    expect(html).toContain('standby');
+    expect(html).toContain('this');
+    expect(html).toContain('already runs');
   });
 });

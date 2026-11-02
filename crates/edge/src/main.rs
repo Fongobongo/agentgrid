@@ -70,9 +70,10 @@ async fn main() -> anyhow::Result<()> {
         upstream_timeout: Duration::from_secs(args.upstream_timeout_secs.max(1)),
         allowed_sources,
         // The standalone edge is the *first* hop in front of a control plane,
-        // never a hop in a chain of relays, so there is nothing to count and
-        // nothing to refuse. Leaving it at `None` keeps its upstream requests
-        // byte-identical to before the hop counter existed.
+        // never a hop in a chain of relays, so there is nothing to refuse and
+        // no loop to cut. It still stamps the hop count: the control plane
+        // reads it to answer "is this node connected directly?", and an edge
+        // that stayed silent made every node behind it look direct.
         max_hops: None,
     })?;
     let listen: std::net::SocketAddr = args.listen.parse()?;

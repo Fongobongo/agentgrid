@@ -85,6 +85,37 @@ pub struct HaStatus {
     /// SHA-256 of the shared JWT secret, when this host has one configured.
     pub jwt_fingerprint: Option<String>,
     pub error: Option<String>,
+    /// Every configured peer, plus anything this node has heard from that is
+    /// not configured, as **this** node currently sees it.
+    ///
+    /// Empty in single mode. The list is a view from one replica: only the
+    /// leader fans out to every peer, so on a standby most entries read
+    /// `never` — that is the truth, not a gap to be papered over.
+    #[serde(default)]
+    pub peers: Vec<PeerStatus>,
+}
+
+/// One peer, as seen from the replica answering the request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerStatus {
+    pub id: String,
+    pub url: String,
+    /// `data` or `witness`, from this node's configuration. A peer that was
+    /// never configured is reported as `unknown` — it is only known because it
+    /// talked to us.
+    pub role: String,
+    /// Unix seconds of the last successful exchange, or `None` if there has
+    /// never been one.
+    pub last_ok_unix: Option<i64>,
+    /// Seconds since that success.
+    pub age_secs: Option<i64>,
+    /// `up` (the last attempt succeeded), `stale` (one miss, or no contact for
+    /// two election timeouts), `down` (repeated failures) or `never`.
+    pub state: String,
+    /// The peer's last reported applied replication sequence.
+    pub applied_seq: Option<u64>,
+    /// Consecutive failed attempts.
+    pub consecutive_failures: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

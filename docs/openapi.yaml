@@ -568,24 +568,52 @@ paths:
         Absent means the node has never reported (older binary, or no heartbeat
         since upgrading), which is **not** the same claim as `plain: 0`.
 
-        Reachability (ADR 0026 + ADR 0012): `relay_hops` is how many relays the
-        last heartbeat crossed before it arrived — `0` when none did — and
+        Reachability (ADR 0026 + ADR 0012): `relay_hops` is how many forwarders
+        the last heartbeat crossed before it arrived — `0` when none did — and
         `egress_proxy` says the node dials through its egress proxy pool. The
         two are sourced differently on purpose. `relay_hops` is **observed** by
-        the control plane from the `x-agentgrid-relay-hops` header that every
-        relay replaces with its own count, so a node cannot claim fewer hops
-        than it used; `egress_proxy` is **claimed** by the node, because a
-        forward proxy is invisible to the receiver. Both are `null` until a
-        heartbeat carries them (no heartbeat since the columns existed), and
-        `null` is not "direct" — a standalone `agentgrid-cp-edge` in front of
-        the control plane does not stamp the hop header, so `relay_hops: 0`
-        does not prove there is no forwarder in the path.
+        the control plane from the `x-agentgrid-relay-hops` header, which every
+        relay and every `agentgrid-cp-edge` replaces with its own count, so a
+        node cannot claim fewer hops than it used; `egress_proxy` is **claimed**
+        by the node, because a forward proxy is invisible to the receiver. Both
+        are `null` until a heartbeat carries them (no heartbeat since the
+        columns existed).
+
+        `relay_hops: 0` therefore means "no AgentGrid forwarder in the path".
+        It does not rule out an L4 balancer or a generic HTTP proxy: those do
+        not stamp, and at layer 4 there is nothing to stamp with.
 
         The list is every enrolled node in every state — `offline`, `degraded`,
         `revoked` included. A node is flipped to `offline` after 30 s without a
         heartbeat. A host that was configured but never enrolled has no row
-        here at all; `GET /v1/node-installs` is the only record of one, and it
-        is in-memory.
+        here; `GET /v1/node-installs` is the record of those, and it is stored.
+  /v1/cluster/status:
+    get:
+      summary: This replica's HA role, term and per-peer liveness
+      description: |
+        The same body as the peer RPC `GET /v1/ha/status`, for an operator. That
+        route is behind the cluster token because a peer must not be
+        impersonable by a user session — which also meant no panel could read
+        it, leaving `ag cluster status` as the only view of a peer that stopped
+        answering. Read-only.
+
+        `peers` is the view from **this** replica. Configuration is the skeleton
+        — a peer that has never answered is still listed, because unreachable
+        and nonexistent are different problems — and observations fill it in
+        from the exchanges the consensus protocol already makes (the leader's
+        heartbeat fan-out, an inbound heartbeat, a vote request). Only the
+        leader fans out to everyone, so on a standby most peers read `never`:
+        that is the truth from there, not a gap.
+
+        `state` is `up` (the last exchange succeeded), `stale` (one miss, or no
+        contact for two election timeouts), `down` (repeated failures) or
+        `never`. `applied_seq` is the peer's last reported replication position
+        and survives failures — a peer that stopped answering is behind by at
+        least that much. `peers` is empty in single mode.
+      responses:
+        '200':
+          description: '`{node_id, role, term, epoch, leader_id, applied_seq, peers[]}`.'
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/nodes/{id}:
     parameters:
       - name: id
@@ -771,6 +799,31 @@ paths:
   /v1/nodes/enrollment-token:
     post:
       summary: Mint a one-time node enrollment token (admin)
+      description: |
+        The token is spent by `POST /v1/node/enroll`. The body is optional and
+        advisory: `{host, name}` records an `issued` row in
+        `GET /v1/node-installs`, which is how a host installed from an
+        operator's laptop — where the install itself never reaches this control
+        plane — stays visible. A body that does not parse is ignored rather than
+        refused: the token still gets minted.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host:
+                  type: string
+                  description: '`user@host` or `user@host:port`, as the installer sees it.'
+                name:
+                  type: string
+                  description: Node name the install will use.
+      responses:
+        '200':
+          description: '`{ token, expires_at }` — one use, 10 minutes.'
+        '401':
+          description: Not authenticated.
   /v1/nodes/{id}/rekey-token:
     parameters:
       - name: id
@@ -816,6 +869,19 @@ paths:
   /v1/node-installs:
     get:
       summary: Recent node-install jobs, newest first
+      description: |
+        Every host this control plane has seen an install for. Stored in
+        `node_installs`, so a restart no longer erases them — that list was the
+        only evidence a host had been configured at all, since `nodes` is keyed
+        by enrollment.
+
+        `state` is `issued`, `running`, `succeeded` or `failed`. `issued` means
+        an enrollment token was minted for the host and nothing has been heard
+        since: the install ran somewhere else (`ag nodes install` from an
+        operator's laptop, the install script) and never reported back. A row
+        still at `running` after a restart is shown as `failed` with the reason
+        — the process that was doing the work is gone — but the stored row keeps
+        the raw state, because on an HA standby it belongs to the leader.
       responses:
         '200':
           description: Jobs with their steps and terminal state.

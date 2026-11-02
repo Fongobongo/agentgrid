@@ -115,6 +115,11 @@ pub async fn handle_vote(
     // A candidate in the current term is alive: give it a full election
     // timeout to win and send heartbeats before this node campaigns too.
     rt.shared.touch_leader();
+    // Same fact for the status page: a replica that campaigns is up, and its
+    // `applied_seq` is the one thing that says whether it would be a safe
+    // leader.
+    rt.shared
+        .observe_peer(&req.candidate_id, true, Some(req.applied_seq));
     if applied_seq > req.applied_seq {
         tracing::info!(
             candidate = %req.candidate_id,
@@ -254,6 +259,9 @@ pub async fn handle_heartbeat(
     }
     rt.shared.set_leader(&req.leader_id, &req.leader_url);
     rt.shared.touch_leader();
+    // A follower's view of its leader. The leader itself never appears in this
+    // list on the leader's own status page — that is what `leader_id` is for.
+    rt.shared.observe_peer(&req.leader_id, true, None);
     HeartbeatResponse {
         term: current,
         ok: true,
@@ -719,6 +727,14 @@ async fn leader_loop(state: Arc<AppState>) {
                 _ = &mut deadline => break,
                 next = pending.next() => {
                     let Some((is_data, id, result)) = next else { break };
+                    // Per-peer liveness, recorded from the exchange the leader
+                    // already makes. `applied_seq` comes back in the response,
+                    // so this is also where "how far behind is that replica"
+                    // is observed rather than guessed.
+                    match &result {
+                        Ok(resp) => rt.shared.observe_peer(&id, resp.ok, Some(resp.applied_seq)),
+                        Err(_) => rt.shared.observe_peer(&id, false, None),
+                    }
                     match result {
                         Ok(resp) => {
                             if resp.term > rt.shared.term() {
@@ -922,7 +938,89 @@ pub async fn status_of(rt: &HaRuntime, store: Option<&Store>) -> Result<super::p
         witnesses: rt.config.witnesses_count,
         jwt_fingerprint: rt.jwt_fingerprint(),
         error: rt.shared.last_error(),
+        peers: peer_status(rt),
     })
+}
+
+/// The peer list for [`super::protocol::HaStatus`].
+///
+/// Configuration is the skeleton — a peer that is down must still be listed,
+/// because "we cannot reach it" and "it does not exist" are different problems
+/// and only one of them is fixable by restarting something. Observations fill
+/// in the rest, and anything that talked to us without being configured is
+/// appended: a stale peer list is a real condition, and hiding it would make
+/// the answer lie by omission.
+fn peer_status(rt: &HaRuntime) -> Vec<super::protocol::PeerStatus> {
+    let seen = rt.shared.peers_seen();
+    let now = chrono::Utc::now().timestamp();
+    let timeout = rt.config.election_timeout.as_secs().max(1) as i64;
+
+    let mut out: Vec<super::protocol::PeerStatus> = Vec::new();
+    let configured: Vec<(&str, &super::config::HaPeer)> = rt
+        .config
+        .peers
+        .iter()
+        .map(|p| ("data", p))
+        .chain(rt.config.witnesses.iter().map(|p| ("witness", p)))
+        .collect();
+    for (role, p) in &configured {
+        let obs = seen.get(&p.id);
+        let (state, age) = peer_state(obs, timeout, now);
+        out.push(super::protocol::PeerStatus {
+            id: p.id.clone(),
+            url: p.url.clone(),
+            role: role.to_string(),
+            last_ok_unix: obs.and_then(|o| o.last_ok_unix),
+            age_secs: age,
+            state: state.to_string(),
+            applied_seq: obs.and_then(|o| o.applied_seq),
+            consecutive_failures: obs.map(|o| o.consecutive_failures).unwrap_or(0),
+        });
+    }
+    for (id, obs) in &seen {
+        if configured.iter().any(|(_, p)| &p.id == id) {
+            continue;
+        }
+        let (state, age) = peer_state(Some(obs), timeout, now);
+        out.push(super::protocol::PeerStatus {
+            id: id.clone(),
+            url: String::new(),
+            role: "unknown".to_string(),
+            last_ok_unix: obs.last_ok_unix,
+            age_secs: age,
+            state: state.to_string(),
+            applied_seq: obs.applied_seq,
+            consecutive_failures: obs.consecutive_failures,
+        });
+    }
+    out
+}
+
+/// `never` / `up` / `stale` / `down`, plus the age of the last success.
+///
+/// The election timeout is the yardstick because the protocol already treats a
+/// silent peer for that long as a suspect: a status page with a different idea
+/// of "gone" than the failure detector would let an operator believe a peer is
+/// fine while the leader is campaigning against it.
+fn peer_state(
+    obs: Option<&super::shared::PeerSeen>,
+    election_timeout_secs: i64,
+    now: i64,
+) -> (&'static str, Option<i64>) {
+    let Some(o) = obs else {
+        return ("never", None);
+    };
+    let age = o.last_ok_unix.map(|t| (now - t).max(0));
+    let state = match age {
+        None => "never",
+        // No contact for two election timeouts is not a blip, whatever the last
+        // attempt said: on a standby nothing probes, so `ok` can be very old.
+        Some(a) if a > 2 * election_timeout_secs => "stale",
+        Some(_) if o.ok => "up",
+        Some(_) if o.consecutive_failures <= 1 => "stale",
+        Some(_) => "down",
+    };
+    (state, age)
 }
 
 fn rpo_str(mode: RpoMode) -> &'static str {

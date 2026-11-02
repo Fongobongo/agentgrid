@@ -1555,3 +1555,86 @@ async fn heartbeat_records_relay_hops_from_the_header() {
         .expect("node listed");
     assert_eq!(row["relay_hops"], serde_json::json!(0));
 }
+
+/// A host installed from an operator's laptop never touches
+/// `/v1/node-installs`; the token mint is the only thing the control plane sees.
+/// Naming the host there is what makes "configured, never enrolled" visible —
+/// and the row has to outlive the process, which is why it is a table now.
+#[tokio::test]
+async fn a_named_token_mint_records_an_install_intent() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/enrollment-token",
+            serde_json::json!({ "host": "root@10.0.0.7:2222", "name": "edge-1" }).to_string(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The write goes through a queue, so poll rather than assume a yield.
+    let mut row = None;
+    for _ in 0..100 {
+        if let Some(r) = state
+            .store
+            .list_installs(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.host == "root@10.0.0.7:2222")
+        {
+            row = Some(r);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let row = row.expect("the mint must leave a record");
+    assert_eq!(row.name, "edge-1");
+    assert_eq!(
+        row.state, "issued",
+        "nothing was started, so nothing may read as running"
+    );
+
+    // And the panel's route shows it.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/node-installs", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let listed = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["host"] == "root@10.0.0.7:2222")
+        .expect("listed");
+    assert_eq!(listed["state"], serde_json::json!("issued"));
+}
+
+/// The bare mint stays bare: `ag token create` hands a token to a human who
+/// enrolls a host by hand, and inventing a host record for that would be a lie.
+#[tokio::test]
+async fn a_bare_token_mint_records_nothing() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/nodes/enrollment-token",
+            String::new(),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(state.store.list_installs(10).await.unwrap().is_empty());
+}

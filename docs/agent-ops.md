@@ -573,7 +573,7 @@ is the point:
 
 | field | source | who can be wrong |
 | --- | --- | --- |
-| `relay_hops` | **observed** — a relay stamps `x-agentgrid-relay-hops` on every request it forwards and *replaces* whatever the client sent | a node cannot claim fewer hops than it used |
+| `relay_hops` | **observed** — a forwarder stamps `x-agentgrid-relay-hops` on every request it forwards and *replaces* whatever the client sent | a node cannot claim fewer hops than it used |
 | `egress_proxy` | **claimed** by the node in its heartbeat | a forward proxy is invisible to the receiver, so the node is the only possible source |
 
 ```bash
@@ -589,19 +589,90 @@ ag nodes ls
 `?` is not `direct`: it means no heartbeat has carried either fact yet (a row
 older than the migration). The panel renders the same three states as badges.
 
-What `relay_hops: 0` does **not** prove: a standalone `agentgrid-cp-edge` in
-front of the control plane is started with `EdgeConfig::max_hops = None` and
-does not stamp the header, so a node behind a load balancer reads exactly like a
-direct one. That is a deliberate asymmetry — the counter exists to cut loops,
-not to inventory forwarders, and the edge leaves requests it has no reason to
-rewrite alone. There is no flag to change it: the only forwarder that stamps
-today is the node relay (`AGENTGRID_RELAY_LISTEN`). So read `relay×N` as "a node
-relay carried this", and `direct` as "no node relay did" rather than "nothing
-did".
+**Every forwarder stamps, limit or no limit.** `EdgeConfig::max_hops` used to
+double as "stamp at all": the standalone `agentgrid-cp-edge` ran with `None`,
+left the header alone, and every node behind it read as directly connected —
+which is the one question the header exists to answer. The two jobs are now
+separate: the limit cuts loops, the stamp makes the hop visible. A standalone
+edge reports `1`.
+
+So `relay_hops: 0` means "no AgentGrid forwarder in the path". It does **not**
+rule out an L4 balancer or a generic HTTP proxy in front of the control plane:
+those do not stamp, and at layer 4 there is nothing to stamp with. Read
+`relay×N` as "N AgentGrid forwarders carried this".
 
 The egress-proxy claim is re-evaluated every heartbeat from the pool's *current*
 entry, so a pool whose every entry is dead reports `false` on the next beat: the
 node has fallen back to direct egress, and the badge disappears with it.
+
+## A host that was configured and never arrived
+
+`nodes` is keyed by enrollment, so a host whose daemon never enrolled has no row
+anywhere. The install attempts are the record, and since 0.8.2 they are a table
+(`node_installs`) rather than a `HashMap`: a restart used to erase the only
+evidence that anyone had tried.
+
+```bash
+curl -s "$CP/v1/node-installs" -H "authorization: Bearer $JWT" | jq '.[] | {host, name, state}'
+```
+
+`state` is one of four:
+
+| state | what it means |
+| --- | --- |
+| `issued` | an enrollment token was minted for this host and nothing has been heard since |
+| `running` | the control plane is provisioning it over ssh right now |
+| `succeeded` | ssh and scp finished — **not** "the node is up"; check the `nodes` list |
+| `failed` | the install stopped; `error` says where |
+
+`issued` is the one that covers the paths the panel cannot see: `ag nodes
+install` runs ssh from *your* laptop, and the install script runs on the host, so
+neither ever calls `/v1/node-installs`. Both mint a token first, and since 0.8.2
+the mint carries `{host, name}`, which is what creates the row. A row that stays
+`issued` forever is a host somebody configured and never got running — exactly
+the case that used to be invisible.
+
+A row still at `running` when the control plane starts again is shown as
+`failed` with "the control plane restarted while this install was running". The
+stored state is left alone on purpose: on an HA standby that row belongs to the
+leader, and a replica that "fixed" it would replicate the fix over a live job.
+
+`ag token create` passes no host and records nothing — it hands a token to a
+human who enrolls a machine by hand, and inventing a host record for that would
+be a lie.
+
+## Are the control-plane replicas talking to each other?
+
+`GET /v1/ha/status` answers that, but it is behind the cluster token, which no
+panel has. `GET /v1/cluster/status` is the same body for an operator (JWT,
+read-only), and `ag cluster status` renders it:
+
+```
+node=cp-a role=leader term=3 epoch=1 applied_seq=91 leader=cp-a
+
+PEER         ROLE     STATE    AGE      SEQ      URL
+cp-b         data     up       1s       91       http://cp-b:7800
+cp-c         data     down     4m       88       http://cp-c:7800
+cp-d         witness  never    -        -        http://cp-d:7800
+```
+
+The liveness comes from the exchanges consensus already makes — the leader's
+heartbeat fan-out, an inbound heartbeat, a vote request — not from a separate
+probe, so there is nothing extra to configure and no probe that can disagree
+with the failure detector. `state`:
+
+- `up` — the last exchange succeeded.
+- `stale` — one miss, or no contact for two election timeouts.
+- `down` — repeated failures.
+- `never` — no exchange yet.
+
+Configuration is the skeleton: a peer that has never answered is still listed,
+because unreachable and nonexistent are different problems. The list is a view
+from **one** replica — only the leader fans out to every peer, so a standby
+legitimately shows `never` for most of them. `applied_seq` is the peer's last
+reported replication position and survives failures: a peer that stopped
+answering is behind by at least that much, which is what tells you whether it
+could safely take over.
 
 ## Two-host smoke test
 

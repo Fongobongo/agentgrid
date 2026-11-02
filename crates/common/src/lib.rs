@@ -644,10 +644,11 @@ pub struct NodeView {
     /// than it used. It can only claim *more*, which buys it nothing (the
     /// number is a diagnostic, not an authorisation).
     ///
-    /// `None` = no heartbeat since this column existed. Note what `0` does
-    /// *not* prove: a standalone `agentgrid-cp-edge` in front of the control
-    /// plane does not stamp the header (`EdgeConfig::max_hops = None`), so a
-    /// node behind a load balancer reads the same as a direct one.
+    /// `None` = no heartbeat since this column existed. `0` means no AgentGrid
+    /// forwarder was in the path: every relay *and* every `agentgrid-cp-edge`
+    /// stamps this header, whether or not it has a hop limit configured. It
+    /// does not rule out an L4 balancer or a generic HTTP proxy — those do not
+    /// stamp, and at layer 4 there is nothing to stamp with.
     #[serde(default)]
     pub relay_hops: Option<u32>,
     /// ADR 0012 reachability: the node reported that it reaches the control

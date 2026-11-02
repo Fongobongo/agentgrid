@@ -15,6 +15,28 @@ pub struct LeaderInfo {
     pub url: String,
 }
 
+/// What this node knows about one peer.
+///
+/// Recorded from the exchanges the protocol already performs — the leader's
+/// heartbeat fan-out, an inbound heartbeat, a vote request — rather than from a
+/// separate probe: a liveness check nobody uses to make a decision is a check
+/// that reports whatever it happens to be configured to report.
+#[derive(Clone, Debug)]
+pub struct PeerSeen {
+    /// Unix seconds of the last *successful* exchange. `None` means every
+    /// attempt so far failed.
+    pub last_ok_unix: Option<i64>,
+    /// Unix seconds of the last attempt, successful or not.
+    pub last_attempt_unix: i64,
+    /// Whether that attempt succeeded.
+    pub ok: bool,
+    /// The peer's applied replication sequence, when it reported one.
+    pub applied_seq: Option<u64>,
+    /// Consecutive failed attempts. A single miss is noise on a busy link; a
+    /// run of them is the peer being gone.
+    pub consecutive_failures: u32,
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -51,6 +73,9 @@ pub struct HaShared {
     pub apply_lock: tokio::sync::Mutex<()>,
     /// Serialises snapshot creation (periodic loop + peer-requested).
     pub snapshot_lock: tokio::sync::Mutex<()>,
+    /// Per-peer liveness, keyed by peer id. Filled by the exchanges the
+    /// protocol already runs; see [`PeerSeen`] for why it is not a probe.
+    peers_seen: Mutex<std::collections::HashMap<String, PeerSeen>>,
     pub manual_promote: tokio::sync::Notify,
 }
 
@@ -74,6 +99,7 @@ impl Default for HaShared {
             promote_lock: tokio::sync::Mutex::new(()),
             apply_lock: tokio::sync::Mutex::new(()),
             snapshot_lock: tokio::sync::Mutex::new(()),
+            peers_seen: Mutex::new(std::collections::HashMap::new()),
             manual_promote: tokio::sync::Notify::new(),
         }
     }
@@ -213,5 +239,42 @@ impl HaShared {
 
     pub fn last_error(&self) -> Option<String> {
         lock(&self.last_error).clone()
+    }
+
+    // ----- per-peer liveness -----
+
+    /// Record the outcome of one exchange with `peer_id`.
+    ///
+    /// `ok` with no `applied_seq` is a peer that answered but did not report a
+    /// position (a witness, or a heartbeat response that carries the term but
+    /// not the sequence). A failed attempt keeps the last known position: the
+    /// peer is behind by at least that much, and the number is still the most
+    /// recent fact about it.
+    pub fn observe_peer(&self, peer_id: &str, ok: bool, applied_seq: Option<u64>) {
+        let now = chrono::Utc::now().timestamp();
+        let mut seen = lock(&self.peers_seen);
+        let entry = seen.entry(peer_id.to_string()).or_insert(PeerSeen {
+            last_ok_unix: None,
+            last_attempt_unix: now,
+            ok: false,
+            applied_seq: None,
+            consecutive_failures: 0,
+        });
+        entry.last_attempt_unix = now;
+        entry.ok = ok;
+        if ok {
+            entry.last_ok_unix = Some(now);
+            entry.consecutive_failures = 0;
+            if applied_seq.is_some() {
+                entry.applied_seq = applied_seq;
+            }
+        } else {
+            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        }
+    }
+
+    /// Everything observed so far, for the status route.
+    pub fn peers_seen(&self) -> std::collections::HashMap<String, PeerSeen> {
+        lock(&self.peers_seen).clone()
     }
 }

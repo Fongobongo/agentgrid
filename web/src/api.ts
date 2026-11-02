@@ -1151,7 +1151,43 @@ export interface ProvisioningInfo {
   reason: string | null;
 }
 
-export type InstallState = "running" | "succeeded" | "failed";
+export type InstallState = "issued" | "running" | "succeeded" | "failed";
+
+/**
+ * One CP peer, as the replica answering `/v1/cluster/status` sees it.
+ *
+ * `state` is derived from exchanges the consensus protocol already makes, not
+ * from a separate probe: `up` = the last attempt succeeded, `stale` = one miss
+ * or no contact for two election timeouts, `down` = repeated failures, `never`
+ * = no exchange yet. On a standby most peers read `never` — only the leader
+ * fans out to everyone.
+ */
+export interface ClusterPeer {
+  id: string;
+  url: string;
+  role: string;
+  last_ok_unix: number | null;
+  age_secs: number | null;
+  state: "up" | "stale" | "down" | "never";
+  applied_seq: number | null;
+  consecutive_failures: number;
+}
+
+export interface ClusterStatus {
+  node_id: string;
+  cluster_id: string;
+  role: string;
+  term: number;
+  epoch: number;
+  leader_id: string | null;
+  leader_url: string | null;
+  applied_seq: number;
+  peers: ClusterPeer[];
+}
+
+export async function getClusterStatus(): Promise<ClusterStatus> {
+  return getJson<ClusterStatus>("/v1/cluster/status");
+}
 
 export interface InstallJob {
   id: string;

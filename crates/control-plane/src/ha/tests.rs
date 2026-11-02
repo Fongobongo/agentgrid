@@ -788,3 +788,109 @@ async fn a_rewind_below_an_evicted_changeset_is_refused() {
     store.pool.close().await;
     cleanup(&path);
 }
+
+// ----- per-peer liveness (GET /v1/cluster/status) -----
+
+/// Configuration is the skeleton. A peer that has never answered must still be
+/// listed: "we cannot reach it" and "it does not exist" are different problems,
+/// and only one of them is fixed by restarting something.
+#[tokio::test]
+async fn status_lists_every_configured_peer_even_when_it_never_answered() {
+    let rt = rt("cp-a");
+    let s = election::status_of(&rt, None).await.unwrap();
+    let ids: Vec<&str> = s.peers.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, vec!["cp-b", "cp-c"]);
+    for p in &s.peers {
+        assert_eq!(p.state, "never");
+        assert!(p.last_ok_unix.is_none());
+        assert_eq!(p.role, "data");
+        assert_eq!(p.url, format!("http://{}:7800", p.id));
+    }
+}
+
+#[tokio::test]
+async fn an_answered_heartbeat_makes_a_peer_up_and_reports_its_position() {
+    let rt = rt("cp-a");
+    rt.shared.observe_peer("cp-b", true, Some(42));
+    let s = election::status_of(&rt, None).await.unwrap();
+    let b = s.peers.iter().find(|p| p.id == "cp-b").expect("listed");
+    assert_eq!(b.state, "up");
+    assert_eq!(b.applied_seq, Some(42));
+    assert_eq!(b.consecutive_failures, 0);
+    assert!(b.age_secs.unwrap_or(99) <= 1);
+    // And the untouched peer is still unknown, not silently "fine".
+    assert_eq!(
+        s.peers.iter().find(|p| p.id == "cp-c").unwrap().state,
+        "never"
+    );
+}
+
+/// One miss is noise on a busy link; a run of them is the peer being gone. The
+/// threshold matters: an operator who sees `down` should be able to act.
+#[tokio::test]
+async fn one_failure_is_stale_and_two_are_down() {
+    let rt = rt("cp-a");
+    rt.shared.observe_peer("cp-b", true, Some(1));
+    rt.shared.observe_peer("cp-b", false, None);
+    let s = election::status_of(&rt, None).await.unwrap();
+    assert_eq!(
+        s.peers.iter().find(|p| p.id == "cp-b").unwrap().state,
+        "stale"
+    );
+
+    rt.shared.observe_peer("cp-b", false, None);
+    let s = election::status_of(&rt, None).await.unwrap();
+    let b = s.peers.iter().find(|p| p.id == "cp-b").unwrap();
+    assert_eq!(b.state, "down");
+    assert_eq!(b.consecutive_failures, 2);
+    // The last position survives the failures: the peer is behind by at least
+    // that much, and it is still the most recent fact about it.
+    assert_eq!(b.applied_seq, Some(1));
+}
+
+/// A peer that talks to us without being in the configuration is a real
+/// condition — a stale peer list — and hiding it would make the answer lie by
+/// omission.
+#[tokio::test]
+async fn a_peer_that_is_not_configured_is_not_hidden() {
+    let rt = rt("cp-a");
+    rt.shared.observe_peer("cp-z", true, Some(7));
+    let s = election::status_of(&rt, None).await.unwrap();
+    let z = s.peers.iter().find(|p| p.id == "cp-z").expect("listed");
+    assert_eq!(z.role, "unknown");
+    assert_eq!(z.state, "up");
+    assert!(z.url.is_empty(), "we never configured an address for it");
+}
+
+/// A standby's view: it does not probe anyone, so the only peer it can see is
+/// the leader that heartbeats it. That is the truth from that replica, and the
+/// status page says so rather than showing a cluster-wide picture it does not
+/// have.
+#[tokio::test]
+async fn a_follower_sees_the_leader_it_hears_from() {
+    let rt = rt("cp-b");
+    election::handle_heartbeat(
+        &rt,
+        None,
+        0,
+        HeartbeatRequest {
+            cluster_id: "prod".into(),
+            term: 3,
+            epoch: 1,
+            leader_id: "cp-a".into(),
+            leader_url: "http://cp-a:7800".into(),
+            commit_seq: 9,
+        },
+    )
+    .await;
+
+    let s = election::status_of(&rt, None).await.unwrap();
+    let leader = s.peers.iter().find(|p| p.id == "cp-a").expect("listed");
+    assert_eq!(leader.state, "up");
+    assert_eq!(s.leader_id.as_deref(), Some("cp-a"));
+    // The other configured peers are still `never` from here.
+    assert_eq!(
+        s.peers.iter().find(|p| p.id == "cp-c").unwrap().state,
+        "never"
+    );
+}

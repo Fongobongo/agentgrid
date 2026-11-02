@@ -1942,7 +1942,7 @@ async fn cmd_repo(client: &reqwest::Client, base: &str, a: RepoArgs) -> Result<(
 async fn cmd_token(client: &reqwest::Client, base: &str, json: bool, a: TokenArgs) -> Result<()> {
     match a.action {
         TokenAction::Create => {
-            let token = create_enrollment_token(client, base).await?;
+            let token = create_enrollment_token(client, base, None, None).await?;
             if json {
                 println!(
                     "{}",
@@ -1957,12 +1957,24 @@ async fn cmd_token(client: &reqwest::Client, base: &str, json: bool, a: TokenArg
 }
 
 /// Mint a one-time enrollment token via the control-plane API.
-async fn create_enrollment_token(client: &reqwest::Client, base: &str) -> Result<String> {
-    let resp = client
-        .post(format!("{base}/v1/nodes/enrollment-token"))
-        .send()
-        .await
-        .context("enrollment-token request failed")?;
+///
+/// `host`/`name` are optional and exist for one reason: the token mint is the
+/// only thing every install path has in common, so naming the host here is what
+/// lets the control plane record "a token went out for this host" even when the
+/// install itself runs on the operator's laptop and never touches
+/// `/v1/node-installs`. `ag token create` passes neither — it is a bare token
+/// for a host the operator enrolls by hand.
+async fn create_enrollment_token(
+    client: &reqwest::Client,
+    base: &str,
+    host: Option<&str>,
+    name: Option<&str>,
+) -> Result<String> {
+    let mut rb = client.post(format!("{base}/v1/nodes/enrollment-token"));
+    if let Some(host) = host {
+        rb = rb.json(&serde_json::json!({ "host": host, "name": name }));
+    }
+    let resp = rb.send().await.context("enrollment-token request failed")?;
     if !resp.status().is_success() {
         anyhow::bail!(
             "token creation failed ({}): are you logged in? (ag login)",
