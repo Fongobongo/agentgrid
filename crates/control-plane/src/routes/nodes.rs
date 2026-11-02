@@ -210,6 +210,11 @@ pub async fn enroll(
                     tracing::warn!(node = %r.node_id, "could not store the node's public key: {e}");
                 }
             }
+            // The token that was minted for this host has now been spent by a
+            // node that is talking to us: close the `issued` install row it
+            // left behind, or the list keeps every successful install open
+            // forever.
+            state.provisioning.mark_enrolled(&req.name, &r.node_id);
             (StatusCode::OK, Json(Some(r)))
         }
         Ok(None) => (StatusCode::BAD_REQUEST, Json(None)),

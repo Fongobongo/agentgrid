@@ -133,6 +133,12 @@
     rather than refused — the token still gets minted, and nothing in it is
     trusted for authorization. `ag token create` passes no host and records
     nothing.
+  - **`issued` rows close themselves.** Enrollment looks up the install rows
+    with that name, marks them `succeeded` and records the node id they became.
+    Without that, every install that worked would leave a permanently open
+    "a token went out and nothing came back" row, and a list whose normal case
+    never clears is a list nobody reads. `deploy/compose/up.sh` names its two
+    hosts at mint time for the same reason.
 - **Control-plane peers have a liveness table.** `GET /v1/ha/status` knew the
   role, term and leader and nothing per peer, and it sits behind the cluster
   token, so no panel could read it: `ag cluster status` showed one replica's own

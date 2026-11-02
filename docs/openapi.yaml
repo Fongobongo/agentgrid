@@ -878,10 +878,14 @@ paths:
         `state` is `issued`, `running`, `succeeded` or `failed`. `issued` means
         an enrollment token was minted for the host and nothing has been heard
         since: the install ran somewhere else (`ag nodes install` from an
-        operator's laptop, the install script) and never reported back. A row
-        still at `running` after a restart is shown as `failed` with the reason
-        — the process that was doing the work is gone — but the stored row keeps
-        the raw state, because on an HA standby it belongs to the leader.
+        operator's laptop, the install script) and never reported back. Such a
+        row is closed to `succeeded` when a node with that name enrolls — the
+        token was spent by a node that is now talking to us, which is the
+        outcome the row was waiting for — and the closing step names the node
+        it became. A row still at `running` after a restart is shown as
+        `failed` with the reason — the process that was doing the work is gone
+        — but the stored row keeps the raw state, because on an HA standby it
+        belongs to the leader.
       responses:
         '200':
           description: Jobs with their steps and terminal state.

@@ -151,6 +151,43 @@ impl ProvisioningRuntime {
         }
     }
 
+    /// Close out the `issued` rows for a host that has now enrolled.
+    ///
+    /// Without this, every install that worked leaves a permanently open
+    /// "a token went out and nothing came back" row — and a list where the
+    /// normal case never clears is a list nobody reads. Enrollment is the
+    /// terminal success signal for those rows: the token was spent by a node
+    /// that is now talking to us, which is the outcome the row was waiting for.
+    ///
+    /// Matching is by name, because that is the only thing the two paths share:
+    /// the mint knows a host string, the enrollment knows the name the daemon
+    /// was configured with, and for every install path in this repo they are
+    /// the same string.
+    pub fn mark_enrolled(&self, name: &str, node_id: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let closed: Vec<String> = {
+            let mut jobs = self.jobs.lock().unwrap();
+            let now = now_iso();
+            let mut closed = Vec::new();
+            for job in jobs.values_mut() {
+                if job.state != JobState::Issued || job.name != name {
+                    continue;
+                }
+                job.state = JobState::Succeeded;
+                job.steps.push(format!("enrolled as {node_id}"));
+                job.finished_at = Some(now.clone());
+                closed.push(job.id.clone());
+            }
+            closed
+        };
+        for id in closed {
+            self.save(&id);
+        }
+    }
+
     /// Record that an enrollment token was minted for a host.
     ///
     /// Every install path mints one — the panel, `ag nodes install` from an

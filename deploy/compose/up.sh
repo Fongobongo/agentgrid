@@ -77,14 +77,20 @@ JWT=$(curl -fsS -X POST "$BASE/v1/auth/login" \
 [ -n "$JWT" ] || { echo "login failed"; exit 1; }
 
 mint() {
+  # Name the host at mint time. If the container never enrolls — which is what
+  # the wait loop below is checking for — the install row is the only record
+  # that anyone tried, and it survives a restart of the control plane. Without
+  # the body the token goes out and the panel has nothing to show.
   curl -fsS -X POST "$BASE/v1/nodes/enrollment-token" \
     -H "authorization: Bearer $JWT" \
+    -H 'content-type: application/json' \
+    -d "{\"host\":\"$1\",\"name\":\"$1\"}" \
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'
 }
 
 echo ">> minting enrollment tokens"
-NODE1_TOKEN=$(mint)
-NODE2_TOKEN=$(mint)
+NODE1_TOKEN=$(mint node-1)
+NODE2_TOKEN=$(mint node-2)
 # Compose interpolates from the process environment; without the exports the
 # `:?` guards in docker-compose.yml reject the node services.
 export NODE1_TOKEN NODE2_TOKEN

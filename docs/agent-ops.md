@@ -622,7 +622,7 @@ curl -s "$CP/v1/node-installs" -H "authorization: Bearer $JWT" | jq '.[] | {host
 | --- | --- |
 | `issued` | an enrollment token was minted for this host and nothing has been heard since |
 | `running` | the control plane is provisioning it over ssh right now |
-| `succeeded` | ssh and scp finished — **not** "the node is up"; check the `nodes` list |
+| `succeeded` | either ssh/scp finished (the panel's install) or the host enrolled (an `issued` row); for the first, **not** "the node is up" — check the `nodes` list |
 | `failed` | the install stopped; `error` says where |
 
 `issued` is the one that covers the paths the panel cannot see: `ag nodes
@@ -631,6 +631,13 @@ neither ever calls `/v1/node-installs`. Both mint a token first, and since 0.8.2
 the mint carries `{host, name}`, which is what creates the row. A row that stays
 `issued` forever is a host somebody configured and never got running — exactly
 the case that used to be invisible.
+
+An `issued` row closes itself when the host arrives: enrollment looks up the
+rows with that name, marks them `succeeded` and adds a step naming the node it
+became. Without that, every install that worked would leave a permanently open
+"token went out and nothing came back" row, and a list whose normal case never
+clears is a list nobody reads. The match is by name because that is the only
+thing the two paths share.
 
 A row still at `running` when the control plane starts again is shown as
 `failed` with "the control plane restarted while this install was running". The

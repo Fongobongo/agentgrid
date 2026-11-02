@@ -1638,3 +1638,65 @@ async fn a_bare_token_mint_records_nothing() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(state.store.list_installs(10).await.unwrap().is_empty());
 }
+
+/// An `issued` row is closed by the enrollment it was waiting for. Without
+/// this, every install that worked leaves a permanently open "a token went out
+/// and nothing came back" row — and a list whose normal case never clears is a
+/// list nobody reads.
+#[tokio::test]
+async fn enrolling_a_node_closes_the_install_row_that_named_it() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let token = test_token(&app).await;
+
+    for name in ["edge-2", "untouched"] {
+        let resp = app
+            .clone()
+            .oneshot(post_auth(
+                "/v1/nodes/enrollment-token",
+                serde_json::json!({ "host": format!("root@{name}.example"), "name": name })
+                    .to_string(),
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let (node_id, _cred) = enroll(&app, "edge-2", vec!["mock".into()], vec!["*".into()]).await;
+
+    let row = |name: &'static str| {
+        let store = state.store.clone();
+        async move {
+            store
+                .list_installs(10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == name)
+        }
+    };
+
+    let mut closed = None;
+    for _ in 0..100 {
+        if let Some(r) = row("edge-2").await {
+            if r.state == "succeeded" {
+                closed = Some(r);
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let closed = closed.expect("the row must close when the host arrives");
+    assert_eq!(closed.steps.len(), 1);
+    assert!(
+        closed.steps[0].contains(&node_id),
+        "the step must name the node it became: {:?}",
+        closed.steps
+    );
+    assert!(closed.finished_at.is_some());
+
+    // A different host's row is not touched: the match is by name, and closing
+    // an unrelated install would hide exactly the host that is still missing.
+    assert_eq!(row("untouched").await.unwrap().state, "issued");
+}
