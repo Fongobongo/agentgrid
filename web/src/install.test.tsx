@@ -161,6 +161,25 @@ describe('the relay picker', () => {
     expect(html).toContain('flaky');
     expect(html).toContain('(offline)');
   });
+
+  // Revoked is the opposite of offline: the credential is dead, so the control
+  // plane answers 409 and no amount of waiting changes that. A revoked node
+  // keeps the address it last announced, which is exactly why it has to be
+  // filtered rather than labelled — the address still looks usable.
+  it('never offers a revoked relay', () => {
+    const html = render({ enabled: false, node_binary: null, reason: 'off' }, [
+      {
+        id: 'n5',
+        name: 'dead-relay',
+        relay_url: 'http://dead:7900',
+        status: 'revoked',
+      },
+    ] as unknown as NodeView[]);
+    expect(html).not.toContain('<option value="n5"');
+    // And it is named, because "no node announces a relay" would be false.
+    expect(html).toContain('dead-relay');
+    expect(html).toContain('ag nodes rekey');
+  });
 });
 
 describe('InstallNode when the control plane cannot install', () => {

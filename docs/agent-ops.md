@@ -698,6 +698,12 @@ node-a:/usr/local/bin/agentgrid-node-daemon .`) or fetch it through the relay
 you are testing. It is dispatched before the daemon's root check, which is the
 only way it can run on a fresh host — exactly when it is most useful.
 
+The binary takes no arguments when it is a daemon (configuration is the
+environment), so `--help` prints the usage instead of starting one, and any
+other argument is refused by name rather than ignored. That matters on the host
+you are probing: an unrecognised flag used to boot the agent, create its data
+directory and try to enroll against `127.0.0.1:7800`.
+
 Output is grouped by question, and the exit code is 1 when any check fails, so
 it belongs in a script:
 

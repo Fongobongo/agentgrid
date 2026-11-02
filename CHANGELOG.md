@@ -277,8 +277,6 @@
   `deploy/install-node.sh` no longer sets the variable: the node daemon never
   read it either (its spool is `AGENTGRID_DATA_DIR/artifact-spool`).
 
-### Fixed
-
 - **`ag nodes add --via` found the relay by scanning the fleet, and the scan is
   capped at 1000 nodes.** On a larger fleet a perfectly valid selector came back
   as `404 no node with id or name`, which reads as "no such node" and is not.
@@ -306,6 +304,15 @@
   relay the `CONTROL PLANE` line reports `hops=1`, which is the only way to tell
   a relay that forwards from a proxy that merely listens. Needs no root, works
   with `--dry-run`.
+- **`agentgrid-node-daemon --help` started the agent instead of printing
+  usage.** `--version` was handled (the release smoke test runs it) but `--help`
+  was not, and an unrecognised argument was ignored rather than refused — so the
+  first command an operator types on a fresh host created the data directory,
+  probed adapters and tried to enroll against `127.0.0.1:7800`, failing with
+  `enroll failed`. `--help`/`-h` now print usage, and any other argument is
+  refused **by name** with a pointer at `--help` and at `probe --help`. The
+  classification is a pure function with tests, because the failure it prevents
+  is a startup that a test process must never cause.
 
 ## [0.8.1] - 2026-11-01
 

@@ -825,26 +825,104 @@ fn probe_main(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// What the command line asks for.
+///
+/// Split out of [`main`] so it can be tested: the alternative is a test that
+/// spawns the binary, and the failure mode this prevents is precisely a
+/// *startup*, which a test process should never cause.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    /// No arguments: run the agent. This is what systemd does.
+    Daemon,
+    /// `probe …` — its own argv, its own usage.
+    Probe,
+    Version,
+    Help,
+    /// An argument the daemon does not take.
+    Unknown(String),
+}
+
+/// Classify the daemon's arguments.
+///
+/// Every argument is handled **before** any startup side effect, because the
+/// daemon otherwise takes none: an unrecognised flag used to be ignored and the
+/// daemon booted for real — probing adapters, pruning workspaces, creating the
+/// data directory, then failing to enroll against `127.0.0.1:7800`. Two ways to
+/// meet that by accident: a typo (`--enroll-token` instead of the environment
+/// variable) and `--help`, which every operator tries first on a fresh host and
+/// which is the one command that must never start anything.
+///
+/// `probe` wins over the flags below when it comes first, because `probe --help`
+/// is the probe's help, not the daemon's.
+fn classify(argv: &[String]) -> Invocation {
+    if argv.first().map(String::as_str) == Some("probe") {
+        return Invocation::Probe;
+    }
+    let mut version = false;
+    for a in argv {
+        match a.as_str() {
+            "--version" | "-V" => version = true,
+            "--help" | "-h" => return Invocation::Help,
+            other => return Invocation::Unknown(other.to_string()),
+        }
+    }
+    if version {
+        Invocation::Version
+    } else {
+        Invocation::Daemon
+    }
+}
+
+/// The daemon's own help. Short on purpose: the configuration is the
+/// environment, and the one subcommand is the one worth naming.
+const USAGE: &str = "\
+agentgrid-node-daemon — the AgentGrid node agent
+
+usage:
+  agentgrid-node-daemon               run the agent (normally under systemd)
+  agentgrid-node-daemon probe [opts]  check what THIS host can reach
+  agentgrid-node-daemon --version
+  agentgrid-node-daemon --help
+
+The agent takes no arguments: it is configured by the environment
+(AGENTGRID_SERVER, AGENTGRID_DATA_DIR, AGENTGRID_ENROLL_TOKEN, AGENTGRID_RELAY_*).
+`probe` is the exception — it needs no credential, no enrollment and no root,
+so it works on a host that has not joined yet:
+
+  agentgrid-node-daemon probe --server https://cp.example.com \\
+      --relay http://node-a.internal:7900 --gateway http://gw:7920
+
+`agentgrid-node-daemon probe --help` lists the rest. See docs/agent-ops.md,
+\"What can this host reach?\".
+";
+
 fn main() -> Result<()> {
-    // Hardening P2 item 30: the release smoke test invokes `--version` on
-    // every published binary. The daemon otherwise takes no CLI args, so an
-    // unrecognized flag used to be ignored and the daemon booted for real
-    // (probing adapters, pruning workspaces, then failing to enroll) —
-    // handle it explicitly before any startup side effects.
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    for a in &argv {
-        if a == "--version" || a == "-V" {
+    match classify(&argv) {
+        // Reachability probe, dispatched before anything else — including the
+        // root check. It is a read-only network diagnostic, it needs no
+        // credential, and the moment it is most useful is *before* this host is
+        // a node (choosing a relay for `ag nodes add --via`), which is also the
+        // moment there is no service user to run it as.
+        Invocation::Probe => return probe_main(&argv[1..]),
+        // Hardening P2 item 30: the release smoke test invokes `--version` on
+        // every published binary.
+        Invocation::Version => {
             println!("agentgrid-node-daemon {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-    }
-    // Reachability probe, dispatched before anything else — including the root
-    // check. It is a read-only network diagnostic, it needs no credential, and
-    // the moment it is most useful is *before* this host is a node (choosing a
-    // relay for `ag nodes add --via`), which is also the moment there is no
-    // service user to run it as.
-    if argv.first().map(String::as_str) == Some("probe") {
-        return probe_main(&argv[1..]);
+        Invocation::Help => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        Invocation::Unknown(arg) => {
+            anyhow::bail!(
+                "unknown argument {arg:?}: the agent takes no arguments and is \
+                 configured by the environment. Try --help, or \
+                 `agentgrid-node-daemon probe --help` for the reachability check."
+            );
+        }
+        Invocation::Daemon => {}
     }
     tracing_subscriber::fmt()
         .json()

@@ -3,6 +3,7 @@ mod tests {
     use crate::enrollment::scrub_token_from_file;
     use crate::event_sink::{read_stream, split_batch, EventSink};
     use crate::skills::render_trusted_skills_block;
+    use crate::{classify, Invocation};
     use agentgrid_common::IncomingEvent;
     #[cfg(unix)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1515,5 +1516,48 @@ mod tests {
             chunks.len()
         );
         std::env::remove_var("AGENTGRID_MAX_EVENT_BATCH_KB");
+    }
+
+    /// `--help` must never start the agent. It is the first thing an operator
+    /// runs on a fresh host, and the daemon used to ignore it: it created the
+    /// data directory, probed adapters and tried to enroll against
+    /// `127.0.0.1:7800` — which reads as a broken install rather than as a
+    /// flag nobody parsed.
+    #[test]
+    fn help_is_recognised_and_starts_nothing() {
+        for flag in ["--help", "-h"] {
+            assert_eq!(classify(&[flag.to_string()]), Invocation::Help, "{flag}");
+        }
+    }
+
+    /// A typo'd flag is refused by name instead of being ignored. The realistic
+    /// one is `--enroll-token`: the token is an environment variable, so
+    /// passing it as an argument used to boot a daemon that enrolled nowhere.
+    #[test]
+    fn an_unknown_argument_is_refused_by_name() {
+        assert_eq!(
+            classify(&["--enroll-token".to_string(), "abc".to_string()]),
+            Invocation::Unknown("--enroll-token".to_string())
+        );
+    }
+
+    /// `probe --help` is the probe's help, not the daemon's: the subcommand
+    /// owns its own argv.
+    #[test]
+    fn the_probe_owns_its_arguments() {
+        assert_eq!(
+            classify(&["probe".to_string(), "--help".to_string()]),
+            Invocation::Probe
+        );
+        assert_eq!(classify(&["probe".to_string()]), Invocation::Probe);
+    }
+
+    /// systemd runs the binary with no arguments at all, and the release smoke
+    /// test runs `--version` — both must stay side-effect-free.
+    #[test]
+    fn no_arguments_means_run_the_agent() {
+        assert_eq!(classify(&[]), Invocation::Daemon);
+        assert_eq!(classify(&["--version".to_string()]), Invocation::Version);
+        assert_eq!(classify(&["-V".to_string()]), Invocation::Version);
     }
 }

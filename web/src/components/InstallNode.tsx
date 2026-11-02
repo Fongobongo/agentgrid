@@ -144,8 +144,19 @@ function JoinSection({
   // named below instead of being silently absent: the fix is a different
   // variable, and "no relay here" would send the operator to set the one they
   // already set.
-  const relays = nodes.filter((n) => n.relay_url);
-  const silentRelays = nodes.filter((n) => !n.relay_url && n.relay_listen);
+  //
+  // A **revoked** node keeps the address it last announced, and it can never
+  // carry a join — its credential is dead, so the control plane answers 409. It
+  // is therefore filtered out instead of being offered with a label nobody
+  // reads. An **offline** one is the opposite case and stays: it may be back
+  // before the line is pasted, so it is offered with its state spelled out.
+  const relays = nodes.filter((n) => n.relay_url && n.status !== 'revoked');
+  const silentRelays = nodes.filter(
+    (n) => !n.relay_url && n.relay_listen && n.status !== 'revoked',
+  );
+  // Named only when there is nothing to offer: "no relay here" would be wrong
+  // when the reason is one revoked node holding the only announced address.
+  const revokedRelays = nodes.filter((n) => n.relay_url && n.status === 'revoked');
 
   const mint = async () => {
     setBusy(true);
@@ -204,6 +215,15 @@ function JoinSection({
               anyone can dial. Set <code>AGENTGRID_RELAY_ADVERTISE</code> on{' '}
               {silentRelays.length === 1 ? 'that node' : 'those nodes'} to the
               address other hosts should dial, and let it beat once.
+            </>
+          ) : revokedRelays.length > 0 ? (
+            <>
+              {revokedRelays.map((n) => n.name).join(', ')}{' '}
+              {revokedRelays.length === 1 ? 'announces' : 'announce'} a relay
+              address, but {revokedRelays.length === 1 ? 'it is' : 'they are'}{' '}
+              revoked: a dead credential cannot reach this control plane, so it
+              cannot carry a join. Re-key it (<code>ag nodes rekey</code>) or set
+              up a relay on another node.
             </>
           ) : (
             <>
