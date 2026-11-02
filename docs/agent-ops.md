@@ -639,6 +639,15 @@ became. Without that, every install that worked would leave a permanently open
 clears is a list nobody reads. The match is by name because that is the only
 thing the two paths share.
 
+The close is a sweep of the table, not of the list. The panel renders the newest
+twenty attempts, but the table keeps every one of them, so an intent that has
+aged out of the panel is still `issued` on disk — and a close that only touched
+what happened to be in memory would leave the durable record claiming a host
+never arrived when it is enrolled and heartbeating. Both the in-memory entry and
+every matching `issued` row in `node_installs` are closed, on the same single
+writer, so the sweep can never run before the row it is closing has been
+written.
+
 A row still at `running` when the control plane starts again is shown as
 `failed` with "the control plane restarted while this install was running". The
 stored state is left alone on purpose: on an HA standby that row belongs to the

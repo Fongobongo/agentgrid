@@ -72,6 +72,49 @@ impl Store {
         Ok(rows.iter().map(row_to_install).collect())
     }
 
+    /// Answer every open `issued` row for a host that has now enrolled.
+    ///
+    /// The in-memory job list is capped at twenty entries, so a row can fall out
+    /// of it while still sitting in the table as `issued`. Closing only what
+    /// happens to be in memory would leave the database asserting "a token went
+    /// out and nothing came back" about a host that is enrolled and
+    /// heartbeating — the opposite of what this table is for. The table is the
+    /// record, so the close happens here, matched by name: the only string the
+    /// mint and the enrollment share.
+    ///
+    /// Idempotent — the `WHERE state = 'issued'` guard means a row already
+    /// closed by the write-through path is left alone, step text and all.
+    pub async fn close_issued_installs(&self, name: &str, node_id: &str) -> Result<usize> {
+        let rows =
+            sqlx::query("SELECT id, steps FROM node_installs WHERE state = 'issued' AND name = ?")
+                .bind(name)
+                .fetch_all(&self.pool)
+                .await?;
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let mut closed = 0;
+        for row in &rows {
+            let id: String = row.try_get("id").unwrap_or_default();
+            let mut steps: Vec<String> = row
+                .try_get::<String, _>("steps")
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            steps.push(format!("enrolled as {node_id}"));
+            self.write_one(
+                sqlx::query(
+                    "UPDATE node_installs SET state = 'succeeded', steps = ?, finished_at = ? \
+                     WHERE id = ? AND state = 'issued'",
+                )
+                .bind(serde_json::to_string(&steps)?)
+                .bind(&finished_at)
+                .bind(&id),
+            )
+            .await?;
+            closed += 1;
+        }
+        Ok(closed)
+    }
+
     pub async fn get_install(&self, id: &str) -> Result<Option<InstallRecord>> {
         let row = sqlx::query(
             "SELECT id, host, name, state, steps, error, server_url, started_at, finished_at \

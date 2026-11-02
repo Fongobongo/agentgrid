@@ -882,10 +882,11 @@ paths:
         row is closed to `succeeded` when a node with that name enrolls — the
         token was spent by a node that is now talking to us, which is the
         outcome the row was waiting for — and the closing step names the node
-        it became. A row still at `running` after a restart is shown as
-        `failed` with the reason — the process that was doing the work is gone
-        — but the stored row keeps the raw state, because on an HA standby it
-        belongs to the leader.
+        it became. That close is applied to every matching `issued` row in the
+        table, not only to the ones still inside this list's window. A row still
+        at `running` after a restart is shown as `failed` with the reason — the
+        process that was doing the work is gone — but the stored row keeps the
+        raw state, because on an HA standby it belongs to the leader.
       responses:
         '200':
           description: Jobs with their steps and terminal state.

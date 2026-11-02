@@ -85,7 +85,21 @@ pub struct ProvisioningRuntime {
     /// would leave a finished job reading as `running` — the exact state the
     /// panel cannot interpret. `None` until [`Self::hydrate`] attaches a store,
     /// which is also what the tests use.
-    persist: Option<tokio::sync::mpsc::UnboundedSender<InstallJob>>,
+    persist: Option<tokio::sync::mpsc::UnboundedSender<Persist>>,
+}
+
+/// What the writer task does with the database.
+///
+/// Both variants share one queue so a close can never overtake the write of the
+/// row it closes — a job saved as `succeeded` after its close was swept would
+/// put the row back, and the sweep would have nothing left to find.
+enum Persist {
+    Job(InstallJob),
+    /// Close the `issued` rows for a host that has enrolled, by name.
+    Enrolled {
+        name: String,
+        node_id: String,
+    },
 }
 
 impl ProvisioningRuntime {
@@ -125,11 +139,28 @@ impl ProvisioningRuntime {
                 tracing::warn!(error = %e, "could not load install jobs; the panel starts empty")
             }
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<InstallJob>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Persist>();
         tokio::spawn(async move {
-            while let Some(job) = rx.recv().await {
-                if let Err(e) = store.put_install(&record(&job)).await {
-                    tracing::warn!(job = %job.id, error = %e, "could not persist an install job");
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    Persist::Job(job) => {
+                        if let Err(e) = store.put_install(&record(&job)).await {
+                            tracing::warn!(job = %job.id, error = %e, "could not persist an install job");
+                        }
+                    }
+                    Persist::Enrolled { name, node_id } => {
+                        match store.close_issued_installs(&name, &node_id).await {
+                            Ok(0) => {}
+                            Ok(n) => {
+                                tracing::debug!(host = %name, rows = n, "closed issued installs")
+                            }
+                            Err(e) => tracing::warn!(
+                                host = %name,
+                                error = %e,
+                                "could not close the issued install rows for an enrolled host"
+                            ),
+                        }
+                    }
                 }
             }
         });
@@ -147,7 +178,7 @@ impl ProvisioningRuntime {
         // waiting for the first reentrant call.
         let job = self.jobs.lock().unwrap().get(id).cloned();
         if let Some(job) = job {
-            let _ = tx.send(job);
+            let _ = tx.send(Persist::Job(job));
         }
     }
 
@@ -163,6 +194,11 @@ impl ProvisioningRuntime {
     /// the mint knows a host string, the enrollment knows the name the daemon
     /// was configured with, and for every install path in this repo they are
     /// the same string.
+    ///
+    /// The list in memory is capped, so the sweep also runs against the table
+    /// (`Store::close_issued_installs`): an intent that fell out of the panel's
+    /// window is still `issued` in the database, and leaving it that way would
+    /// make the durable record claim a host never arrived when it did.
     pub fn mark_enrolled(&self, name: &str, node_id: &str) {
         let name = name.trim();
         if name.is_empty() {
@@ -185,6 +221,14 @@ impl ProvisioningRuntime {
         };
         for id in closed {
             self.save(&id);
+        }
+        // Sent after the saves above, and on the same queue: the sweep must not
+        // run before the rows it would otherwise find still marked `issued`.
+        if let Some(tx) = &self.persist {
+            let _ = tx.send(Persist::Enrolled {
+                name: name.to_string(),
+                node_id: node_id.to_string(),
+            });
         }
     }
 
@@ -799,6 +843,59 @@ mod tests {
             .hydrate(state.store.clone())
             .await;
         assert_eq!(rt.get("j4").unwrap().state, JobState::Failed);
+    }
+
+    /// The panel keeps [`KEPT_JOBS`] jobs; the table keeps everything. So an
+    /// intent can fall out of the panel's window and still be `issued` on disk —
+    /// and if only the in-memory list were closed, that row would go on saying
+    /// "a token went out and nothing came back" about a node that is enrolled
+    /// and heartbeating. The table is the record, so the close has to reach it.
+    #[tokio::test]
+    async fn an_intent_evicted_from_the_list_still_closes_in_the_database() {
+        let state = crate::AppState::open_temp().await.unwrap();
+        let rt = ProvisioningRuntime::from_env()
+            .hydrate(state.store.clone())
+            .await;
+
+        // The oldest intent, then enough newer ones to push it past the cap.
+        let mut intent = job("w", "2026-01-01T00:00:00Z", JobState::Issued);
+        intent.name = "web-1".into();
+        rt.insert(intent);
+        for i in 0..KEPT_JOBS {
+            let id = format!("f{i}");
+            let started = format!("2026-01-01T00:00:{:02}Z", i + 1);
+            let mut filler = job(&id, &started, JobState::Issued);
+            filler.name = format!("filler-{i}");
+            rt.insert(filler);
+        }
+        assert!(
+            rt.list().iter().all(|j| j.name != "web-1"),
+            "the oldest intent should have been evicted from the panel"
+        );
+
+        rt.mark_enrolled("web-1", "node-abc");
+
+        let mut found = None;
+        for _ in 0..100 {
+            let rows = state.store.list_installs(100).await.unwrap();
+            if let Some(r) = rows.into_iter().find(|r| r.name == "web-1") {
+                if r.state == "succeeded" {
+                    found = Some(r);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let web = found.expect("the evicted intent was never closed in the database");
+        assert_eq!(web.steps, vec!["enrolled as node-abc".to_string()]);
+        assert!(web.finished_at.is_some());
+
+        // And an unrelated host is untouched.
+        let rows = state.store.list_installs(100).await.unwrap();
+        assert!(rows
+            .iter()
+            .filter(|r| r.name.starts_with("filler-"))
+            .all(|r| r.state == "issued"));
     }
 
     async fn wait_for_row(
