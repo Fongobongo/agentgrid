@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`ag nodes probe --host user@host` — the reachability check on a host you can
+  only ssh to.** The probe needs no credential and no enrollment, but running it
+  on a remote host meant `scp` and `ssh` by hand, which is the step people skip
+  and then guess instead. It now copies the daemon over the same ssh an install
+  would use (same key, certificate and host-key policy), runs it there and
+  removes it. `--server` defaults to the control plane `ag` already talks to;
+  `--relay`, `--gateway` and `--tcp` pass through, and the exit code is 1 when
+  any check fails. The ssh flags are shared with `install` through one flattened
+  struct, so the two cannot drift. `ag nodes add --probe` — and a checkbox in the
+  join dialog — puts `--probe` into the printed line, which is the cheapest way
+  to find out that a relay does not actually forward.
+
 - **Joining a host that cannot reach the control plane — and finding out what a
   host can reach.** The pull-based join had no way to *ask for* its command and
   no way to name a relay, so "install through a sibling" was an out-of-band

@@ -18,7 +18,7 @@
 //! is minted by the caller and handed in, so this crate never talks HTTP.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// SSH connection parameters.
 ///
@@ -223,6 +223,19 @@ pub fn validate(t: &Target, p: &Plan) -> Result<()> {
     if let Some(s) = &p.server {
         sane(s, "server")?;
     }
+    validate_target(t)?;
+    if p.transport == Transport::Direct && p.server.is_none() {
+        anyhow::bail!("direct transport needs a server URL");
+    }
+    Ok(())
+}
+
+/// The [`Target`] half of [`validate`], for callers that have no [`Plan`].
+///
+/// The guards are the same ones an install uses — the probe runs over the same
+/// ssh, with the same key and certificate — so they live in one place rather
+/// than being repeated per command.
+pub fn validate_target(t: &Target) -> Result<()> {
     // The SSH target is interpolated into argv, not a shell, but a newline or a
     // leading `-` (which ssh reads as an option) is still not a host. Colons
     // and brackets stay legal so `user@[::1]:2222` keeps working.
@@ -252,9 +265,6 @@ pub fn validate(t: &Target, p: &Plan) -> Result<()> {
     }
     if t.ssh_cert.is_some() && t.password.is_some() {
         anyhow::bail!("an ssh certificate and a password are mutually exclusive");
-    }
-    if p.transport == Transport::Direct && p.server.is_none() {
-        anyhow::bail!("direct transport needs a server URL");
     }
     Ok(())
 }
@@ -413,24 +423,20 @@ fn ssh_argv(t: &Target, is_scp: bool, extra: &[String], remote_cmd: Option<&str>
     base
 }
 
-/// Run ssh/scp against the remote, choosing the auth wrapper: key (direct),
-/// password via `sshpass` when present, else `expect`.
+/// The final argv plus the optional secret to pass through the environment.
 ///
-/// `extra` are program-specific args (e.g. `-f -N -R ...`); `remote_cmd` (ssh
-/// only) is the final argument. `detach` starts the command in its own session
-/// so it survives this process — used for the tunnel and for the node start.
-fn run_remote(
+/// Split out so both runners share the auth wrapper: `sshpass` when it exists,
+/// `expect` otherwise, with the password never in argv.
+fn invocation(
     t: &Target,
     is_scp: bool,
     extra: &[String],
     remote_cmd: Option<String>,
-    what: &str,
-    detach: bool,
-) -> Result<()> {
+) -> (Vec<String>, Option<(&'static str, String)>) {
     let base = ssh_argv(t, is_scp, extra, remote_cmd.as_deref());
 
     // auth wrapper -> final argv (+ optional secret passed via env, never argv)
-    let (argv, secret_env) = if let Some(pw) = &t.password {
+    if let Some(pw) = &t.password {
         if std::process::Command::new("sshpass")
             .arg("true")
             .status()
@@ -460,9 +466,49 @@ fn run_remote(
         }
     } else {
         (base, None)
-    };
+    }
+}
 
+/// Run ssh/scp and return the child's exit code instead of failing on it.
+///
+/// A non-zero code is not always an ssh failure: `probe` exits `1` to mean "at
+/// least one check failed", which is a *result* the caller has to report, not a
+/// transport error to abort on. `-1` is "killed by a signal".
+fn run_remote_code(
+    t: &Target,
+    is_scp: bool,
+    extra: &[String],
+    remote_cmd: Option<String>,
+    what: &str,
+) -> Result<i32> {
+    let (argv, secret_env) = invocation(t, is_scp, extra, remote_cmd);
+    let mut c = std::process::Command::new(&argv[0]);
+    c.args(&argv[1..]);
+    if let Some((var, val)) = &secret_env {
+        c.env(var, val);
+    }
+    let status = c
+        .status()
+        .with_context(|| format!("failed to run ssh/scp ({what})"))?;
+    Ok(status.code().unwrap_or(-1))
+}
+
+/// Run ssh/scp against the remote, choosing the auth wrapper: key (direct),
+/// password via `sshpass` when present, else `expect`.
+///
+/// `extra` are program-specific args (e.g. `-f -N -R ...`); `remote_cmd` (ssh
+/// only) is the final argument. `detach` starts the command in its own session
+/// so it survives this process — used for the tunnel and for the node start.
+fn run_remote(
+    t: &Target,
+    is_scp: bool,
+    extra: &[String],
+    remote_cmd: Option<String>,
+    what: &str,
+    detach: bool,
+) -> Result<()> {
     if detach {
+        let (argv, secret_env) = invocation(t, is_scp, extra, remote_cmd);
         let mut c = std::process::Command::new("setsid");
         c.arg("nohup").args(&argv);
         if let Some((var, val)) = &secret_env {
@@ -477,16 +523,9 @@ fn run_remote(
             .with_context(|| format!("failed to spawn detached ssh/scp ({what})"))?;
         return Ok(());
     }
-    let mut c = std::process::Command::new(&argv[0]);
-    c.args(&argv[1..]);
-    if let Some((var, val)) = &secret_env {
-        c.env(var, val);
-    }
-    let status = c
-        .status()
-        .with_context(|| format!("failed to run ssh/scp ({what})"))?;
-    if !status.success() {
-        anyhow::bail!("ssh/scp step failed ({what}): {status}");
+    let code = run_remote_code(t, is_scp, extra, remote_cmd, what)?;
+    if code != 0 {
+        anyhow::bail!("ssh/scp step failed ({what}): exit {code}");
     }
     Ok(())
 }
@@ -508,6 +547,73 @@ fn scp_file(t: &Target, local: &str, remote: &str) -> Result<()> {
         "scp file",
         false,
     )
+}
+
+/// Quote one argument for the remote shell.
+///
+/// The probe's arguments are URLs and host:port pairs, so they mostly need no
+/// quoting at all — but `?` and `&` in a query string are shell operators, and
+/// the cost of getting this wrong is a command that silently checks the wrong
+/// thing.
+fn sh_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@%+,=".contains(c))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Run the reachability probe **on** `t`.
+///
+/// The binary is copied over the same ssh (same key, same certificate, same
+/// host-key policy), run there, and removed. It has to be copied rather than
+/// run from here for two reasons: the question is what *that host* can reach,
+/// and the machine running `ag` is usually a different platform anyway.
+///
+/// Returns the probe's exit code — `0` every check passed, `1` at least one
+/// failed (the report has already gone to this process's stdout). Anything else
+/// is a transport problem, and the caller reports it as one.
+pub fn probe(t: &Target, binary: &Path, args: &[String]) -> Result<i32> {
+    validate_target(t)?;
+    if !binary.is_file() {
+        anyhow::bail!(
+            "no node daemon binary at {} — pass --binary",
+            binary.display()
+        );
+    }
+    // The copy goes to the user's home, not `/tmp`: `/tmp` is `noexec` on a
+    // fair number of hardened hosts, and the failure then reads as "permission
+    // denied" on a file that is plainly executable.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dir = ".agentgrid";
+    let remote = format!("~/{dir}/probe-{}-{stamp}", std::process::id());
+    run_remote(
+        t,
+        false,
+        &[],
+        Some(format!("mkdir -p ~/{dir}")),
+        "prepare the probe directory",
+        false,
+    )?;
+    let local = binary
+        .to_str()
+        .context("the binary path is not valid UTF-8")?;
+    scp_file(t, local, &remote)?;
+    let quoted = args
+        .iter()
+        .map(|a| sh_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    // `rc=$?` right after the probe, so the report's exit code survives the
+    // cleanup — `rm` would otherwise be the last command and always succeed.
+    let cmd =
+        format!("chmod +x {remote} && {remote} probe {quoted}; rc=$?; rm -f {remote}; exit $rc");
+    run_remote_code(t, false, &[], Some(cmd), "probe")
 }
 
 #[cfg(test)]
@@ -844,5 +950,39 @@ mod tests {
             argv.contains("-o CertificateFile=/home/op/.ssh/id_ed25519-cert.pub"),
             "the certificate must reach every ssh/scp child, not just argv():\n{argv}"
         );
+    }
+
+    /// The probe's arguments are URLs and `host:port`, so they mostly need no
+    /// quoting — but `?` and `&` in a query string are shell operators, and a
+    /// quote that ends the argument early turns a check into a second command.
+    #[test]
+    fn sh_quote_quotes_only_what_needs_it() {
+        assert_eq!(sh_quote("http://node-a:7900"), "http://node-a:7900");
+        assert_eq!(sh_quote("10.0.0.1:5432"), "10.0.0.1:5432");
+        assert_eq!(sh_quote("a b"), "'a b'");
+        assert_eq!(sh_quote("x;rm -rf /"), "'x;rm -rf /'");
+        assert_eq!(sh_quote("https://cp/x?a=1&b=2"), "'https://cp/x?a=1&b=2'");
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+        assert_eq!(sh_quote(""), "''");
+    }
+
+    /// The probe reuses the install's guards: the same ssh, the same key, the
+    /// same certificate rules. A certificate without its key is not a valid
+    /// target for either.
+    #[test]
+    fn probe_targets_are_validated_like_installs() {
+        let mut t = target();
+        t.host = "-oProxyCommand=evil".into();
+        assert!(validate_target(&t).is_err());
+        let mut t = target();
+        t.ssh_cert = Some("/k/cert.pub".into());
+        assert!(
+            validate_target(&t).is_err(),
+            "a certificate needs the private key it was signed for"
+        );
+        let mut t = target();
+        t.ssh_cert = Some("/k/cert.pub".into());
+        t.ssh_key = Some("/k/id".into());
+        assert!(validate_target(&t).is_ok());
     }
 }

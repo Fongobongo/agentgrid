@@ -135,6 +135,7 @@ function JoinSection({
   nodes: NodeView[];
 }) {
   const [via, setVia] = useState('');
+  const [probe, setProbe] = useState(false);
   const [view, setView] = useState<JoinCommandView | null>(null);
   const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -166,6 +167,7 @@ function JoinSection({
         await requestJoinCommand({
           name: name.trim() || 'remote-node',
           via: via || undefined,
+          probe: probe || undefined,
         }),
       );
     } catch (e) {
@@ -204,6 +206,21 @@ function JoinSection({
             </option>
           ))}
         </select>
+      </label>
+      <label style={{ display: 'block', marginTop: 6 }}>
+        <input
+          type="checkbox"
+          checked={probe}
+          disabled={busy}
+          onChange={(e) => {
+            setProbe(e.target.checked);
+            // The line on screen no longer matches the choice; leaving it up
+            // is how an operator pastes a command without the flag they ticked.
+            setView(null);
+          }}
+        />{' '}
+        Check the path first (<code>--probe</code>): the host verifies what it
+        can reach and stops before installing anything
       </label>
       {relays.length === 0 && (
         <p className="muted">

@@ -1333,6 +1333,10 @@ export interface JoinCommandRequest {
   name: string;
   host?: string;
   via?: string;
+  // Put `--probe` in the line: the host checks what it can reach before
+  // installing anything, and stops if the check fails. The only cheap way to
+  // find out that a relay does not actually forward.
+  probe?: boolean;
 }
 
 /**

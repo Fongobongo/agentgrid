@@ -704,6 +704,30 @@ other argument is refused by name rather than ignored. That matters on the host
 you are probing: an unrecognised flag used to boot the agent, create its data
 directory and try to enroll against `127.0.0.1:7800`.
 
+### On a host you can only ssh to
+
+`ag nodes probe` does the copy for you, over the same ssh an install would use —
+same key, same certificate, same host-key policy — and removes the binary when
+it is done:
+
+```bash
+ag nodes probe --host fong@10.0.0.9 \
+  --server https://cp.example.com:7800 \
+  --relay http://node-a.internal:7900 \
+  --tcp db.internal:5432
+```
+
+`--server` defaults to the control plane this `ag` is pointed at, the ssh flags
+are the ones `ag nodes install` takes, and the exit code is 1 when any check
+fails — so a working install line can be reused verbatim, and the result can go
+straight into a script.
+
+The binary it copies is the one next to `ag`, or `--binary`. That matters: the
+check has to run on *that* host, so the binary must be built for it. An `ag` on
+a laptop has no daemon for a linux/x86-64 server, and the failure looks like
+"could not execute the probe". Point `--binary` at the bundle the control plane
+serves (`/v1/node/bundle/agentgrid-node-daemon`) or at a copy from a sibling.
+
 Output is grouped by question, and the exit code is 1 when any check fails, so
 it belongs in a script:
 

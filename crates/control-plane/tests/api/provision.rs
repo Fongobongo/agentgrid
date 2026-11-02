@@ -311,6 +311,52 @@ async fn a_join_through_a_relay_names_the_relay_as_the_server() {
     );
 }
 
+/// `probe: true` puts `--probe` in the line, and nothing else changes.
+///
+/// It is the cheapest way to find out that a relay does not actually forward,
+/// so it has to be reachable without editing the command by hand — but it is
+/// asked for, never assumed: it costs a round trip and a bundle checksum on a
+/// path that is often already known to work.
+#[tokio::test]
+async fn a_join_can_ask_the_host_to_probe_first() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state.clone());
+    let tok = test_token(&app).await;
+
+    let ask = |app: axum::Router, probe: bool| {
+        let body = if probe {
+            json!({ "name": "web-3", "probe": true })
+        } else {
+            json!({ "name": "web-3" })
+        };
+        let tok = tok.clone();
+        async move {
+            let resp = app
+                .oneshot(post_auth("/v1/nodes/join-command", body_json(&body), &tok))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let out: serde_json::Value =
+                serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            out["command"].as_str().unwrap().to_string()
+        }
+    };
+
+    let asked = ask(app.clone(), true).await;
+    assert!(
+        asked.ends_with(" --probe"),
+        "the flag has to be the last argument, after --token: {asked}"
+    );
+    assert_eq!(asked.matches("--probe").count(), 1);
+
+    let plain = ask(app, false).await;
+    assert!(
+        !plain.contains("--probe"),
+        "a probe is a choice, not a default: {plain}"
+    );
+}
+
 /// Asking for a relay that cannot relay is the one case where falling back to
 /// a direct join would be actively harmful: the operator asked *because* the
 /// host cannot reach the control plane, so a silently direct command is a

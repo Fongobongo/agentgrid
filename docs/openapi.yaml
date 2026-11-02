@@ -1041,6 +1041,13 @@ paths:
         endpoint guess. The client is expected to warn — the command is minted
         for a host nobody can log into.
 
+        `probe: true` appends `--probe` to the line: the host checks what it can
+        reach before installing anything and stops if the check fails. It is
+        asked for, never assumed — it costs a round trip and a bundle checksum
+        on a path that often already works — and on a relayed join it is the
+        only thing that tells a relay which forwards from a proxy which merely
+        listens: the report's `CONTROL PLANE` line then reads `hops=1`.
+
         A static segment wins over `/v1/nodes/{id}` in axum's router, so this
         path is reachable even though the pattern also matches.
       responses:

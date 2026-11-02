@@ -139,6 +139,17 @@ describe('the relay picker', () => {
     expect(html).toContain('AGENTGRID_RELAY_ADVERTISE');
   });
 
+  // The one check that tells a relay that forwards from a proxy that merely
+  // listens, and it costs a round trip — so it is offered, not assumed.
+  it('offers the pre-install probe and does not tick it', () => {
+    const html = render({ enabled: false, node_binary: null, reason: 'off' }, []);
+    expect(html).toContain('--probe');
+    const boxes = Array.from(html.matchAll(/<input type="checkbox"([^>]*)>/g)).map((m) =>
+      /\bchecked\b/.test(m[1]),
+    );
+    expect(boxes.filter(Boolean)).toHaveLength(0);
+  });
+
   // "No relay here" and "a relay that listens and announces nothing" need
   // different answers. The second one is a node with AGENTGRID_RELAY_LISTEN set
   // and no advertise address — telling its operator to set the listen variable
@@ -229,7 +240,11 @@ describe('InstallNode when the control plane can install', () => {
     const boxes = Array.from(html.matchAll(/<input type="checkbox"([^>]*)>/g)).map(
       (m) => /\bchecked\b/.test(m[1]),
     );
-    expect(boxes.length).toBe(2);
-    expect(boxes).toEqual([false, false]);
+    // Every checkbox in this dialog is opt-in: the two that widen what the
+    // install is allowed to do, and the probe, which costs a round trip before
+    // anything is installed. The count is asserted so a new box cannot appear
+    // pre-ticked without someone deciding to.
+    expect(boxes.length).toBe(3);
+    expect(boxes).toEqual([false, false, false]);
   });
 });

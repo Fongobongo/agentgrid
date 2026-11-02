@@ -37,9 +37,22 @@ pub(crate) enum NodeSub {
         /// which nodes announce a relay in the RELAY column.
         #[arg(long)]
         via: Option<String>,
+        /// Put `--probe` in the printed line: the host checks what it can reach
+        /// before anything is installed, and stops if it cannot get through.
+        /// Cheapest way to find out that a relay does not forward.
+        #[arg(long, default_value_t = false)]
+        probe: bool,
     },
     /// Provision a remote host as a node over SSH and link it to this control plane.
     Install(Box<NodeInstallArgs>),
+    /// Check what a host can reach — from that host, over SSH.
+    ///
+    /// `doctor` reports the control plane's view of a node, which cannot answer
+    /// "can this machine reach anything". This copies the node daemon over the
+    /// same ssh an install would use, runs its `probe` there and removes it, so
+    /// a host with nothing installed can be checked without `scp` and `ssh` by
+    /// hand. Needs no credential on the host and no enrollment.
+    Probe(Box<NodeProbeArgs>),
     /// Diagnose a node: fetch its control-plane view and surface known
     /// symptoms (status, missing adapters, low disk, stale heartbeat). Doctor
     /// is report-only — it does not mutate the node. Use `ag node install` /
@@ -81,8 +94,13 @@ pub(crate) enum Transport {
     Wireguard,
 }
 
+/// The ssh half of a node command: where to connect, and how to authenticate.
+///
+/// Shared by `install` and `probe` through `#[command(flatten)]` so the two
+/// cannot drift — an operator who has a working `install` line can reuse its
+/// flags verbatim for a probe, which is exactly the moment they need one.
 #[derive(Args)]
-pub(crate) struct NodeInstallArgs {
+pub(crate) struct SshArgs {
     /// Remote host as user@host or user@host:port.
     #[arg(long)]
     host: String,
@@ -108,6 +126,61 @@ pub(crate) struct NodeInstallArgs {
     /// not match; overrides --accept-new-host-key.
     #[arg(long)]
     host_key_fingerprint: Option<String>,
+}
+
+impl SshArgs {
+    fn target(&self) -> agentgrid_provision::Target {
+        agentgrid_provision::Target {
+            host: self.host.clone(),
+            ssh_key: self.ssh_key.clone(),
+            ssh_cert: self.ssh_cert.clone(),
+            password: self.password.clone(),
+            accept_new_host_key: self.accept_new_host_key,
+            host_key_fingerprint: self.host_key_fingerprint.clone(),
+        }
+    }
+}
+
+/// Check what a host can reach, **from that host**.
+///
+/// `ag nodes doctor` reports the control plane's view of a node, which cannot
+/// answer "can this machine reach anything". This copies the node daemon over
+/// the same ssh an install would use, runs its `probe` there, and removes it —
+/// the same thing you would do by hand with `scp` and `ssh`, without the copy.
+#[derive(Args)]
+pub(crate) struct NodeProbeArgs {
+    #[command(flatten)]
+    ssh: SshArgs,
+    /// Control plane URL to check (default: the one this `ag` talks to).
+    #[arg(long)]
+    server: Option<String>,
+    /// Relay URL to check: does it actually forward to the control plane.
+    /// This is the check with no equivalent anywhere else — it reads back the
+    /// hop count the control plane observed.
+    #[arg(long)]
+    relay: Option<String>,
+    /// Credential-gateway URL to check.
+    #[arg(long)]
+    gateway: Option<String>,
+    /// A TCP endpoint to check, `host:port`. Repeatable.
+    #[arg(long = "tcp")]
+    tcp: Vec<String>,
+    /// Per-check timeout in seconds.
+    #[arg(long, default_value_t = 10)]
+    timeout: u64,
+    /// Emit the probe's JSON report instead of the grouped text.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+    /// Local agentgrid-node-daemon to copy (default: next to `ag`). It must be
+    /// built for the remote host's platform, not for this machine.
+    #[arg(long)]
+    binary: Option<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct NodeInstallArgs {
+    #[command(flatten)]
+    ssh: SshArgs,
     /// Allow the node daemon to run as root on the remote (sets
     /// `AGENTGRID_ALLOW_ROOT=1`). OFF by default: the daemon refuses root, so
     /// SSH as (or create) an unprivileged user and point --data-dir at a dir it
@@ -158,10 +231,28 @@ pub(crate) async fn cmd_nodes(
 ) -> Result<()> {
     match a.command {
         NodeSub::List => cmd_node_list(client, base, json).await,
-        NodeSub::Add { name, host, via } => {
-            cmd_node_add(client, base, json, &name, host.as_deref(), via.as_deref()).await
+        NodeSub::Add {
+            name,
+            host,
+            via,
+            probe,
+        } => {
+            cmd_node_add(
+                client,
+                base,
+                json,
+                &name,
+                host.as_deref(),
+                via.as_deref(),
+                probe,
+            )
+            .await
         }
         NodeSub::Install(i) => cmd_node_install(client, base, *i).await,
+        // No control-plane call at all: the probe runs on the remote host and
+        // needs no credential, which is what makes it usable before that host
+        // has joined anything.
+        NodeSub::Probe(p) => cmd_node_probe(base, *p).await,
         NodeSub::Doctor { node_id } => cmd_node_doctor(client, base, &node_id).await,
         NodeSub::Drain { node_id, undrain } => {
             cmd_node_drain(client, base, &node_id, undrain).await
@@ -184,6 +275,7 @@ async fn cmd_node_add(
     name: &str,
     host: Option<&str>,
     via: Option<&str>,
+    probe: bool,
 ) -> Result<()> {
     let mut body = serde_json::json!({ "name": name });
     if let Some(h) = host.map(str::trim).filter(|h| !h.is_empty()) {
@@ -191,6 +283,9 @@ async fn cmd_node_add(
     }
     if let Some(v) = via.map(str::trim).filter(|v| !v.is_empty()) {
         body["via"] = serde_json::json!(v);
+    }
+    if probe {
+        body["probe"] = serde_json::json!(true);
     }
     let resp = client
         .post(format!("{base}/v1/nodes/join-command"))
@@ -260,8 +355,8 @@ async fn cmd_node_add(
                     .and_then(|v| v.as_str())
                     .unwrap_or("never")
             );
-            println!("Add --probe to the line above to stop before installing anything if");
-            println!("the new host cannot reach it.");
+            println!("Re-run with --probe to stop before installing anything if the new");
+            println!("host cannot reach that relay.");
         }
     }
     println!();
@@ -473,6 +568,71 @@ async fn cmd_node_doctor(client: &reqwest::Client, base: &str, node_id: &str) ->
     Ok(())
 }
 
+/// The arguments the remote probe is given.
+///
+/// Split out to be testable: the `--tcp` → `--host` rename is exactly the kind
+/// of mapping that breaks silently, and a probe that checks nothing still exits
+/// `0` and looks like a pass.
+fn probe_argv(a: &NodeProbeArgs, base: &str) -> Vec<String> {
+    // `--server` defaults to the control plane this `ag` is pointed at: the
+    // usual question is "can that host reach the control plane I am looking
+    // at", and asking the operator to retype the URL invites a typo that turns
+    // a reachability failure into a DNS failure.
+    let server = a.server.clone().unwrap_or_else(|| base.to_string());
+    let mut args: Vec<String> = vec!["--server".into(), server];
+    if let Some(r) = &a.relay {
+        args.push("--relay".into());
+        args.push(r.clone());
+    }
+    if let Some(g) = &a.gateway {
+        args.push("--gateway".into());
+        args.push(g.clone());
+    }
+    // The probe calls these `--host` (a TCP endpoint); the CLI cannot, because
+    // `--host` here is the ssh target.
+    for t in &a.tcp {
+        args.push("--host".into());
+        args.push(t.clone());
+    }
+    args.push("--timeout".into());
+    args.push(a.timeout.to_string());
+    if a.json {
+        args.push("--json".into());
+    }
+    args
+}
+
+/// Run the reachability probe on a remote host.
+///
+/// `async` only because the caller's match arms are: the work itself is a
+/// blocking ssh child, and a CLI process has nothing to interleave with it.
+async fn cmd_node_probe(base: &str, a: NodeProbeArgs) -> Result<()> {
+    let binary = resolve_node_binary(a.binary.as_deref())?;
+    let target = a.ssh.target();
+    let args = probe_argv(&a, base);
+
+    println!(
+        "probing {} (copying {}, removing it afterwards)",
+        target.host,
+        binary.display()
+    );
+    let code = agentgrid_provision::probe(&target, &binary, &args)?;
+    match code {
+        0 => Ok(()),
+        // The report is already on stdout, including "N of M check(s) failed";
+        // the exit code is what a script sees, so it has to be non-zero here.
+        1 => anyhow::bail!("{} failed at least one check", target.host),
+        // 126/127 mean the copy did not run at all — the one failure that looks
+        // like a reachability problem and is not.
+        126 | 127 => anyhow::bail!(
+            "could not execute the probe on {}: the copied binary did not run \
+             (a noexec home directory?): pass --binary with one built for that host",
+            target.host
+        ),
+        other => anyhow::bail!("the probe on {} ended with exit {other}", target.host),
+    }
+}
+
 async fn cmd_node_install(client: &reqwest::Client, base: &str, a: NodeInstallArgs) -> Result<()> {
     if let Transport::Wireguard = a.transport {
         anyhow::bail!(
@@ -520,14 +680,7 @@ fn resolve_node_binary(explicit: Option<&str>) -> Result<std::path::PathBuf> {
 
 impl NodeInstallArgs {
     fn target(&self) -> agentgrid_provision::Target {
-        agentgrid_provision::Target {
-            host: self.host.clone(),
-            ssh_key: self.ssh_key.clone(),
-            ssh_cert: self.ssh_cert.clone(),
-            password: self.password.clone(),
-            accept_new_host_key: self.accept_new_host_key,
-            host_key_fingerprint: self.host_key_fingerprint.clone(),
-        }
+        self.ssh.target()
     }
 
     /// `--server` means "the node dials that URL itself"; without it the
@@ -725,12 +878,14 @@ mod node_install_tests {
 
     fn sample() -> NodeInstallArgs {
         NodeInstallArgs {
-            host: "deploy@node-b:2222".into(),
-            ssh_key: None,
-            ssh_cert: None,
-            password: None,
-            accept_new_host_key: false,
-            host_key_fingerprint: None,
+            ssh: SshArgs {
+                host: "deploy@node-b:2222".into(),
+                ssh_key: None,
+                ssh_cert: None,
+                password: None,
+                accept_new_host_key: false,
+                host_key_fingerprint: None,
+            },
             allow_root: false,
             transport: Transport::SshTunnel,
             name: "node-b".into(),
@@ -865,5 +1020,91 @@ mod relay_cell_tests {
             relay_cell(&json!({ "relay_url": null, "relay_listen": null })),
             "-"
         );
+    }
+}
+
+#[cfg(test)]
+mod node_probe_tests {
+    use super::*;
+
+    fn args() -> NodeProbeArgs {
+        NodeProbeArgs {
+            ssh: SshArgs {
+                host: "fong@host3".into(),
+                ssh_key: None,
+                ssh_cert: None,
+                password: None,
+                accept_new_host_key: false,
+                host_key_fingerprint: None,
+            },
+            server: None,
+            relay: None,
+            gateway: None,
+            tcp: vec![],
+            timeout: 10,
+            json: false,
+            binary: None,
+        }
+    }
+
+    /// `--server` defaults to the control plane `ag` already talks to. Making
+    /// the operator retype it invites a typo that turns "unreachable" into
+    /// "no such host", which reads as a different problem entirely.
+    #[test]
+    fn the_server_defaults_to_this_control_plane() {
+        assert_eq!(
+            probe_argv(&args(), "http://cp:7800"),
+            vec![
+                "--server".to_string(),
+                "http://cp:7800".to_string(),
+                "--timeout".to_string(),
+                "10".to_string(),
+            ]
+        );
+        let mut a = args();
+        a.server = Some("http://other:7800".into());
+        assert_eq!(probe_argv(&a, "http://cp:7800")[1], "http://other:7800");
+    }
+
+    /// The probe's flag for a TCP endpoint is `--host`, which the CLI has
+    /// already spent on the ssh target. Mapping it wrongly would leave the
+    /// remote probe with no check at all — and it exits 0 having checked
+    /// nothing, which is the one failure mode a diagnostic must not have.
+    #[test]
+    fn a_tcp_check_becomes_the_probe_host_flag() {
+        let mut a = args();
+        a.tcp = vec!["db:5432".into(), "gw:7920".into()];
+        let argv = probe_argv(&a, "http://cp:7800");
+        let pairs: Vec<(&str, &str)> = argv
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()))
+            .collect();
+        assert!(pairs.contains(&("--host", "db:5432")));
+        assert!(pairs.contains(&("--host", "gw:7920")));
+        assert!(
+            !argv.iter().any(|s| s == "--tcp"),
+            "the CLI's own flag is not the probe's"
+        );
+    }
+
+    /// Every flag the operator typed has to reach the remote argv, and `--json`
+    /// only when asked — the report shape is what a script parses.
+    #[test]
+    fn the_optional_checks_and_json_are_passed_through() {
+        let mut a = args();
+        a.relay = Some("http://node-a:7900".into());
+        a.gateway = Some("http://gw:7920".into());
+        a.json = true;
+        a.timeout = 3;
+        let argv = probe_argv(&a, "http://cp:7800");
+        assert!(argv.contains(&"--relay".to_string()));
+        assert!(argv.contains(&"http://node-a:7900".to_string()));
+        assert!(argv.contains(&"--gateway".to_string()));
+        assert!(argv.contains(&"--json".to_string()));
+        let pairs: Vec<(&str, &str)> = argv
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()))
+            .collect();
+        assert!(pairs.contains(&("--timeout", "3")));
     }
 }

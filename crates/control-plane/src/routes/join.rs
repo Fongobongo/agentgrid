@@ -80,6 +80,10 @@ pub struct JoinCommandRequest {
     /// cannot reach this control plane directly.
     #[serde(default)]
     pub via: Option<String>,
+    /// Put `--probe` in the command: the host checks what it can reach before
+    /// installing anything and stops if the check fails.
+    #[serde(default)]
+    pub probe: bool,
 }
 
 /// `POST /v1/nodes/join-command`
@@ -106,6 +110,7 @@ pub async fn join_command(
         name: String::new(),
         host: None,
         via: None,
+        probe: false,
     });
     let name = req.name.trim().to_string();
     if name.is_empty() {
@@ -145,7 +150,7 @@ pub async fn join_command(
         Some(v) => (v.relay_url.clone(), Some(v)),
         None => (public_url(&headers), None),
     };
-    let command = join_line(&server, &token, via.is_some());
+    let command = join_line(&server, &token, via.is_some(), req.probe);
     Json(JoinCommandResponse {
         token,
         expires_at,
@@ -164,11 +169,19 @@ pub async fn join_command(
 /// set one, and that address is exactly the one the new host cannot reach. A
 /// redundant flag is cheaper than an install that fails at the last step on a
 /// machine the operator cannot inspect.
-fn join_line(server: &str, token: &str, relayed: bool) -> String {
+///
+/// `--probe` is asked for, never assumed: it costs a round trip and a checksum
+/// of the bundle, and an operator who already knows the path works should not
+/// pay for it. On a relayed join it is the only thing that distinguishes a
+/// relay that forwards from a proxy that merely listens.
+fn join_line(server: &str, token: &str, relayed: bool, probe: bool) -> String {
     let base = server.trim_end_matches('/');
     let mut line = format!("curl -fsSL {base}/v1/node/join.sh | sudo bash -s -- --token {token}");
     if relayed {
         line.push_str(&format!(" --server {base}"));
+    }
+    if probe {
+        line.push_str(" --probe");
     }
     line
 }
