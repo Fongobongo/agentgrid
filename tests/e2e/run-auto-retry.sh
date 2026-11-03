@@ -10,7 +10,7 @@ cd "$(dirname "$0")/../.."
 
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7800}"
 USER="${AGENTGRID_BOOTSTRAP_USER:-admin}"
-PASS="${AGENTGRID_BOOTSTRAP_PASSWORD:-changeme}"
+PASS="${AGENTGRID_BOOTSTRAP_PASSWORD:-dev-only-password}"
 TIMEOUT="${E2E_TIMEOUT:-120}"
 
 docker image inspect ag-cp:test >/dev/null 2>&1 || docker build -t ag-cp:test -f Dockerfile.control-plane .

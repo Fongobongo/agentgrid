@@ -27,7 +27,7 @@ TOKEN="e2e-ha-incremental-token-0123456789abcd"  # gitleaks:allow
 JWT_SECRET="e2e-ha-incremental-secret-0123456789ab"  # gitleaks:allow
 CLUSTER="e2e-inc"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 
 declare -A PORT=([cp-a]=17841 [cp-b]=17842 [cp-c]=17843)
 declare -A PID=()

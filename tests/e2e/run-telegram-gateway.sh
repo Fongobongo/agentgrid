@@ -21,7 +21,7 @@ TG_PORT=18901
 TG_URL="http://127.0.0.1:$TG_PORT"
 TOKEN="e2e-bot-token"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 CHAT_ID=4242
 source "$ROOT/tests/e2e/lib-bootstrap.sh"
 

@@ -41,7 +41,7 @@ RELAY="http://127.0.0.1:$RELAY_PORT"
 RELAY2_PORT="${AGENTGRID_RELAY2_PORT:-7833}"
 RELAY2="http://127.0.0.1:$RELAY2_PORT"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 E2E_JWT_SECRET="e2e-relay-secret"
 E2E_CONCURRENCY=2
 

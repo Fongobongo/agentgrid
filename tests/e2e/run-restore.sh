@@ -16,7 +16,7 @@ PORT1="${AGENTGRID_PORT1:-7812}"
 PORT2="${AGENTGRID_PORT2:-7813}"
 USER="admin"
 source "$ROOT/tests/e2e/lib-bootstrap.sh"
-PASS="changeme"
+PASS="dev-only-password"
 
 TMP="$(mktemp -d -t ag-e2e-restore-XXXXXX)"
 CP_DB="$TMP/cp.db"

@@ -19,7 +19,7 @@ BIN="$ROOT/target/debug"
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7827}"
 PORT="${AGENTGRID_PORT:-7827}"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 E2E_JWT_SECRET="e2e-autoasm-secret"
 E2E_CONCURRENCY=2
 

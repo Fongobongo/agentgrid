@@ -50,10 +50,10 @@ AGENTGRID_LISTEN="0.0.0.0:$PORT" AGENTGRID_DB="$TMP/cp.db" \
 CPPID=$!
 
 source "$ROOT/tests/e2e/lib-bootstrap.sh"
-bootstrap_first_user "$TMP/cp.log" "http://127.0.0.1:$PORT" "admin" "changeme"
+bootstrap_first_user "$TMP/cp.log" "http://127.0.0.1:$PORT" "admin" "dev-only-password"
 for _ in $(seq 1 20); do
   JWT=$(curl -fsS -H 'content-type: application/json' \
-    -d '{"username":"admin","password":"changeme"}' \
+    -d '{"username":"admin","password":"dev-only-password"}' \
     "http://127.0.0.1:$PORT/v1/auth/login" 2>/dev/null \
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' 2>/dev/null) && break
   sleep 0.5

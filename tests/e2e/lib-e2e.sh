@@ -25,7 +25,7 @@
 #
 # Usage:
 #   cd "$(dirname "$0")/../.."; ROOT="$PWD"; BIN="$ROOT/target/debug"
-#   BASE="http://127.0.0.1:7819"; PORT=7819; USER=admin; PASS=changeme
+#   BASE="http://127.0.0.1:7819"; PORT=7819; USER=admin; PASS=dev-only-password
 #   TMP="$(mktemp -d -t ag-e2e-x-XXXXXX)"; mkdir -p ...
 #   source "$ROOT/tests/e2e/lib-e2e.sh"
 #   trap e2e_cleanup EXIT

@@ -39,7 +39,7 @@ RELAY_A="http://127.0.0.1:$RELAY_A_PORT"
 RELAY_B_PORT="${AGENTGRID_RELAY_B_PORT:-7843}"
 RELAY_B="http://127.0.0.1:$RELAY_B_PORT"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 E2E_JWT_SECRET="e2e-relay-chain-secret"
 E2E_CONCURRENCY=2
 

@@ -21,7 +21,7 @@ CP_PORT = 7802
 TG_PORT = 19081
 CHAT_ID = 4242
 USER = "admin"
-PASS = "changeme"
+PASS = "dev-only-password"
 
 def http(method, url, body=None, token=None):
     data = json.dumps(body).encode() if body is not None else None

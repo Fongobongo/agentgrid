@@ -23,7 +23,7 @@ BASE="${AGENTGRID_BASE:-http://127.0.0.1:7816}"
 PORT="${AGENTGRID_PORT:-7816}"
 USER="admin"
 source "$ROOT/tests/e2e/lib-bootstrap.sh"
-PASS="changeme"
+PASS="dev-only-password"
 
 for b in agentgrid-control-plane agentgrid-node-daemon adapter-mock ag; do
   [ -x "$BIN/$b" ] || { echo ">> skip: $BIN/$b not built (cargo build -p agentgrid-cli -p agentgrid-control-plane -p agentgrid-node-daemon -p agentgrid-adapters)"; exit 0; }

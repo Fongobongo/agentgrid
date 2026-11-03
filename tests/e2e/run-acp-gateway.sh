@@ -29,7 +29,7 @@ BIN="${AGENTGRID_BIN:-$ROOT/target/debug}"
 PORT="${AGENTGRID_PORT:-7833}"
 BASE="http://127.0.0.1:$PORT"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 # Unique per run so the CP-side lookup cannot match a task from another script.
 PROMPT="acp-gateway-e2e-$(date +%s)-$$"
 

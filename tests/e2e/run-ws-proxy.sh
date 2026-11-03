@@ -42,7 +42,7 @@ BASE="http://127.0.0.1:$PORT"
 PROXY_PORT="${AGENTGRID_PROXY_PORT:-18810}"
 PROXY="http://127.0.0.1:$PROXY_PORT"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 E2E_JWT_SECRET="e2e-ws-proxy-secret"
 E2E_CONCURRENCY=2
 

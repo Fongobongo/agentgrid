@@ -21,7 +21,7 @@ BASE_PROXY="http://127.0.0.1:7820"
 BASE="$BASE_REAL"
 PORT=7811
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 E2E_JWT_SECRET="e2e-stable-secret"
 E2E_CONCURRENCY=2
 # Only the node speaks through the proxy; CP/operator calls stay direct.

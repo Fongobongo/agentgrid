@@ -27,7 +27,7 @@ PORT="${AG_REAL_PORT:-7813}"
 BASE="http://127.0.0.1:$PORT"
 TIMEOUT="${AG_REAL_TIMEOUT:-600}"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 
 skip() { echo "SKIP (real-agent e2e): $1"; exit 77; }
 

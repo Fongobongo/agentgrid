@@ -23,7 +23,7 @@ BIN="${BIN:-$ROOT/target/debug}"
 LISTEN_PORT="${AG_SMOKE_PORT:-7823}"
 BASE="http://127.0.0.1:${LISTEN_PORT}"
 PORT="$LISTEN_PORT"
-USER="admin"; PASS="changeme"
+USER="admin"; PASS="dev-only-password"
 E2E_JWT_SECRET="smoke-secret"
 E2E_CONCURRENCY=1
 

@@ -12,9 +12,9 @@ AGENTGRID_LISTEN="127.0.0.1:$PORT" AGENTGRID_DB="$TMP/cp.db" \
 AGENTGRID_JWT_SECRET="e2e-flush-secret" AGENTGRID_ARTIFACT_ROOT="$TMP/art" \
 nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 & echo -n "$! " >>$TMP/pids
 for _ in $(seq 1 40); do curl -fsS "$BASE/health/ready" >/dev/null 2>&1 && break; sleep 0.5; done
-bootstrap_first_user "$TMP/cp.log" "$BASE" admin changeme
+bootstrap_first_user "$TMP/cp.log" "$BASE" admin dev-only-password
 jwt=$(curl -fsS -X POST "$BASE/v1/auth/login" -H 'content-type: application/json' \
-  -d '{"username":"admin","password":"changeme"}' \
+  -d '{"username":"admin","password":"dev-only-password"}' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 tok=$(curl -fsS -X POST "$BASE/v1/nodes/enrollment-token" -H "authorization: Bearer $jwt" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')

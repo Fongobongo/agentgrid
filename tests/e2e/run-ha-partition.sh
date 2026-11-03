@@ -25,7 +25,7 @@ TOKEN="e2e-ha-part-token-0123456789abcdef"  # gitleaks:allow
 JWT_SECRET="e2e-ha-part-secret-0123456789abcdef0123456789"  # gitleaks:allow
 CLUSTER="e2e-part"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 
 declare -A PORT=([cp-a]=17921 [cp-b]=17922 [cp-c]=17923 [edge]=17924)
 DATA_IDS=(cp-a cp-b cp-c)

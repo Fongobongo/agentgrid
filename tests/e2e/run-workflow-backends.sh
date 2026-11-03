@@ -26,7 +26,7 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "skip: image $IMAGE miss
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7818}"
 PORT="${AGENTGRID_PORT:-7818}"
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 source "$ROOT/tests/e2e/lib-bootstrap.sh"
 
 TMP="$(mktemp -d -t ag-e2e-wfbe-XXXXXX)"

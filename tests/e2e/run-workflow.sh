@@ -13,7 +13,7 @@ cd "$(dirname "$0")/../.."
 
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7800}"
 USER="${AGENTGRID_BOOTSTRAP_USER:-admin}"
-PASS="${AGENTGRID_BOOTSTRAP_PASSWORD:-changeme}"
+PASS="${AGENTGRID_BOOTSTRAP_PASSWORD:-dev-only-password}"
 TIMEOUT="${E2E_TIMEOUT:-120}"
 
 # Build images if missing so the script is self-contained in CI.

@@ -48,7 +48,7 @@ curl -fsS -X POST http://127.0.0.1:7811/v1/auth/setup \
   -d "{\"username\":\"smoke\",\"password\":\"smokepw\",\"setup_token\":\"$SETUP\"}" >/dev/null
 JWT=$(curl -fsS -X POST http://127.0.0.1:7811/v1/auth/login \
   -H 'content-type: application/json' \
-  -d '{"username":"smoke","password":"smokepw"}' \
+  -d '{"username":"smoke","password":"smoke-password"}' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 [ -n "$JWT" ] || { echo "SMOKE FAILED: login on musl cp"; exit 1; }
 curl -fsS "http://127.0.0.1:7811/v1/tasks?limit=1" -H "authorization: Bearer $JWT" >/dev/null \

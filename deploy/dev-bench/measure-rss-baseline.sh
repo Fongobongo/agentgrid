@@ -35,7 +35,7 @@ echo "SETUP=$SETUP"
 curl -sS -X POST "http://127.0.0.1:$CP_PORT/v1/auth/setup" -H "content-type: application/json" \
     -d "{\"username\":\"admin\",\"password\":\"adminpw\",\"setup_token\":\"$SETUP\"}" -o /tmp/x.json -w "setup -> %{http_code}\n"
 JWT=$(curl -sS -X POST "http://127.0.0.1:$CP_PORT/v1/auth/login" -H "content-type: application/json" \
-    -d '{"username":"admin","password":"adminpw"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+    -d '{"username":"admin","password":"admin-password"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 echo "JWT=${JWT:0:20}..."
 ETOK=$(curl -sS -X POST "http://127.0.0.1:$CP_PORT/v1/nodes/enrollment-token" -H "authorization: Bearer $JWT" -d '{}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 echo "ETOK=${ETOK:0:16}..."

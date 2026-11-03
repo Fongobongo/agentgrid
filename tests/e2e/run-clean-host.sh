@@ -111,9 +111,9 @@ TOKEN=$(awk '/=== agentgrid setup token/{f=1;next} /=== present this at/{f=0} f'
   | grep -E '^[A-Za-z0-9_-]+$' | tail -1)
 [ -n "$TOKEN" ] || { echo ">> FATAL: no setup token in CP log"; cat "$TMP/cp.log"; exit 1; }
 curl -fsS -X POST "$BASE/v1/auth/setup" -H 'content-type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"changeme\",\"setup_token\":\"$TOKEN\"}" >/dev/null \
+  -d "{\"username\":\"admin\",\"password\":\"dev-only-password\",\"setup_token\":\"$TOKEN\"}" >/dev/null \
   || { echo ">> FATAL: setup failed"; exit 1; }
-$AG login admin changeme >/dev/null || { echo ">> FATAL: ag login"; exit 1; }
+$AG login admin dev-only-password >/dev/null || { echo ">> FATAL: ag login"; exit 1; }
 echo "  bootstrap + login OK (credential flow)"
 
 echo ">> [node] minting enrollment token"

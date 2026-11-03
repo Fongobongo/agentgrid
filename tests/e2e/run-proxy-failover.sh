@@ -30,7 +30,7 @@ BASE="http://127.0.0.1:$PORT"
 PROXY_A_PORT=18801
 PROXY_B_PORT=18802
 USER="admin"
-PASS="changeme"
+PASS="dev-only-password"
 source "$ROOT/tests/e2e/lib-bootstrap.sh"
 
 TMP="$(mktemp -d -t ag-e2e-proxy-XXXXXX)"

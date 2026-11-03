@@ -21,7 +21,7 @@ BIN="$ROOT/target/debug"
 PORT="${AGENTGRID_PORT:-7831}"
 BASE="http://127.0.0.1:$PORT"
 USER=admin
-PASS=changeme
+PASS=dev-only-password
 
 TMP="$(mktemp -d -t ag-e2e-join-XXXXXX)"
 mkdir -p "$TMP/dist"
