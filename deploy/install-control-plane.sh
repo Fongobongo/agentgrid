@@ -141,3 +141,4 @@ echo ">> control plane listening on $LISTEN. journalctl -u agentgrid-control-pla
 echo ">> first run: read the one-time setup token from the logs above,"
 echo ">> then: curl -X POST $LISTEN/v1/auth/setup -H 'content-type: application/json'"
 echo ">>   -d '{\"setup_token\":\"<token>\",\"username\":\"admin\",\"password\":\"<your>\"}'"
+echo ">>   (the password must be at least 12 characters, or the control plane answers 400)"

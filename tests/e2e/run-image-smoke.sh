@@ -45,7 +45,7 @@ SETUP=$(docker logs ag-musl-smoke 2>&1 | grep -oE '[0-9a-f]{32}' | head -1 || tr
 [ -n "$SETUP" ] || { echo "SMOKE FAILED: no setup token in musl cp logs"; exit 1; }
 curl -fsS -X POST http://127.0.0.1:7811/v1/auth/setup \
   -H 'content-type: application/json' \
-  -d "{\"username\":\"smoke\",\"password\":\"smokepw\",\"setup_token\":\"$SETUP\"}" >/dev/null
+  -d "{\"username\":\"smoke\",\"password\":\"smoke-password\",\"setup_token\":\"$SETUP\"}" >/dev/null
 JWT=$(curl -fsS -X POST http://127.0.0.1:7811/v1/auth/login \
   -H 'content-type: application/json' \
   -d '{"username":"smoke","password":"smoke-password"}' \
@@ -58,7 +58,7 @@ docker rm -f ag-musl-smoke >/dev/null
 
 echo ">> 2/2 glibc images: HEALTHCHECK status must reach 'healthy'"
 export AGENTGRID_ADMIN_USER=smoke
-export AGENTGRID_ADMIN_PASSWORD=smokepw
+export AGENTGRID_ADMIN_PASSWORD=smoke-password
 bash deploy/compose/up.sh >/dev/null
 # docker-compose.yml uses `:?` interpolation guards; compose re-interpolates
 # the whole file even for read-only `ps`/`inspect`. After bootstrap up.sh

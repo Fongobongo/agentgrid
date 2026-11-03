@@ -33,7 +33,7 @@ SETUP=$(grep -oE '[0-9a-f]{32}' "$CP_LOG" | head -1)
 echo "SETUP=$SETUP"
 [ -n "$SETUP" ] || { echo "no setup token"; tail -5 "$CP_LOG"; exit 1; }
 curl -sS -X POST "http://127.0.0.1:$CP_PORT/v1/auth/setup" -H "content-type: application/json" \
-    -d "{\"username\":\"admin\",\"password\":\"adminpw\",\"setup_token\":\"$SETUP\"}" -o /tmp/x.json -w "setup -> %{http_code}\n"
+    -d "{\"username\":\"admin\",\"password\":\"admin-password\",\"setup_token\":\"$SETUP\"}" -o /tmp/x.json -w "setup -> %{http_code}\n"
 JWT=$(curl -sS -X POST "http://127.0.0.1:$CP_PORT/v1/auth/login" -H "content-type: application/json" \
     -d '{"username":"admin","password":"admin-password"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 echo "JWT=${JWT:0:20}..."
