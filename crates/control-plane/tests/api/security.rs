@@ -1355,3 +1355,71 @@ async fn the_default_body_limit_is_small_and_artifact_uploads_are_exempt() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+/// Finding 8: an operator reads the board, not the secrets. `/v1/proxies`
+/// returns `user:pass@` URLs and `/v1/adapter-env` returns key fingerprints;
+/// both were readable by any operator because the rule was "every GET".
+#[tokio::test]
+async fn an_operator_cannot_read_proxies_or_adapter_env() {
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
+    assert_eq!(
+        auth_setup(&app, &state, "alice", "secret").await,
+        StatusCode::CREATED
+    );
+    let admin = auth_login(&app, "alice", "secret").await.unwrap();
+
+    // The admin registers a proxy that carries a password ...
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/proxies",
+            json!({ "url": "http://alice:hunter2@proxy.example:3128" }).to_string(),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // ... and the admin view no longer echoes it.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/proxies", &admin))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!body.contains("hunter2"), "password echoed: {body}");
+    assert!(body.contains("alice:***@"), "userinfo not redacted: {body}");
+
+    // An operator is refused outright, on both routes.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/users",
+            json!({"username": "bob", "password": "pw", "role": "operator"}).to_string(),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let op = auth_login(&app, "bob", "pw").await.unwrap();
+    for path in ["/v1/proxies", "/v1/adapter-env"] {
+        let resp = app.clone().oneshot(get_auth(path, &op)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    // The board itself stays readable, so the refusal is the route, not the
+    // operator's token.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/tasks", &op))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}

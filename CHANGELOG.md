@@ -322,6 +322,17 @@
   and ran that program. A leading `-` is now refused, `--` separates options
   from positionals, and the whole `helper::<addr>` form is rejected rather than
   just `ext::`/`fd::` — no legitimate remote URL contains `::`.
+- **The operator role could read secrets over GET.** RBAC was "every GET except
+  `/v1/adapter-env`", so `GET /v1/proxies` — documented as "list (admin)" —
+  handed proxy URLs containing `user:pass@` to any operator, and *every* future
+  GET route was readable the moment it was registered. Read access is now an
+  allow-list (`OPERATOR_READ`): a route is admin-only until it is declared, so
+  the failure mode is a closed route rather than a leaked one. Proxy passwords
+  are redacted in the panel view (`alice:***@`) while nodes still get the real
+  URL from the store, and the proxy routes no longer echo `e.to_string()` in a
+  500. A unit test walks every GET in `docs/openapi.yaml` and fails if it is
+  neither readable nor explicitly denied — which immediately found a documented
+  GET (`/v1/tasks/{id}/approvals`) that no handler served.
 - **Login limiting keyed only on the username.** One bucket per account meant
   anyone could lock the real user out by spending it with wrong passwords, it
   did nothing against spraying one password across many accounts, an unknown

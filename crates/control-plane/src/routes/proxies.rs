@@ -27,10 +27,15 @@ pub async fn list_proxies(
 ) -> (StatusCode, Json<serde_json::Value>) {
     match state.store.list_proxies().await {
         Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "items": rows }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        ),
+        // Finding 8: the body used to carry `e.to_string()`, which leaks the
+        // SQL text and any bound values to the caller. Log it, answer opaquely.
+        Err(e) => {
+            tracing::error!("list_proxies failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "internal error" })),
+            )
+        }
     }
 }
 
@@ -73,10 +78,13 @@ pub async fn add_proxy(
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "proxy already registered" })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        ),
+        Err(e) => {
+            tracing::error!("add_proxy failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "internal error" })),
+            )
+        }
     }
 }
 
@@ -96,9 +104,12 @@ pub async fn remove_proxy(
             state.ws_registry.push_proxies(&state.store).await;
             (StatusCode::OK, Json(serde_json::json!({ "removed": id })))
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        ),
+        Err(e) => {
+            tracing::error!("remove_proxy failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "internal error" })),
+            )
+        }
     }
 }

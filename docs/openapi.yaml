@@ -516,8 +516,12 @@ paths:
         in: path
         required: true
         schema: { type: string }
-    get:
-      summary: List pending approvals for a task
+    post:
+      summary: Request an approval for a task
+      description: |
+        The list of approvals is `GET /v1/approvals` (`?task_id=` filters it);
+        this path only creates one. It was documented as a GET that no handler
+        served — the RBAC classification test is what noticed.
   /v1/tasks/{id}/eligibility:
     parameters:
       - name: id

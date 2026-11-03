@@ -79,19 +79,111 @@ pub struct AuthedUser {
     pub role: String,
 }
 
-/// RBAC (plan 5.2): an operator may view (GET/HEAD) and approve/deny, but
-/// nothing else mutates. All other mutating verbs are rejected with 403 by
-/// [`require_user_auth`] before the handler runs.
-fn operator_allowed(method: &str, path: &str) -> bool {
+/// RBAC (plan 5.2, finding 8): an operator may view (GET/HEAD) and
+/// approve/deny, but nothing else mutates. All other mutating verbs are
+/// rejected with 403 by [`require_user_auth`] before the handler runs.
+///
+/// Read access is an **allow-list**, not "any GET". The old rule was
+/// "every GET except `/v1/adapter-env`", which fails open: every new GET
+/// route that returns sensitive data was readable by an operator the moment it
+/// was registered. A route has to be declared here to be readable, so the
+/// default for a new GET is admin-only.
+const OPERATOR_READ: &[&str] = &[
+    "/v1/agents",
+    "/v1/agents/{id}/actions",
+    "/v1/approvals",
+    "/v1/approvals/{id}",
+    "/v1/attempts/{id}",
+    "/v1/attempts/{id}/annotations",
+    "/v1/audit",
+    "/v1/cluster/status",
+    "/v1/conversations",
+    "/v1/conversations/{id}",
+    "/v1/conversations/{id}/messages",
+    "/v1/mcp-servers",
+    "/v1/node-installs",
+    "/v1/node-installs/{id}",
+    "/v1/nodes",
+    "/v1/nodes/{id}",
+    "/v1/nodes/{id}/accounts/usage",
+    "/v1/nodes/{id}/opencode-audit",
+    "/v1/opencode-profiles",
+    "/v1/opencode-profiles/{name}",
+    "/v1/profiles",
+    "/v1/profiles/{id}",
+    "/v1/provisioning",
+    "/v1/repos/{repo}/learnings",
+    "/v1/repositories",
+    "/v1/search",
+    "/v1/search/events",
+    "/v1/skills",
+    "/v1/skills/{name}",
+    "/v1/stream",
+    "/v1/task-groups/{id}/context",
+    "/v1/task-groups/{id}/context/{key}",
+    "/v1/tasks",
+    "/v1/tasks/{id}",
+    "/v1/tasks/{id}/artifacts",
+    "/v1/tasks/{id}/artifacts/{name}",
+    "/v1/tasks/{id}/eligibility",
+    "/v1/tasks/{id}/events",
+    "/v1/tasks/{id}/events/stream",
+    "/v1/tasks/{id}/review-approval",
+    "/v1/tasks/{id}/tags",
+    "/v1/users",
+    "/v1/workflow-runs",
+    "/v1/workflow-runs/{id}",
+    "/v1/workflow-runs/{id}/plan",
+    "/v1/workflow-runs/{id}/projection",
+    "/v1/workflows",
+    "/v1/workflows/{id}",
+    "/v1/workflows/{id}/schedules",
+];
+
+/// GET routes an operator may not read, kept explicit so the classification
+/// test below can tell "deliberately closed" from "forgotten".
+const OPERATOR_READ_DENIED: &[&str] = &[
     // Secrets are not "view" data. The list carries fingerprints rather than
     // values (ADR 0028 Phase 0), but even the fingerprint is an oracle — it
     // confirms a guessed key — and enumerating which credentials exist on
-    // which node is itself information. Admin only, on every verb.
-    if path == "/v1/adapter-env" || path.starts_with("/v1/adapter-env/") {
-        return false;
+    // which node is itself information.
+    "/v1/adapter-env",
+    // Proxy URLs routinely carry `user:pass@`; the panel only needs to
+    // recognise which proxy is configured.
+    "/v1/proxies",
+];
+
+/// Match a concrete request path against a route template, where a `{name}`
+/// segment matches exactly one path segment.
+fn path_matches(template: &str, path: &str) -> bool {
+    let mut t = template.split('/');
+    let mut p = path.split('/');
+    loop {
+        match (t.next(), p.next()) {
+            (None, None) => return true,
+            (Some(t), Some(p)) => {
+                let is_param = t.starts_with('{') && t.ends_with('}');
+                if is_param {
+                    if p.is_empty() {
+                        return false;
+                    }
+                } else if t != p {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
     }
+}
+
+fn operator_allowed(method: &str, path: &str) -> bool {
     if method == "GET" || method == "HEAD" {
-        return true;
+        // Deny wins even if a later edit adds the path to the read list: these
+        // two are the ones whose payload is a credential.
+        if OPERATOR_READ_DENIED.iter().any(|t| path_matches(t, path)) {
+            return false;
+        }
+        return OPERATOR_READ.iter().any(|t| path_matches(t, path));
     }
     if method == "POST" {
         if path == "/v1/auth/logout" {
@@ -504,5 +596,105 @@ pub async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+#[cfg(test)]
+mod rbac_tests {
+    use super::*;
+
+    /// Concrete path for a template, so a classification test can call
+    /// `operator_allowed` the way a request would.
+    fn concrete(template: &str) -> String {
+        template
+            .split('/')
+            .map(|s| {
+                if s.starts_with('{') && s.ends_with('}') {
+                    "x"
+                } else {
+                    s
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Finding 8: read access is an allow-list, so a GET that is not declared
+    /// is admin-only. These are the two that used to leak.
+    #[test]
+    fn an_operator_cannot_read_secrets_over_get() {
+        assert!(!operator_allowed("GET", "/v1/adapter-env"));
+        assert!(!operator_allowed("GET", "/v1/proxies"));
+        // A route nobody declared is closed, not open.
+        assert!(!operator_allowed("GET", "/v1/credential-store"));
+        assert!(!operator_allowed("GET", "/v1/tasks/abc/secret"));
+    }
+
+    /// The board the operator is supposed to see still works, including paths
+    /// with parameters.
+    #[test]
+    fn an_operator_can_still_read_the_board() {
+        for path in [
+            "/v1/tasks",
+            "/v1/tasks/3f2a",
+            "/v1/tasks/3f2a/events",
+            "/v1/tasks/3f2a/artifacts/changes.patch",
+            "/v1/nodes",
+            "/v1/nodes/node-a/accounts/usage",
+            "/v1/workflow-runs/abc/projection",
+            "/v1/approvals",
+            "/v1/approvals/ap-1",
+        ] {
+            assert!(operator_allowed("GET", path), "{path} must stay readable");
+        }
+        // Read does not imply write.
+        assert!(!operator_allowed("POST", "/v1/tasks"));
+        assert!(!operator_allowed("DELETE", "/v1/tasks/3f2a"));
+    }
+
+    /// Every GET the API documents is classified on purpose: the test fails
+    /// when a new documented GET is neither readable nor explicitly denied, so
+    /// the decision cannot be made by omission.
+    #[test]
+    fn every_documented_get_route_is_classified() {
+        let doc = include_str!("../../../docs/openapi.yaml");
+        let mut current: Option<String> = None;
+        let mut gets: Vec<String> = Vec::new();
+        for line in doc.lines() {
+            let trimmed = line.trim_end();
+            if let Some(rest) = trimmed.strip_prefix("  /") {
+                if !line.starts_with("   ") {
+                    current = rest.strip_suffix(':').map(|p| format!("/{p}"));
+                    continue;
+                }
+            }
+            if trimmed == "    get:" {
+                if let Some(p) = &current {
+                    gets.push(p.clone());
+                }
+            }
+        }
+        assert!(gets.len() > 50, "openapi parse found only {}", gets.len());
+        for path in gets {
+            // Public, node-authenticated and HA routes never reach this check.
+            if path.starts_with("/health")
+                || path == "/metrics"
+                || path == "/v1/version"
+                || path.starts_with("/v1/node/")
+            {
+                continue;
+            }
+            let readable = OPERATOR_READ.contains(&path.as_str());
+            let denied = OPERATOR_READ_DENIED.contains(&path.as_str());
+            assert!(
+                readable ^ denied,
+                "{path} must be in exactly one of OPERATOR_READ / OPERATOR_READ_DENIED"
+            );
+            assert_eq!(
+                operator_allowed("GET", &concrete(&path)),
+                readable,
+                "{path}: the classification and the runtime answer disagree"
+            );
+        }
     }
 }

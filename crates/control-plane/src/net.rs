@@ -59,9 +59,9 @@ where
             .headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok());
-        Ok(ClientAddr(
-            peer.map(|peer| resolve_client(peer, forwarded, &trusted_proxies())),
-        ))
+        Ok(ClientAddr(peer.map(|peer| {
+            resolve_client(peer, forwarded, &trusted_proxies())
+        })))
     }
 }
 
