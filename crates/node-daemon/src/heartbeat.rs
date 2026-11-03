@@ -469,7 +469,7 @@ pub fn spawn_heartbeat(
                 // the flag reflects that honestly.
                 enforced_limits: match cfg.sandbox {
                     sandbox::SandboxKind::Docker => {
-                        sandbox::effective_egress_isolated(&cfg.network_mode)
+                        sandbox::effective_egress_isolated(cfg.sandbox, &cfg.network_mode)
                             && (std::env::var("AGENTGRID_SANDBOX_PIDS_LIMIT").is_ok()
                                 || std::env::var("AGENTGRID_SANDBOX_MEMORY").is_ok()
                                 || std::env::var("AGENTGRID_SANDBOX_CPUS").is_ok())

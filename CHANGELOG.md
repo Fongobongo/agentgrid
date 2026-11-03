@@ -262,6 +262,28 @@
 
 ### Fixed
 
+- **`bwrap` let the agent read every secret the service user could.** The
+  sandbox binds the host root read-only, which stops writes but not reads — and
+  reading is the agent's job. A shell inside the namespace could open
+  `credential.json`, the ADR 0028 sealed-env key, `~/.ssh`, cloud CLI
+  credentials and every sibling attempt's worktree. The data directory, the
+  workspace root and `$HOME` are now masked with an empty `--tmpfs` before the
+  worktree is bound on top, so the agent sees its own tree and the toolchain
+  and nothing else from the daemon's private space. The `PATH` entries the
+  `$HOME` mask would swallow (`~/.cargo/bin`, `~/.local/bin`) are bound back
+  read-only, because the adapter and the `cargo test` an attempt runs as
+  validation usually live there — the entries only, so `~/.ssh` and
+  `~/.cargo/credentials.toml` stay hidden as siblings rather than as
+  directories on `PATH`. The rest of the host root
+  is still visible read-only: a full explicit bind list would break on the
+  first missing `/lib64`, so `bwrap` stays the option for a host with no
+  runtime and no root, and `docs/agent-ops.md` says so.
+  `AGENTGRID_SANDBOX_NETWORK=restricted` is refused with `bwrap` — it has
+  `--unshare-net` or the host network and nothing in between, so the proxy was
+  an environment variable any process could ignore — and a task asking for it
+  runs with no egress instead. `effective_egress_isolated` now takes the
+  sandbox kind: it used to answer for the mode alone, so the same attempt read
+  as isolated on a bwrap node and as enforced on a docker one.
 - **The leader committed before it knew the write was replicated.** In `sync`
   mode `tx.commit()` ran first and the quorum acknowledgement was awaited
   afterwards, so a failed acknowledgement returned an error for a row that was
@@ -293,6 +315,27 @@
   by itself — its client trusts the system roots only — so the requirement is
   stated in `docs/runbook-transport.md` and warned about at startup: WireGuard,
   an ssh tunnel, or a segment where the relay and its peers are the only hosts.
+- **The command guard rewrote the transcript and blocked nothing.** It ran on
+  the `tool_call` event, which the adapter prints *after* (or while) it runs the
+  tool, and the only thing it did with a refusal was replace the event with a
+  `guard_blocked` marker — so the audit trail lost the command the agent
+  actually ran, which is the one thing it is for, and the process carried on.
+  The real call is now kept and the marker sits beside it (`enforced: true`,
+  with the reason that fired); the refusal is latched, and the supervisor polls
+  the latch and **kills the process group** — descendants included, because the
+  command already ran and they are what is holding the worktree. The attempt
+  then fails as `guard_blocked` even if the adapter happened to exit `0` in the
+  window before the kill landed, and no validation retry re-spawns it: a fresh
+  adapter would be killed on its first tool call by the same latch.
+  Matching moved from a case-sensitive substring to argv tokens: short-flag
+  clusters are order-insensitive (`-fr` == `-rf`), quoted and re-spaced forms
+  are the same command, `sudo`/`env`/`xargs`/`timeout`-style prefixes are looked
+  through, the allow-list applies per pipeline segment, and `curl … | sh` is
+  refused as a shape. `\n` separates commands rather than separating words —
+  without that, `ls\nrm -rf ~` was a single command line whose first token was
+  allow-listed. A `/` in a pattern now matches only the root and its immediate
+  children, so `rm -rf /` and `rm -rf /usr` are refused while `rm -rf
+  /tmp/build` — which the substring rule flagged — is not.
 - **Host-side git trusted the worktree the agent had just written to.** After an
   attempt the daemon ran `git add -A`, `diff --cached` and `commit` with
   `current_dir` set to the agent-writable worktree, so git discovered `.git`

@@ -52,13 +52,18 @@ fi
 # N times is what the daemon does (one bwrap per attempt), so there is no warm
 # path to amortise.
 WD="$(mktemp -d -t ag-bwrap-bench-XXXXXX)"
-trap 'rm -rf "$WD"' EXIT
+# The daemon masks the data dir and the service user's home with a tmpfs
+# (finding 3), so the benchmark carries the same two mounts: each one is a
+# mount syscall per attempt, which is exactly what this measures.
+DATA="$(mktemp -d -t ag-bwrap-data-XXXXXX)"
+trap 'rm -rf "$WD" "$DATA"' EXIT
 bwrap_head() { # <share-net?>
     printf '%s\n' --die-with-parent --new-session --unshare-all
     if [ "$1" = "share-net" ]; then
         printf '%s\n' --share-net
     fi
     printf '%s\n' --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+        --tmpfs "$DATA" --tmpfs "${HOME:-/root}" \
         --bind "$WD" "$WD" --chdir "$WD" --
 }
 

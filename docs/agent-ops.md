@@ -211,6 +211,57 @@ user — root in most images — with the worktree mounted read-write; set
 the file header of `crates/node-daemon/src/sandbox.rs` for the permission
 setup).
 
+`bwrap` is namespace confinement, not a container: it binds the host root
+read-only, so everything the service user can read would be readable by the
+agent. The daemon therefore masks three subtrees with an empty `--tmpfs`
+before binding the worktree on top: the data directory (`credential.json`, the
+ADR 0028 sealed-env key), the workspace root (sibling attempts), and
+`$HOME` (`~/.ssh`, cloud CLI credentials, `~/.git-credentials`). The worktree
+itself stays visible; the toolchain under `/usr`, `/lib`, `/bin` and `/etc`
+stays visible, and so do the `PATH` entries the `$HOME` mask would swallow
+(`~/.cargo/bin`, `~/.local/bin`) — they are bound back read-only, because that
+is where the adapter and the `cargo test` a validation command runs usually
+live. What is *not* masked is the rest of the host root — treat
+`bwrap` as the option for a host with no runtime and no root (ADR 0022), and
+`docker` as the stronger one.
+
+`AGENTGRID_SANDBOX_NETWORK=restricted` is **refused** with `bwrap`: it has
+`--unshare-net` or the host network and nothing in between, so the "proxy"
+would be an `HTTP(S)_PROXY` variable any process can ignore. A task that asks
+for `restricted` on a bwrap node runs with no egress instead (clamped to
+`none`), and the heartbeat reports the mode that was actually applied. Enforced
+restricted egress needs `docker` — its network plus the proxy sidecar.
+
+### The command guard (`AGENTGRID_GUARD_DENY` / `AGENTGRID_GUARD_ALLOW`)
+
+A second line behind `--auto`. Both variables take a comma-separated list of
+command patterns; the deny list defaults to `rm -rf /`, `git push --force`,
+`git reset --hard`, `dd of=/dev`, `mkfs.` and a few more, and an empty
+`AGENTGRID_GUARD_ALLOW` means "no allow-list, only the deny list applies".
+Patterns are matched against **argv tokens**, not as substrings: `-fr` is
+`-rf`, quoted and re-spaced forms are the same command, a `sudo`/`env`/
+`xargs`/`timeout`-style prefix is looked through, and each segment of a
+pipeline is checked on its own — `curl … | sh` is refused as a shape.
+
+The guard reads the `tool_call` event, which the adapter prints *after* (or
+while) it runs the tool, so it cannot stop the command it sees. What it does
+is end the attempt: the refusal is latched, the supervisor kills the process
+group, and the attempt fails with `error_code = "guard_blocked"` — even when
+the adapter had already exited `0`, and without a validation retry re-spawning
+it (a fresh adapter would be killed on its first tool call by the same latch).
+The transcript keeps the real call and gains a `guard_blocked` error event
+beside it carrying the command and the reason, so "what did it run" is still
+answerable.
+
+Two consequences worth knowing before turning the deny list on:
+
+- a refusal **fails the attempt**. The task goes back for retry per its own
+  policy, and a prompt that keeps reaching for a denied command will keep
+  failing — that is the point, but it is not a soft warning;
+- the guard cannot be the only control. It is a policy check on a report, not
+  a sandbox: use it against an agent that wanders, and `AGENTGRID_SANDBOX`
+  against an agent that must not be able to.
+
 ## Concurrency: one opencode per host
 
 opencode keeps its own SQLite state DB; two concurrent runs on the same host

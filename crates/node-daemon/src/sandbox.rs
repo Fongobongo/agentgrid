@@ -138,6 +138,23 @@ pub fn check_startup_config(unsafe_acknowledged: bool) -> anyhow::Result<()> {
              AGENTGRID_RUN_AS_USER=<uid[:gid]> to run the agent as a separate user"
         );
     }
+    // Finding 3: `restricted` under bwrap is not a restriction. bwrap has no
+    // per-CIDR filter and no proxy-only network — `--share-net` plus an
+    // `HTTP(S)_PROXY` variable is a hint any process can ignore — so a node
+    // configured for it would advertise an egress policy it cannot apply.
+    // Refused rather than clamped: the operator asked for a guarantee, and a
+    // silent downgrade is the failure this whole finding is about.
+    if kind == SandboxKind::Bwrap
+        && std::env::var("AGENTGRID_SANDBOX_NETWORK").as_deref() == Ok("restricted")
+    {
+        anyhow::bail!(
+            "AGENTGRID_SANDBOX=bwrap cannot enforce AGENTGRID_SANDBOX_NETWORK=restricted: \
+             bwrap has only --unshare-net or the host network, so the proxy would be an \
+             environment hint that any process can ignore. Use AGENTGRID_SANDBOX=docker \
+             (restricted egress needs its network + proxy), or set \
+             AGENTGRID_SANDBOX_NETWORK=none and run attempts with no egress"
+        );
+    }
     Ok(())
 }
 
@@ -498,7 +515,8 @@ pub fn sandbox_prefix(
         // inherited through the spawn environment (the backend hands it a
         // clean env); only the egress-proxy URL is passed explicitly.
         SandboxKind::Bwrap => {
-            let mut prefix = bwrap_head(workdir, network_mode, read_only_worktree);
+            let masks = bwrap_masked_paths(workdir);
+            let mut prefix = bwrap_head(workdir, network_mode, read_only_worktree, &masks);
             // The child runs with a curated environment, so a bare program
             // name has no PATH to resolve against *inside* the namespace:
             // `bwrap: execvp adapter-mock: No such file or directory`. Resolve
@@ -508,7 +526,11 @@ pub fn sandbox_prefix(
             let program = crate::capabilities::resolve_in_path(program)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| program.to_string());
-            bwrap_rebind_if_masked(&mut prefix, &program);
+            bwrap_rebind_if_masked(&mut prefix, &program, &masks);
+            // The masks hid `$HOME` (and the data dir); put back the `PATH`
+            // entries that lived under them, or the adapter's own toolchain
+            // disappears with the secrets.
+            bwrap_rebind_path_dirs(&mut prefix, &masks, std::env::var_os("PATH").as_deref());
             prefix.push(program);
             ("bwrap".into(), prefix)
         }
@@ -517,15 +539,20 @@ pub fn sandbox_prefix(
 
 /// Re-expose `program` when the sandbox's own mounts would hide it.
 ///
-/// `bwrap_head` replaces `/tmp` with a tmpfs, so an adapter that lives under
-/// `/tmp` exists on the host and is invisible inside the namespace — the
-/// symptom is `execvp /tmp/…/adapter-mock: No such file or directory` for a
-/// file that is right there. A later bind wins over the tmpfs, so binding the
-/// binary back (read-only) is enough, and it costs nothing when the adapter
-/// sits in a normal install prefix.
-fn bwrap_rebind_if_masked(prefix: &mut Vec<String>, program: &str) {
-    let masked = ["/tmp/", "/dev/", "/proc/"];
-    if !masked.iter().any(|m| program.starts_with(m)) {
+/// `bwrap_head` replaces `/tmp` with a tmpfs and masks the host's private
+/// directories ([`bwrap_masked_paths`]), so an adapter that lives under one of
+/// them exists on the host and is invisible inside the namespace — the symptom
+/// is `execvp /tmp/…/adapter-mock: No such file or directory` for a file that
+/// is right there. A later bind wins over the tmpfs, so binding the binary back
+/// (read-only) is enough, and it costs nothing when the adapter sits in a
+/// normal install prefix.
+fn bwrap_rebind_if_masked(prefix: &mut Vec<String>, program: &str, masks: &[std::path::PathBuf]) {
+    let masked_fixed = ["/tmp/", "/dev/", "/proc/"];
+    let under_fixed = masked_fixed.iter().any(|m| program.starts_with(m));
+    let under_mask = masks
+        .iter()
+        .any(|m| std::path::Path::new(program).starts_with(m));
+    if !under_fixed && !under_mask {
         return;
     }
     // Only a real file can be bound; a bare name or a missing path is left to
@@ -533,10 +560,15 @@ fn bwrap_rebind_if_masked(prefix: &mut Vec<String>, program: &str) {
     if !std::path::Path::new(program).is_file() {
         return;
     }
-    let bind = ["--ro-bind", program, program];
-    // `bwrap_head` ends with `--`, after which bwrap reads the next argument
-    // as the program: appending here made it exec `--ro-bind`. Insert before
-    // the terminator instead.
+    bwrap_insert_ro_bind(prefix, program);
+}
+
+/// Insert `--ro-bind <path> <path>` before the argv terminator.
+///
+/// `bwrap_head` ends with `--`, after which bwrap reads the next argument as
+/// the program: appending a bind there made it exec `--ro-bind`.
+fn bwrap_insert_ro_bind(prefix: &mut Vec<String>, path: &str) {
+    let bind = ["--ro-bind", path, path];
     match prefix.iter().rposition(|a| a == "--") {
         Some(pos) => {
             for (offset, arg) in bind.iter().enumerate() {
@@ -545,6 +577,111 @@ fn bwrap_rebind_if_masked(prefix: &mut Vec<String>, program: &str) {
         }
         None => prefix.extend(bind.iter().map(|a| a.to_string())),
     }
+}
+
+/// Re-expose the `PATH` directories the masks just hid.
+///
+/// Masking `$HOME` also hides `~/.cargo/bin`, `~/.local/bin`, `~/.nvm/...` —
+/// where the adapter and the toolchain an attempt runs (`cargo test` as a
+/// validation command) usually live. Losing them turns a security fix into
+/// `cargo: not found` on every attempt of that node. Only the `PATH` entries
+/// themselves are bound back, read-only: an executable directory is not where
+/// a credential belongs, and `~/.cargo/credentials.toml`, `~/.ssh` and the
+/// rest stay hidden because they are siblings, not entries.
+///
+/// `path_var` is a parameter rather than `std::env::var_os("PATH")` so a test
+/// can drive it without mutating the process environment.
+fn bwrap_rebind_path_dirs(
+    prefix: &mut Vec<String>,
+    masks: &[std::path::PathBuf],
+    path_var: Option<&std::ffi::OsStr>,
+) {
+    if masks.is_empty() {
+        return;
+    }
+    let Some(path_var) = path_var else {
+        return;
+    };
+    let mut bound: Vec<std::path::PathBuf> = Vec::new();
+    for dir in std::env::split_paths(path_var) {
+        let Ok(real) = std::fs::canonicalize(&dir) else {
+            continue;
+        };
+        if !real.is_dir() || bound.contains(&real) {
+            continue;
+        }
+        if !masks.iter().any(|m| real.starts_with(m)) {
+            continue;
+        }
+        bound.push(real.clone());
+        bwrap_insert_ro_bind(prefix, &real.display().to_string());
+    }
+}
+
+/// Host directories a bwrap attempt must not be able to read, even read-only.
+///
+/// `--ro-bind / /` gives the agent everything the daemon user can read: the
+/// node credential (`credential.json`), the ADR 0028 X25519 key that unseals
+/// adapter env, `~/.ssh`, cloud CLI credentials, and every other attempt's
+/// worktree under the workspace root. Read-only does not help — the threat is
+/// reading, and a coding agent with shell access exfiltrates what it can read.
+///
+/// Masking with `--tmpfs` is the cheap half of the fix: it hides exactly these
+/// subtrees while leaving `/usr`, `/lib`, `/bin`, `/etc` and the toolchain in
+/// place, so nothing has to be re-listed and a missing entry cannot break an
+/// attempt. The worktree is bound *after* the masks, so it stays visible even
+/// when it lives inside one of them.
+///
+/// Only absolute, existing paths are masked: bwrap creates a mount point where
+/// one already exists, and a nonexistent destination would fail the attempt
+/// with `Can't mkdir …: Read-only file system`.
+fn bwrap_masked_paths(workdir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut consider = |p: std::path::PathBuf| {
+        // Canonicalise so a symlinked data dir is masked where it really is.
+        let Ok(real) = std::fs::canonicalize(&p) else {
+            return;
+        };
+        if !real.is_absolute() || !real.is_dir() {
+            return;
+        }
+        // Never mask the filesystem root: a worktree directly under `/` makes
+        // its parent `/`, and `--tmpfs /` would erase the namespace the next
+        // arguments are built on. `parent()` is the portable "is a root" test —
+        // a component count is not: on Windows `canonicalize` returns a
+        // verbatim path whose components are `[Prefix, RootDir]`, so `D:\`
+        // counted as two and the whole drive was masked.
+        if real.parent().is_none() {
+            return;
+        }
+        // Masking the worktree itself would hide the only thing the agent is
+        // supposed to see (it is re-bound below, but an empty `--tmpfs` over it
+        // first is pointless noise in the argv).
+        if real == workdir {
+            return;
+        }
+        if !out.contains(&real) {
+            out.push(real);
+        }
+    };
+    // The daemon's own data directory: credential, keys, outbox, repo cache.
+    let data = std::env::var("AGENTGRID_DATA_DIR").unwrap_or_else(|_| "./agentgrid-data".into());
+    let data = std::path::Path::new(&data);
+    consider(if data.is_absolute() {
+        data.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(data)
+    });
+    // The workspace root: sibling attempts' worktrees are other tasks' code.
+    if let Some(root) = workdir.parent() {
+        consider(root.to_path_buf());
+    }
+    // The daemon user's home: `~/.ssh`, `~/.aws`, `~/.docker/config.json`,
+    // `~/.git-credentials`, shell history.
+    if let Some(home) = std::env::var_os("HOME") {
+        consider(std::path::PathBuf::from(home));
+    }
+    out
 }
 
 /// True when `net` is an `allowlist:` spec and every CIDR in it parses.
@@ -625,19 +762,34 @@ pub fn egress_proxy_env() -> Vec<(String, String)> {
     .collect()
 }
 
-/// True when the effective egress is isolated: `none`; a `restricted`
-/// attempt collapsed to `none` (no usable proxy); or `restricted` attached
-/// to a configured egress-proxy network WITH its filtering URL. A proxy
-/// network without a URL is unfiltered internet (fail-open), so it reports
-/// NOT isolated (audit X-N2: the old code reported it isolated).
-pub fn effective_egress_isolated(mode: &str) -> bool {
-    match mode {
-        "restricted" => match (egress_proxy_network(), egress_proxy_url()) {
-            (None, _) => true,
-            (Some(_), Some(_)) => true,
-            (Some(_), None) => false,
+/// True when the effective egress is isolated **for this sandbox kind**.
+///
+/// Docker: `none` (its own network namespace with no route), or `restricted`
+/// collapsed to `none` (no usable proxy), or `restricted` attached to a
+/// configured egress-proxy network WITH its filtering URL. A proxy network
+/// without a URL is unfiltered internet (fail-open), so it reports NOT
+/// isolated (audit X-N2: the old code reported it isolated).
+///
+/// bwrap: only `none` — it has `--unshare-net` and nothing in between, so a
+/// `restricted` attempt keeps the host namespace and its proxy is an
+/// environment-variable hint. The answer used to ignore the kind, which made
+/// the same mode read as isolated on a bwrap node and as enforced on a docker
+/// one.
+///
+/// systemd and no-sandbox: never. A cgroup scope and a bare process share the
+/// host network namespace; there is nothing to unshare.
+pub fn effective_egress_isolated(kind: SandboxKind, mode: &str) -> bool {
+    match kind {
+        SandboxKind::Docker => match mode {
+            "restricted" => match (egress_proxy_network(), egress_proxy_url()) {
+                (None, _) => true,
+                (Some(_), Some(_)) => true,
+                (Some(_), None) => false,
+            },
+            other => other == "none",
         },
-        other => other == "none",
+        SandboxKind::Bwrap => mode == "none",
+        SandboxKind::Systemd | SandboxKind::None => false,
     }
 }
 
@@ -647,17 +799,18 @@ pub fn effective_egress_isolated(mode: &str) -> bool {
 /// mapping is coarser than docker's: `none` (and anything unrecognised, i.e.
 /// a task-supplied mode that is not one of the three documented ones) keeps
 /// the namespace unshared — strictly more isolated than promised, never less.
-/// `restricted` shares the host network ONLY when an egress-proxy URL is
-/// configured, because that proxy is then the filter; a host process reaches
-/// it by URL, not through a docker network, so `AGENTGRID_SANDBOX_EGRESS_NETWORK`
-/// is not required here. `unrestricted` (and the docker-flavoured operator
-/// spellings `bridge`/`host`) shares it.
+///
+/// `restricted` is **not** enforceable here and therefore never shares it.
+/// bwrap has no per-CIDR filter and no proxy-only network: with `--share-net`
+/// the "proxy" is an `HTTP(S)_PROXY` environment variable, which any process
+/// can ignore and connect straight to the LAN, the metadata endpoint or the
+/// control plane. So `restricted` collapses to `none` (see [`bwrap_head`]) and
+/// a node configured for it under bwrap refuses to start (see
+/// [`check_startup_config`]) rather than reporting an isolation it does not
+/// have. `unrestricted` (and the docker-flavoured spellings `bridge`/`host`)
+/// shares the namespace.
 pub fn bwrap_shares_network(mode: &str) -> bool {
-    match mode {
-        "restricted" => egress_proxy_url().is_some(),
-        "unrestricted" | "bridge" | "host" => true,
-        _ => false,
-    }
+    matches!(mode, "unrestricted" | "bridge" | "host")
 }
 
 /// The `bwrap … --` argv head for [`SandboxKind::Bwrap`]. `--unshare-all`
@@ -673,6 +826,7 @@ fn bwrap_head(
     workdir: &std::path::Path,
     network_mode: Option<&str>,
     read_only_worktree: bool,
+    masks: &[std::path::PathBuf],
 ) -> Vec<String> {
     let raw = network_mode
         .map(|s| s.to_string())
@@ -681,7 +835,7 @@ fn bwrap_head(
     // Fail closed for TASK-supplied modes only (same rule as
     // `docker_run_head`): an unknown string from an assignment payload must
     // never widen egress. The operator env fallback stays trusted.
-    let net = if network_mode.is_some()
+    let mut net = if network_mode.is_some()
         && !matches!(raw.as_str(), "none" | "restricted" | "unrestricted")
     {
         tracing::warn!(mode = %raw, "unknown task network_mode clamped to none");
@@ -689,6 +843,19 @@ fn bwrap_head(
     } else {
         raw
     };
+    // Finding 3: `restricted` under bwrap would be the host network with an
+    // environment-variable hint, which is not a restriction. Collapsing to
+    // `none` is the honest reading of "restricted" — strictly less egress
+    // than asked for, never more. The operator-level setting is refused at
+    // startup; this covers the task-supplied one.
+    if net == "restricted" {
+        tracing::warn!(
+            "network_mode=restricted under bwrap has no enforcement (no per-CIDR \
+             filter, no proxy-only network); running with --unshare-net instead — \
+             use AGENTGRID_SANDBOX=docker for enforced restricted egress"
+        );
+        net = "none".to_string();
+    }
     let wd = workdir.display().to_string();
     let mut v = vec![
         // No orphaned agent tree if the daemon dies, and no TIOCSTI injection
@@ -709,6 +876,15 @@ fn bwrap_head(
         "--tmpfs".to_string(),
         "/tmp".to_string(),
     ]);
+    // Finding 3: the host root is read-only, which stops writes but not reads —
+    // and the agent's job is reading. Mask the daemon's data dir, the workspace
+    // root and the service user's home so a shell in the sandbox cannot read
+    // the node credential, the sealed-env key, `~/.ssh` or a sibling attempt.
+    // Emitted before the worktree bind, so a worktree that lives inside one of
+    // them is still visible.
+    for mask in masks {
+        v.extend(["--tmpfs".to_string(), mask.display().to_string()]);
+    }
     // Plan 2.4 (#22a): a verifier's worktree is read-only — same mount, ro.
     // Emitted AFTER the /tmp tmpfs so a worktree that happens to live under
     // /tmp is not hidden by it (later binds win).
@@ -724,23 +900,6 @@ fn bwrap_head(
     v.push(wd.clone());
     v.extend(["--chdir".to_string(), wd]);
     v.extend(bwrap_run_as_prefix());
-    // Egress firewall parity with docker: a restricted attempt that kept the
-    // host network gets the proxy URL injected so the proxy's allowlist is
-    // what the agent actually talks to.
-    if net == "restricted" {
-        if let Some(proxy) = egress_proxy_url() {
-            for key in [
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-            ] {
-                v.extend(["--setenv".to_string(), key.to_string(), proxy.clone()]);
-            }
-        }
-    }
     v.push("--".to_string());
     v
 }
@@ -1188,14 +1347,19 @@ pub fn sandbox_command(
         // ADR 0022: same builder as `sandbox_prefix`; the args follow the
         // `--` terminator so a program name can never be read as a bwrap flag.
         SandboxKind::Bwrap => {
-            let mut out = bwrap_head(workdir, network_mode, read_only_worktree);
+            let masks = bwrap_masked_paths(workdir);
+            let mut out = bwrap_head(workdir, network_mode, read_only_worktree, &masks);
             // Same reason as `sandbox_command`: the child's PATH is the
             // curated one, so a bare name does not resolve inside the
             // namespace. Resolve it here, where the daemon's PATH applies.
             let program = crate::capabilities::resolve_in_path(program)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| program.to_string());
-            bwrap_rebind_if_masked(&mut out, &program);
+            bwrap_rebind_if_masked(&mut out, &program, &masks);
+            // Same mounts as `sandbox_prefix`, or the two would disagree on the
+            // argv and the validation command would lose the toolchain the
+            // agent's shell kept.
+            bwrap_rebind_path_dirs(&mut out, &masks, std::env::var_os("PATH").as_deref());
             out.push(program);
             out.extend(args.iter().cloned());
             ("bwrap".into(), out)
@@ -2750,18 +2914,22 @@ mod tests {
         // `none` keeps the netns unshared; `unrestricted` shares it.
         assert!(!shared("none"));
         assert!(shared("unrestricted"));
-        // `restricted` shares only when a filtering proxy is configured —
-        // a shared net with no filter is unfiltered internet, not a sandbox.
+        // Finding 3: `restricted` never shares it, proxy URL or not. A shared
+        // net with an HTTP_PROXY variable is unfiltered internet — the variable
+        // is a hint, not a firewall.
         assert!(!shared("restricted"));
         std::env::set_var("AGENTGRID_SANDBOX_EGRESS_PROXY", "http://egress:3128");
-        assert!(shared("restricted"));
+        assert!(
+            !shared("restricted"),
+            "a proxy URL must not turn restricted into --share-net under bwrap"
+        );
         std::env::remove_var("AGENTGRID_SANDBOX_EGRESS_PROXY");
         // An unknown TASK mode must never widen egress.
         assert!(!shared("host"));
     }
 
     #[test]
-    fn bwrap_restricted_mode_injects_the_proxy_url() {
+    fn bwrap_restricted_mode_does_not_pretend_to_have_a_proxy() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_EGRESS_PROXY", "http://egress:3128");
@@ -2775,13 +2943,52 @@ mod tests {
             &[],
             None,
         );
-        assert!(a
-            .windows(3)
-            .any(|w| w == ["--setenv", "HTTPS_PROXY", "http://egress:3128"]));
-        // ... and never for a `none` attempt.
+        // No `--share-net` and no proxy hint: a `--setenv HTTPS_PROXY` on a
+        // network namespace that was never unshared was the lie. The attempt
+        // runs with no egress at all instead.
+        assert!(!a.iter().any(|x| x == "--share-net"));
+        assert!(!a.iter().any(|x| x == "--setenv"));
+        std::env::remove_var("AGENTGRID_SANDBOX_EGRESS_PROXY");
+    }
+
+    /// Finding 3: `--ro-bind / /` let the agent read the node credential, the
+    /// sealed-env key, `~/.ssh` and sibling attempts. Those subtrees are masked
+    /// with a tmpfs, and the worktree bind comes after them so it stays
+    /// visible.
+    #[test]
+    fn bwrap_masks_the_host_directories_an_agent_must_not_read() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        let tmp = std::env::temp_dir().join(format!("ag-mask-{}", std::process::id()));
+        let data = tmp.join("data");
+        let ws = tmp.join("workspaces");
+        let work = ws.join("attempt-1");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::env::set_var("AGENTGRID_DATA_DIR", &data);
+
+        let masks = bwrap_masked_paths(&work);
+        let data = std::fs::canonicalize(&data).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+        let work = std::fs::canonicalize(&work).unwrap();
+        assert!(
+            masks.contains(&data),
+            "the data dir must be masked: {masks:?}"
+        );
+        assert!(
+            masks.contains(&ws),
+            "the workspace root (sibling attempts) must be masked: {masks:?}"
+        );
+        assert!(
+            !masks.contains(&work),
+            "the worktree itself is what the agent works in: {masks:?}"
+        );
+        // Never the root: `--tmpfs /` would erase the namespace.
+        assert!(!masks.iter().any(|m| m.components().count() < 2));
+
         let (_, a) = sandbox_prefix(
             SandboxKind::Bwrap,
-            std::path::Path::new("/w"),
+            &work,
             "c",
             Some("none"),
             false,
@@ -2789,7 +2996,124 @@ mod tests {
             &[],
             None,
         );
-        assert!(!a.iter().any(|x| x == "--setenv"));
+        let mask_at = a
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1] == data.display().to_string())
+            .expect("the data dir is masked");
+        let bind_at = a
+            .windows(3)
+            .position(|w| {
+                w[0] == "--bind"
+                    && w[1] == work.display().to_string()
+                    && w[2] == work.display().to_string()
+            })
+            .expect("the worktree is bound");
+        assert!(
+            mask_at < bind_at,
+            "masks must precede the worktree bind, or they hide it"
+        );
+
+        std::env::remove_var("AGENTGRID_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Masking `$HOME` also hides `~/.cargo/bin` and `~/.local/bin`, where the
+    /// adapter and the toolchain an attempt runs usually live. The `PATH`
+    /// entries that the masks swallowed are bound back read-only — the entries
+    /// only, so `~/.ssh` and `~/.cargo/credentials.toml` stay hidden as
+    /// siblings rather than as directories on `PATH`.
+    #[test]
+    fn path_entries_swallowed_by_a_mask_are_bound_back() {
+        let tmp = std::env::temp_dir().join(format!("ag-pathbind-{}", std::process::id()));
+        let home = tmp.join("home");
+        let bin = home.join(".cargo").join("bin");
+        let outside = tmp.join("usr-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let home = std::fs::canonicalize(&home).unwrap();
+        let bin = std::fs::canonicalize(&bin).unwrap();
+        let outside = std::fs::canonicalize(&outside).unwrap();
+
+        let path_var = std::env::join_paths([outside.as_path(), bin.as_path()]).unwrap();
+        let mut prefix: Vec<String> = vec!["--ro-bind".into(), "/".into(), "/".into(), "--".into()];
+        bwrap_rebind_path_dirs(
+            &mut prefix,
+            std::slice::from_ref(&home),
+            Some(path_var.as_os_str()),
+        );
+
+        let bin_s = bin.display().to_string();
+        let at = prefix
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == bin_s && w[2] == bin_s)
+            .expect("the hidden PATH entry is bound back");
+        // Before the terminator, or bwrap tries to exec the flag.
+        assert!(
+            at + 3 <= prefix.iter().rposition(|a| a == "--").unwrap(),
+            "the bind must precede the argv terminator: {prefix:?}"
+        );
+        assert!(
+            !prefix.iter().any(|a| a == &outside.display().to_string()),
+            "a PATH entry outside the masks needs no bind: {prefix:?}"
+        );
+        // Nothing to do without masks — the common case on a docker node.
+        let mut plain: Vec<String> = vec!["--".into()];
+        bwrap_rebind_path_dirs(&mut plain, &[], Some(path_var.as_os_str()));
+        assert_eq!(plain, vec!["--".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Finding 3: the answer to "is egress isolated" depended on the mode only,
+    /// so a `restricted` attempt on a bwrap node read as isolated while it was
+    /// running on the host network.
+    #[test]
+    fn egress_isolation_depends_on_the_sandbox_kind() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        // bwrap: only `none` is enforced (it unshares the net namespace).
+        assert!(effective_egress_isolated(SandboxKind::Bwrap, "none"));
+        assert!(!effective_egress_isolated(SandboxKind::Bwrap, "restricted"));
+        assert!(!effective_egress_isolated(
+            SandboxKind::Bwrap,
+            "unrestricted"
+        ));
+        // docker: `restricted` with no proxy network is its own `--network
+        // none`; with a network and a URL the proxy filters.
+        assert!(effective_egress_isolated(SandboxKind::Docker, "none"));
+        assert!(effective_egress_isolated(SandboxKind::Docker, "restricted"));
+        std::env::set_var("AGENTGRID_SANDBOX_EGRESS_NETWORK", "egress");
+        assert!(
+            !effective_egress_isolated(SandboxKind::Docker, "restricted"),
+            "a proxy network without a proxy URL is unfiltered internet"
+        );
+        std::env::set_var("AGENTGRID_SANDBOX_EGRESS_PROXY", "http://egress:3128");
+        assert!(effective_egress_isolated(SandboxKind::Docker, "restricted"));
+        clear_sandbox_env();
+        // A scope and a bare process share the host network namespace.
+        assert!(!effective_egress_isolated(SandboxKind::Systemd, "none"));
+        assert!(!effective_egress_isolated(SandboxKind::None, "none"));
+    }
+
+    /// Finding 3: an operator who asked for enforced `restricted` egress under
+    /// bwrap must be told it cannot be done, not silently given the host
+    /// network.
+    #[test]
+    fn bwrap_refuses_restricted_egress_at_startup() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX", "bwrap");
+        std::env::set_var("AGENTGRID_SANDBOX_NETWORK", "restricted");
+        let err = check_startup_config(true).expect_err("restricted+bwrap must not start");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("AGENTGRID_SANDBOX=docker"),
+            "the message must name the backend that can do it: {msg}"
+        );
+        // `none` under bwrap is fine.
+        std::env::set_var("AGENTGRID_SANDBOX_NETWORK", "none");
+        check_startup_config(true).expect("none under bwrap is enforceable");
+        clear_sandbox_env();
     }
 
     #[test]
@@ -2806,14 +3130,16 @@ mod tests {
             &[],
             None,
         );
-        // Two ro-binds now: the host root and the worktree.
+        // The host root and the worktree are read-only; the worktree is the
+        // second of the two. Later `--ro-bind`s (the `PATH` entries a mask
+        // swallowed) are host-dependent and not part of this contract.
         let ro: Vec<usize> = a
             .iter()
             .enumerate()
             .filter(|(_, x)| x.as_str() == "--ro-bind")
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(ro.len(), 2, "{a:?}");
+        assert!(ro.len() >= 2, "{a:?}");
         assert_eq!(&a[ro[1]..ro[1] + 3], ["--ro-bind", "/w", "/w"]);
         assert!(!a.iter().any(|x| x == "--bind"));
     }
@@ -2898,18 +3224,18 @@ mod tests {
     #[test]
     fn bwrap_rebinds_only_a_real_program_under_a_masked_path() {
         let mut v = Vec::new();
-        bwrap_rebind_if_masked(&mut v, "/usr/local/bin/adapter-mock");
+        bwrap_rebind_if_masked(&mut v, "/usr/local/bin/adapter-mock", &[]);
         assert!(v.is_empty(), "unexpected bind for an unmasked path: {v:?}");
 
         let mut v = Vec::new();
-        bwrap_rebind_if_masked(&mut v, "/tmp/nope/not-a-file");
+        bwrap_rebind_if_masked(&mut v, "/tmp/nope/not-a-file", &[]);
         assert!(v.is_empty(), "bound a path that does not exist: {v:?}");
 
         let dir = std::env::temp_dir();
         let real = dir.join("agentgrid-rebind-probe");
         std::fs::write(&real, b"x").expect("write probe");
         let mut v = Vec::new();
-        bwrap_rebind_if_masked(&mut v, &real.display().to_string());
+        bwrap_rebind_if_masked(&mut v, &real.display().to_string(), &[]);
         // Windows temp is not under /tmp, so this only asserts on unix.
         if real.display().to_string().starts_with("/tmp/") {
             assert_eq!(
@@ -2925,7 +3251,7 @@ mod tests {
         // `bwrap_head` ends with `--`; a bind appended after it became the
         // program ("bwrap: execvp --ro-bind"). It has to go before.
         let mut v = vec!["--tmpfs".to_string(), "--".to_string()];
-        bwrap_rebind_if_masked(&mut v, &real.display().to_string());
+        bwrap_rebind_if_masked(&mut v, &real.display().to_string(), &[]);
         if real.display().to_string().starts_with("/tmp/") {
             assert_eq!(v.last().map(String::as_str), Some("--"));
             assert_eq!(v[1], "--ro-bind");

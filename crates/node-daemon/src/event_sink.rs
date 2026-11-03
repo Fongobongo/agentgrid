@@ -98,6 +98,20 @@ pub struct EventSink {
     /// ascending by sequence (`in_sequence_order`), keeps the stored stream
     /// monotone.
     send_gate: tokio::sync::Mutex<()>,
+    /// Finding 4: the first command the guard refused during this attempt.
+    ///
+    /// The guard sees the `tool_call` event, which the adapter prints after (or
+    /// while) it runs the tool, so it cannot prevent that one execution. It can
+    /// end the attempt: the supervisor polls this and kills the process group,
+    /// which is what turns "the event was rewritten" into "the agent stopped".
+    guard_block: std::sync::Mutex<Option<GuardBlock>>,
+}
+
+/// The command a [`crate::command_guard`] decision refused, and why.
+#[derive(Debug, Clone)]
+pub struct GuardBlock {
+    pub command: String,
+    pub reason: &'static str,
 }
 
 /// Put a drained buffer back into sequence order.
@@ -245,6 +259,7 @@ impl EventSink {
             last_gauge_tokens: AtomicU64::new(0),
             budget: std::sync::Mutex::new((None, None)),
             send_gate: tokio::sync::Mutex::new(()),
+            guard_block: std::sync::Mutex::new(None),
         })
     }
 
@@ -308,6 +323,29 @@ impl EventSink {
             .ok()
             .map(|g| g.0.is_some() || g.1.is_some())
             .unwrap_or(false)
+    }
+
+    /// Latch the first guard refusal of this attempt (finding 4).
+    ///
+    /// First one wins: the supervisor kills the process on the signal, and the
+    /// command that caused it is what the operator needs in the failure, not
+    /// whatever the agent printed in the millisecond before the kill landed.
+    pub fn note_guard_block(&self, command: &str, reason: &'static str) {
+        let mut slot = self.guard_block.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(GuardBlock {
+                command: command.to_string(),
+                reason,
+            });
+        }
+    }
+
+    /// The guard refusal latched for this attempt, if any.
+    pub fn guard_block(&self) -> Option<GuardBlock> {
+        self.guard_block
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Record that an event originated from the adapter output (not the
@@ -867,9 +905,12 @@ async fn emit_line_masked(
                 sink.note_plan(text.to_string());
             }
         }
-        // Plan 1.2: command guard — deny-listed tool calls are replaced with
-        // a `guard_blocked` error event so the operator/audit trail sees the
-        // block instead of silently forwarding the dangerous call.
+        // Plan 1.2: command guard — a refused tool call is kept in the
+        // transcript and marked, rather than replaced. The old code dropped the
+        // real call and emitted only `guard_blocked`, so the audit trail lost
+        // what the agent actually did — which is the one thing it is for — and
+        // nothing stopped the process. The marker latches the block; the
+        // supervisor kills the attempt on it.
         if matches!(env.kind, EventKind::ToolCall) {
             if let Some(cmd) = env
                 .payload
@@ -878,21 +919,24 @@ async fn emit_line_masked(
                 .or_else(|| env.payload.get("tool").and_then(|v| v.as_str()))
             {
                 use crate::command_guard::GuardDecision::*;
-                match guard.decide(cmd) {
-                    Allowed => {}
-                    DeniedMatch | DeniedNotAllowlisted => {
-                        sink.push(
-                            EventType::Error,
-                            json!({
-                                "kind": "guard_blocked",
-                                "command": cmd,
-                                "reason": "denylist match",
-                            }),
-                        )
-                        .await;
-                        sink.note_adapter_event();
-                        return;
-                    }
+                let decision = guard.decide(cmd);
+                if matches!(decision, DeniedMatch | DeniedNotAllowlisted) {
+                    // Owned before the payload moves: `cmd` borrows from it.
+                    let cmd = cmd.to_string();
+                    sink.push(env.kind.to_event_type(), env.payload).await;
+                    sink.push(
+                        EventType::Error,
+                        json!({
+                            "kind": "guard_blocked",
+                            "command": cmd,
+                            "reason": decision.reason(),
+                            "enforced": true,
+                        }),
+                    )
+                    .await;
+                    sink.note_guard_block(&cmd, decision.reason());
+                    sink.note_adapter_event();
+                    return;
                 }
             }
         }
@@ -916,21 +960,23 @@ async fn emit_line_masked(
                     .or_else(|| ae.payload.get("tool").and_then(|v| v.as_str()))
                 {
                     use crate::command_guard::GuardDecision::*;
-                    match guard.decide(cmd) {
-                        Allowed => {}
-                        DeniedMatch | DeniedNotAllowlisted => {
-                            sink.push(
-                                EventType::Error,
-                                json!({
-                                    "kind": "guard_blocked",
-                                    "command": cmd,
-                                    "reason": "denylist match",
-                                }),
-                            )
-                            .await;
-                            sink.note_adapter_event();
-                            return;
-                        }
+                    let decision = guard.decide(cmd);
+                    if matches!(decision, DeniedMatch | DeniedNotAllowlisted) {
+                        let cmd = cmd.to_string();
+                        sink.push(to_event_type(&ae.r#type), ae.payload).await;
+                        sink.push(
+                            EventType::Error,
+                            json!({
+                                "kind": "guard_blocked",
+                                "command": cmd,
+                                "reason": decision.reason(),
+                                "enforced": true,
+                            }),
+                        )
+                        .await;
+                        sink.note_guard_block(&cmd, decision.reason());
+                        sink.note_adapter_event();
+                        return;
                     }
                 }
             }
@@ -964,6 +1010,68 @@ mod plan_capture_tests {
             String::new(),
             Arc::new(ob),
         )
+    }
+
+    /// Finding 4: the guard used to replace the tool call with a marker, so
+    /// the transcript lost what the agent actually ran, and nothing stopped the
+    /// process. The real call is kept, the marker sits beside it, and the block
+    /// is latched for the supervisor to act on.
+    #[tokio::test]
+    async fn a_guarded_tool_call_is_kept_beside_its_marker_and_latched() {
+        let sink = test_sink("guard-block");
+        let guard = crate::command_guard::CommandGuard::new(vec![], vec![]);
+        emit_line_masked(
+            br#"{"type":"tool_call","payload":{"input":"rm -fr /"}}"#,
+            &sink,
+            "stdout",
+            &None,
+            &guard,
+        )
+        .await;
+
+        let events = sink.buffered_events().await;
+        assert_eq!(events.len(), 2, "the call and its marker: {events:?}");
+        assert_eq!(events[0].r#type, EventType::Tool, "the real call stays");
+        assert_eq!(
+            events[0].payload.get("input").and_then(|v| v.as_str()),
+            Some("rm -fr /")
+        );
+        assert_eq!(
+            events[1].payload.get("kind").and_then(|v| v.as_str()),
+            Some("guard_blocked")
+        );
+        assert_eq!(
+            events[1].payload.get("reason").and_then(|v| v.as_str()),
+            Some("denylist match")
+        );
+        assert_eq!(
+            events[1].payload.get("enforced").and_then(|v| v.as_bool()),
+            Some(true),
+            "the marker must say the attempt was stopped, not just relabelled"
+        );
+
+        let blocked = sink.guard_block().expect("the block is latched");
+        assert_eq!(blocked.command, "rm -fr /");
+        assert_eq!(blocked.reason, "denylist match");
+    }
+
+    /// An allowed call is forwarded once, with no marker and nothing latched —
+    /// otherwise every attempt would look blocked.
+    #[tokio::test]
+    async fn an_allowed_tool_call_is_forwarded_untouched() {
+        let sink = test_sink("guard-allow");
+        let guard = crate::command_guard::CommandGuard::new(vec![], vec![]);
+        emit_line_masked(
+            br#"{"type":"tool_call","payload":{"input":"cargo test"}}"#,
+            &sink,
+            "stdout",
+            &None,
+            &guard,
+        )
+        .await;
+        let events = sink.buffered_events().await;
+        assert_eq!(events.len(), 1);
+        assert!(sink.guard_block().is_none());
     }
 
     #[tokio::test]

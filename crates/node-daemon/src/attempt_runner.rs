@@ -1176,8 +1176,13 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // A budget kill is terminal whatever the exit code: the post-exit path
         // in `supervise_adapter` reports the breach with code 0, and a
         // validation round (or its feedback retry) would keep spending against
-        // a ceiling already declared breached.
-        if last_kill_reason.as_deref() == Some("budget_exceeded") {
+        // a ceiling already declared breached. A guard kill is terminal for the
+        // same reason — and doubly so: the block is latched, so a fresh adapter
+        // spawned by a validation retry would be killed on its first tool call.
+        if matches!(
+            last_kill_reason.as_deref(),
+            Some("budget_exceeded") | Some("guard_blocked")
+        ) {
             break false;
         }
         // Agent failed (non-zero exit): no fixable validation to feed back; stop.
@@ -1349,6 +1354,13 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
         // already breached the declared ceiling, so the attempt is over budget
         // whatever else happened (the loop above stops before validating).
         Some("budget_exceeded".into())
+    } else if last_kill_reason.as_deref() == Some("guard_blocked") {
+        // Same precedence, and for a sharper reason: the adapter may have
+        // exited 0 in the window between the refused command and the kill
+        // (the exit code is read after `terminate_group`). Reporting a
+        // guard-blocked run as a success would hand the operator a worktree
+        // whose contents nobody vouched for.
+        Some("guard_blocked".into())
     } else if code == 0 {
         if validation_passed {
             None

@@ -1923,8 +1923,8 @@ components:
           type: [string, "null"]
           description: |
             Failure category when the task did not end cleanly — `agent_failed`,
-            `validation_failed`, `timeout`, `node_lost`, `budget_exceeded`. Null
-            on success or a clean cancel.
+            `validation_failed`, `timeout`, `node_lost`, `budget_exceeded`,
+            `guard_blocked`. Null on success or a clean cancel.
         requested_node_id: { type: [string, "null"] }
         base_commit: { type: [string, "null"] }
         parent_acp_session_id: { type: [string, "null"] }
