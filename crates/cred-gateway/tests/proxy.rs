@@ -335,16 +335,30 @@ async fn minting_requires_the_admin_token() {
     );
 }
 
+/// An upstream that cannot answer, without racing for a free port.
+///
+/// Binding a listener and dropping it to "reserve then release" a port is not
+/// safe here: the suite runs in parallel, another test can bind that port in
+/// the gap and answer the request with its own 404. Instead the port stays
+/// ours and every connection is accepted and dropped, so the gateway's
+/// connect succeeds and the request fails — which is what this test needs.
+async fn a_port_that_never_answers() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            drop(sock);
+        }
+    });
+    format!("http://{addr}")
+}
+
 /// The gateway's own error paths are the ones that could accidentally print the
-/// credential. Point a route at a closed port and read what comes back.
+/// credential. Point a route at an upstream that never answers and read what
+/// comes back.
 #[tokio::test]
 async fn an_upstream_failure_does_not_echo_the_key() {
-    let dead = {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let a = l.local_addr().unwrap();
-        drop(l);
-        format!("http://{a}")
-    };
+    let dead = a_port_that_never_answers().await;
     let mut routes = HashMap::new();
     routes.insert("mock".to_string(), route(&dead, "x-api-key"));
     let gw = spawn(router(gateway(routes, &[("mock", "sk-very-secret")]))).await;

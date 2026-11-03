@@ -188,7 +188,12 @@ pub fn open(node_secret_b64: &str, sealed: &str, aad: &str) -> Result<String, Se
     String::from_utf8(plain.to_vec()).map_err(|_| SealError::NotUtf8)
 }
 
-#[cfg(test)]
+// Not under Miri: `ring` calls into assembly/C, and Miri aborts the run at
+// `ring_core_*__OPENSSL_cpuid_setup` ("unsupported operation: can't call
+// foreign function"). The seal tests therefore cannot execute there at all,
+// and one unsupported call fails the whole `miri test` job — including the
+// parts of this crate that Miri *can* check.
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 
