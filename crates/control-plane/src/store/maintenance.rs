@@ -31,24 +31,14 @@ impl Store {
     /// drifted — approval expiry only ran on the loop side).
     pub async fn tick_maintenance(&self) -> Result<()> {
         let now = now_iso();
-        let reverted = revert_expired_leases(
-            &self.pool,
-            &now,
-            self.ha_gate.as_deref(),
-            self.repl.as_ref(),
-        )
-        .await?;
+        let reverted =
+            revert_expired_leases(&self.pool, &now, self.ha_gate.as_ref(), self.repl.as_ref())
+                .await?;
         if reverted > 0 {
             self.lease_reverts
                 .fetch_add(reverted as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        mark_offline_nodes(
-            &self.pool,
-            &now,
-            self.ha_gate.as_deref(),
-            self.repl.as_ref(),
-        )
-        .await?;
+        mark_offline_nodes(&self.pool, &now, self.ha_gate.as_ref(), self.repl.as_ref()).await?;
         // Approval expiry + scheduled-workflow triggers fire on the shared
         // cadence; without them scheduled workflows would never fire and
         // approvals would never expire in production.

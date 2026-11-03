@@ -96,6 +96,17 @@ pub struct EdgeConfig {
     /// plane reads the count to answer "is this node connected directly?", and
     /// an edge that stayed silent would make its nodes look direct.
     pub max_hops: Option<u32>,
+    /// Path prefixes this forwarder will pass upstream. Empty means "any
+    /// path", which is right for the standalone `agentgrid-cp-edge` — it *is*
+    /// the control plane's front door.
+    ///
+    /// A node-hosted relay is a different thing: it carries a peer's node
+    /// traffic, and nothing else. Left unrestricted it also forwards
+    /// `/v1/auth/*`, `/v1/users`, `/v1/ha/*` and every admin route, so a host
+    /// that can reach the relay port has the whole control-plane API — and a
+    /// relay host that is itself compromised can read every peer credential
+    /// that crosses it. [`crate::relay`] sets this to `/v1/node/`.
+    pub allowed_paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +126,8 @@ struct Metrics {
     rejected_sources_total: AtomicU64,
     /// Requests refused because they had already crossed `max_hops` relays.
     loop_detected_total: AtomicU64,
+    /// Requests refused because their path is outside `allowed_paths`.
+    path_refused_total: AtomicU64,
 }
 
 pub struct Edge {
@@ -123,6 +136,7 @@ pub struct Edge {
     upstream_timeout: Duration,
     allowed_sources: Vec<Cidr>,
     max_hops: Option<u32>,
+    allowed_paths: Vec<String>,
     /// Only used by [`Upstream::Ha`]; the fixed variant has nothing to cache.
     leader: tokio::sync::RwLock<Option<CachedLeader>>,
     metrics: Metrics,
@@ -140,6 +154,17 @@ impl Edge {
                 anyhow::bail!("an HA edge must list at least one control plane");
             }
         }
+        for prefix in &cfg.allowed_paths {
+            // A prefix that does not end in `/` over-matches: `/v1/node`
+            // would also forward `/v1/nodes`, the admin node list. Refusing it
+            // at startup is cheaper than a test that has to remember.
+            if !prefix.starts_with('/') || !prefix.ends_with('/') {
+                anyhow::bail!(
+                    "forwarded path prefix {prefix:?} must start and end with `/` \
+                     (write `/v1/node/`, not `/v1/node`)"
+                );
+            }
+        }
         let http = reqwest::Client::builder()
             // Never replay a client request (or the cluster token) to a
             // redirect target chosen by an upstream.
@@ -152,6 +177,7 @@ impl Edge {
             upstream_timeout: cfg.upstream_timeout,
             allowed_sources: cfg.allowed_sources,
             max_hops: cfg.max_hops,
+            allowed_paths: cfg.allowed_paths,
             leader: tokio::sync::RwLock::new(None),
             metrics: Metrics::default(),
         }))
@@ -243,6 +269,17 @@ impl Edge {
 
     fn source_allowed(&self, addr: IpAddr) -> bool {
         self.allowed_sources.is_empty() || self.allowed_sources.iter().any(|c| c.contains(addr))
+    }
+
+    /// Whether `path` (no query string) may be forwarded.
+    ///
+    /// Prefix matching, not glob: `/v1/node/` matches `/v1/node/ws` and
+    /// `/v1/node/attempts/x/events`, and deliberately does **not** match
+    /// `/v1/nodes`, which is the admin node list. The trailing slash is what
+    /// keeps those apart, so a prefix without one is refused at construction
+    /// ([`Edge::new`]) rather than left to match too much.
+    fn path_allowed(&self, path: &str) -> bool {
+        self.allowed_paths.is_empty() || self.allowed_paths.iter().any(|p| path.starts_with(p))
     }
 }
 
@@ -434,6 +471,8 @@ async fn metrics(State(edge): State<Arc<Edge>>) -> Response {
         agentgrid_edge_rejected_sources_total {rejected_sources_total}\n\
         # TYPE agentgrid_edge_loop_detected_total counter\n\
         agentgrid_edge_loop_detected_total {loop_detected_total}\n\
+        # TYPE agentgrid_edge_path_refused_total counter\n\
+        agentgrid_edge_path_refused_total {path_refused_total}\n\
         # HELP agentgrid_edge_requests_total Total client requests handled by the forwarder.\n\
         # HELP agentgrid_edge_leader_discoveries_total Successful leader discoveries via /v1/ha/status.\n\
         # HELP agentgrid_edge_leaderless_total Requests answered 503 because no leader was reachable.\n\
@@ -442,7 +481,8 @@ async fn metrics(State(edge): State<Arc<Edge>>) -> Response {
         # HELP agentgrid_edge_upstream_timeouts_total Forwarded requests whose upstream did not answer in time.\n\
         # HELP agentgrid_edge_ws_bridges_total Total WebSocket bridges established.\n\
         # HELP agentgrid_edge_rejected_sources_total Peers refused by the allowlist before any request was read.\n\
-        # HELP agentgrid_edge_loop_detected_total Requests refused with 508 because they had already crossed every allowed relay.\n",
+        # HELP agentgrid_edge_loop_detected_total Requests refused with 508 because they had already crossed every allowed relay.\n\
+        # HELP agentgrid_edge_path_refused_total Requests refused with 404 because their path is outside the forwarded prefixes.\n",
         requests_total = edge.metrics.requests_total.load(Ordering::Relaxed),
         leader_discoveries_total = edge.metrics.leader_discoveries_total.load(Ordering::Relaxed),
         leaderless_total = edge.metrics.leaderless_total.load(Ordering::Relaxed),
@@ -455,6 +495,7 @@ async fn metrics(State(edge): State<Arc<Edge>>) -> Response {
         ws_bridges_total = edge.metrics.ws_bridges_total.load(Ordering::Relaxed),
         rejected_sources_total = edge.metrics.rejected_sources_total.load(Ordering::Relaxed),
         loop_detected_total = edge.metrics.loop_detected_total.load(Ordering::Relaxed),
+        path_refused_total = edge.metrics.path_refused_total.load(Ordering::Relaxed),
     );
     (
         StatusCode::OK,
@@ -482,6 +523,22 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 
 async fn proxy(State(edge): State<Arc<Edge>>, req: Request) -> Response {
     edge.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
+    // Before the body is read: an unforwardable path must not cost this
+    // process a 64 MiB buffer. 404 rather than 403 — from a peer's point of
+    // view the route does not exist on this endpoint, and the relay is not
+    // saying which control-plane routes it knows about.
+    if !edge.path_allowed(req.uri().path()) {
+        edge.metrics
+            .path_refused_total
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(path = %req.uri().path(), "path is not forwarded by this edge");
+        let carried = edge.allowed_paths.join(", ");
+        return (
+            StatusCode::NOT_FOUND,
+            format!("this forwarder carries only: {carried}"),
+        )
+            .into_response();
+    }
     let (parts, body) = req.into_parts();
     let limit = axum::body::to_bytes(body, MAX_REQUEST_BODY).await;
     let bytes = match limit {
@@ -861,6 +918,7 @@ mod tests {
             upstream_timeout: timeout,
             allowed_sources: vec![],
             max_hops: None,
+            allowed_paths: vec![],
         })
         .expect("edge")
     }
@@ -874,6 +932,7 @@ mod tests {
             upstream_timeout: Duration::from_secs(10),
             allowed_sources: vec![],
             max_hops: None,
+            allowed_paths: vec![],
         })
         .expect("relay")
     }
@@ -993,6 +1052,7 @@ mod tests {
             upstream_timeout: Duration::from_secs(10),
             allowed_sources: vec![],
             max_hops,
+            allowed_paths: vec![],
         })
         .expect("relay")
     }
@@ -1071,6 +1131,109 @@ mod tests {
             "a looping request must not reach the upstream at all"
         );
         assert_eq!(edge.metrics.loop_detected_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_relay_forwards_node_traffic_and_refuses_the_rest_of_the_api() {
+        // Finding 11: the node-hosted relay used to forward every path, so the
+        // relay port was a second front door to `/v1/auth/*`, the admin routes
+        // and `/v1/ha/*`. Only `/v1/node/` is a node's business.
+        let (upstream, hits) = start_hop_echo_upstream().await;
+        let url = upstream.clone();
+        let edge = Edge::new(EdgeConfig {
+            upstream: Upstream::Fixed(Arc::new(move || url.clone())),
+            upstream_timeout: Duration::from_secs(10),
+            allowed_sources: vec![],
+            max_hops: Some(3),
+            allowed_paths: vec!["/v1/node/".to_string()],
+        })
+        .expect("relay");
+        let base = start_forwarder(Arc::clone(&edge)).await;
+
+        let resp = local_http()
+            .get(format!("{base}/v1/node/attempts/abc/events"))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK, "node traffic must pass");
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+        for path in [
+            "/v1/auth/login",
+            "/v1/auth/setup",
+            "/v1/users",
+            "/v1/ha/changeset",
+            "/v1/adapter-env",
+            // The trailing slash is the whole point: `/v1/nodes` is the admin
+            // node list and must not be covered by a `/v1/node` prefix.
+            "/v1/nodes",
+            "/v1/nodes/node-a/revoke",
+        ] {
+            let resp = local_http()
+                .get(format!("{base}{path}"))
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must be refused"
+            );
+            let body = resp.text().await.expect("body");
+            assert!(
+                body.contains("/v1/node/"),
+                "{path}: the body must say what this forwarder carries: {body}"
+            );
+        }
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            1,
+            "no refused path may reach the upstream"
+        );
+        assert_eq!(
+            edge.metrics.path_refused_total.load(Ordering::Relaxed),
+            7,
+            "every refusal is counted"
+        );
+    }
+
+    #[test]
+    fn a_path_prefix_without_a_trailing_slash_is_refused_at_startup() {
+        // `/v1/node` as a prefix would also match `/v1/nodes` — the exact leak
+        // the relay's restriction exists to prevent, reintroduced by a typo.
+        for bad in ["/v1/node", "v1/node/", "/v1/node/*", ""] {
+            let url = "http://127.0.0.1:1".to_string();
+            let err = Edge::new(EdgeConfig {
+                upstream: Upstream::Fixed(Arc::new(move || url.clone())),
+                upstream_timeout: Duration::from_secs(1),
+                allowed_sources: vec![],
+                max_hops: None,
+                allowed_paths: vec![bad.to_string()],
+            })
+            .err()
+            .expect("a prefix without a trailing slash must not build an edge");
+            assert!(
+                format!("{err}").contains("prefix"),
+                "{bad:?}: the message must name the prefix: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unrestricted_edge_still_forwards_everything() {
+        // The standalone `agentgrid-cp-edge` is the front door; restricting it
+        // by default would break every node behind it.
+        let (upstream, hits) = start_hop_echo_upstream().await;
+        let edge = fixed_edge(&upstream);
+        let base = start_forwarder(Arc::clone(&edge)).await;
+        let resp = local_http()
+            .get(format!("{base}/v1/tasks"))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+        assert_eq!(edge.metrics.path_refused_total.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -1322,6 +1485,7 @@ mod tests {
             upstream_timeout: Duration::from_secs(10),
             allowed_sources: vec![],
             max_hops: None,
+            allowed_paths: vec![],
         })
         .expect("relay");
 
@@ -1383,6 +1547,7 @@ mod tests {
             upstream_timeout: Duration::from_secs(10),
             allowed_sources: vec![Cidr::parse("10.0.0.0/8").unwrap()],
             max_hops: None,
+            allowed_paths: vec![],
         })
         .expect("relay");
         assert!(closed.source_allowed("10.9.9.9".parse().unwrap()));

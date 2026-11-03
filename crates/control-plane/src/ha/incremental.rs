@@ -419,14 +419,17 @@ impl Replicator {
                     }
                     Ok(Ok(Err(e))) => {
                         self.rt.shared.set_replication_lost();
+                        self.rt.gate.suspend_writes();
                         bail!("sync replication failed: {e}");
                     }
                     Ok(Err(_)) => {
                         self.rt.shared.set_replication_lost();
+                        self.rt.gate.suspend_writes();
                         bail!("sync replication worker dropped the acknowledgement");
                     }
                     Err(_) => {
                         self.rt.shared.set_replication_lost();
+                        self.rt.gate.suspend_writes();
                         bail!("sync replication ack exceeded {wait:?}");
                     }
                 }
@@ -526,6 +529,7 @@ impl Replicator {
                         "sync write missed the data quorum"
                     );
                     self.rt.shared.set_replication_lost();
+                    self.rt.gate.suspend_writes();
                     Err(format!(
                         "changeset {} acknowledged by {acks} data replicas, need {}",
                         job.seq,
@@ -535,6 +539,7 @@ impl Replicator {
                 Err(e) => {
                     tracing::warn!(seq = job.seq, "sync write replication failed: {e}");
                     self.rt.shared.set_replication_lost();
+                    self.rt.gate.suspend_writes();
                     Err(e.to_string())
                 }
             };
@@ -599,6 +604,7 @@ impl Replicator {
                             "no data replica acknowledged within the async lag budget"
                         );
                         self.rt.shared.set_replication_lost();
+                        self.rt.gate.suspend_writes();
                     }
                 }
             }

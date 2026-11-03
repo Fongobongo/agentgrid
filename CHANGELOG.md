@@ -262,6 +262,37 @@
 
 ### Fixed
 
+- **The leader committed before it knew the write was replicated.** In `sync`
+  mode `tx.commit()` ran first and the quorum acknowledgement was awaited
+  afterwards, so a failed acknowledgement returned an error for a row that was
+  already durable — and a retry created it twice. The row is still committed
+  first (a quorum-acked write must be durable on the leader), but the leader
+  now stops accepting writes the moment the acknowledgement fails instead of at
+  the next election tick, so the retry cannot land a second row on a log that
+  is about to be rewound. The lease is also re-checked immediately before
+  `COMMIT`, not only at `BEGIN`: a transaction whose lease expires while it runs
+  is rolled back, because another replica may already have been elected.
+  `docs/ha-deployment.md` states what an error means in this mode ("not
+  acknowledged", not "not applied"). Client-supplied idempotency keys would
+  remove the last ambiguity and are not implemented; the write gate is still
+  held across the replication round trip, so a group commit would be the next
+  throughput step.
+- **The peer relay forwarded the whole control-plane API.** A node-hosted relay
+  passed every path upstream, so the relay port was a second front door:
+  `/v1/auth/*`, `/v1/users`, `/v1/adapter-env` and `/v1/ha/*` (cluster token
+  included) all crossed it, and a compromised relay host could keep every
+  credential that passed. It now carries `/v1/node/` only — the prefix the node
+  actually uses, from enroll and `join.sh` to the attempt event stream and the
+  WebSocket — and answers `404` to everything else *before* reading the body.
+  The prefix must end in `/` (checked at startup, because `/v1/node` would also
+  match `/v1/nodes`, the admin node list). `AGENTGRID_RELAY_ALLOW` is now
+  required for a non-loopback listen instead of a startup warning: a relay is a
+  way into the control plane, and an unlisted one is a way in for any host that
+  can reach the port. Loopback stays exempt. The peer → relay hop is still
+  plain HTTP and still carries the node credential, which the relay cannot fix
+  by itself — its client trusts the system roots only — so the requirement is
+  stated in `docs/runbook-transport.md` and warned about at startup: WireGuard,
+  an ssh tunnel, or a segment where the relay and its peers are the only hosts.
 - **Host-side git trusted the worktree the agent had just written to.** After an
   attempt the daemon ran `git add -A`, `diff --cached` and `commit` with
   `current_dir` set to the agent-writable worktree, so git discovered `.git`

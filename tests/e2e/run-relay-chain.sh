@@ -78,9 +78,14 @@ metric_at() {  # $1 = relay base, $2 = metric name
 
 # A forwarded request through relay B, carrying a given hop count. Prints the
 # HTTP status; the body is left for the caller to inspect if it cares.
+#
+# `/v1/node/join.sh` and not `/v1/ha/status`: a relay forwards node traffic
+# only, so anything outside `/v1/node/` is answered 404 by the relay itself and
+# the probe would prove nothing. join.sh is public, cheap and a real thing a
+# host behind a relay fetches.
 status_through_b() {  # $1 = hop count to enter with
   curl -s -o "$TMP/last-body" -w '%{http_code}' --max-time 10 \
-    -H "x-agentgrid-relay-hops: $1" "$RELAY_B/v1/ha/status" || true
+    -H "x-agentgrid-relay-hops: $1" "$RELAY_B/v1/node/join.sh" || true
 }
 
 echo ">> relay chain E2E: C -> relay B -> relay A -> control plane"
@@ -150,8 +155,10 @@ echo "   relay A carried $A_REQS, relay B carried $B_REQS, no loops on either"
 # were passed through unchanged (or reset at each hop) these two would agree.
 echo ">> the same request, one hop apart, gets opposite answers"
 CODE=$(status_through_b 1)
-[ "$CODE" != "508" ] \
-  || { echo "entering B with 1 hop was refused at A (status $CODE) — the counter is off by one"; cat "$TMP/last-body"; exit 1; }
+[ "$CODE" = "200" ] \
+  || { echo "entering B with 1 hop must reach the control plane, got $CODE — the counter is off by one"; cat "$TMP/last-body"; exit 1; }
+grep -q "AGENTGRID" "$TMP/last-body" \
+  || { echo "200 through the chain is not the join script:"; head -5 "$TMP/last-body"; exit 1; }
 echo "   entering with 1 hop -> A sees 2 -> forwarded (status $CODE)"
 
 CODE=$(status_through_b 2)

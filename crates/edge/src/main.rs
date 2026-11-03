@@ -75,6 +75,11 @@ async fn main() -> anyhow::Result<()> {
         // reads it to answer "is this node connected directly?", and an edge
         // that stayed silent made every node behind it look direct.
         max_hops: None,
+        // Every path: this process *is* the control plane's front door, and a
+        // node behind it is indistinguishable from a direct client. The
+        // restriction exists for the node-hosted relay, which carries a peer's
+        // `/v1/node/` traffic and nothing else.
+        allowed_paths: vec![],
     })?;
     let listen: std::net::SocketAddr = args.listen.parse()?;
     let listener = tokio::net::TcpListener::bind(listen).await?;

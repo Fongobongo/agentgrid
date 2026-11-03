@@ -4811,6 +4811,67 @@ mod ha_fencing_tests {
         let tx = s.write_txn().await.unwrap();
         tx.commit().await.unwrap();
     }
+
+    /// Finding 13: the lease was checked when the transaction began and never
+    /// again, so a leader whose lease expired while the handler was working
+    /// still committed. The row must not land — a new leader may already be
+    /// writing the same rows.
+    #[tokio::test]
+    async fn a_lease_that_expires_mid_transaction_rolls_the_write_back() {
+        let gate = HaGate::new(HaRole::Leader, 0);
+        // A lease that is valid now and can be expired by hand afterwards.
+        gate.promote(0, u64::MAX - 1);
+        let (s, _p) = store_with_gate(gate.clone()).await;
+        let mut tx = s.write_txn().await.unwrap();
+        sqlx::query("CREATE TABLE lease_probe (id INTEGER PRIMARY KEY)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO lease_probe (id) VALUES (1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        // The lease runs out while the transaction is open (a quorum that
+        // stopped acknowledging is exactly this).
+        gate.renew_lease(0);
+
+        let err = tx.commit().await.expect_err("an expired lease must fence");
+        assert!(err.downcast_ref::<FencedError>().is_some(), "{err}");
+
+        // Rolled back, not committed: the table does not exist.
+        let missing = sqlx::query("SELECT id FROM lease_probe")
+            .fetch_all(&s.pool)
+            .await;
+        assert!(missing.is_err(), "the transaction must not have committed");
+    }
+
+    /// Finding 13: a write that was committed locally but not confirmed by a
+    /// data quorum is about to be rewound, so the leader must stop admitting
+    /// writes immediately rather than at the next election tick.
+    #[tokio::test]
+    async fn suspended_writes_are_fenced_until_the_next_promotion() {
+        let gate = HaGate::new(HaRole::Leader, 0);
+        gate.promote(0, u64::MAX - 1);
+        let (s, _p) = store_with_gate(gate.clone()).await;
+        gate.suspend_writes();
+        assert!(gate.writes_suspended());
+
+        let err = match s.write_txn().await {
+            Ok(_) => panic!("a suspended leader must refuse writes"),
+            Err(e) => e,
+        };
+        assert!(err.downcast_ref::<FencedError>().is_some(), "{err}");
+
+        // A new term starts from a log the cluster agreed on, so it clears it.
+        // Same epoch on purpose: the epoch itself is replicated state and the
+        // store compares it, so a new number here would fence for the other
+        // reason and prove nothing about the suspension.
+        gate.promote(0, u64::MAX - 1);
+        assert!(!gate.writes_suspended());
+        let tx = s.write_txn().await.expect("a promoted leader writes again");
+        tx.rollback().await.unwrap();
+    }
 }
 
 #[cfg(test)]

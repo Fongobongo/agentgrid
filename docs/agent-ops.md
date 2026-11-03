@@ -275,6 +275,7 @@ Two things have to be true on the sibling first:
 ```bash
 AGENTGRID_RELAY_LISTEN=0.0.0.0:7900        # carry other nodes' CP traffic
 AGENTGRID_RELAY_ADVERTISE=http://node-a.internal:7900
+AGENTGRID_RELAY_ALLOW=10.20.0.0/16         # required: who may use it
 ```
 
 `AGENTGRID_RELAY_ADVERTISE` is not optional there. A `0.0.0.0` listen means
@@ -282,6 +283,13 @@ AGENTGRID_RELAY_ADVERTISE=http://node-a.internal:7900
 without an advertise value the node announces **nothing** rather than guessing
 a hostname that would only be wrong on the other machine. The announced URL is
 what `ag nodes ls` shows in `RELAY` and what `--via` resolves to.
+
+`AGENTGRID_RELAY_ALLOW` is required for the same class of reason: a relay is a
+way into the control plane, and an unlisted one is a way in for every host that
+can reach the port. A loopback listen is the exception (ssh tunnel, sidecar).
+The relay also carries **`/v1/node/` only** — the rest of the API answers `404`
+there, so the port is not a second front door. See "Relay transport" in
+`docs/runbook-transport.md` for the encryption requirement below the relay.
 
 Every refusal is deliberate:
 

@@ -7,7 +7,7 @@
 //! layer maps to 503.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -92,6 +92,12 @@ pub struct HaGate {
     /// rest of the cluster could have missed, so it must not be condemned to
     /// a full snapshot (and with it, permanent ineligibility to campaign).
     admitted_writes: AtomicU64,
+    /// Set when a write was committed locally and could not be confirmed by a
+    /// data quorum. The role may still say `leader` for a tick, but the log is
+    /// no longer cluster history: it is about to be rewound, so accepting
+    /// another write into it would put a second row on a log that is about to
+    /// disappear. Cleared by [`HaGate::promote`].
+    writes_suspended: AtomicBool,
 }
 
 impl HaGate {
@@ -102,6 +108,7 @@ impl HaGate {
             lease_until_ms: AtomicU64::new(u64::MAX),
             fenced_writes: AtomicU64::new(0),
             admitted_writes: AtomicU64::new(0),
+            writes_suspended: AtomicBool::new(false),
         })
     }
 
@@ -113,6 +120,7 @@ impl HaGate {
             lease_until_ms: AtomicU64::new(lease),
             fenced_writes: AtomicU64::new(0),
             admitted_writes: AtomicU64::new(0),
+            writes_suspended: AtomicBool::new(false),
         })
     }
 
@@ -141,14 +149,32 @@ impl HaGate {
     }
 
     pub fn assert_writable(&self) -> Result<(), FencedError> {
+        self.check_writable()?;
+        self.admitted_writes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The same predicate as [`HaGate::assert_writable`] without counting an
+    /// admitted write.
+    ///
+    /// Called again immediately before `COMMIT`, after the transaction has
+    /// done its work: the lease can expire, or replication can be lost, while
+    /// a transaction runs, and a leader that has stopped being the leader must
+    /// not commit — a new leader may already be writing the same rows. Without
+    /// this the only check was at `BEGIN`, which is the whole duration of the
+    /// transaction too early.
+    pub fn assert_still_writable(&self) -> Result<(), FencedError> {
+        self.check_writable()
+    }
+
+    fn check_writable(&self) -> Result<(), FencedError> {
         let role = self.role();
         let ok = match role {
             HaRole::Single => true,
             HaRole::Leader => mono_ms() < self.lease_until_ms(),
             HaRole::Standby | HaRole::Witness => false,
-        };
+        } && !self.writes_suspended.load(Ordering::Acquire);
         if ok {
-            self.admitted_writes.fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
             self.fenced_writes.fetch_add(1, Ordering::Relaxed);
@@ -159,11 +185,34 @@ impl HaGate {
         }
     }
 
+    /// Stop accepting writes because this leader can no longer confirm that a
+    /// write it already committed reached a data quorum.
+    ///
+    /// The local commit stands for now (it was durable before the peer
+    /// acknowledgement was attempted, which is the ordering that makes a
+    /// quorum-acked write safe), but it is not cluster history: the election
+    /// loop demotes on the same signal and the write is rewound out of the log.
+    /// Between those two moments the role still reads `leader`, so anything
+    /// admitted in that window would be a second row on a log that is about to
+    /// be discarded — and, from the client's side, the duplicate the reviewer
+    /// described. Cleared only by [`HaGate::promote`], because a fresh
+    /// leadership starts from a log the cluster agreed on.
+    pub fn suspend_writes(&self) {
+        self.writes_suspended.store(true, Ordering::Release);
+    }
+
+    pub fn writes_suspended(&self) -> bool {
+        self.writes_suspended.load(Ordering::Acquire)
+    }
+
     /// Become leader for `epoch` with a lease valid until `lease_until_ms`.
     pub fn promote(&self, epoch: u64, lease_until_ms: u64) {
         self.epoch.store(epoch, Ordering::Release);
         self.lease_until_ms.store(lease_until_ms, Ordering::Release);
         self.admitted_writes.store(0, Ordering::Release);
+        // A new leadership starts from a log the cluster agreed on, so a
+        // suspension left over from the previous term does not apply to it.
+        self.writes_suspended.store(false, Ordering::Release);
         self.role.store(HaRole::Leader as u8, Ordering::Release);
     }
 

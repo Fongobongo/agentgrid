@@ -250,6 +250,21 @@ impl RelayConfig {
         })?;
         let allow = agentgrid_edge::parse_allowlist(allow)
             .context("AGENTGRID_RELAY_ALLOW is not a comma-separated CIDR list")?;
+        // A relay on a routable address with no allowlist is an open way into
+        // the control plane for every host that can reach the port — the
+        // operator widened their network perimeter without writing it down
+        // anywhere. Refused rather than warned: a warning is read once, at
+        // startup, by the one person who already knows. Loopback needs no list
+        // (the only peers are local, and an ssh tunnel or a sidecar is the
+        // usual reason for that shape).
+        if allow.is_empty() && !listen.ip().is_loopback() {
+            anyhow::bail!(
+                "AGENTGRID_RELAY_ALLOW is required when the relay listens on {listen}: \
+                 without it every host that can reach this port can use this node as its \
+                 way into the control plane — write the peers' prefixes, e.g. \
+                 AGENTGRID_RELAY_ALLOW=10.20.0.0/16"
+            );
+        }
         let max_hops = match max_hops.map(str::trim).filter(|s| !s.is_empty()) {
             None => DEFAULT_MAX_HOPS,
             Some(raw) => {
@@ -345,12 +360,25 @@ pub async fn start(cfg: &Config, relay: RelayConfig) -> Result<()> {
         );
     }
     if relay.allow.is_empty() {
-        tracing::warn!(
+        // Only reachable on a loopback listen — `parse` refuses an unlisted
+        // relay on a routable address. Said out loud anyway, because "only
+        // local peers" is an assumption about who else is on the host.
+        tracing::info!(
             listen = %relay.listen,
-            "peer relay has no AGENTGRID_RELAY_ALLOW: any host that can reach this port \
-             can reach the control plane through this node"
+            "peer relay listens on loopback with no AGENTGRID_RELAY_ALLOW: only processes \
+             on this host can use it"
         );
     }
+    // The peer → relay hop is plain HTTP, so a node credential crosses it in
+    // clear text. The relay cannot fix that by itself: it would have to
+    // terminate TLS with a certificate the peer's control-plane client
+    // verifies, and that client trusts the system roots only. The honest
+    // answer is the layer below — see docs/runbook-transport.md.
+    tracing::warn!(
+        listen = %relay.listen,
+        "peer relay carries node credentials over plain HTTP: run it on a trusted segment \
+         or inside WireGuard / an ssh tunnel (docs/runbook-transport.md, \"Relay transport\")"
+    );
     match &relay.announce {
         Some(url) => tracing::info!(
             listen = %relay.listen,
@@ -376,6 +404,18 @@ pub async fn start(cfg: &Config, relay: RelayConfig) -> Result<()> {
         upstream_timeout: std::time::Duration::from_secs(30),
         allowed_sources: relay.allow.clone(),
         max_hops: Some(relay.max_hops),
+        // A relay carries a peer's node traffic, not the control plane's whole
+        // API. Forwarding everything made this port a second front door: user
+        // JWTs, `/v1/auth/*`, the admin routes and `/v1/ha/*` (cluster token)
+        // all crossed it, so a host that could reach the port had the API and a
+        // compromised relay host could keep every credential that passed.
+        //
+        // `/v1/node/` is everything a node needs — enroll, join.sh, the bundle,
+        // heartbeat, the attempt event stream, completion, and the WebSocket
+        // (served by the forwarder's own route, so it is reachable either way).
+        // The trailing slash matters: `/v1/nodes` is the admin node list and
+        // must not match.
+        allowed_paths: vec!["/v1/node/".to_string()],
     })?;
     let listener = tokio::net::TcpListener::bind(relay.listen)
         .await
@@ -430,17 +470,39 @@ mod tests {
     }
 
     #[test]
-    fn listen_parses_with_and_without_an_allowlist() {
-        let r = RelayConfig::parse(Some("0.0.0.0:7900"), None, None, None)
+    fn a_relay_on_a_routable_address_must_name_its_peers() {
+        // The old behaviour: 0.0.0.0 with no list started and printed a
+        // warning. A relay is a way into the control plane, so an unlisted one
+        // is an open door rather than a caution.
+        let err = RelayConfig::parse(Some("0.0.0.0:7900"), None, None, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("AGENTGRID_RELAY_ALLOW"),
+            "the message must name the variable: {msg}"
+        );
+        assert!(
+            msg.contains("10.20.0.0/16"),
+            "the message must show what to write: {msg}"
+        );
+
+        // Loopback is the exception: an ssh tunnel or a local sidecar.
+        let r = RelayConfig::parse(Some("127.0.0.1:7900"), None, None, None)
             .unwrap()
             .expect("relay");
-        assert_eq!(r.listen.port(), 7900);
-        assert!(r.allow.is_empty(), "no list = any source, caller warns");
+        assert!(r.allow.is_empty());
+        // And an explicit list makes a routable listen acceptable.
+        let r = RelayConfig::parse(Some("0.0.0.0:7900"), Some("10.0.0.0/8"), None, None)
+            .unwrap()
+            .expect("relay");
+        assert_eq!(r.allow.len(), 1);
         assert_eq!(
             r.max_hops, DEFAULT_MAX_HOPS,
             "an unset limit must still bound a loop"
         );
+    }
 
+    #[test]
+    fn listen_parses_with_and_without_an_allowlist() {
         let r = RelayConfig::parse(
             Some("10.0.0.5:7900"),
             Some("10.0.0.0/8, 192.168.1.7"),
@@ -462,7 +524,8 @@ mod tests {
     fn zero_hops_is_refused_not_clamped() {
         // 0 would mean "508 for every request" — a relay that listens and is
         // useless, which the operator would diagnose from a 508 storm.
-        let err = RelayConfig::parse(Some("0.0.0.0:7900"), None, Some("0"), None).unwrap_err();
+        let err = RelayConfig::parse(Some("0.0.0.0:7900"), Some("10.0.0.0/8"), Some("0"), None)
+            .unwrap_err();
         assert!(
             format!("{err}").contains("508"),
             "the message must say what 0 would do: {err}"
@@ -472,7 +535,7 @@ mod tests {
     #[test]
     fn a_nonsense_hop_limit_is_refused() {
         for bad in ["-1", "three", "1.5", " "] {
-            let r = RelayConfig::parse(Some("0.0.0.0:7900"), None, Some(bad), None);
+            let r = RelayConfig::parse(Some("0.0.0.0:7900"), Some("10.0.0.0/8"), Some(bad), None);
             // Whitespace means "unset" and falls back to the default; anything
             // else must be an error rather than a silent default.
             if bad.trim().is_empty() {

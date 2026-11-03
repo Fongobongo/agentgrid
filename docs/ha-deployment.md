@@ -106,3 +106,29 @@ curl -s -H "x-agentgrid-ha-token: $TOKEN" http://<host>:7800/v1/ha/status
 - 2 data + witness: cheaper; sync writes still need both data hosts (the
   witness cannot stand in for data freshness); async/snapshot tolerate one
   data host down.
+
+## What an error means in `sync` mode
+
+The leader commits locally and then asks a data quorum to confirm, because a
+write that is only on the leader is not safe to acknowledge. The order matters
+for what a caller sees when the confirmation does not arrive:
+
+- The row **is** on the leader's disk when the request returns an error.
+- The leader immediately stops accepting writes (`assert_writable` refuses) and
+  the election loop demotes it, because it can no longer promise the configured
+  RPO.
+- The unconfirmed changesets are then **rewound** out of the log
+  (`rewind_to`), so the write that "succeeded" a moment ago is gone — it was
+  never cluster history.
+
+So an error in `sync` mode means "not acknowledged", not "not applied", and the
+correct client behaviour is to retry: after the rewind the retry creates the
+row once. A retry that arrives *before* the rewind is refused rather than
+duplicated, which is what `HaGate::suspend_writes` exists for. Client-supplied
+idempotency keys would make this cleaner and are not implemented; until they
+are, a client that must not retry blindly should read before it writes.
+
+The lease is also re-checked immediately before `COMMIT`, not only at `BEGIN`:
+a transaction whose lease expires while it runs is rolled back instead of
+committed, because another replica may already have been elected and be
+writing the same rows.

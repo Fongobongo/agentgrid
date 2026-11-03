@@ -176,6 +176,9 @@ pub struct WriteTxn<'a> {
     tx: sqlx::Transaction<'a, sqlx::Sqlite>,
     _permit: tokio::sync::SemaphorePermit<'static>,
     repl: Option<std::sync::Arc<crate::ha::incremental::Replicator>>,
+    /// Re-checked at commit: the lease can expire, or replication can be lost,
+    /// while the transaction runs.
+    gate: Option<std::sync::Arc<crate::ha::HaGate>>,
 }
 
 impl std::ops::Deref for WriteTxn<'_> {
@@ -198,7 +201,21 @@ impl<'a> WriteTxn<'a> {
             mut tx,
             _permit,
             repl,
+            gate,
         } = self;
+        // Last check before the row becomes durable. `begin_checked` asked the
+        // same question at BEGIN, but the answer can change while the
+        // transaction runs: a lease that expires mid-transaction means another
+        // replica may already have been elected and be writing the same rows.
+        // A refusal here rolls back, so the write never happened — which is
+        // what makes it safe to answer an error.
+        if let Some(gate) = gate.as_deref() {
+            if let Err(e) = gate.assert_still_writable() {
+                drop(session.take());
+                tx.rollback().await?;
+                return Err(e.into());
+            }
+        }
         let (Some(repl), Some(mut session)) = (repl, session.take()) else {
             return Ok(tx.commit().await?);
         };
@@ -262,6 +279,7 @@ async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<WriteTxn<'static>> {
                 tx,
                 _permit: permit,
                 repl: None,
+                gate: None,
             })
         }
         Err(e) => {
@@ -281,15 +299,16 @@ async fn begin_immediate(pool: &sqlx::SqlitePool) -> Result<WriteTxn<'static>> {
 /// changeset for the peer replicas.
 async fn begin_checked(
     pool: &SqlitePool,
-    gate: Option<&HaGate>,
+    gate: Option<&std::sync::Arc<HaGate>>,
     repl: Option<&std::sync::Arc<crate::ha::incremental::Replicator>>,
 ) -> Result<WriteTxn<'static>> {
     let mut tx = match gate {
         Some(gate) => {
             gate.assert_writable()?;
             let mut tx = begin_immediate(pool).await?;
-            // The lease can expire while queued on the write gate.
-            if let Err(e) = gate.assert_writable() {
+            // The lease can expire while queued on the write gate. Not counted
+            // as an admitted write twice — the admission was the check above.
+            if let Err(e) = gate.assert_still_writable() {
                 tx.rollback().await?;
                 return Err(e.into());
             }
@@ -305,6 +324,9 @@ async fn begin_checked(
                 tx.rollback().await?;
                 return Err(err.into());
             }
+            // Kept on the transaction so `commit` can ask the same question
+            // again, after the handler has done its work.
+            tx.gate = Some(gate.clone());
             tx
         }
         None => begin_immediate(pool).await?,
@@ -510,7 +532,7 @@ impl Store {
 
     /// Fenced write transaction without bumping the per-store counter.
     pub(crate) async fn fenced_txn(&self) -> Result<WriteTxn<'static>> {
-        begin_checked(&self.pool, self.ha_gate.as_deref(), self.repl.as_ref()).await
+        begin_checked(&self.pool, self.ha_gate.as_ref(), self.repl.as_ref()).await
     }
 
     /// Execute one statement as a fenced, replicated write transaction.
@@ -758,7 +780,7 @@ impl Store {
 async fn revert_expired_leases(
     pool: &SqlitePool,
     now: &str,
-    gate: Option<&HaGate>,
+    gate: Option<&std::sync::Arc<HaGate>>,
     repl: Option<&std::sync::Arc<crate::ha::incremental::Replicator>>,
 ) -> Result<usize> {
     // Race-safe (hardening P0 item 7): a single `BEGIN IMMEDIATE` transaction
@@ -818,7 +840,7 @@ async fn revert_expired_leases(
 async fn mark_offline_nodes(
     pool: &SqlitePool,
     now: &str,
-    gate: Option<&HaGate>,
+    gate: Option<&std::sync::Arc<HaGate>>,
     repl: Option<&std::sync::Arc<crate::ha::incremental::Replicator>>,
 ) -> Result<()> {
     // Race-safe (hardening P0 item 7): CAS `online` -> `offline` under a single
