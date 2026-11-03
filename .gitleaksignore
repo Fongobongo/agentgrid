@@ -45,3 +45,14 @@ e0279261e4583268854cd5ab0df4adccb4ae72a6:crates/node-daemon/src/main.rs:generic-
 a7fbf554b85d42e38e247106ac858926b88b5613:crates/control-plane/src/ha/tests.rs:generic-api-key:308
 a7fbf554b85d42e38e247106ac858926b88b5613:tests/e2e/run-ha-incremental.sh:generic-api-key:24
 141d58446d213a18e9ab330e4df2b0c8672f25be:tests/e2e/run-ha-2pluswitness.sh:generic-api-key:22
+# ADR 0029 exchange fixtures (commit 7b7dbdd). The two `exchange.rs` entries are
+# the dummy PEMs — `AAAA` as the body, which the parser accepts and no provider
+# would — and the current lines carry inline allows. The fixture below cannot:
+# a `.pem` has no line a comment could sit on without breaking the header, so
+# `test-app-key.pem` (a throwaway RSA key generated for the exchange tests and
+# registered with nothing) is covered by this fingerprint alone. Replace the
+# fixture and the nightly run turns red again — that is the intended signal,
+# not a false positive.
+7b7dbdd25be3e80be5d969ebd71734d3de77f674:crates/cred-gateway/src/exchange.rs:private-key:323
+7b7dbdd25be3e80be5d969ebd71734d3de77f674:crates/cred-gateway/src/exchange.rs:private-key:410
+7b7dbdd25be3e80be5d969ebd71734d3de77f674:crates/cred-gateway/tests/fixtures/test-app-key.pem:private-key:1

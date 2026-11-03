@@ -320,7 +320,9 @@ mod tests {
         let key = dir.path().join("app.pem");
         std::fs::write(
             &key,
-            "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+            // A dummy PEM: the parser only checks the header and that the body
+            // decodes, so `AAAA` is enough and no key exists.
+            "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n", // gitleaks:allow
         )
         .unwrap();
         let spec = format!(
@@ -348,7 +350,9 @@ mod tests {
         let key = dir.path().join("app.pem");
         std::fs::write(
             &key,
-            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+            // A dummy PEM: the parser only checks the header and that the body
+            // decodes, so `AAAA` is enough and no key exists.
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", // gitleaks:allow
         )
         .unwrap();
         let spec = format!(
@@ -407,7 +411,9 @@ mod tests {
         let key = dir.path().join("app.pem");
         std::fs::write(
             &key,
-            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+            // A dummy PEM: the parser only checks the header and that the body
+            // decodes, so `AAAA` is enough and no key exists.
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", // gitleaks:allow
         )
         .unwrap();
         let one = format!(
