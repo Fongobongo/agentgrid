@@ -49,6 +49,16 @@ pub(crate) fn put_auth(uri: &str, body: String, cred: &str) -> Request<Body> {
         .unwrap()
 }
 
+pub(crate) fn patch_auth(uri: &str, body: String, cred: &str) -> Request<Body> {
+    Request::builder()
+        .method("PATCH")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {cred}"))
+        .body(Body::from(body))
+        .unwrap()
+}
+
 /// Hardening P0 item 8: a node mutates its own attempt with its fenced token
 /// (the same one returned in its assignment). Use for /events, /complete,
 /// /ack, /session and /artifacts so the CP fence check passes.

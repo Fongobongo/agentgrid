@@ -1364,10 +1364,10 @@ async fn an_operator_cannot_read_proxies_or_adapter_env() {
     let state = AppState::open_temp_fresh().await.unwrap();
     let app = build_router(state.clone());
     assert_eq!(
-        auth_setup(&app, &state, "alice", "secret").await,
+        auth_setup(&app, &state, "alice", "secret-password").await,
         StatusCode::CREATED
     );
-    let admin = auth_login(&app, "alice", "secret").await.unwrap();
+    let admin = auth_login(&app, "alice", "secret-password").await.unwrap();
 
     // The admin registers a proxy that carries a password ...
     let resp = app
@@ -1403,13 +1403,13 @@ async fn an_operator_cannot_read_proxies_or_adapter_env() {
         .clone()
         .oneshot(post_auth(
             "/v1/users",
-            json!({"username": "bob", "password": "pw", "role": "operator"}).to_string(),
+            json!({"username": "bob", "password": "operator-pass", "role": "operator"}).to_string(),
             &admin,
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let op = auth_login(&app, "bob", "pw").await.unwrap();
+    let op = auth_login(&app, "bob", "operator-pass").await.unwrap();
     for path in ["/v1/proxies", "/v1/adapter-env"] {
         let resp = app.clone().oneshot(get_auth(path, &op)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path}");
@@ -1422,4 +1422,249 @@ async fn an_operator_cannot_read_proxies_or_adapter_env() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// Finding 7: deleting a user ends their session on the next request, not at
+/// the end of the twelve-hour token.
+#[tokio::test]
+async fn deleting_a_user_ends_their_session_immediately() {
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
+    assert_eq!(
+        auth_setup(&app, &state, "alice", "secret-password").await,
+        StatusCode::CREATED
+    );
+    let admin = auth_login(&app, "alice", "secret-password").await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/users",
+            json!({"username": "bob", "password": "operator-pass", "role": "operator"}).to_string(),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bob = auth_login(&app, "bob", "operator-pass").await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/tasks", &bob))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(delete_auth("/v1/users/bob", &admin))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The token is unchanged and unexpired; the user behind it is gone.
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/tasks", &bob))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // And the account cannot log in again.
+    assert_eq!(
+        login_status(&app, "bob", "operator-pass").await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// Finding 7: the role comes from the users table, so a demotion applies at
+/// once instead of after the token expires.
+#[tokio::test]
+async fn demoting_an_admin_takes_effect_immediately() {
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
+    assert_eq!(
+        auth_setup(&app, &state, "alice", "secret-password").await,
+        StatusCode::CREATED
+    );
+    let alice = auth_login(&app, "alice", "secret-password").await.unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(post_auth(
+                "/v1/users",
+                json!({"username": "bob", "password": "second-admin", "role": "admin"}).to_string(),
+                &alice,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    let bob = auth_login(&app, "bob", "second-admin").await.unwrap();
+    // Bob is an admin and can mutate (create a user — a task would need a
+    // repository, and this test is about the role, not task validation).
+    assert_eq!(
+        app.clone()
+            .oneshot(post_auth(
+                "/v1/users",
+                json!({"username": "carol", "password": "carol-password"}).to_string(),
+                &bob,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+
+    // Alice demotes him.
+    let resp = app
+        .clone()
+        .oneshot(patch_auth(
+            "/v1/users/bob",
+            json!({"role": "operator"}).to_string(),
+            &alice,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Same token, but the role it claims is no longer the one in force: the
+    // session generation moved, so the token is refused outright.
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/users",
+            json!({"username": "dave", "password": "dave-password"}).to_string(),
+            &bob,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // He can log in again as the operator he now is, and the mutation is
+    // refused by the role rather than by the token.
+    let bob = auth_login(&app, "bob", "second-admin").await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/users",
+            json!({"username": "dave", "password": "dave-password"}).to_string(),
+            &bob,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// Finding 7: rotating a password kills every session minted before it, so a
+/// leaked token does not outlive the fix.
+#[tokio::test]
+async fn changing_a_password_revokes_old_sessions() {
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
+    assert_eq!(
+        auth_setup(&app, &state, "alice", "secret-password").await,
+        StatusCode::CREATED
+    );
+    let alice = auth_login(&app, "alice", "secret-password").await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(patch_auth(
+            "/v1/users/alice",
+            json!({"password": "a-brand-new-password"}).to_string(),
+            &alice,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(get_auth("/v1/tasks", &alice))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        login_status(&app, "alice", "secret-password").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login_status(&app, "alice", "a-brand-new-password").await,
+        StatusCode::OK
+    );
+}
+
+/// Finding 7: an install nobody can administer is not a recoverable state, so
+/// the last admin can be neither deleted nor demoted.
+#[tokio::test]
+async fn the_last_admin_cannot_be_deleted_or_demoted() {
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
+    assert_eq!(
+        auth_setup(&app, &state, "alice", "secret-password").await,
+        StatusCode::CREATED
+    );
+    let alice = auth_login(&app, "alice", "secret-password").await.unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(delete_auth("/v1/users/alice", &alice))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(patch_auth(
+                "/v1/users/alice",
+                json!({"role": "operator"}).to_string(),
+                &alice,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    // Still an admin, still able to log in.
+    assert_eq!(
+        login_status(&app, "alice", "secret-password").await,
+        StatusCode::OK
+    );
+}
+
+/// Finding 7: the API used to accept any non-empty password, so
+/// `{"password":"a"}` created an account.
+#[tokio::test]
+async fn a_short_password_is_refused() {
+    let state = AppState::open_temp_fresh().await.unwrap();
+    let app = build_router(state.clone());
+    assert_eq!(
+        auth_setup(&app, &state, "alice", "short").await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        auth_setup(&app, &state, "alice", "secret-password").await,
+        StatusCode::CREATED
+    );
+    let alice = auth_login(&app, "alice", "secret-password").await.unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(post_auth(
+                "/v1/users",
+                json!({"username": "bob", "password": "short"}).to_string(),
+                &alice,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(patch_auth(
+                "/v1/users/alice",
+                json!({"password": "short"}).to_string(),
+                &alice,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
 }

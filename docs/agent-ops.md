@@ -201,6 +201,16 @@ sandbox for anything but throwaway prompts: `AGENTGRID_SANDBOX=docker` (or
 `systemd` for a cgroup scope, or `bwrap` on a host with no runtime and no root
 — ADR 0022).
 
+`AGENTGRID_SANDBOX` is validated at startup: a value that is not
+`none`/`docker`/`podman`/`systemd`/`bwrap` is a **startup error**, and with
+`AGENTGRID_ENV=production` the daemon refuses to start with no sandbox at all.
+A typo used to mean "run the agent on the host", which is the one thing this
+variable exists to prevent. `docker` runs the attempt as the image's default
+user — root in most images — with the worktree mounted read-write; set
+`AGENTGRID_RUN_AS_USER=<uid[:gid]>` to give the agent its own identity (see
+the file header of `crates/node-daemon/src/sandbox.rs` for the permission
+setup).
+
 ## Concurrency: one opencode per host
 
 opencode keeps its own SQLite state DB; two concurrent runs on the same host

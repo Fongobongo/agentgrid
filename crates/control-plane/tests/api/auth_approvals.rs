@@ -52,7 +52,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
         .oneshot(post_json(
             "/v1/auth/setup",
             serde_json::to_string(&serde_json::json!({
-                "username": "alice", "password": "secret"
+                "username": "alice", "password": "secret-password"
             }))
             .unwrap(),
             None,
@@ -67,7 +67,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
         .oneshot(post_json(
             "/v1/auth/setup",
             serde_json::to_string(&serde_json::json!({
-                "username": "alice", "password": "secret",
+                "username": "alice", "password": "secret-password",
                 "setup_token": "deadbeef"
             }))
             .unwrap(),
@@ -79,13 +79,13 @@ async fn user_auth_setup_login_and_protects_endpoints() {
 
     // Setup with the correct one-time token creates the first user.
     assert_eq!(
-        auth_setup(&app, &state, "alice", "secret").await,
+        auth_setup(&app, &state, "alice", "secret-password").await,
         StatusCode::CREATED
     );
     // The token is single-use: a second setup (even with the same token) is
     // 409 because a user now exists.
     assert_eq!(
-        auth_setup(&app, &state, "bob", "secret").await,
+        auth_setup(&app, &state, "bob", "secret-password").await,
         StatusCode::CONFLICT
     );
 
@@ -133,7 +133,7 @@ async fn user_auth_setup_login_and_protects_endpoints() {
     assert!(auth_login(&app, "alice", "wrong").await.is_none());
 
     // Correct login yields a token that unlocks the endpoint.
-    let token = auth_login(&app, "alice", "secret").await.unwrap();
+    let token = auth_login(&app, "alice", "secret-password").await.unwrap();
     let authed = app
         .clone()
         .oneshot(post_json(
@@ -181,7 +181,7 @@ async fn login_sets_cookie_and_cookie_auths() {
     let state = AppState::open_temp_fresh().await.unwrap();
     let app = build_router(state.clone());
     assert_eq!(
-        auth_setup(&app, &state, "alice", "secret").await,
+        auth_setup(&app, &state, "alice", "secret-password").await,
         StatusCode::CREATED
     );
     let resp = app
@@ -189,7 +189,7 @@ async fn login_sets_cookie_and_cookie_auths() {
         .oneshot(post_json(
             "/v1/auth/login",
             serde_json::to_string(
-                &serde_json::json!({ "username": "alice", "password": "secret" }),
+                &serde_json::json!({ "username": "alice", "password": "secret-password" }),
             )
             .unwrap(),
             None,

@@ -18,19 +18,31 @@ use crate::AppState;
 
 /// JWT claims for user sessions (Stage 4.1).
 /// Includes `jti` (JWT ID) for session revocation (Stage 4.2) and `role`
-/// for RBAC (plan 5.2). Tokens minted before 5.2 lack `role` and decode
-/// as admin (all pre-existing users were admins).
+/// for RBAC (plan 5.2).
+///
+/// Finding 7: `role` is **not** authoritative — [`AppState::verify_token`]
+/// reads the role from the `users` table on every request, so a demoted admin
+/// loses the role immediately. The claim stays for diagnostics and because
+/// older tokens carry it, but it is never trusted. A token without a `role`
+/// claim is not "admin" any more; it simply has no claim, and the table
+/// decides.
+///
+/// `gen` is the session generation stamped at login. A change to the role or
+/// the password increments the row's counter, and every token carrying an
+/// older value is refused — which is how revocation reaches sessions that are
+/// already in the wild. A token minted before this field existed is generation
+/// 0, and is accepted only while the account is still at generation 0.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Claims {
     pub(crate) sub: String,
     pub(crate) exp: usize,
+    #[serde(default)]
+    pub(crate) iat: usize,
+    #[serde(default)]
+    pub(crate) gen: i64,
     pub(crate) jti: String,
-    #[serde(default = "default_role_admin")]
+    #[serde(default)]
     pub(crate) role: String,
-}
-
-fn default_role_admin() -> String {
-    agentgrid_common::ROLE_ADMIN.to_string()
 }
 
 /// Stage 2.5: the cookie name carrying the session JWT, set HttpOnly so the
@@ -61,11 +73,36 @@ pub fn auth_token_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Minimum password length for a user account (finding 7). The API used to
+/// accept anything non-empty, so `{"password":"a"}` created an account.
+pub const MIN_PASSWORD_LEN: usize = 12;
+
+/// True when a password meets the policy. Counted in characters, not bytes, so
+/// a Cyrillic or CJK passphrase is not penalised.
+pub fn password_is_acceptable(password: &str) -> bool {
+    password.chars().count() >= MIN_PASSWORD_LEN
+}
+
+/// Whether the session cookie carries `Secure`.
+///
+/// `AGENTGRID_COOKIE_SECURE=1` forces it on. It is also on automatically when
+/// the control plane serves TLS itself or runs with `AGENTGRID_ENV=production`
+/// — in production the browser reaches the control plane over a TLS terminator
+/// in front of it, so a non-`Secure` cookie is the anomaly (finding 16). The
+/// env var stays as an escape hatch for a plaintext dev host.
+fn cookie_secure() -> bool {
+    if std::env::var("AGENTGRID_COOKIE_SECURE").as_deref() == Ok("1") {
+        return true;
+    }
+    let tls =
+        std::env::var("AGENTGRID_TLS_CERT").is_ok() && std::env::var("AGENTGRID_TLS_KEY").is_ok();
+    tls || std::env::var("AGENTGRID_ENV").as_deref() == Ok("production")
+}
+
 /// Build a `Set-Cookie` header value for a freshly-issued session JWT.
 pub fn auth_cookie_header(token: &str) -> String {
-    let secure = std::env::var("AGENTGRID_COOKIE_SECURE").as_deref() == Ok("1");
     let mut v = format!("{AUTH_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200");
-    if secure {
+    if cookie_secure() {
         v.push_str("; Secure");
     }
     v
@@ -418,6 +455,10 @@ pub async fn auth_setup(
     if req.username.is_empty() || req.password.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // Finding 7: the first admin is a production credential like any other.
+    if !password_is_acceptable(&req.password) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     // Only allowed while no users exist (closes the open bootstrap window).
     match state.store.user_count().await {
         Ok(0) => {}
@@ -456,7 +497,7 @@ pub async fn auth_setup(
     drop(guard);
     // The bootstrapped first user is always an admin.
     let token = state
-        .issue_token(&req.username, agentgrid_common::ROLE_ADMIN)
+        .issue_token(&req.username, agentgrid_common::ROLE_ADMIN, 0)
         .map_err(|e| {
             tracing::error!("issue_token failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -501,7 +542,7 @@ pub async fn auth_login(
             tracing::error!("verify_user failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    let Some((_, role)) = user else {
+    let Some((_, role, sessions_gen)) = user else {
         // Count failures, not attempts: a spent budget turns the answer into
         // a generic 429 but never rejects a correct password, so an attacker
         // cannot lock the real user out of their own account.
@@ -514,10 +555,12 @@ pub async fn auth_login(
     };
     // A correct password clears the account's failure budget.
     state.login_rate.lock().await.note_success(&req.username);
-    let token = state.issue_token(&req.username, &role).map_err(|e| {
-        tracing::error!("issue_token failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let token = state
+        .issue_token(&req.username, &role, sessions_gen)
+        .map_err(|e| {
+            tracing::error!("issue_token failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let _ = state
         .store
         .audit("user", Some(&req.username), "login", None, None)
@@ -550,7 +593,7 @@ pub async fn auth_logout(
     }
     // Clear the session cookie regardless of auth state (idempotent logout).
     let mut v = format!("{AUTH_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
-    if std::env::var("AGENTGRID_COOKIE_SECURE").as_deref() == Ok("1") {
+    if cookie_secure() {
         v.push_str("; Secure");
     }
     let mut headers = HeaderMap::new();

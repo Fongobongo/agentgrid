@@ -968,6 +968,11 @@ fn main() -> Result<()> {
         );
     }
 
+    // Finding 16: a typo in AGENTGRID_SANDBOX used to mean "no sandbox" —
+    // i.e. attempts running directly on the host. Unknown values are refused,
+    // and production refuses to run with no sandbox at all.
+    sandbox::check_startup_config(agentgrid_adapters::unsafe_unattended_from_env())?;
+
     tokio_runtime().block_on(amain())
 }
 

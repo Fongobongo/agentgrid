@@ -322,6 +322,43 @@
   and ran that program. A leading `-` is now refused, `--` separates options
   from positionals, and the whole `helper::<addr>` form is rejected rather than
   just `ext::`/`fd::` — no legitimate remote URL contains `::`.
+- **A session outlived the account it belonged to (finding 7).** The role came
+  only from the JWT, and `verify_token` never asked whether the user still
+  existed, so a deleted user, a demoted admin or a rotated password kept working
+  until the token expired twelve hours later. There was also no way to do any of
+  those things through the API: an admin could create users and list them, and
+  that was all.
+  - `verify_token` now reads the role from the `users` table on every request,
+    and a missing row means unauthenticated. The `role` claim is no longer
+    trusted, and a token without one is no longer admin — it has no claim, and
+    the table decides.
+  - New `DELETE /v1/users/{name}` and `PATCH /v1/users/{name}` (`role` and/or
+    `password`). Either change increments a per-user session generation stamped
+    into the token at login, so every session issued before the change is
+    refused on its next request. The last admin can be neither deleted nor
+    demoted (`409`) — an install nobody can administer is not recoverable.
+  - Passwords must be at least 12 characters at setup, at create and at change.
+    The API used to accept anything non-empty.
+- **Sandbox and session defaults that failed open (finding 16).**
+  - `AGENTGRID_SANDBOX` is parsed, not guessed: a value that is not
+    `none`/`docker`/`podman`/`systemd`/`bwrap` is a startup error. It used to
+    fall through to `None`, so `AGENTGRID_SANDBOX=dokcer` ran every attempt
+    directly on the host — the one outcome the variable exists to prevent.
+    With `AGENTGRID_ENV=production` the daemon also refuses to start with no
+    sandbox at all (an acknowledged `AGENTGRID_UNSAFE_UNATTENDED` still
+    passes, since that mode disables the sandbox by design).
+  - The node WebSocket on both the control plane and the relay caps a message
+    at 1 MiB and a frame at 256 KiB instead of axum's 64 MiB default. The
+    protocol is JSON and the largest field is a 64 KiB prompt; artifacts
+    travel over HTTP.
+  - The session cookie is `Secure` automatically when the control plane serves
+    TLS or runs with `AGENTGRID_ENV=production`; `AGENTGRID_COOKIE_SECURE=1`
+    stays as the explicit override for a plaintext dev host.
+  - `docker` without `AGENTGRID_RUN_AS_USER` warns at startup that attempts run
+    as the image's default user (root in most images) with a read-write
+    worktree. A non-root `--user` cannot be the blind default: the worktree is
+    bind-mounted and owned by the daemon user, so every attempt would fail on
+    permissions. `docs/agent-ops.md` documents the setup instead.
 - **The operator role could read secrets over GET.** RBAC was "every GET except
   `/v1/adapter-env`", so `GET /v1/proxies` — documented as "list (admin)" —
   handed proxy URLs containing `user:pass@` to any operator, and *every* future

@@ -1939,17 +1939,17 @@ async fn rbac_operator_limited_to_view_and_approve() {
 
     // Bootstrap: first user is admin.
     assert_eq!(
-        auth_setup(&app, &state, "alice", "secret").await,
+        auth_setup(&app, &state, "alice", "secret-password").await,
         StatusCode::CREATED
     );
-    let admin = auth_login(&app, "alice", "secret").await.unwrap();
+    let admin = auth_login(&app, "alice", "secret-password").await.unwrap();
 
     // Admin creates an operator and sees both in the users list.
     let resp = app
         .clone()
         .oneshot(post_auth(
             "/v1/users",
-            json!({"username": "bob", "password": "pw", "role": "operator"}).to_string(),
+            json!({"username": "bob", "password": "operator-pass", "role": "operator"}).to_string(),
             &admin,
         ))
         .await
@@ -1970,7 +1970,7 @@ async fn rbac_operator_limited_to_view_and_approve() {
         .iter()
         .any(|u| u.username == "bob" && u.role == "operator"));
 
-    let op = auth_login(&app, "bob", "pw").await.unwrap();
+    let op = auth_login(&app, "bob", "operator-pass").await.unwrap();
 
     // Operator can view.
     let resp = app
@@ -2011,7 +2011,7 @@ async fn rbac_operator_limited_to_view_and_approve() {
         .clone()
         .oneshot(post_auth(
             "/v1/users",
-            json!({"username": "eve", "password": "pw"}).to_string(),
+            json!({"username": "eve", "password": "operator-pass"}).to_string(),
             &op,
         ))
         .await

@@ -34,6 +34,14 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const PUMP_TICK: Duration = Duration::from_secs(1);
 /// Outbound channel depth per connection.
 const CHANNEL_CAPACITY: usize = 64;
+/// Largest WebSocket message a node may send (finding 16). The protocol is
+/// JSON — hello, ack, heartbeat, result — and the biggest field is a 64 KiB
+/// prompt, so this is 16x headroom rather than a tight fit. axum's default is
+/// 64 MiB, which one node could use to make the control plane allocate per
+/// frame before any handler runs.
+const WS_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+/// A single frame; tungstenite reassembles fragments up to the message limit.
+const WS_MAX_FRAME_BYTES: usize = 256 * 1024;
 
 static WS_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Cumulative assignment batches pushed over WS (plan 2.5 metrics).
@@ -238,7 +246,14 @@ pub async fn node_ws(
         },
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    ws.on_upgrade(move |socket| handle_conn(state, node_id, socket))
+    // Finding 16: axum's defaults allow a 64 MiB message, so one authenticated
+    // node could make the control plane buffer 64 MiB per frame before any
+    // handler sees it. Every message on this protocol is JSON (an assignment,
+    // a hello, a config update) and the largest field is a 64 KiB prompt, so
+    // 1 MiB is generous; artifacts travel over HTTP, not here.
+    ws.max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| handle_conn(state, node_id, socket))
 }
 
 async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {

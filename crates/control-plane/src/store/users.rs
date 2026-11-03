@@ -89,16 +89,96 @@ impl Store {
             .collect()
     }
 
-    /// Verify a username/password pair. Returns the user id and role on success.
+    /// Authoritative auth state for a username (finding 7): the role that is in
+    /// force *now*, and the session generation a token must match.
+    ///
+    /// `None` means the user no longer exists. `verify_token` treats both
+    /// `None` and a stale generation as unauthenticated, so deleting a user,
+    /// changing their role or rotating their password takes effect on the next
+    /// request instead of at the end of the token's twelve hours.
+    pub async fn user_auth_state(&self, username: &str) -> Result<Option<(String, i64)>> {
+        let row = sqlx::query("SELECT role, sessions_gen FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(r) => Ok(Some((
+                r.try_get("role")?,
+                r.try_get::<i64, _>("sessions_gen")?,
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a user. Returns false when there was no such user.
+    pub async fn delete_user(&self, username: &str) -> Result<bool> {
+        let res = self
+            .write_one(sqlx::query("DELETE FROM users WHERE username = ?").bind(username))
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Change a user's role. Returns false when there was no such user.
+    pub async fn set_user_role(&self, username: &str, role: &str) -> Result<bool> {
+        let res = self
+            .write_one(
+                sqlx::query("UPDATE users SET role = ? WHERE username = ?")
+                    .bind(role)
+                    .bind(username),
+            )
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Replace a user's password hash. Returns false when there was no such
+    /// user.
+    pub async fn set_user_password(&self, username: &str, password: &str) -> Result<bool> {
+        let pw = password.to_string();
+        let hash = tokio::task::spawn_blocking(move || hash_password(&pw)).await??;
+        let res = self
+            .write_one(
+                sqlx::query("UPDATE users SET password_hash = ? WHERE username = ?")
+                    .bind(&hash)
+                    .bind(username),
+            )
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Invalidate every session issued for this user so far by moving the
+    /// generation forward.
+    pub async fn bump_sessions_gen(&self, username: &str) -> Result<()> {
+        self.write_one(
+            sqlx::query("UPDATE users SET sessions_gen = sessions_gen + 1 WHERE username = ?")
+                .bind(username),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Number of admins, so the last one cannot be deleted or demoted (that
+    /// would leave an install nobody can administer).
+    pub async fn admin_count(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) AS c FROM users WHERE role = ?")
+            .bind(agentgrid_common::ROLE_ADMIN)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get::<i64, _>("c")?)
+    }
+
+    /// Verify a username/password pair. Returns the user id, role and session
+    /// generation on success.
     pub async fn verify_user(
         &self,
         username: &str,
         password: &str,
-    ) -> Result<Option<(String, String)>> {
-        let row = sqlx::query("SELECT id, password_hash, role FROM users WHERE username = ?")
-            .bind(username)
-            .fetch_optional(&self.pool)
-            .await?;
+    ) -> Result<Option<(String, String, i64)>> {
+        let row = sqlx::query(
+            "SELECT id, password_hash, role, sessions_gen FROM users WHERE username = ?",
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some(row) = row else {
             // Spend the same Argon2 time an existing user would, so response
             // latency does not reveal which usernames exist (finding 12).
@@ -109,9 +189,10 @@ impl Store {
         let id: String = row.try_get("id")?;
         let hash: String = row.try_get("password_hash")?;
         let role: String = row.try_get("role")?;
+        let gen: i64 = row.try_get("sessions_gen")?;
         // Argon2 verification is CPU-heavy; keep it off the async executor.
         let pw = password.to_string();
         let ok = tokio::task::spawn_blocking(move || verify_password(&pw, &hash)).await?;
-        Ok(if ok { Some((id, role)) } else { None })
+        Ok(if ok { Some((id, role, gen)) } else { None })
     }
 }

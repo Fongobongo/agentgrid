@@ -396,12 +396,24 @@ impl AppState {
     /// Issue a 12h JWT for `username` (Stage 4.1).
     /// Includes `jti` for session revocation (Stage 4.2) and the RBAC
     /// `role` claim (plan 5.2).
-    pub(crate) fn issue_token(&self, username: &str, role: &str) -> anyhow::Result<String> {
-        let exp = (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp() as usize;
+    /// Issue a session token. `sessions_gen` is the user's current session
+    /// generation (finding 7): the token carries it, and `verify_token` refuses
+    /// a token whose generation is behind the row — which is how a password
+    /// rotation or a demotion revokes sessions that are already out there.
+    pub(crate) fn issue_token(
+        &self,
+        username: &str,
+        role: &str,
+        sessions_gen: i64,
+    ) -> anyhow::Result<String> {
+        let now = chrono::Utc::now();
+        let exp = (now + chrono::Duration::hours(12)).timestamp() as usize;
         let jti = Uuid::new_v4().to_string();
         let claims = Claims {
             sub: username.to_string(),
             exp,
+            iat: now.timestamp() as usize,
+            gen: sessions_gen,
             jti,
             role: role.to_string(),
         };
@@ -417,6 +429,11 @@ impl AppState {
     /// A storage failure is fail-closed (None → 401) like a revocation, but
     /// it is logged — silently mapping every DB blip to mass 401s hid the
     /// root cause from operators.
+    ///
+    /// Finding 7: the role comes from the `users` table, not from the token.
+    /// The JWT says who you were at login; the table says who you are now, so
+    /// a deleted user, a demoted admin or a rotated password takes effect on
+    /// the next request instead of lasting until the token expires.
     pub(crate) async fn verify_token(&self, token: &str) -> Option<(String, String)> {
         let claims = decode::<Claims>(
             token,
@@ -426,13 +443,34 @@ impl AppState {
         .ok()?;
         // Check if this jti has been revoked
         match self.store.is_session_revoked(&claims.claims.jti).await {
-            Ok(true) => None,
-            Ok(false) => Some((claims.claims.sub, claims.claims.role)),
+            Ok(true) => return None,
+            Ok(false) => {}
             Err(e) => {
                 tracing::error!("session revocation check failed (failing closed): {e}");
-                None
+                return None;
             }
         }
+        let (role, sessions_gen) = match self.store.user_auth_state(&claims.claims.sub).await {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                tracing::debug!(
+                    user = %claims.claims.sub,
+                    "token presented for a user that no longer exists"
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::error!("user auth state check failed (failing closed): {e}");
+                return None;
+            }
+        };
+        // A token minted before the last revocation carries a stale generation.
+        // A token with no generation at all (minted before this field existed)
+        // is generation 0, which is only accepted while the row is still at 0.
+        if claims.claims.gen < sessions_gen {
+            return None;
+        }
+        Some((claims.claims.sub, role))
     }
 
     /// Read the current one-time setup token (if live) for tests / operators
@@ -647,6 +685,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/users",
             get(routes::users::list_users_handler).post(routes::users::create_user_handler),
+        )
+        // Finding 7: the lifecycle an admin needs without touching SQLite.
+        .route(
+            "/v1/users/{name}",
+            delete(routes::users::delete_user_handler).patch(routes::users::update_user_handler),
         )
         .route(
             "/v1/policy/evaluate",

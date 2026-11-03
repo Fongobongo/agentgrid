@@ -88,7 +88,27 @@ paths:
         Body `{ "username", "password", "role"? }` where role is `admin` or
         `operator` (defaults to `operator`). Operators may only view (GET) and
         approve/deny; all other mutating calls return 403. Non-admin callers
-        receive 403 from the RBAC middleware.
+        receive 403 from the RBAC middleware. The password must be at least 12
+        characters (finding 7).
+  /v1/users/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      summary: Change a user's role and/or password (admin only)
+      description: |
+        Body `{ "role"?, "password"? }`, at least one field. Either change
+        invalidates every session issued so far, so a demoted admin or a
+        rotated password takes effect on the next request. Demoting the last
+        admin is `409`. Audited as `user.update`.
+    delete:
+      summary: Delete a user (admin only)
+      description: |
+        The user's sessions die with the row. Deleting the last admin is `409`
+        — an install nobody can administer is not a recoverable state.
+        Audited as `user.delete`.
   /v1/admin/backup:
     post:
       summary: Snapshot the SQLite DB (VACUUM INTO) to a downloadable artifact

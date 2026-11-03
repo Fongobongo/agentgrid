@@ -907,6 +907,18 @@ pub struct UserEntry {
     pub role: String,
 }
 
+/// Finding 7: admin updates an existing account. Both fields are optional and
+/// at least one is required; either change invalidates every session issued so
+/// far, so a demotion or a password rotation cannot be outlived by a token.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UpdateUserRequest {
+    /// "admin" or "operator".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
 /// Node→control-plane protocol version (Stage 2.5). Bump the major on any
 /// incompatible change to enroll/heartbeat/poll; a node advertising a
 /// different major is marked `degraded(incompatible_protocol)`.

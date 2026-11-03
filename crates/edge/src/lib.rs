@@ -52,6 +52,10 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The forwarder buffers a request body once so a `503 not_leader` retry is
 /// safe. Matches the control-plane artifact ceiling (50 MiB) with headroom.
 const MAX_REQUEST_BODY: usize = 64 * 1024 * 1024;
+/// WebSocket message ceiling, matching the control plane's (`ws.rs`): the
+/// relay must not accept a frame the upstream would refuse (finding 16).
+const WS_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const WS_MAX_FRAME_BYTES: usize = 256 * 1024;
 
 /// Where the forwarder sends traffic.
 pub enum Upstream {
@@ -599,14 +603,18 @@ async fn node_ws(ws: WebSocketUpgrade, State(edge): State<Arc<Edge>>, req: Reque
         .fetch_add(1, Ordering::Relaxed);
     let headers = req.headers().clone();
     let timeout = edge2.upstream_timeout;
-    ws.on_upgrade(move |socket| async move {
-        if let Err(e) = bridge_ws(socket, &url, &headers, timeout).await {
-            // The cached leader is the likeliest reason the upgrade failed;
-            // drop it so this node's retry rediscovers instead of re-hanging.
-            edge2.invalidate().await;
-            tracing::warn!(error = %e, %url, "forwarder websocket bridge ended");
-        }
-    })
+    // Finding 16: the relay is reachable by any node, so it must not accept a
+    // larger message than the control plane behind it does.
+    ws.max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| async move {
+            if let Err(e) = bridge_ws(socket, &url, &headers, timeout).await {
+                // The cached leader is the likeliest reason the upgrade failed;
+                // drop it so this node's retry rediscovers instead of re-hanging.
+                edge2.invalidate().await;
+                tracing::warn!(error = %e, %url, "forwarder websocket bridge ended");
+            }
+        })
 }
 
 async fn bridge_ws(

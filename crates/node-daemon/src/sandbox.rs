@@ -63,17 +63,35 @@ pub enum SandboxKind {
 }
 
 impl SandboxKind {
+    /// Parse an `AGENTGRID_SANDBOX` value.
+    ///
+    /// `Err` for a value that is set but not recognised. The old behaviour —
+    /// anything unknown means `None` — turned a typo (`AGENTGRID_SANDBOX=dokcer`)
+    /// into "run the agent directly on the host", which is the one outcome this
+    /// setting exists to prevent (finding 16).
+    pub fn parse(raw: Option<&str>) -> Result<Self, String> {
+        let value = raw.unwrap_or_default().trim().to_ascii_lowercase();
+        match value.as_str() {
+            "" | "none" | "off" => Ok(SandboxKind::None),
+            "docker" | "podman" => Ok(SandboxKind::Docker),
+            "systemd" | "systemd-scope" | "cgroups" => Ok(SandboxKind::Systemd),
+            "bwrap" | "bubblewrap" | "userns" => Ok(SandboxKind::Bwrap),
+            other => Err(format!(
+                "AGENTGRID_SANDBOX={other:?} is not a known sandbox: \
+                 use none, docker (or podman), systemd, or bwrap"
+            )),
+        }
+    }
+
     pub fn from_env() -> Self {
-        match std::env::var("AGENTGRID_SANDBOX")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "docker" | "podman" => SandboxKind::Docker,
-            "systemd" | "systemd-scope" | "cgroups" => SandboxKind::Systemd,
-            "bwrap" | "bubblewrap" | "userns" => SandboxKind::Bwrap,
-            _ => SandboxKind::None,
+        match Self::parse(std::env::var("AGENTGRID_SANDBOX").ok().as_deref()) {
+            Ok(kind) => kind,
+            // Startup refuses (see `check_startup_config`), so this fallback is
+            // unreachable in a running daemon; it only keeps call sites total.
+            Err(e) => {
+                tracing::error!("{e}");
+                SandboxKind::None
+            }
         }
     }
 
@@ -85,6 +103,42 @@ impl SandboxKind {
     pub fn inherits_daemon_env(self) -> bool {
         matches!(self, SandboxKind::Docker | SandboxKind::Systemd)
     }
+}
+
+/// Startup gate for the sandbox setting (finding 16).
+///
+/// An unknown value is always an error. No sandbox at all is allowed in a dev
+/// host and refused in `AGENTGRID_ENV=production`, unless unsafe unattended
+/// mode was explicitly acknowledged — that mode disables the sandbox by design,
+/// and its own gate already ran.
+pub fn check_startup_config(unsafe_acknowledged: bool) -> anyhow::Result<()> {
+    let raw = std::env::var("AGENTGRID_SANDBOX").ok();
+    let kind = SandboxKind::parse(raw.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+    if kind == SandboxKind::None && !unsafe_acknowledged {
+        let production = std::env::var("AGENTGRID_ENV").as_deref() == Ok("production");
+        if production {
+            anyhow::bail!(
+                "no sandbox is configured (AGENTGRID_SANDBOX is unset or 'none') with \
+                 AGENTGRID_ENV=production: attempts would run directly on the host; \
+                 set docker, systemd or bwrap"
+            );
+        }
+        tracing::warn!(
+            "AGENTGRID_SANDBOX is unset: attempts run directly on the host with no \
+             isolation — set docker, systemd or bwrap"
+        );
+    }
+    // A non-root `--user` cannot be the default: the worktree is bind-mounted
+    // read-write and owned by the daemon user, so switching the uid blind would
+    // make every attempt fail on permissions. Say so instead of pretending.
+    if kind == SandboxKind::Docker && run_as_spec().is_none() {
+        tracing::warn!(
+            "docker sandbox runs attempts as the image's default user (root in most \
+             images) with the worktree mounted read-write; set \
+             AGENTGRID_RUN_AS_USER=<uid[:gid]> to run the agent as a separate user"
+        );
+    }
+    Ok(())
 }
 
 /// Deterministic per-attempt sandbox container name (audit ND-6): enables
@@ -1489,6 +1543,35 @@ mod tests {
     /// vs docker_opts_read_only_and_resource_limits).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Finding 16: an unknown `AGENTGRID_SANDBOX` must not quietly mean
+    /// "no sandbox" — that is the one setting a typo must never weaken.
+    #[test]
+    fn an_unknown_sandbox_value_is_an_error_not_none() {
+        assert_eq!(SandboxKind::parse(None), Ok(SandboxKind::None));
+        assert_eq!(SandboxKind::parse(Some("")), Ok(SandboxKind::None));
+        assert_eq!(SandboxKind::parse(Some("none")), Ok(SandboxKind::None));
+        assert_eq!(SandboxKind::parse(Some("off")), Ok(SandboxKind::None));
+        assert_eq!(SandboxKind::parse(Some("Docker")), Ok(SandboxKind::Docker));
+        assert_eq!(
+            SandboxKind::parse(Some(" podman ")),
+            Ok(SandboxKind::Docker)
+        );
+        assert_eq!(
+            SandboxKind::parse(Some("systemd-scope")),
+            Ok(SandboxKind::Systemd)
+        );
+        assert_eq!(
+            SandboxKind::parse(Some("bubblewrap")),
+            Ok(SandboxKind::Bwrap)
+        );
+        for typo in ["dokcer", "bwrap:", "docker;rm -rf", "0"] {
+            assert!(
+                SandboxKind::parse(Some(typo)).is_err(),
+                "{typo:?} must not parse"
+            );
+        }
+    }
+
     #[test]
     fn none_passthrough() {
         // No sandbox and no run-as user → identity. Lock + clear: sibling
@@ -2570,14 +2653,28 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_kind_systemd_still_routes_to_none_on_garbage() {
+    fn sandbox_kind_garbage_is_refused_at_startup_not_silently_none() {
         let _g = ENV_LOCK.lock().unwrap();
-        for v in ["", "none", "jail", "kvm"] {
+        for v in ["", "none"] {
+            std::env::set_var("AGENTGRID_SANDBOX", v);
+            assert_eq!(
+                SandboxKind::from_env(),
+                SandboxKind::None,
+                "'{v}' is an explicit no-sandbox request"
+            );
+        }
+        // `jail`/`kvm` are not backends: they must never select isolation, and
+        // since finding 16 they are a startup error rather than a silent None.
+        for v in ["jail", "kvm"] {
             std::env::set_var("AGENTGRID_SANDBOX", v);
             assert_eq!(
                 SandboxKind::from_env(),
                 SandboxKind::None,
                 "'{v}' must never select an isolation backend"
+            );
+            assert!(
+                SandboxKind::parse(Some(v)).is_err(),
+                "'{v}' must be refused at startup"
             );
         }
         std::env::remove_var("AGENTGRID_SANDBOX");
