@@ -73,7 +73,11 @@ echo "   daemon 200, everything else 404"
 echo ">> the served script already knows this control plane"
 script="$(curl -fsS "$BASE/v1/node/join.sh")"
 grep -q "__AGENTGRID_SERVER__" <<<"$script" && fail "the placeholder was served unsubstituted"
-grep -q "SERVER=\"$BASE\"" <<<"$script" || fail "the script does not default to $BASE"
+# Single quotes, not double: the value is substituted per request from the
+# request's Host header, and the script is piped into `sudo bash`.
+grep -q "SERVER='$BASE'" <<<"$script" || fail "the script does not default to $BASE"
+grep -q "# WARNING: this control plane answered over plain http" <<<"$script" \
+    || fail "an http fetch must warn inside the script it serves"
 curl -fsS "$BASE/v1/node/install.sh" | grep -q -- '--staging' || fail "install.sh is not the installer"
 echo "   one line, no URL to type"
 
