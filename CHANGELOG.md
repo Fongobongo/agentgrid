@@ -262,6 +262,37 @@
 
 ### Fixed
 
+- **Host-side git trusted the worktree the agent had just written to.** After an
+  attempt the daemon ran `git add -A`, `diff --cached` and `commit` with
+  `current_dir` set to the agent-writable worktree, so git discovered `.git`
+  there: an agent that replaced the pointer (or a standalone repo's config) with
+  its own could make `core.fsmonitor`, a hook, or a filter driver run **as the
+  daemon user**, outside the sandbox. The daemon now records the git dir when it
+  creates the worktree, passes `--git-dir`/`--work-tree` explicitly so discovery
+  cannot happen, refuses a worktree whose `.git` no longer points at that git
+  dir (the attempt fails as `infrastructure_failed`), and restores the config
+  bytes it wrote for a standalone repo before committing. Every git call is also
+  hardened the same way: `GIT_CONFIG_NOSYSTEM`, an empty global config, a
+  `core.hooksPath` pointing at a path this process never creates,
+  `core.fsmonitor=false`, and `--no-verify` on the commit.
+- **Daemon-owned output followed symlinks out of the worktree.**
+  `validation.log`, `agent-raw-output.log` and `changes.patch` live in a
+  directory the agent can write, and were created with a plain
+  `File::create`/`fs::write` — a committed `validation.log -> ~/.ssh/authorized_keys`
+  turned an append into host file corruption, and `changes.patch -> credential.json`
+  shipped the node credential to the control plane as an artifact. All three are
+  now written by removing the entry and recreating it with `O_EXCL`/`O_NOFOLLOW`.
+  Artifact staging stops at the same place from the other side: it refuses a
+  source that is not a regular file, and copies through `take(max+1)` so a
+  `/dev/zero` artifact can no longer fill the spool before the size check runs.
+- **`docker run` published adapter secrets in its argv.** Every attempt env pair
+  was rendered as `--env KEY=VALUE`, so API keys and sealed-env values were
+  readable in `ps auxww` and `/proc/<pid>/cmdline` for the whole attempt. Docker
+  copies a value from its own environment when the flag names the variable
+  alone, and the backend already populates the client with exactly those pairs —
+  so the flag is now `--env KEY`. The egress-proxy URL follows the same rule,
+  which also keeps a `user:pass@` proxy URL out of the process table.
+
 - **`network_mode=restricted` was advisory in the shipped deploy.** The egress
   compose file declared `agentgrid-egress` with `internal: false` — a
   user-defined bridge *with* NAT — so a sandbox that ignored `HTTP_PROXY` and

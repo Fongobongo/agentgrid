@@ -396,6 +396,75 @@ fn worktree_commit_and_patch() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The confirmed escape (review finding 1): the agent replaces the worktree's
+/// `.git` pointer with a repo it controls, so host-side `git add`/`commit`
+/// would read its config and run `core.fsmonitor` as the daemon user.
+#[test]
+fn finalize_refuses_a_worktree_whose_git_dir_the_agent_replaced() {
+    let dir = std::env::temp_dir().join(format!("ag-git-escape-{}", uuid::Uuid::new_v4()));
+    let origin = init_origin(&dir);
+    commit_file(&origin, "base.txt", "base", "init");
+    let a = make_assignment(origin.to_str().unwrap(), "main");
+    let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
+
+    // What the agent can do with its own worktree.
+    let marker = dir.join("PWNED");
+    std::fs::remove_file(ws.path.join(".git")).unwrap();
+    git(&ws.path, &["init", "-q", "."]).unwrap();
+    git(
+        &ws.path,
+        &[
+            "config",
+            "core.fsmonitor",
+            &format!("touch {}; false", marker.display()),
+        ],
+    )
+    .unwrap();
+    std::fs::write(ws.path.join("new.txt"), "hello").unwrap();
+
+    let err = finalize_workspace(ws, "agent@agentgrid").expect_err("must refuse");
+    assert!(
+        err.to_string().contains(".git"),
+        "error must name the git dir: {err}"
+    );
+    assert!(
+        !marker.exists(),
+        "an fsmonitor hook from the agent's config ran on the host"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Review finding 2: `changes.patch` is written into a directory the agent can
+/// write, so a symlink there used to redirect the write to any host file.
+#[cfg(unix)]
+#[test]
+fn finalize_does_not_write_through_a_symlinked_patch() {
+    let dir = std::env::temp_dir().join(format!("ag-git-symlink-{}", uuid::Uuid::new_v4()));
+    let origin = init_origin(&dir);
+    commit_file(&origin, "base.txt", "base", "init");
+    let a = make_assignment(origin.to_str().unwrap(), "main");
+    let ws = prepare_workspace(&dir.join("repos"), &dir.join("ws"), &a, &[], &[]).unwrap();
+    let ws_path = ws.path.clone();
+
+    let target = dir.join("outside.txt");
+    std::fs::write(&target, "ORIGINAL").unwrap();
+    std::os::unix::fs::symlink(&target, ws_path.join("changes.patch")).unwrap();
+    std::fs::write(ws_path.join("new.txt"), "hello").unwrap();
+
+    finalize_workspace(ws, "agent@agentgrid").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "ORIGINAL",
+        "the patch was written through the agent's symlink"
+    );
+    let patch = std::fs::read_to_string(ws_path.join("changes.patch")).unwrap();
+    assert!(
+        patch.contains("new.txt"),
+        "changes.patch must be a real file with the diff: {patch}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn cleanup_workspace_removes_worktree_and_branch() {
     let dir = std::env::temp_dir().join(format!("ag-git-cleanup-{}", uuid::Uuid::new_v4()));

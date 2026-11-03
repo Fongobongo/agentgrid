@@ -709,12 +709,10 @@ pub async fn run_attempt(cfg: Config, client: Client, assignment: Assignment) ->
 
     // Raw adapter output is mirrored to disk as a safety net against CLI
     // output-format changes (Stage 3.1): the structured events may be lossy,
-    // but the raw log is always preserved as an artifact.
+    // but the raw log is always preserved as an artifact. The worktree is
+    // agent-writable, so the file is created without following a link there.
     let raw_path = ws.path.join("agent-raw-output.log");
-    let raw_file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&raw_path)
+    let raw_file = crate::artifact_spool::create_owned(&raw_path, true)
         .await
         .ok()
         .map(|f| Arc::new(Mutex::new(f)));

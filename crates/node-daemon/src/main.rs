@@ -161,6 +161,13 @@ async fn drive_acp_session(
     if let Some(gid) = &assignment.group_id {
         container_env.push(("AG_GROUP_ID".to_string(), gid.clone()));
     }
+    // Egress proxy: docker receives `--env KEY` (no value) for these, so the
+    // value has to ride the client process instead of argv (review finding 5).
+    if cfg.sandbox == sandbox::SandboxKind::Docker
+        && assignment.network_mode.as_deref() == Some("restricted")
+    {
+        container_env.extend(sandbox::egress_proxy_env());
+    }
     // ADR 0029 option F: `NAME@gateway=<route>` entries are replaced here by a
     // per-attempt capability. Refused, never downgraded: if this cannot be
     // honoured the attempt fails, because the alternative is handing the agent

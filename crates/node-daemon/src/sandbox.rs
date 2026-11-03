@@ -547,6 +547,30 @@ pub fn egress_proxy_url() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The proxy variables a `restricted` attempt needs, as `(key, value)` pairs.
+///
+/// They are exported to the docker *client* process, never written into argv:
+/// a proxy URL commonly carries `user:pass@`, and `ps auxww` /
+/// `/proc/<pid>/cmdline` are readable by every local user for the whole
+/// attempt. `--env KEY` (no value) makes docker copy the value from its own
+/// environment, which is where the backend puts these.
+pub fn egress_proxy_env() -> Vec<(String, String)> {
+    let Some(url) = egress_proxy_url() else {
+        return Vec::new();
+    };
+    [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ]
+    .iter()
+    .map(|k| ((*k).to_string(), url.clone()))
+    .collect()
+}
+
 /// True when the effective egress is isolated: `none`; a `restricted`
 /// attempt collapsed to `none` (no usable proxy); or `restricted` attached
 /// to a configured egress-proxy network WITH its filtering URL. A proxy
@@ -913,30 +937,22 @@ fn docker_run_head(
     // Audit X-N3b: forward the attempt env INTO the container. The backend
     // applies SpawnRequest.env only to the `docker` client process, so
     // without these flags credentials/proxies/managed env never reached
-    // sandboxed agents. (The proxy-URL block below stays as the restricted
-    // path's explicit variant; when it fires the same pairs simply appear
-    // twice — harmless, last-wins identical values.)
-    for (k, val) in container_env {
+    // sandboxed agents. The flag is deliberately value-less: `--env K=V` would
+    // publish every adapter API key and sealed-env value in `ps auxww` and
+    // `/proc/<pid>/cmdline` for the whole attempt, while `--env K` takes the
+    // value from the client's environment, which is already populated.
+    for (k, _value) in container_env {
         v.push("--env".to_string());
-        v.push(format!("{k}={val}"));
+        v.push(k.clone());
     }
     // Competitor-gap feature (egress firewall): inject the proxy URL so
     // restricted-mode adapters route through the sidecar (which enforces the
     // domain allowlist). Only applied when a restricted attempt attached to
     // the egress network — an unrestricted/none attempt must not inherit it.
     if network_mode == Some("restricted") && egress_proxy_network().is_some() {
-        if let Some(proxy) = egress_proxy_url() {
-            for key in [
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-            ] {
-                v.push("--env".to_string());
-                v.push(format!("{key}={proxy}"));
-            }
+        for (key, _) in egress_proxy_env() {
+            v.push("--env".to_string());
+            v.push(key);
         }
     }
     // ADR 0029 step 5 ("C3"): the gateway may be served over TLS with the
@@ -1818,6 +1834,45 @@ mod tests {
         assert_eq!(a[at("--cpus")], "1.5");
     }
 
+    /// Review finding 5: `--env K=V` published every adapter API key and
+    /// sealed-env value in `ps auxww` and `/proc/<pid>/cmdline` for the whole
+    /// attempt. The value must travel through the docker client's environment.
+    #[test]
+    fn docker_env_flags_carry_names_only() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        let env = vec![
+            (
+                "ANTHROPIC_API_KEY".to_string(),
+                "sk-secret-value".to_string(),
+            ),
+            ("OPENAI_API_KEY".to_string(), "sk-other-secret".to_string()),
+        ];
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            std::path::Path::new("/w"),
+            None,
+            false,
+            None,
+            &env,
+            None,
+        );
+        clear_sandbox_env();
+        assert!(
+            !a.iter()
+                .any(|x| x.contains("sk-secret") || x.contains("sk-other")),
+            "a secret reached the argv: {a:?}"
+        );
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "--env" && w[1] == "ANTHROPIC_API_KEY"),
+            "--env must name the variable without its value: {a:?}"
+        );
+    }
+
     #[test]
     fn task_network_mode_maps_to_docker_native_networks() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1873,11 +1928,26 @@ mod tests {
             "agentgrid-egress",
             "restricted attaches to the egress-proxy network"
         );
-        // Proxy env is injected for restricted attempts on the egress network.
-        let envs: Vec<&String> = a.iter().filter(|x| x.starts_with("HTTP_PROXY=")).collect();
-        assert_eq!(envs, vec![&"HTTP_PROXY=http://egress:3128".to_string()]);
-        let envs: Vec<&String> = a.iter().filter(|x| x.starts_with("HTTPS_PROXY=")).collect();
-        assert_eq!(envs, vec![&"HTTPS_PROXY=http://egress:3128".to_string()]);
+        // Proxy env is injected for restricted attempts on the egress network —
+        // by name only: the value rides the docker client's environment, so a
+        // proxy URL carrying `user:pass@` never lands in argv (review finding 5).
+        let env_names: Vec<&String> = a
+            .windows(2)
+            .filter(|w| w[0] == "--env")
+            .map(|w| &w[1])
+            .collect();
+        assert!(
+            env_names.contains(&&"HTTP_PROXY".to_string()),
+            "restricted must forward HTTP_PROXY: {a:?}"
+        );
+        assert!(
+            env_names.contains(&&"HTTPS_PROXY".to_string()),
+            "restricted must forward HTTPS_PROXY: {a:?}"
+        );
+        assert!(
+            !a.iter().any(|x| x.contains("egress:3128")),
+            "the proxy URL must not reach argv: {a:?}"
+        );
 
         // An unrestricted attempt on the same node must NOT inherit the proxy.
         let (_, a2) = sandbox_command(
@@ -1894,8 +1964,9 @@ mod tests {
         let at2 = |flag: &str| a2.iter().position(|x| x == flag).unwrap() + 1;
         assert_eq!(a2[at2("--network")], "bridge");
         assert!(
-            !a2.iter().any(|x| x.starts_with("HTTP_PROXY=")),
-            "unrestricted attempt must not inherit the egress proxy env"
+            !a2.windows(2)
+                .any(|w| w[0] == "--env" && w[1] == "HTTP_PROXY"),
+            "unrestricted attempt must not inherit the egress proxy env: {a2:?}"
         );
     }
 

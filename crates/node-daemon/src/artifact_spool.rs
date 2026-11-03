@@ -7,6 +7,7 @@
 //! `<root>/<attempt_id>/<name>`; the attempt id and name are sanitized to
 //! safe path segments so nothing can escape the spool root.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -33,10 +34,72 @@ fn entry_path(root: &Path, attempt_id: &str, name: &str) -> Result<PathBuf> {
     Ok(root.join(aid).join(nm))
 }
 
+/// Write a daemon-owned file, refusing to follow a symlink or a hardlink at
+/// the path: the entry is removed first and recreated with `O_EXCL`, so an
+/// agent-planted link can neither redirect the write nor be written through.
+pub fn write_owned(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("clear {}", path.display())),
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    f.write_all(bytes)
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Same rule as [`write_owned`], for the async call sites that stream into the
+/// file while a process runs (`validation.log`, `agent-raw-output.log`).
+pub async fn create_owned(path: &Path, append: bool) -> std::io::Result<tokio::fs::File> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create_new(true).append(append);
+    // `custom_flags` is inherent on tokio's OpenOptions (i32 on unix), so no
+    // trait import here — one would be an unused-import warning on Linux.
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW);
+    opts.open(path).await
+}
+
 /// Copy `path` into the spool atomically (temp sibling + rename). Idempotent:
 /// re-staging the same (attempt_id, name) replaces the previous copy.
-pub fn stage(root: &Path, attempt_id: &str, name: &str, path: &Path) -> Result<PathBuf> {
+///
+/// The source is daemon-written output sitting in a directory the agent can
+/// also write, so it is not trusted: a symlink there would exfiltrate any file
+/// the daemon user can read (the node credential, another attempt's worktree),
+/// and `/dev/zero` would fill the spool before any size check ran. Only a
+/// regular file is accepted, and the copy stops one byte past `max_size`.
+pub fn stage(
+    root: &Path,
+    attempt_id: &str,
+    name: &str,
+    path: &Path,
+    max_size: u64,
+) -> Result<PathBuf> {
     let dest = entry_path(root, attempt_id, name)?;
+    let md = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat source artifact {}", path.display()))?;
+    if !md.file_type().is_file() {
+        anyhow::bail!(
+            "artifact {} is not a regular file — refusing to stage it",
+            path.display()
+        );
+    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create spool dir {}", parent.display()))?;
@@ -47,8 +110,17 @@ pub fn stage(root: &Path, attempt_id: &str, name: &str, path: &Path) -> Result<P
             .with_context(|| format!("create spool temp {}", tmp.display()))?;
         let mut src = std::fs::File::open(path)
             .with_context(|| format!("open source artifact {}", path.display()))?;
-        std::io::copy(&mut src, &mut f)
+        let copied = std::io::copy(&mut (&mut src).take(max_size.saturating_add(1)), &mut f)
             .with_context(|| format!("copy artifact into spool {}", dest.display()))?;
+        if copied > max_size {
+            drop(f);
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!(
+                "artifact {} exceeds the {} byte limit",
+                path.display(),
+                max_size
+            );
+        }
         f.sync_all()
             .with_context(|| format!("fsync spool temp {}", tmp.display()))?;
     }
@@ -173,13 +245,56 @@ mod tests {
         d
     }
 
+    /// Review finding 2: the source sits in a directory the agent can write, so
+    /// a symlink there would copy any file the daemon can read into an
+    /// artifact the control plane hands back to every UI user.
+    #[cfg(unix)]
+    #[test]
+    fn stage_refuses_a_symlinked_source() {
+        let root = tmpdir("symlink");
+        let secret = root.join("credential.json");
+        std::fs::write(&secret, b"{\"token\":\"node-secret\"}").unwrap();
+        let link = root.join("changes.patch");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let err = stage(&root, "a1", "changes.patch", &link, u64::MAX).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("not a regular file"),
+            "error must say why: {err}"
+        );
+        assert!(
+            pending(&root).unwrap().is_empty(),
+            "nothing may be published for a refused source"
+        );
+    }
+
+    /// `/dev/zero` as an artifact used to fill the spool before the size check
+    /// in `upload_if_exists` ever ran.
+    #[test]
+    fn stage_stops_at_the_size_limit() {
+        let root = tmpdir("oversize");
+        let src = root.join("big.log");
+        std::fs::write(&src, vec![b'x'; 64 * 1024]).unwrap();
+
+        let err = stage(&root, "a1", "agent-raw-output.log", &src, 1024).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "error must name the limit: {err}"
+        );
+        assert!(pending(&root).unwrap().is_empty());
+        assert!(
+            !root.join("a1").join("agent-raw-output.log.tmp").exists(),
+            "the truncated temp copy must not be left behind"
+        );
+    }
+
     #[test]
     fn stage_pending_remove_round_trip() {
         let root = tmpdir("roundtrip");
         let src = root.join("src.txt");
         std::fs::write(&src, b"hello artifact").unwrap();
 
-        let staged = stage(&root, "attempt-1", "changes.patch", &src).unwrap();
+        let staged = stage(&root, "attempt-1", "changes.patch", &src, u64::MAX).unwrap();
         assert!(staged.ends_with("attempt-1/changes.patch"));
 
         let pend = pending(&root).unwrap();
@@ -199,8 +314,8 @@ mod tests {
         let b = root.join("b.txt");
         std::fs::write(&a, b"v1").unwrap();
         std::fs::write(&b, b"v2-longer").unwrap();
-        stage(&root, "a1", "f.bin", &a).unwrap();
-        stage(&root, "a1", "f.bin", &b).unwrap();
+        stage(&root, "a1", "f.bin", &a, u64::MAX).unwrap();
+        stage(&root, "a1", "f.bin", &b, u64::MAX).unwrap();
         let pend = pending(&root).unwrap();
         assert_eq!(pend.len(), 1);
         assert_eq!(std::fs::read(&pend[0].2).unwrap(), b"v2-longer");
@@ -211,7 +326,7 @@ mod tests {
         let root = tmpdir("traversal");
         let src = root.join("src.txt");
         std::fs::write(&src, b"x").unwrap();
-        assert!(stage(&root, "../evil", "f.bin", &src).is_err());
+        assert!(stage(&root, "../evil", "f.bin", &src, u64::MAX).is_err());
     }
 
     #[test]
@@ -219,9 +334,9 @@ mod tests {
         let root = tmpdir("rm-scope");
         let src = root.join("s.txt");
         std::fs::write(&src, b"x").unwrap();
-        stage(&root, "a1", "one.txt", &src).unwrap();
-        stage(&root, "a1", "two.txt", &src).unwrap();
-        stage(&root, "a2", "one.txt", &src).unwrap();
+        stage(&root, "a1", "one.txt", &src, u64::MAX).unwrap();
+        stage(&root, "a1", "two.txt", &src, u64::MAX).unwrap();
+        stage(&root, "a2", "one.txt", &src, u64::MAX).unwrap();
         // Removing one name from one attempt leaves the rest untouched.
         remove(&root, "a1", "one.txt").unwrap();
         let pend = pending(&root).unwrap();
@@ -241,13 +356,13 @@ mod tests {
         std::fs::write(&src, b"x").unwrap();
 
         // Create old attempt directory
-        stage(&root, "old-attempt", "file.txt", &src).unwrap();
+        stage(&root, "old-attempt", "file.txt", &src, u64::MAX).unwrap();
 
         // Sleep > 1 second to ensure mtime difference (filesystem resolution)
         sleep(Duration::from_secs(2));
 
         // Create new attempt directory (more recent)
-        stage(&root, "new-attempt", "file.txt", &src).unwrap();
+        stage(&root, "new-attempt", "file.txt", &src, u64::MAX).unwrap();
 
         // Recover with 1 second max_age - only old-attempt should be removed
         let removed = recover_orphans(&root, Duration::from_secs(1)).unwrap();
@@ -264,7 +379,7 @@ mod tests {
         let src = root.join("s.txt");
         std::fs::write(&src, b"x").unwrap();
 
-        stage(&root, "attempt-1", "file.txt", &src).unwrap();
+        stage(&root, "attempt-1", "file.txt", &src, u64::MAX).unwrap();
 
         // Max age 1 hour - should NOT remove
         let removed = recover_orphans(&root, Duration::from_secs(3600)).unwrap();

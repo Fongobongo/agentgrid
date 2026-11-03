@@ -117,7 +117,7 @@ pub async fn run_validation(
         .stderr
         .take()
         .ok_or_else(|| anyhow::anyhow!("validation stderr pipe unavailable for {attempt_id}"))?;
-    let raw = tokio::fs::File::create(workdir.join("validation.log"))
+    let raw = crate::artifact_spool::create_owned(&workdir.join("validation.log"), false)
         .await
         .ok();
     let raw = raw.map(|f| Arc::new(tokio::sync::Mutex::new(f)));

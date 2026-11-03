@@ -409,12 +409,87 @@ pub struct Workspace {
     pub is_git: bool,
     /// Optional exact commit the worktree was pinned to (Stage 8 base_commit).
     pub base_commit: Option<String>,
+    /// Git dir recorded when the daemon created the workspace. Post-agent git
+    /// calls pass it explicitly (`--git-dir`) instead of letting git discover
+    /// `.git` inside a directory the agent can write to — see
+    /// [`finalize_workspace`].
+    pub git_dir: Option<PathBuf>,
+    /// Config bytes as the daemon wrote them. Only set for a standalone repo
+    /// (`git init` inside the worktree), where the config file itself lives in
+    /// agent-writable space and is restored before the finalize commit.
+    pub git_config: Option<Vec<u8>>,
+}
+
+/// A directory that never exists: `core.hooksPath` points here so a hook
+/// planted in the worktree is never discovered. Random per process, so it
+/// cannot be pre-created by an agent that knows the layout.
+fn no_hooks_dir() -> &'static str {
+    static DIR: OnceLock<String> = OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::temp_dir()
+            .join(format!("agentgrid-nohooks-{}", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+/// An empty config file, so no ambient git settings apply.
+fn null_config() -> &'static str {
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
+}
+
+/// Every host-side git invocation is hardened the same way.
+///
+/// The agent writes to the worktree, so everything git reads from there —
+/// config, hooks, filter drivers, `core.fsmonitor` — is agent-controlled
+/// input, and git turns several of those into host code execution. Ambient
+/// config is removed, and the two settings that turn a repository file into a
+/// program are pinned on the command line (which outranks repo config).
+///
+/// `GIT_ALLOW_PROTOCOL` is deliberately **not** pinned here: it is a
+/// per-operation policy (a local-submodule clone legitimately needs `file`,
+/// which is off by default since CVE-2022-39253), so pinning one list for
+/// every invocation both overrides the caller's intent and broke local
+/// submodule clones. The protocol boundary belongs to `validate_git_url` and
+/// the clone site, not to a blanket environment.
+fn harden_git(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", null_config())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_COUNT")
+        .args([
+            "-c",
+            &format!("core.hooksPath={}", no_hooks_dir()),
+            "-c",
+            "core.fsmonitor=false",
+        ])
+}
+
+/// A `git` invocation with the hardening already applied. `-c` overrides come
+/// first, so call sites keep passing a plain subcommand.
+fn git_cmd() -> Command {
+    let mut cmd = Command::new("git");
+    harden_git(&mut cmd);
+    cmd
+}
+
+/// Write a daemon-owned file in a directory the agent can also write, without
+/// following a link planted at that path (see `artifact_spool::write_owned`).
+fn write_no_follow(path: &Path, bytes: &[u8]) -> Result<()> {
+    crate::artifact_spool::write_owned(path, bytes)
 }
 
 /// Run `git` with explicit args (no shell). Args are passed verbatim, so they
 /// cannot be reinterpreted as shell syntax.
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
+    let status = git_cmd()
         .args(args)
         .current_dir(dir)
         .status()
@@ -427,7 +502,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<()> {
 
 /// Like [`git`] but capture stdout (trimmed).
 fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(args)
         .current_dir(dir)
         .output()
@@ -438,11 +513,31 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Like [`git`] but with the git dir and work tree pinned on the command line.
+/// Git then never discovers `.git` by walking up from a directory the agent
+/// can write to — the recorded pair is the only thing it will read.
+fn git_scoped(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<()> {
+    let gd = git_dir.to_string_lossy();
+    let wt = work_tree.to_string_lossy();
+    let mut all: Vec<&str> = vec!["--git-dir", &gd, "--work-tree", &wt];
+    all.extend_from_slice(args);
+    git(work_tree, &all)
+}
+
+/// [`git_out`] with the same pinning as [`git_scoped`].
+fn git_scoped_out(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String> {
+    let gd = git_dir.to_string_lossy();
+    let wt = work_tree.to_string_lossy();
+    let mut all: Vec<&str> = vec!["--git-dir", &gd, "--work-tree", &wt];
+    all.extend_from_slice(args);
+    git_out(work_tree, &all)
+}
+
 /// Hardening P1 item 32: true if `maybe_ancestor` is an ancestor of (or equal
 /// to) `descendant`. Uses `git merge-base --is-ancestor`; best-effort — returns
 /// false on any git error so the call site falls back to "not stale".
 fn is_ancestor_or_equal(repo: &Path, maybe_ancestor: &str, descendant: &str) -> bool {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["merge-base", "--is-ancestor", maybe_ancestor, descendant])
         .current_dir(repo)
         .output();
@@ -456,7 +551,7 @@ fn is_ancestor_or_equal(repo: &Path, maybe_ancestor: &str, descendant: &str) -> 
 /// diff --binary`), where `String::from_utf8_lossy` would corrupt non-UTF-8
 /// hunk data. (Hardening P1 item 32: preserve binary patch bytes.)
 fn git_out_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(args)
         .current_dir(dir)
         .output()
@@ -480,7 +575,7 @@ fn init_worktree_submodules(ws: &Path) -> Result<()> {
     if !ws.join(".gitmodules").exists() {
         return Ok(());
     }
-    let status = Command::new("git")
+    let status = git_cmd()
         .args(["submodule", "status"])
         .current_dir(ws)
         .output();
@@ -493,7 +588,7 @@ fn init_worktree_submodules(ws: &Path) -> Result<()> {
     if !has_submodules {
         return Ok(());
     }
-    match Command::new("git")
+    match git_cmd()
         .args(["submodule", "update", "--init", "--recursive"])
         .current_dir(ws)
         .output()
@@ -570,7 +665,7 @@ fn validate_local_source(git_url: &str, default_branch: &str) -> Result<()> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| path.to_path_buf());
-    let git_dir = Command::new("git")
+    let git_dir = git_cmd()
         .args(["rev-parse", "--git-dir"])
         .env("GIT_CEILING_DIRECTORIES", &ceiling)
         .current_dir(path)
@@ -581,7 +676,7 @@ fn validate_local_source(git_url: &str, default_branch: &str) -> Result<()> {
     }
     // ...carrying the requested default branch.
     validate_token(default_branch)?;
-    let branch_ok = Command::new("git")
+    let branch_ok = git_cmd()
         .args([
             "show-ref",
             "--verify",
@@ -695,6 +790,8 @@ pub fn prepare_workspace(
                 default_branch: String::new(),
                 is_git: false,
                 base_commit: None,
+                git_dir: None,
+                git_config: None,
             });
         }
         validate_token(&assignment.task_id)?;
@@ -729,17 +826,23 @@ pub fn prepare_workspace(
             upstream_patches,
         )?;
         let ws_path = ws.clone();
+        // Standalone repo: the git dir is *inside* the worktree, so the agent
+        // can rewrite its config. Keep the bytes the daemon wrote and restore
+        // them before the finalize commit (see `finalize_workspace`).
+        let git_config = std::fs::read(ws_path.join(".git").join("config")).ok();
         return Ok(Workspace {
             path: ws_path.clone(),
             // Standalone repo: diff/cleanup run in the worktree itself (no
             // mirror). `cleanup_workspace` degrades safely: `worktree remove`
             // warns + falls back to rm, `branch -D` runs inside the dir that
             // is deleted right after.
-            repo_dir: Some(ws_path),
+            repo_dir: Some(ws_path.clone()),
             branch: Some(branch),
             default_branch,
             is_git: true,
             base_commit: None,
+            git_dir: Some(ws_path.join(".git")),
+            git_config,
         });
     }
     validate_token(&assignment.repository)?;
@@ -870,7 +973,7 @@ pub fn prepare_workspace(
         .filter(|c| !c.is_empty())
         .map(|c| {
             validate_token(c)?;
-            let fetch_ok = Command::new("git")
+            let fetch_ok = git_cmd()
                 .args(["fetch", "origin", c])
                 .current_dir(&repo_dir)
                 .status()
@@ -887,7 +990,7 @@ pub fn prepare_workspace(
             let allow_missing = std::env::var("AGENTGRID_ALLOW_MISSING_UPSTREAM")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            let present_locally = Command::new("git")
+            let present_locally = git_cmd()
                 .args(["cat-file", "-e", c])
                 .current_dir(&repo_dir)
                 .status()
@@ -945,6 +1048,9 @@ pub fn prepare_workspace(
             start_point,
         ],
     )?;
+    // Record the git dir git just wrote before anything else can touch the
+    // worktree: every later host-side call passes it explicitly.
+    let git_dir = recorded_git_dir(&ws)?;
     // Hardening P2 item 35: check workspace quota after worktree add.
     if let Ok(size) = dir_size(workspace_root) {
         check_workspace_quota(size.saturating_sub(WORKSPACE_BYTES.load(Ordering::Relaxed)))?;
@@ -1003,19 +1109,19 @@ pub fn prepare_workspace(
             // (scaffold) repos have no mirror: skip the fetch, every SHA
             // falls through to its patch.
             if let Some(mirror) = repo_dir {
-                let _ = Command::new("git")
+                let _ = git_cmd()
                     .args(["fetch", "origin", sha])
                     .current_dir(mirror)
                     .status();
             }
-            let have_obj = Command::new("git")
+            let have_obj = git_cmd()
                 .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
                 .current_dir(ws_path)
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
             if have_obj {
-                let cp = Command::new("git")
+                let cp = git_cmd()
                     .args([
                         "-c",
                         "user.name=agentgrid",
@@ -1033,7 +1139,7 @@ pub fn prepare_workspace(
                     if resolve_trivial_conflicts(ws_path)? {
                         continue;
                     }
-                    let _ = Command::new("git")
+                    let _ = git_cmd()
                         .args(["cherry-pick", "--abort"])
                         .current_dir(ws_path)
                         .status();
@@ -1053,7 +1159,7 @@ pub fn prepare_workspace(
                 );
                 continue;
             };
-            let mut ap = Command::new("git")
+            let mut ap = git_cmd()
                 .args(["apply", "--3way", "--whitespace=nowarn", "-"])
                 .current_dir(ws_path)
                 .stdin(std::process::Stdio::piped())
@@ -1083,7 +1189,7 @@ pub fn prepare_workspace(
             // commit — exactly the collector-on-the-other-node assemble
             // layout — every later upstream failed. Land each patch as its
             // own commit so the tree is clean for whatever comes next.
-            let commit = Command::new("git")
+            let commit = git_cmd()
                 .args([
                     "-c",
                     "user.name=agentgrid",
@@ -1145,7 +1251,66 @@ pub fn prepare_workspace(
         default_branch: assignment.default_branch.clone(),
         is_git: true,
         base_commit: base_commit.map(|c| c.to_string()),
+        git_dir: Some(git_dir),
+        git_config: None,
     })
+}
+
+/// The git dir git itself recorded for a freshly added worktree: the `.git`
+/// file it wrote, resolved. Read once, right after `worktree add`, so later
+/// host-side calls never have to trust what is in the worktree *now*.
+fn recorded_git_dir(ws: &Path) -> Result<PathBuf> {
+    let dot = ws.join(".git");
+    let md = std::fs::symlink_metadata(&dot).with_context(|| format!("stat {}", dot.display()))?;
+    if md.is_dir() {
+        return Ok(dot);
+    }
+    let content =
+        std::fs::read_to_string(&dot).with_context(|| format!("read {}", dot.display()))?;
+    let target = content
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a gitdir pointer", dot.display()))?;
+    let target = PathBuf::from(target);
+    Ok(if target.is_relative() {
+        ws.join(target)
+    } else {
+        target
+    })
+}
+
+/// Refuse a worktree whose `.git` no longer points at the git dir the daemon
+/// recorded. Replacing it is the first step of the escape: git then reads a
+/// config (and a hooks dir) the agent wrote, and runs it on the host.
+fn verify_worktree_git_dir(ws: &Path, git_dir: &Path) -> Result<()> {
+    let dot = ws.join(".git");
+    let md = std::fs::symlink_metadata(&dot).with_context(|| format!("stat {}", dot.display()))?;
+    if md.file_type().is_symlink() {
+        anyhow::bail!(
+            "worktree {}: .git is a symlink — refusing to run host git on it",
+            ws.display()
+        );
+    }
+    let actual = if md.is_dir() {
+        // Standalone repo: `.git` *is* the git dir.
+        std::fs::canonicalize(&dot).with_context(|| format!("canonicalize {}", dot.display()))?
+    } else {
+        let target = recorded_git_dir(ws)?;
+        std::fs::canonicalize(&target)
+            .with_context(|| format!("canonicalize {}", target.display()))?
+    };
+    let expected = std::fs::canonicalize(git_dir)
+        .with_context(|| format!("canonicalize {}", git_dir.display()))?;
+    if actual != expected {
+        anyhow::bail!(
+            "worktree {}: .git points at {}, expected {} — the worktree was rewritten after the daemon created it",
+            ws.display(),
+            actual.display(),
+            expected.display()
+        );
+    }
+    Ok(())
 }
 
 /// Commit any staged changes and write a binary diff (`changes.patch`) into the
@@ -1156,14 +1321,38 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
         (Some(r), Some(b)) => (r, b),
         _ => return Ok(None),
     };
-    git(&ws.path, &["add", "-A"])?;
-    let has_changes = !Command::new("git")
+    let git_dir = ws.git_dir.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "workspace {} has no recorded git dir — refusing to finalize",
+            ws.path.display()
+        )
+    })?;
+    // Everything below runs on the host as the daemon user, after an agent has
+    // had write access to `ws.path`. Two things make that dangerous, and both
+    // are checked here rather than trusted:
+    //  - `.git` may have been replaced or repointed, so git would read a config
+    //    and hooks dir the agent wrote (confirmed escape: `core.fsmonitor`);
+    //  - a standalone repo keeps its config inside the worktree, so the daemon
+    //    restores the bytes it wrote before committing.
+    verify_worktree_git_dir(&ws.path, &git_dir)?;
+    if let Some(cfg) = &ws.git_config {
+        write_no_follow(&git_dir.join("config"), cfg)
+            .context("restore the daemon-written git config")?;
+    }
+    git_scoped(&git_dir, &ws.path, &["add", "-A"])?;
+    let has_changes = !git_cmd()
+        .args(["--git-dir", &git_dir.to_string_lossy()])
+        .args(["--work-tree", &ws.path.to_string_lossy()])
         .args(["diff", "--cached", "--quiet"])
         .current_dir(&ws.path)
         .status()?
         .success();
     let sha = if has_changes {
-        git(
+        // `--no-verify` is belt and braces next to the pinned `core.hooksPath`:
+        // a hook in the worktree is never discovered, and even a hooks dir git
+        // does find cannot veto or instrument this commit.
+        git_scoped(
+            &git_dir,
             &ws.path,
             &[
                 "-c",
@@ -1171,30 +1360,32 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
                 "-c",
                 &format!("user.email={committer_email}"),
                 "commit",
+                "--no-verify",
                 "-m",
                 &format!("agentgrid: {branch}"),
             ],
         )?;
-        git_out(&ws.path, &["rev-parse", "HEAD"])?
+        git_scoped_out(&git_dir, &ws.path, &["rev-parse", "HEAD"])?
     } else {
-        git_out(&ws.path, &["rev-parse", "HEAD"])?
+        git_scoped_out(&git_dir, &ws.path, &["rev-parse", "HEAD"])?
     };
     let diff_base = ws.base_commit.clone().unwrap_or(ws.default_branch.clone());
     // Project assembly: a scaffolded repo has no base branch yet (fresh `git
     // init`) — diff against the empty tree so `changes.patch` carries the
     // whole initial content instead of failing the finalize.
     const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-    let diff_base = if Command::new("git")
-        .args([
+    let diff_base = if git_scoped_out(
+        &git_dir,
+        &ws.path,
+        &[
             "rev-parse",
             "--verify",
             "--quiet",
             &format!("{diff_base}^{{commit}}"),
-        ])
-        .current_dir(&ws.path)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        ],
+    )
+    .map(|s| !s.is_empty())
+    .unwrap_or(false)
     {
         diff_base
     } else {
@@ -1203,7 +1394,9 @@ pub fn finalize_workspace(ws: Workspace, committer_email: &str) -> Result<Option
     // Hardening P1 item 32: capture the binary diff as raw bytes so a
     // binary patch's non-UTF-8 hunk data is not corrupted by lossy conversion.
     let patch = git_out_bytes(repo_dir, &["diff", &diff_base, branch, "--binary"])?;
-    std::fs::write(ws.path.join("changes.patch"), patch)?;
+    // `changes.patch` is daemon-owned output in a directory the agent can
+    // write: create it fresh so a planted symlink cannot redirect the write.
+    write_no_follow(&ws.path.join("changes.patch"), &patch)?;
     Ok(Some(sha))
 }
 
@@ -1312,7 +1505,7 @@ pub fn cleanup_workspace(
         ) {
             tracing::warn!(?ws_path, "worktree remove failed: {e}; falling back to rm");
         }
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["branch", "-D", branch])
             .current_dir(repo)
             .status();
@@ -1323,7 +1516,7 @@ pub fn cleanup_workspace(
         // dir was rm'd — a retry reusing this attempt id failed `worktree
         // add` until the startup-only prune. Prune now, scoped to this repo.
         if let Some(repo) = repo_dir {
-            let _ = Command::new("git")
+            let _ = git_cmd()
                 .args(["worktree", "prune"])
                 .current_dir(repo)
                 .status();
@@ -1474,7 +1667,7 @@ fn resolve_trivial_conflicts(ws_path: &str) -> Result<bool> {
 /// path sees exactly the conflict git produced. On full success the files
 /// are staged, and an in-progress cherry-pick is completed.
 fn builtin_resolve_trivial(ws_path: &str) -> Result<bool> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["diff", "--name-only", "--diff-filter=U", "-z"])
         .current_dir(ws_path)
         .output()?;
@@ -1505,7 +1698,7 @@ fn builtin_resolve_trivial(ws_path: &str) -> Result<bool> {
     for (path, new) in &resolved {
         std::fs::write(path, new)?;
     }
-    let mut add = Command::new("git");
+    let mut add = git_cmd();
     add.arg("add")
         .args(resolved.iter().map(|(p, _)| p))
         .current_dir(ws_path);
@@ -1515,7 +1708,7 @@ fn builtin_resolve_trivial(ws_path: &str) -> Result<bool> {
     // A cherry-pick left in progress would break the next integrator step —
     // complete it. `git apply` conflicts have no sequencer state; the staged
     // resolution simply becomes part of the worktree.
-    let gitdir = Command::new("git")
+    let gitdir = git_cmd()
         .args(["rev-parse", "--absolute-git-dir"])
         .current_dir(ws_path)
         .output()?;
@@ -1525,7 +1718,7 @@ fn builtin_resolve_trivial(ws_path: &str) -> Result<bool> {
             .join("CHERRY_PICK_HEAD")
             .exists()
         {
-            let cp = Command::new("git")
+            let cp = git_cmd()
                 .args(["-c", "core.editor=true", "cherry-pick", "--continue"])
                 .current_dir(ws_path)
                 .output()?;

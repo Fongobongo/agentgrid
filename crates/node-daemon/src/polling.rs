@@ -467,7 +467,8 @@ pub async fn upload_if_exists(
     max_artifact_size: u64,
 ) {
     // Stage into the durable spool first (idempotent; re-stages replace).
-    let staged = match artifact_spool::stage(spool_root, attempt_id, name, path) {
+    let staged = match artifact_spool::stage(spool_root, attempt_id, name, path, max_artifact_size)
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("artifact {name} stage failed for {attempt_id}: {e}");
