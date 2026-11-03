@@ -180,6 +180,23 @@ impl WsRegistry {
         self.conns.lock().await.len()
     }
 
+    /// Close one node's connection with `code`.
+    ///
+    /// `node_ws` checks the credential at upgrade time only, so without this a
+    /// revoked node keeps its socket: it goes on acking and rejecting
+    /// assignments and receives every broadcast until it chooses to
+    /// disconnect. Closing here makes the revocation take effect at the moment
+    /// the operator asks for it; the node's next reconnect attempt gets a 401.
+    pub async fn close(&self, node_id: &str, code: u16, reason: &str) {
+        let conns = self.conns.lock().await;
+        if let Some(c) = conns.get(node_id) {
+            let _ = c.tx.try_send(Message::Close(Some(CloseFrame {
+                code,
+                reason: reason.to_string().into(),
+            })));
+        }
+    }
+
     /// Close every connection with `code` (HA demotion: nodes must reconnect
     /// to the new leader instead of waiting for a ping timeout).
     pub async fn close_all(&self, code: u16, reason: &str) {

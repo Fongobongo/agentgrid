@@ -745,8 +745,18 @@ fn validate_git_url(s: &str) -> Result<()> {
     {
         anyhow::bail!("unsafe git url: {s:?}");
     }
-    let lower = s.to_ascii_lowercase();
-    if lower.starts_with("ext::") || lower.starts_with("fd::") {
+    // A leading `-` makes the URL an *option*: `--upload-pack=/path/x` turns
+    // `git clone --mirror <url> <dir>` into "run this program". Only an admin
+    // registers repositories, which is why this is defence in depth rather
+    // than the boundary — but the cost of refusing is zero and the cost of
+    // being wrong is code execution on the node.
+    if s.starts_with('-') {
+        anyhow::bail!("git url may not start with '-': {s:?}");
+    }
+    // `helper::<addr>` runs `git-remote-<helper>`. `ext::` and `fd::` are the
+    // dangerous ones, but the shape itself is what carries the risk, so the
+    // whole `::` form is refused: no legitimate remote URL contains it.
+    if s.contains("::") {
         anyhow::bail!("unsafe git url transport: {s:?}");
     }
     Ok(())
@@ -939,7 +949,7 @@ pub fn prepare_workspace(
                     std::fs::remove_dir_all(&repo_dir)?;
                 }
                 std::fs::create_dir_all(repository_root)?;
-                git(repository_root, &["clone", "--mirror", gurl, repo])?;
+                git(repository_root, &["clone", "--mirror", "--", gurl, repo])?;
                 // Hardening P2 item 35: check repo cache quota after clone.
                 if let Ok(size) = dir_size(repository_root) {
                     check_repo_cache_quota(size)?;

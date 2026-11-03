@@ -30,6 +30,16 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// Forget a delivery GUID, so a retry of the same delivery can create the
+    /// task. Used when task creation failed *after* the GUID was recorded:
+    /// keeping the record would turn one transient failure into a permanently
+    /// dropped webhook.
+    pub async fn webhook_delivery_forget(&self, guid: &str) -> Result<()> {
+        self.write_one(sqlx::query("DELETE FROM webhook_deliveries WHERE guid = ?").bind(guid))
+            .await?;
+        Ok(())
+    }
+
     pub async fn create_task(&self, req: &CreateTaskRequest) -> Result<TaskView> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();

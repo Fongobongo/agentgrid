@@ -324,6 +324,18 @@ pub async fn revoke_node(
 ) -> StatusCode {
     match state.store.revoke_node(&id).await {
         Ok(true) => {
+            // The credential is only checked when the socket is upgraded, so a
+            // revoked node would keep its live session (acking assignments,
+            // receiving broadcasts) until it disconnected on its own. Drop the
+            // socket here; its reconnect gets a 401 from `require_node_auth`.
+            state
+                .ws_registry
+                .close(
+                    &id,
+                    agentgrid_common::ws::WS_CLOSE_UNAUTHORIZED,
+                    "node credential revoked",
+                )
+                .await;
             // Hardening P2 item 35: audit the security-sensitive mutation.
             let _ = state
                 .store

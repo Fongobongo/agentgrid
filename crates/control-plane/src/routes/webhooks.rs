@@ -11,6 +11,8 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -21,6 +23,19 @@ fn configured_secret() -> Option<String> {
     match std::env::var("AGENTGRID_GITHUB_WEBHOOK_SECRET") {
         Ok(s) if !s.trim().is_empty() => Some(s),
         _ => None,
+    }
+}
+
+/// `AGENTGRID_WEBHOOK_ADAPTER` — the adapter a webhook-created task asks for.
+///
+/// Defaults to `mock`, which is what a fresh node installs. A node that does
+/// not carry the requested adapter fails the attempt as
+/// `infrastructure_failed`, so a fleet running only `claude` needs this set —
+/// there is no per-repository adapter config to resolve it from.
+fn webhook_adapter() -> String {
+    match std::env::var("AGENTGRID_WEBHOOK_ADAPTER") {
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => "mock".into(),
     }
 }
 
@@ -46,50 +61,16 @@ fn verify_github_sig(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCode>
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("sha256="))
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    let expected = hmac_sha256(secret.as_bytes(), body);
-    let expected_hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
-    if !ct_eq(sig.as_bytes(), expected_hex.as_bytes()) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(())
-}
-
-/// Constant-time comparison of two byte slices.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-/// HMAC-SHA256 (RFC 2104) with the sha2 crate only — avoids a new dependency
-/// for one endpoint.
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    const BLOCK: usize = 64;
-    let mut k = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        let h = Sha256::digest(key);
-        k[..32].copy_from_slice(&h);
-    } else {
-        k[..key.len()].copy_from_slice(key);
-    }
-    let mut ipad = [0u8; BLOCK];
-    let mut opad = [0u8; BLOCK];
-    for i in 0..BLOCK {
-        ipad[i] = k[i] ^ 0x36;
-        opad[i] = k[i] ^ 0x5c;
-    }
-    let inner = Sha256::digest([ipad.as_slice(), msg].concat());
-    let full = [opad.as_slice(), inner.as_slice()].concat();
-    let out = Sha256::digest(full);
-    let mut r = [0u8; 32];
-    r.copy_from_slice(&out);
-    r
+    // GitHub sends the digest as lowercase hex; anything that is not a
+    // 32-byte hex string cannot be the right MAC.
+    let presented = hex::decode(sig).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    mac.update(body);
+    // `verify_slice` is constant time — comparing hex strings with `==` would
+    // leak the position of the first differing byte.
+    mac.verify_slice(&presented)
+        .map_err(|_| StatusCode::UNAUTHORIZED)
 }
 
 /// GitHub sends the payload as raw bytes; axum's `Json` extractor would
@@ -106,8 +87,13 @@ pub async fn github_issue_webhook(
     // replayed delivery GUID must not mint a second task for the same
     // issue. Missing header (non-GitHub sender / proxy strip) falls back
     // to the historical create-once behavior.
-    if let Some(guid) = delivery_guid(&headers) {
-        match state.store.webhook_delivery_fresh(&guid).await {
+    //
+    // The GUID is remembered *before* the task exists, so every failure path
+    // below has to forget it again — otherwise GitHub's retry looks like a
+    // duplicate and the issue silently never becomes a task.
+    let guid = delivery_guid(&headers);
+    if let Some(guid) = &guid {
+        match state.store.webhook_delivery_fresh(guid).await {
             Ok(true) => {}
             Ok(false) => return Ok(StatusCode::OK),
             Err(e) => {
@@ -171,8 +157,11 @@ pub async fn github_issue_webhook(
     };
     let req = agentgrid_common::CreateTaskRequest {
         prompt,
-        repository: repo_name,
-        adapter: "mock".into(),
+        // `owner/name`, not the bare `name`: two organisations can both have
+        // an `api` repository, and the short name would put both into one task
+        // bucket (and one node cache directory).
+        repository: full_name.clone().unwrap_or(repo_name),
+        adapter: webhook_adapter(),
         requested_node_id: None,
         timeout_secs: None,
         validation_command: None,
@@ -199,22 +188,29 @@ pub async fn github_issue_webhook(
         max_tokens: None,
         max_cost_cents: None,
     };
-    state
-        .store
-        .create_task(&req)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Err(e) = state.store.create_task(&req).await {
+        tracing::error!("webhook task creation failed: {e}");
+        // The delivery was recorded as seen before the task existed. Left in
+        // place, every GitHub retry is answered "duplicate" and the issue
+        // never becomes a task — so drop the record and let the retry work.
+        if let Some(guid) = &guid {
+            if let Err(e) = state.store.webhook_delivery_forget(guid).await {
+                tracing::error!("could not clear webhook delivery {guid}: {e}");
+            }
+        }
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
     Ok(StatusCode::OK)
 }
 
-/// Build a fire-and-forget CI-fix/PR-fix task. `adapter=mock` matches the
-/// issue webhook convention; nodes carrying a real adapter override it via
-/// `adapter` resolution. Repository `*` lets any registered node claim it.
+/// Build a fire-and-forget CI-fix/PR-fix task. The adapter comes from
+/// [`webhook_adapter`] (default `mock`); repository `*` lets any registered
+/// node claim it.
 fn create_followup_task(prompt: String) -> agentgrid_common::CreateTaskRequest {
     agentgrid_common::CreateTaskRequest {
         prompt,
         repository: "*".into(),
-        adapter: "mock".into(),
+        adapter: webhook_adapter(),
         requested_node_id: None,
         timeout_secs: None,
         validation_command: None,
@@ -378,18 +374,21 @@ mod tests {
     use tower::ServiceExt;
 
     fn sign(secret: &str, body: &[u8]) -> String {
-        let mac = hmac_sha256(secret.as_bytes(), body);
-        mac.iter().map(|b| format!("{b:02x}")).collect()
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
     }
 
+    /// Pins the dependency to the standard: if the `hmac` crate were swapped
+    /// for something that computes a different MAC, every signature check in
+    /// production would start refusing real deliveries (or accepting forged
+    /// ones) and this is the test that says which.
     #[test]
-    fn hmac_sha256_matches_known_vector() {
-        // RFC 4231 test case 1: key=0x0b*20, data="Hi There".
-        let key = [0x0bu8; 20];
-        let mac = hmac_sha256(&key, b"Hi There");
-        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    fn hmac_sha256_matches_rfc_4231_case_1() {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&[0x0bu8; 20]).unwrap();
+        mac.update(b"Hi There");
         assert_eq!(
-            hex,
+            hex::encode(mac.finalize().into_bytes()),
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
         );
     }
@@ -439,9 +438,82 @@ mod tests {
         // Competitor-gap feature (GitHub write-back): the webhook must capture
         // the repository full_name + issue number so a successful attempt can
         // push a branch, open a PR and comment on the issue.
-        assert_eq!(tasks[0].repository, "demo");
+        // `owner/name`, not the bare name: two orgs can both have `demo`.
+        assert_eq!(tasks[0].repository, "acme/demo");
         assert_eq!(tasks[0].github_repo.as_deref(), Some("acme/demo"));
         assert_eq!(tasks[0].github_issue, Some(42));
+    }
+
+    /// The delivery GUID is recorded before the task exists, so a failure in
+    /// between used to make every GitHub retry look like a duplicate — the
+    /// issue silently never became a task. The trigger below is a stand-in for
+    /// any transient write failure (disk full, lock timeout).
+    #[tokio::test]
+    async fn a_retry_after_a_failed_create_still_creates_the_task() {
+        std::env::set_var("AGENTGRID_GITHUB_WEBHOOK_SECRET", "test-secret");
+        std::env::set_var("AGENTGRID_DISK_CRITICAL_MB", "0");
+        let state = crate::AppState::open_temp().await.unwrap();
+        let app = crate::build_router(state.clone());
+
+        let payload = serde_json::json!({
+            "action": "opened",
+            "repository": {"name": "demo", "full_name": "acme/demo"},
+            "issue": {
+                "number": 7,
+                "title": "Retry me",
+                "body": "",
+                "labels": [{"name": "agent"}]
+            }
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let sig = sign("test-secret", &body);
+        // Same delivery, same GUID: GitHub retries carry the original one.
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/webhooks/github/issues")
+                .header("content-type", "application/json")
+                .header("x-hub-signature-256", format!("sha256={sig}"))
+                .header("x-github-delivery", "delivery-1")
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+
+        sqlx::raw_sql(
+            "CREATE TRIGGER block_tasks BEFORE INSERT ON tasks \
+             BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END",
+        )
+        .execute(&state.store.pool)
+        .await
+        .unwrap();
+
+        let resp = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the failed insert must surface as a failure, not a silent OK"
+        );
+        assert!(state.store.list_tasks().await.unwrap().is_empty());
+
+        sqlx::raw_sql("DROP TRIGGER block_tasks")
+            .execute(&state.store.pool)
+            .await
+            .unwrap();
+
+        let resp = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the retry of a failed delivery must not be dropped as a duplicate"
+        );
+        let tasks = state.store.list_tasks().await.unwrap();
+        assert_eq!(tasks.len(), 1, "the retry must create exactly one task");
+        assert!(tasks[0].prompt.contains("Retry me"));
+
+        // And the GUID is recorded again: a second replay is still a no-op.
+        let resp = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(state.store.list_tasks().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

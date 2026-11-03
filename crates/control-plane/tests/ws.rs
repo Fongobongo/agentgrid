@@ -546,3 +546,79 @@ async fn proxy_pool_reaches_a_ws_node_on_connect_and_on_write() {
         "an empty pool must be marked complete or the node keeps the old list"
     );
 }
+
+/// Revoking a node has to end the session it already holds.
+///
+/// `node_ws` checks the credential at upgrade time only, so before this the
+/// revoked node kept its socket: it went on acking and rejecting assignments
+/// and received every broadcast until it decided to disconnect. The close
+/// frame is the observable difference.
+#[tokio::test]
+async fn revoking_a_node_closes_its_live_socket() {
+    let (base, token) = boot().await;
+    let (node_id, cred) = enroll(&base, &token, "revoke-me", 1).await;
+    let mut sock = ws_connect(&base, &cred).await;
+    send_hello(&mut sock, &node_id, 1).await;
+
+    // Give the server a moment to register the connection: the registry is
+    // keyed by node id and is only populated once the hello is processed.
+    let mut registered = false;
+    for _ in 0..50 {
+        let nodes: serde_json::Value = reqwest::Client::new()
+            .get(format!("{base}/v1/nodes"))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let online = nodes["items"]
+            .as_array()
+            .map(|a| {
+                a.iter().any(|n| {
+                    n["id"].as_str() == Some(node_id.as_str())
+                        && n["status"].as_str() == Some("online")
+                })
+            })
+            .unwrap_or(false);
+        if online {
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(registered, "the node must be registered before revoking it");
+
+    let resp = reqwest::Client::new()
+        .delete(format!("{base}/v1/nodes/{node_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match sock.next().await {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return true,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.unwrap_or(false),
+        "revoking must close the live socket, not just refuse the next reconnect"
+    );
+
+    // And the reconnect is refused at the upgrade.
+    let url = base.replace("http://", "ws://") + "/v1/node/ws";
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {cred}").parse().unwrap());
+    assert!(
+        tokio_tungstenite::connect_async(req).await.is_err(),
+        "a revoked credential must not get a socket"
+    );
+}

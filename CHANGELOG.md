@@ -292,6 +292,36 @@
   alone, and the backend already populates the client with exactly those pairs —
   so the flag is now `--env KEY`. The egress-proxy URL follows the same rule,
   which also keeps a `user:pass@` proxy URL out of the process table.
+- **`join.sh` pasted the request's `Host` header into a script run as root.** With
+  `AGENTGRID_PUBLIC_URL` unset the control plane substituted the `Host` header
+  into `SERVER="..."` inside `deploy/join-node.sh`, which operators pipe into
+  `sudo bash`: a value containing `"`, `$(…)` or a backtick became shell code,
+  reachable through a proxy that forwards a client `Host`, a poisoned cache or
+  DNS rebinding. The header is now **validated, not escaped** (letters, digits,
+  `.`, `-`, `:`, IPv6 brackets), the placeholder is single-quoted as a second
+  line of defence, and an unusable `Host` is a `400` naming
+  `AGENTGRID_PUBLIC_URL` instead of a silent fallback to `127.0.0.1`. A script
+  served over plain `http` now carries a warning under its shebang, because the
+  enrollment token in it travels in clear text.
+- **Revoking a node left its WebSocket open.** The credential was checked only
+  at upgrade time, so a revoked node kept acking and rejecting assignments and
+  received every broadcast until it disconnected on its own. `DELETE
+  /v1/nodes/{id}` now closes the live session with 4001 before returning.
+- **A failed webhook left the issue permanently untasked.** The delivery GUID was
+  recorded before the task existed, so a `500` from `create_task` made every
+  GitHub retry look like a duplicate. The GUID is now forgotten on failure, so
+  the retry creates the task. Three things around it in the same handler:
+  `repository` is `owner/name` rather than the bare name (two orgs can both have
+  `demo`, and the short name put both into one task bucket and one node cache
+  directory); the adapter comes from `AGENTGRID_WEBHOOK_ADAPTER` instead of a
+  hard-coded `mock` that failed as `infrastructure_failed` on a fleet without
+  it; and the signature check uses `hmac::Hmac<Sha256>::verify_slice` — constant
+  time, and the hand-rolled HMAC plus its `ct_eq` are gone.
+- **A repository URL could be read as a git option.** `git clone --mirror <url>
+  <dir>` passed the URL positionally, so `--upload-pack=/path/x` became a flag
+  and ran that program. A leading `-` is now refused, `--` separates options
+  from positionals, and the whole `helper::<addr>` form is rejected rather than
+  just `ext::`/`fd::` — no legitimate remote URL contains `::`.
 
 - **`network_mode=restricted` was advisory in the shipped deploy.** The egress
   compose file declared `agentgrid-egress` with `internal: false` — a

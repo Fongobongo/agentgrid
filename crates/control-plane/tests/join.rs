@@ -86,8 +86,16 @@ async fn join_script_embeds_the_address_the_host_will_dial() {
         "the placeholder must be substituted before the script is served"
     );
     assert!(
-        body.contains(&format!("SERVER=\"{base}\"")),
-        "the script must default to the URL it was fetched from"
+        body.contains(&format!("SERVER='{base}'")),
+        "the script must default to the URL it was fetched from, in single \
+         quotes — the value is substituted from the request's Host header, so \
+         the quoting must not be the only thing keeping it inert"
+    );
+    // The test server speaks plain http, so the served script has to say so:
+    // the token the operator passes on that line crosses the network in clear.
+    assert!(
+        body.contains("# WARNING: this control plane answered over plain http"),
+        "an http fetch must warn inside the script it serves"
     );
     assert!(
         body.contains("--token"),

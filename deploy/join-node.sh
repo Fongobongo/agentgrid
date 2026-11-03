@@ -19,7 +19,11 @@
 # minutes, which is what makes a copy-pasted command safe to hand out.
 set -euo pipefail
 
-SERVER="__AGENTGRID_SERVER__"
+# Single quotes: the value is substituted per request from the request's Host
+# header, and this file is piped into `sudo bash`. The control plane validates
+# the host before substituting it; the quoting here is the second line of
+# defence, not the only one.
+SERVER='__AGENTGRID_SERVER__'
 TOKEN=""
 NAME="$(hostname 2>/dev/null || echo node)"
 ADAPTERS="mock"
