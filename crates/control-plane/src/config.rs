@@ -46,39 +46,142 @@ impl SetupToken {
     }
 }
 
-/// Sliding-window brute-force limiter for the login endpoint (Stage 2.5).
-/// Keyed per account (lowercased username): a generic 429 (not a per-user
-/// signal) is returned when the budget is spent, so it cannot be used to
-/// enumerate which usernames exist. Per-account keying means one attacked
-/// account cannot exhaust the budget for everyone (a global key let a single
-/// attacker lock out all users).
-pub(crate) struct LoginRate {
-    per_key: std::collections::HashMap<String, (i64, u32)>,
-    max: u32,
-    window_secs: i64,
+/// One fixed-window counter map with a hard entry cap.
+///
+/// The cap matters as much as the counter: keys are attacker-supplied
+/// (usernames, source addresses), so an unbounded map is a memory-exhaustion
+/// primitive inside the one endpoint that is reachable without a credential.
+struct WindowMap {
+    entries: std::collections::HashMap<String, (i64, u32)>,
+    cap: usize,
 }
-impl LoginRate {
-    pub(crate) fn new() -> Self {
+
+impl WindowMap {
+    fn new(cap: usize) -> Self {
         Self {
-            per_key: std::collections::HashMap::new(),
-            max: 10,
-            window_secs: 60,
+            entries: std::collections::HashMap::new(),
+            cap,
         }
     }
-    /// Record an attempt for `key`; returns false once its per-window budget
-    /// is spent. Stale keys are pruned opportunistically.
-    pub(crate) fn check_and_record(&mut self, key: &str, now: i64) -> bool {
-        if self.per_key.len() > 1024 {
-            let window = self.window_secs;
-            self.per_key.retain(|_, (start, _)| now - *start < window);
+
+    /// Record one event for `key`; false once its budget for the window is
+    /// spent.
+    fn check_and_record(&mut self, key: &str, now: i64, window_secs: i64, max: u32) -> bool {
+        if !self.entries.contains_key(key) && self.entries.len() >= self.cap {
+            self.entries
+                .retain(|_, (start, _)| now - *start < window_secs);
+            // Still full of live keys: evict the one closest to expiry. A
+            // flood of distinct keys must not grow the map without bound, and
+            // dropping the oldest window costs an attacker the least.
+            if self.entries.len() >= self.cap {
+                if let Some(oldest) = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, (start, _))| *start)
+                    .map(|(k, _)| k.clone())
+                {
+                    self.entries.remove(&oldest);
+                }
+            }
         }
-        let entry = self.per_key.entry(key.to_string()).or_insert((0, 0));
-        if now - entry.0 >= self.window_secs {
+        let entry = self.entries.entry(key.to_string()).or_insert((0, 0));
+        if now - entry.0 >= window_secs {
             entry.0 = now;
             entry.1 = 0;
         }
         entry.1 += 1;
-        entry.1 <= self.max
+        entry.1 <= max
+    }
+
+    #[cfg(test)]
+    fn is_exhausted(&self, key: &str, now: i64, window_secs: i64, max: u32) -> bool {
+        match self.entries.get(key) {
+            Some((start, count)) => now - *start < window_secs && *count >= max,
+            None => false,
+        }
+    }
+
+    fn reset(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+}
+
+/// Brute-force limiter for the login endpoint.
+///
+/// Two buckets, because one is not enough (finding 12):
+///
+/// * **Per source address** — a hard gate in front of Argon2. It is what stops
+///   password spraying across many usernames, and it caps the CPU an
+///   unauthenticated caller can make the control plane burn.
+/// * **Per account, failures only** — a soft gate applied *after* the password
+///   has been checked, and cleared by a successful login. Counting failures
+///   rather than attempts is what removes the lockout: an attacker can spend
+///   the budget, but the real user's correct password still logs in, and the
+///   wrong-password answer degrades to a generic 429 instead of a 401.
+///
+/// Both answers are generic, so neither bucket says whether the username
+/// exists.
+pub(crate) struct LoginRate {
+    per_ip: WindowMap,
+    per_user: WindowMap,
+    /// Attempts per address per window (all attempts).
+    ip_max: u32,
+    /// Failed attempts per account per window.
+    user_max: u32,
+    window_secs: i64,
+}
+
+impl LoginRate {
+    pub(crate) fn new() -> Self {
+        Self {
+            per_ip: WindowMap::new(4096),
+            per_user: WindowMap::new(4096),
+            ip_max: 30,
+            user_max: 10,
+            window_secs: 60,
+        }
+    }
+
+    /// Hard gate, before the expensive password check. `None` (no connect
+    /// info: in-process callers) skips it rather than inventing a shared
+    /// bucket that would let one caller throttle every test.
+    pub(crate) fn admit(&mut self, client: Option<std::net::IpAddr>, now: i64) -> bool {
+        match client {
+            Some(ip) => {
+                self.per_ip
+                    .check_and_record(&ip.to_string(), now, self.window_secs, self.ip_max)
+            }
+            None => true,
+        }
+    }
+
+    /// Count a failed verification. False means the account's failure budget
+    /// is spent: answer 429 instead of 401, but do not reject a correct
+    /// password — [`Self::note_success`] is what makes that possible.
+    pub(crate) fn note_failure(&mut self, username: &str, now: i64) -> bool {
+        self.per_user.check_and_record(
+            &username.to_lowercase(),
+            now,
+            self.window_secs,
+            self.user_max,
+        )
+    }
+
+    /// A correct password clears the account's failure budget.
+    pub(crate) fn note_success(&mut self, username: &str) {
+        self.per_user.reset(&username.to_lowercase());
+    }
+
+    /// True once this account has spent its failure budget (used by tests and
+    /// by the handler's 429-vs-401 decision).
+    #[cfg(test)]
+    pub(crate) fn account_is_throttled(&self, username: &str, now: i64) -> bool {
+        self.per_user.is_exhausted(
+            &username.to_lowercase(),
+            now,
+            self.window_secs,
+            self.user_max,
+        )
     }
 }
 
@@ -138,4 +241,67 @@ pub(crate) fn env_usize(key: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> std::net::IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// Finding 12: the per-account bucket counts failures, not attempts, so a
+    /// spent budget cannot lock the real user out of their own account.
+    #[test]
+    fn a_spent_failure_budget_does_not_block_a_correct_password() {
+        let mut rate = LoginRate::new();
+        for i in 0..20 {
+            rate.note_failure("admin", 1000 + i);
+        }
+        assert!(rate.account_is_throttled("admin", 1020));
+        // A correct password resets it; the handler calls this on success.
+        rate.note_success("admin");
+        assert!(!rate.account_is_throttled("admin", 1021));
+    }
+
+    /// The per-address gate is what bounds spraying across usernames: ten
+    /// distinct accounts from one address must not buy ten budgets.
+    #[test]
+    fn one_address_cannot_spray_across_accounts() {
+        let mut rate = LoginRate::new();
+        let mut allowed = 0;
+        for i in 0..60 {
+            if rate.admit(Some(ip("203.0.113.7")), 1000 + i) {
+                allowed += 1;
+            }
+            // Each attempt is a fresh username with its own per-account bucket.
+            let _ = rate.note_failure(&format!("user{i}"), 1000 + i);
+        }
+        assert_eq!(allowed, rate.ip_max as i32);
+    }
+
+    /// A different address is unaffected by someone else's exhausted bucket.
+    #[test]
+    fn the_address_bucket_is_per_address() {
+        let mut rate = LoginRate::new();
+        for i in 0..40 {
+            rate.admit(Some(ip("203.0.113.7")), 1000 + i);
+        }
+        assert!(!rate.admit(Some(ip("203.0.113.7")), 1040));
+        assert!(rate.admit(Some(ip("198.51.100.4")), 1041));
+    }
+
+    /// An unbounded key map is a memory-exhaustion primitive on the one route
+    /// reachable without a credential.
+    #[test]
+    fn the_key_maps_are_bounded() {
+        let mut rate = LoginRate::new();
+        for i in 0..10_000 {
+            let _ = rate.admit(Some(ip("10.0.0.1")), 1000);
+            rate.note_failure(&format!("user{i}"), 1000);
+        }
+        assert!(rate.per_user.entries.len() <= rate.per_user.cap);
+        assert!(rate.per_ip.entries.len() <= rate.per_ip.cap);
+    }
 }

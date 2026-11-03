@@ -1245,3 +1245,113 @@ async fn node_skills_trust_requires_node_credential() {
         .unwrap();
     assert_eq!(user.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// Finding 12: the per-account bucket counts failures and a correct password
+/// clears it, so an attacker cannot lock the real user out of their own
+/// account by spending the budget with wrong guesses.
+#[tokio::test]
+async fn a_correct_password_survives_a_spent_failure_budget() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+    // `open_temp` bootstraps test/test. Spend the failure budget against the
+    // real account; the answers degrade from 401 to 429 as it runs out.
+    let mut saw_throttle = false;
+    for i in 0..15 {
+        let code = login_status(&app, "test", &format!("wrong{i}")).await;
+        assert!(
+            code == StatusCode::UNAUTHORIZED || code == StatusCode::TOO_MANY_REQUESTS,
+            "attempt {i} answered {code}"
+        );
+        saw_throttle |= code == StatusCode::TOO_MANY_REQUESTS;
+    }
+    assert!(saw_throttle, "the failure budget must run out");
+    // The real password still works.
+    assert_eq!(login_status(&app, "test", "test").await, StatusCode::OK);
+}
+
+/// Finding 14: `/metrics` can be closed to the network with a bearer token.
+#[tokio::test]
+async fn metrics_requires_the_configured_bearer_token() {
+    let state = AppState::open_temp().await.unwrap();
+    state.set_metrics_token(Some("s3cret-metrics".into()));
+    let app = build_router(state);
+    let get = |auth: Option<String>| {
+        let mut req = Request::builder().uri("/metrics");
+        if let Some(a) = auth.as_deref() {
+            req = req.header("authorization", a);
+        }
+        req.body(Body::empty()).unwrap()
+    };
+    let resp = app.clone().oneshot(get(None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        resp.headers().contains_key("www-authenticate"),
+        "a 401 must tell the caller which scheme to use"
+    );
+    // A user JWT is not the metrics token.
+    let jwt = test_token(&app).await;
+    let resp = app
+        .clone()
+        .oneshot(get(Some(format!("Bearer {jwt}"))))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = app
+        .clone()
+        .oneshot(get(Some("Bearer s3cret-metrics".into())))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// Finding 14: the 50 MiB body ceiling used to apply to every route, so an
+/// unauthenticated caller could make the control plane buffer 50 MiB per
+/// request. It is now the event-batch size by default, raised only on the two
+/// artifact upload routes.
+#[tokio::test]
+async fn the_default_body_limit_is_small_and_artifact_uploads_are_exempt() {
+    let state = AppState::open_temp().await.unwrap();
+    let app = build_router(state);
+
+    // 5 MiB is over the default ceiling (4 MiB event batch) ...
+    let big = "x".repeat(5 * 1024 * 1024);
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/v1/auth/login",
+            serde_json::json!({ "username": "a", "password": big }).to_string(),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    // ... and under the artifact ceiling, which the upload routes raise
+    // explicitly. A wrong sha256 proves the body was read: the size check
+    // never ran, the integrity check did.
+    let (node_id, cred) = enroll(&app, "node-body", vec!["mock".into()], vec!["*".into()]).await;
+    let assign = create_and_assign(&app, &node_id, &cred, "write:x:hi").await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/node/attempts/{}/artifacts/raw",
+                    assign.attempt_id
+                ))
+                .header("authorization", format!("Bearer {cred}"))
+                .header("x-agentgrid-fencing-token", &assign.fencing_token)
+                .header("x-artifact-name", "big.bin")
+                .header("x-artifact-media-type", "application/octet-stream")
+                .header(
+                    "x-artifact-sha256",
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdead",
+                )
+                .body(Body::from(big.into_bytes()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}

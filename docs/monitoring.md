@@ -1,8 +1,24 @@
 # Prometheus + Grafana setup (Plan 3.10 follow-up)
 
 The control plane exposes a Prometheus text-format scrape endpoint at
-`GET /metrics` (public, no auth — same class as `/health/*`; put it behind
-your reverse proxy's access rules if the port is exposed).
+`GET /metrics`.
+
+It is public by default, like `/health/*`. That is fine on a private network
+and wrong on an exposed port: the payload lists every node name and each
+scrape pays for a full-table aggregation. Set `AGENTGRID_METRICS_TOKEN` to
+require a bearer token instead:
+
+```bash
+AGENTGRID_METRICS_TOKEN=... agentgrid-control-plane ...
+curl -s -H "Authorization: Bearer $AGENTGRID_METRICS_TOKEN" http://cp-host:7800/metrics
+```
+
+The token can also be rotated at runtime (`AppState::set_metrics_token`) — no
+restart needed. Without it, restrict the endpoint at the reverse proxy.
+
+`GET /health/ready` answers only on the leader and reuses its disk + database
+probe for one second, so a tight liveness poller cannot turn every request
+into a file write.
 
 ## Prometheus scrape config
 
@@ -11,6 +27,8 @@ your reverse proxy's access rules if the port is exposed).
 scrape_configs:
   - job_name: agentgrid-cp
     scrape_interval: 15s
+    authorization:
+      credentials: "<AGENTGRID_METRICS_TOKEN>"   # drop this block if the endpoint is public
     static_configs:
       - targets: ["cp-host:7800"]   # or the TLS-terminated proxy in front
 ```
@@ -18,7 +36,8 @@ scrape_configs:
 Verify by hand:
 
 ```bash
-curl -s http://cp-host:7800/metrics | head -20
+curl -s -H "Authorization: Bearer $AGENTGRID_METRICS_TOKEN" \
+  http://cp-host:7800/metrics | head -20
 curl -s http://cp-host:7800/health/ready
 ```
 

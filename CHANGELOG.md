@@ -322,6 +322,27 @@
   and ran that program. A leading `-` is now refused, `--` separates options
   from positionals, and the whole `helper::<addr>` form is rejected rather than
   just `ext::`/`fd::` — no legitimate remote URL contains `::`.
+- **Login limiting keyed only on the username.** One bucket per account meant
+  anyone could lock the real user out by spending it with wrong passwords, it
+  did nothing against spraying one password across many accounts, an unknown
+  username returned before Argon2 ran (a timing oracle for which accounts
+  exist), and the key map was unbounded. There are now two buckets: a per-source
+  address gate in front of Argon2 (30/min, the peer address from connect info,
+  `X-Forwarded-For` honoured only when `AGENTGRID_TRUSTED_PROXIES` names the
+  peer) and a per-account *failure* counter (10/min) that a correct password
+  clears — so a spent budget degrades the wrong-password answer to a generic
+  `429` and never rejects the real user. Both maps are capped at 4096 keys with
+  oldest-window eviction, and an unknown username now pays for the same Argon2
+  verification as a real one.
+- **Unauthenticated endpoints that cost the control plane work.** `/metrics`
+  listed every node name and ran a full-table aggregation per scrape: it now
+  takes an optional `AGENTGRID_METRICS_TOKEN` bearer (constant-time compare,
+  documented in `docs/monitoring.md`). `/health/ready` wrote and deleted a file
+  on every request: the disk + database verdict is reused for one second while
+  the leader check stays per-request. And the 50 MiB body ceiling applied to
+  *every* route, `/v1/auth/login` included: the default is now the event-batch
+  size (4 MiB), raised to `AGENTGRID_MAX_ARTIFACT_MB` only on the two artifact
+  upload routes.
 
 - **`network_mode=restricted` was advisory in the shipped deploy.** The egress
   compose file declared `agentgrid-egress` with `internal: false` — a

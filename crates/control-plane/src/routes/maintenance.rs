@@ -95,8 +95,46 @@ fn prom_label(s: &str) -> String {
         .replace('\n', "\\n")
 }
 
-pub async fn metrics(State(state): State<Arc<AppState>>) -> (StatusCode, axum::response::Response) {
+/// Constant-time byte comparison. The metrics token is a secret compared once
+/// per scrape; a short-circuiting `==` would let a caller recover it byte by
+/// byte from response times.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+pub async fn metrics(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> (StatusCode, axum::response::Response) {
     use axum::response::IntoResponse;
+    // Finding 14: `/metrics` lists every node name and pays for a full-table
+    // aggregation on each scrape. It stays public unless the operator sets
+    // `AGENTGRID_METRICS_TOKEN` (docs/monitoring.md), which is the documented
+    // way to close it to the network.
+    if let Some(expected) = state.required_metrics_token() {
+        let presented = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match presented {
+            Some(token) if ct_eq(token.as_bytes(), expected.as_bytes()) => {}
+            _ => {
+                let mut resp = "".into_response();
+                resp.headers_mut().insert(
+                    axum::http::header::WWW_AUTHENTICATE,
+                    axum::http::HeaderValue::from_static("Bearer"),
+                );
+                return (StatusCode::UNAUTHORIZED, resp);
+            }
+        }
+    }
     let nodes = match state.store.list_nodes(None, None).await {
         Ok(n) => n,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".into_response()),

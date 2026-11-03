@@ -384,17 +384,20 @@ pub async fn auth_setup(
 
 pub async fn auth_login(
     State(state): State<Arc<AppState>>,
+    crate::net::ClientAddr(client): crate::net::ClientAddr,
     Json(req): Json<LoginRequest>,
 ) -> Result<(HeaderMap, Json<LoginResponse>), StatusCode> {
-    // Stage 2.5: brute-force protection. Fail closed to 429 on budget
-    // exhaustion; the generic error avoids user enumeration.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    // Hard gate, and the only one that runs before Argon2: it caps the CPU an
+    // unauthenticated caller can make the control plane burn and stops one
+    // address from spraying a password across many accounts. The answer is a
+    // generic 429, so it says nothing about whether the username exists.
     {
         let mut rate = state.login_rate.lock().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        if !rate.check_and_record(&req.username.to_lowercase(), now) {
+        if !rate.admit(client, now) {
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
     }
@@ -407,8 +410,18 @@ pub async fn auth_login(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let Some((_, role)) = user else {
-        return Err(StatusCode::UNAUTHORIZED);
+        // Count failures, not attempts: a spent budget turns the answer into
+        // a generic 429 but never rejects a correct password, so an attacker
+        // cannot lock the real user out of their own account.
+        let mut rate = state.login_rate.lock().await;
+        return Err(if rate.note_failure(&req.username, now) {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        });
     };
+    // A correct password clears the account's failure budget.
+    state.login_rate.lock().await.note_success(&req.username);
     let token = state.issue_token(&req.username, &role).map_err(|e| {
         tracing::error!("issue_token failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -458,9 +471,20 @@ pub async fn auth_logout(
 
 pub async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
     // A standby is alive but must never receive traffic: only the leader (or
-    // a single-mode node) is ready.
+    // a single-mode node) is ready. The role is in memory, so it is checked on
+    // every request — a failover must show up immediately.
     if !state.ha.is_leader() {
         return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    // The rest of the probe touches the disk and the database. Finding 14: an
+    // unauthenticated caller must not be able to turn every request into a
+    // file write, so the verdict is reused for a second.
+    if let Some(ready) = state.ready_cached() {
+        return if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
     }
     let dir = std::path::Path::new(&state.db_path)
         .parent()
@@ -474,7 +498,9 @@ pub async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
     })
     .await
     .unwrap_or(false);
-    if state.store.health_check().await && writable {
+    let ready = state.store.health_check().await && writable;
+    state.ready_store(ready);
+    if ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

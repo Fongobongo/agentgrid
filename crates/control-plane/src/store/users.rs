@@ -28,6 +28,21 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
+/// A hash to verify against when the username does not exist (finding 12).
+///
+/// Returning early for an unknown user made the response measurably faster
+/// than a wrong password for a real one — a username oracle that no amount of
+/// generic error messages hides. Hashing this constant once at first use keeps
+/// the cost identical on both paths (same `Argon2::default()` parameters, so
+/// the parameters cannot drift away from the real hashes).
+fn dummy_hash() -> &'static str {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DUMMY.get_or_init(|| {
+        hash_password("agentgrid-timing-equaliser")
+            .expect("hash the constant dummy password (cannot fail short of OOM)")
+    })
+}
+
 impl Store {
     /// Number of local users (0 means the install is in its open bootstrap window).
     pub async fn user_count(&self) -> Result<i64> {
@@ -85,6 +100,10 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         let Some(row) = row else {
+            // Spend the same Argon2 time an existing user would, so response
+            // latency does not reveal which usernames exist (finding 12).
+            let pw = password.to_string();
+            let _ = tokio::task::spawn_blocking(move || verify_password(&pw, dummy_hash())).await?;
             return Ok(None);
         };
         let id: String = row.try_get("id")?;

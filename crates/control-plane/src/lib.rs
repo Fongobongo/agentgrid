@@ -14,6 +14,7 @@ mod config;
 mod diff_scan;
 pub mod ha;
 mod middleware;
+mod net;
 mod notify;
 mod routes;
 mod scope_scan;
@@ -76,6 +77,15 @@ pub struct AppState {
     db_path: String,
     /// Brute-force protection on `/v1/auth/login` (Stage 2.5).
     pub(crate) login_rate: Arc<tokio::sync::Mutex<LoginRate>>,
+    /// Optional bearer token for `/metrics` (`AGENTGRID_METRICS_TOKEN`).
+    /// `None` keeps the endpoint public, as documented in docs/monitoring.md;
+    /// set it to stop an unauthenticated caller from enumerating node names
+    /// and making every scrape pay for a full-table aggregation.
+    pub(crate) metrics_token: std::sync::RwLock<Option<String>>,
+    /// Cached `/health/ready` verdict (finding 14): the probe writes and
+    /// deletes a file, so an unauthenticated caller must not be able to turn
+    /// each request into disk I/O. Holds `(checked_at, ready)`.
+    pub(crate) ready_probe: std::sync::Mutex<Option<(std::time::Instant, bool)>>,
     /// Hardening P1 item 14: per-node event-ingest rate limit (requests per
     /// window). A node that floods the control plane with event batches beyond
     /// `event_rate_max` / `event_rate_window_secs` gets 429 instead of more
@@ -313,6 +323,12 @@ impl AppState {
             limits,
             db_path: db_path.to_string(),
             login_rate: Arc::new(tokio::sync::Mutex::new(LoginRate::new())),
+            metrics_token: std::sync::RwLock::new(
+                std::env::var("AGENTGRID_METRICS_TOKEN")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+            ),
+            ready_probe: std::sync::Mutex::new(None),
             event_rate: Arc::new(tokio::sync::Mutex::new(EventRate::new())),
             setup_token,
             cross_node_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -428,6 +444,45 @@ impl AppState {
             .as_ref()
             .filter(|t| t.is_live())
             .map(|t| t.token.clone())
+    }
+
+    /// How long a `/health/ready` verdict is reused. Short enough that a
+    /// liveness poller still sees a failover within a second, long enough
+    /// that a scrape storm costs one disk probe instead of one per request.
+    const READY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Cached readiness verdict, or `None` when it is older than
+    /// [`Self::READY_CACHE_TTL`].
+    pub(crate) fn ready_cached(&self) -> Option<bool> {
+        let guard = self.ready_probe.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < Self::READY_CACHE_TTL)
+            .map(|(_, ready)| *ready)
+    }
+
+    pub(crate) fn ready_store(&self, ready: bool) {
+        let mut guard = self.ready_probe.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some((std::time::Instant::now(), ready));
+    }
+
+    /// Bearer token `/metrics` requires, or `None` when it is public.
+    pub(crate) fn required_metrics_token(&self) -> Option<String> {
+        self.metrics_token
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Set (or clear) the `/metrics` bearer token. Boot reads
+    /// `AGENTGRID_METRICS_TOKEN`; this is the runtime path, so a token can be
+    /// rotated without a restart and a test can pin one without touching the
+    /// process environment that every other test in the binary reads.
+    pub fn set_metrics_token(&self, token: Option<String>) {
+        *self
+            .metrics_token
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = token;
     }
 }
 
@@ -767,11 +822,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/node/attempts/{id}/artifacts",
-            post(routes::artifacts::upload_artifact),
+            post(routes::artifacts::upload_artifact)
+                .layer(DefaultBodyLimit::max(state.limits.artifact)),
         )
         .route(
             "/v1/node/attempts/{id}/artifacts/raw",
-            post(routes::artifacts::upload_artifact_raw),
+            post(routes::artifacts::upload_artifact_raw)
+                .layer(DefaultBodyLimit::max(state.limits.artifact)),
         )
         .route(
             "/v1/tasks/{id}/artifacts",
@@ -849,7 +906,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::workflows::cancel_workflow_run_handler),
         )
         .merge(ha::routes::data_router(state.clone()))
-        .layer(DefaultBodyLimit::max(state.limits.artifact))
+        // Finding 14: the ceiling used to be the artifact size (50 MiB) on
+        // *every* route, including `/v1/auth/login` — an unauthenticated
+        // caller could make the control plane buffer 50 MiB per request. The
+        // default is now the largest non-artifact body we accept (an event
+        // batch); the two artifact upload routes raise it to `artifact`.
+        .layer(DefaultBodyLimit::max(
+            state.limits.event_batch_bytes.max(state.limits.event),
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_user_auth,
@@ -1014,16 +1078,23 @@ async fn serve_listener(state: Arc<AppState>, addr: std::net::SocketAddr) -> any
                     tcp: listener,
                     acceptor,
                 },
-                app,
+                // Finding 12: the login limiter needs the peer address, which
+                // axum only attaches when the service is built with connect
+                // info. Both branches must use it, or a TLS deployment would
+                // silently fall back to the per-account bucket alone.
+                app.into_make_service_with_connect_info::<net::PeerAddr>(),
             )
             .with_graceful_shutdown(tls::shutdown_signal(Some(state)))
             .await?;
         }
         _ => {
             tracing::info!("control plane listening on {addr} (plaintext)");
-            axum::serve(listener, app)
-                .with_graceful_shutdown(tls::shutdown_signal(Some(state)))
-                .await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<net::PeerAddr>(),
+            )
+            .with_graceful_shutdown(tls::shutdown_signal(Some(state)))
+            .await?;
         }
     }
     Ok(())

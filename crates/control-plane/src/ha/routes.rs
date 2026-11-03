@@ -22,6 +22,17 @@ use super::{election, snapshot};
 use crate::store::ApplyOutcome;
 use crate::AppState;
 
+/// Body ceiling for one replicated changeset batch.
+///
+/// The control plane's default body limit is the event-batch size (4 MiB,
+/// finding 14), but a changeset is sized by `AGENTGRID_HA_MAX_CHANGESET_MB`
+/// (8 MiB by default) — without this override replication would start
+/// answering 413 for batches the leader itself assembled.
+fn changeset_body_limit(state: &AppState) -> axum::extract::DefaultBodyLimit {
+    let max = state.ha.config.max_changeset_bytes.min(usize::MAX as u64) as usize;
+    axum::extract::DefaultBodyLimit::max(max)
+}
+
 pub fn data_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/ha/status", get(status))
@@ -32,8 +43,16 @@ pub fn data_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/ha/snapshot", post(snapshot_now))
         .route("/v1/ha/snapshot/{id}", get(snapshot_download))
         .route("/v1/ha/snapshot/{id}/manifest", get(snapshot_manifest))
-        .route("/v1/ha/changeset", post(changeset))
-        .route("/v1/ha/artifact", get(artifact_get).put(artifact_put))
+        .route(
+            "/v1/ha/changeset",
+            post(changeset).layer(changeset_body_limit(&state)),
+        )
+        .route(
+            "/v1/ha/artifact",
+            get(artifact_get)
+                .put(artifact_put)
+                .layer(axum::extract::DefaultBodyLimit::max(state.limits.artifact)),
+        )
         .route("/v1/ha/secret", get(secret))
         .layer(axum::middleware::from_fn_with_state(state, data_token))
 }
