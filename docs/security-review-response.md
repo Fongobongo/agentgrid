@@ -205,7 +205,9 @@ full-table aggregation. With `AGENTGRID_ENV=production` and no token, the
 endpoint now returns `401` with `WWW-Authenticate: Bearer`, and boot logs a
 warning naming the variable. A configured token opens it on any host; clearing
 the token in production closes it again rather than reverting to public. A dev
-host stays public. `docs/monitoring.md` documents the behaviour.
+host stays public. `docs/monitoring.md` documents the behaviour; the production
+compose E2E asserts both halves — an anonymous scrape gets `401`, one with the
+token still returns the transport gauges.
 
 ## Test gaps from the review
 

@@ -16,10 +16,13 @@ curl -s -H "Authorization: Bearer $AGENTGRID_METRICS_TOKEN" http://cp-host:7800/
 ```
 
 Outside production the token is optional and closes the endpoint there too.
-It can be rotated at runtime (`AppState::set_metrics_token`) — no restart
-needed. Clearing it in production closes the endpoint again instead of
-silently making it public. `/metrics` is deliberately exempt from the session
-JWT middleware: a scraper sends a bearer token, not a login cookie.
+The production `docker-compose.yml` passes `AGENTGRID_METRICS_TOKEN` through
+from the environment; leaving it unset is a supported configuration and simply
+keeps the endpoint closed. It can be rotated at runtime
+(`AppState::set_metrics_token`) — no restart needed. Clearing it in production
+closes the endpoint again instead of silently making it public. `/metrics` is
+deliberately exempt from the session JWT middleware: a scraper sends a bearer
+token, not a login cookie.
 
 `GET /health/ready` answers only on the leader and reuses its disk + database
 probe for one second, so a tight liveness poller cannot turn every request

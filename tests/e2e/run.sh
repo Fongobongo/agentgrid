@@ -28,6 +28,11 @@ echo ">> bringing up stack"
 # below so login does not break against a random admin password.
 export AGENTGRID_ADMIN_USER="$USER"
 export AGENTGRID_ADMIN_PASSWORD="$PASS"
+# Finding 14 follow-up: this compose stack sets AGENTGRID_ENV=production, where
+# /metrics is closed unless a token exists. Pin one so the transport-gauge
+# assertions below can still scrape it (up.sh passes process env to compose).
+export AGENTGRID_METRICS_TOKEN="${AGENTGRID_METRICS_TOKEN:-e2e-metrics-token}"
+METRICS_AUTH=(-H "authorization: Bearer $AGENTGRID_METRICS_TOKEN")
 bash deploy/compose/up.sh >/dev/null
 
 echo ">> waiting for health"
@@ -36,6 +41,13 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 curl -fsS "$BASE/health/ready" >/dev/null || { echo "control plane never became ready"; exit 1; }
+
+# A production control plane must not hand its node list and a full-table
+# aggregation to an anonymous scraper. The health probe stays public.
+metrics_code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/metrics")
+[ "$metrics_code" = "401" ] \
+  || { echo "E2E FAILED: unauthenticated /metrics -> $metrics_code (want 401)"; exit 1; }
+echo "metrics closed to anonymous scrapes: HTTP $metrics_code"
 
 # Hardening P2 item 31: assert the control-plane ran as a non-root user
 # (USER agentgrid in the image). root inside the container is a fail.
@@ -73,10 +85,10 @@ echo "final status: $status"
 # least one node must show on the WS gauge; in poll mode the poll counter
 # must be non-zero (and the WS gauge zero).
 MODE="${AGENTGRID_TRANSPORT:-auto}"
-WS_NODES=$(curl -fsS "$BASE/metrics" | awk -F' ' '/^agentgrid_node_transport_connections\{transport="ws"\}/{print $2}')
+WS_NODES=$(curl -fsS "${METRICS_AUTH[@]}" "$BASE/metrics" | awk -F' ' '/^agentgrid_node_transport_connections\{transport="ws"\}/{print $2}')
 case "$MODE" in
   poll)
-    POLLS=$(curl -fsS "$BASE/metrics" | awk '/^agentgrid_poll_requests_total /{print $2}')
+    POLLS=$(curl -fsS "${METRICS_AUTH[@]}" "$BASE/metrics" | awk '/^agentgrid_poll_requests_total /{print $2}')
     [ "${POLLS:-0}" -ge 1 ] || { echo "E2E FAILED: poll mode but agentgrid_poll_requests_total=${POLLS:-0}"; exit 1; }
     [ "${WS_NODES:-0}" -eq 0 ] || { echo "E2E FAILED: poll mode but ws gauge=${WS_NODES}"; exit 1; }
     echo "metrics OK: poll_requests_total=$POLLS ws_nodes=0";;

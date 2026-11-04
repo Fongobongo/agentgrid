@@ -28,6 +28,10 @@ services:
       AGENTGRID_ENV: production
       AGENTGRID_JWT_SECRET: ${AGENTGRID_JWT_SECRET:?AGENTGRID_JWT_SECRET must be set (>=32 bytes)}
       AGENTGRID_LISTEN: 0.0.0.0:7800
+      # `/metrics` is closed (401) in production when this is unset — boot logs
+      # a warning. Set it to let Prometheus scrape; see docs/monitoring.md.
+      # Optional on purpose: an operator without Prometheus needs no token.
+      AGENTGRID_METRICS_TOKEN: ${AGENTGRID_METRICS_TOKEN:-}
     volumes:
       - agentgrid-data:/var/lib/agentgrid
 

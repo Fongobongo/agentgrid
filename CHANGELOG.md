@@ -286,7 +286,10 @@
   now answers `401` (with `WWW-Authenticate: Bearer`) and boot logs a warning
   naming the variable; a dev host stays public. Configuring a token opens it
   on either host, and rotating the token away in production closes it again
-  instead of silently reverting to public. See `docs/monitoring.md`.
+  instead of silently reverting to public. The production compose stack passes
+  the token through from the environment (unset = closed), and its E2E now
+  asserts that an unauthenticated scrape gets `401` while the scrape with the
+  token still works. See `docs/monitoring.md`.
 
 - **`bwrap` let the agent read every secret the service user could.** The
   sandbox binds the host root read-only, which stops writes but not reads — and
