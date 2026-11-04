@@ -1304,6 +1304,53 @@ async fn metrics_requires_the_configured_bearer_token() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// Finding 14 (follow-up): an opt-in token left `/metrics` public by default
+/// even on a production host. Production now fails closed.
+#[tokio::test]
+async fn metrics_is_closed_in_production_without_a_token() {
+    let state = AppState::open_temp().await.unwrap();
+    state.set_metrics_allow_public(false);
+    let app = build_router(state.clone());
+    let get = |auth: Option<&str>| {
+        let mut req = Request::builder().uri("/metrics");
+        if let Some(a) = auth {
+            req = req.header("authorization", a);
+        }
+        req.body(Body::empty()).unwrap()
+    };
+
+    // No token exists, so no presented value can match — not even a
+    // plausible-looking bearer header.
+    for auth in [None, Some("Bearer anything")] {
+        let resp = app.clone().oneshot(get(auth)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().contains_key("www-authenticate"));
+    }
+
+    // Configuring a token opens it to that token only.
+    state.set_metrics_token(Some("prod-metrics".into()));
+    assert_eq!(
+        app.clone().oneshot(get(None)).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(get(Some("Bearer prod-metrics")))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Rotating the token away closes the endpoint again rather than
+    // silently reverting to public.
+    state.set_metrics_token(None);
+    assert_eq!(
+        app.clone().oneshot(get(None)).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 /// Finding 14: the 50 MiB body ceiling used to apply to every route, so an
 /// unauthenticated caller could make the control plane buffer 50 MiB per
 /// request. It is now the event-batch size by default, raised only on the two

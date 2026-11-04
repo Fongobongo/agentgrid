@@ -109,22 +109,32 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// A configured token always closes the endpoint. Without one, only a dev
+/// host may serve it: production fails closed (finding 14). Keeping this a
+/// pure predicate makes the default testable without a database in the loop.
+fn metrics_requires_auth(allow_public: bool, token: Option<&str>) -> bool {
+    token.is_some() || !allow_public
+}
+
 pub async fn metrics(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> (StatusCode, axum::response::Response) {
     use axum::response::IntoResponse;
     // Finding 14: `/metrics` lists every node name and pays for a full-table
-    // aggregation on each scrape. It stays public unless the operator sets
-    // `AGENTGRID_METRICS_TOKEN` (docs/monitoring.md), which is the documented
-    // way to close it to the network.
-    if let Some(expected) = state.required_metrics_token() {
+    // aggregation on each scrape. A token closes it on any host; in
+    // production "no token" means closed, not public, so the safe default no
+    // longer depends on the operator remembering an env var. `user_protected`
+    // still exempts this path from the session JWT: Prometheus sends a bearer
+    // token, not a login cookie.
+    let expected = state.required_metrics_token();
+    if metrics_requires_auth(state.metrics_allow_public(), expected.as_deref()) {
         let presented = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        match presented {
-            Some(token) if ct_eq(token.as_bytes(), expected.as_bytes()) => {}
+        match (expected.as_deref(), presented) {
+            (Some(secret), Some(token)) if ct_eq(token.as_bytes(), secret.as_bytes()) => {}
             _ => {
                 let mut resp = "".into_response();
                 resp.headers_mut().insert(
@@ -826,4 +836,36 @@ pub async fn metrics(
         )
             .into_response(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review finding 14: the endpoint used to be public by default, including
+    /// in production. A token closes it anywhere; production closes it even
+    /// when no token is configured.
+    #[test]
+    fn metrics_policy_fails_closed_in_production() {
+        assert!(
+            !metrics_requires_auth(true, None),
+            "a dev host stays public"
+        );
+        assert!(
+            metrics_requires_auth(true, Some("t")),
+            "a token closes a dev host too"
+        );
+        assert!(
+            metrics_requires_auth(false, None),
+            "production with no token must not be public"
+        );
+        assert!(metrics_requires_auth(false, Some("t")));
+    }
+
+    #[test]
+    fn metrics_token_comparison_is_constant_time_and_exact() {
+        assert!(ct_eq(b"s3cret", b"s3cret"));
+        assert!(!ct_eq(b"s3cret", b"s3creT"));
+        assert!(!ct_eq(b"s3cret", b"s3cre"));
+    }
 }

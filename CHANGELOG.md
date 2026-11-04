@@ -262,6 +262,32 @@
 
 ### Fixed
 
+- **Staging an artifact trusted a path lookup the agent could win.** `stage`
+  checked `symlink_metadata` and then opened the source with `File::open`,
+  which follows symlinks: two separate lookups in an agent-writable worktree.
+  A live agent — or a background child it left behind — could replace
+  `changes.patch` in that window and have `credential.json` copied into the
+  spool as an artifact. The second lookup now goes through `open_source`:
+  unix opens with `O_NOFOLLOW`, and every decision (regular file, one hard
+  link) is made against the `fstat` of the descriptor that is actually read,
+  so swapping the path afterwards changes nothing. A hard link is refused too
+  — `ln <data_dir>/credential.json <workdir>/changes.patch` is not a symlink
+  and `O_NOFOLLOW` would not have stopped it. Windows has no stable
+  `O_NOFOLLOW` or hard-link count in `std`; there the path is re-stat'ed
+  after the open, which can only refuse a good file, never accept a bad one.
+  Deterministic regression tests model the swap between the lookups and the
+  hard link.
+
+- **`/metrics` was public by default even in production.** Review finding 14
+  asked for a closed endpoint; the earlier fix added
+  `AGENTGRID_METRICS_TOKEN` but left the default open, so an exposed control
+  plane still handed every node name and a full-table aggregation to
+  anonymous scrapes. With `AGENTGRID_ENV=production` and no token the endpoint
+  now answers `401` (with `WWW-Authenticate: Bearer`) and boot logs a warning
+  naming the variable; a dev host stays public. Configuring a token opens it
+  on either host, and rotating the token away in production closes it again
+  instead of silently reverting to public. See `docs/monitoring.md`.
+
 - **`bwrap` let the agent read every secret the service user could.** The
   sandbox binds the host root read-only, which stops writes but not reads — and
   reading is the agent's job. A shell inside the namespace could open

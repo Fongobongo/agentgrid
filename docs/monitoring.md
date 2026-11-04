@@ -3,18 +3,23 @@
 The control plane exposes a Prometheus text-format scrape endpoint at
 `GET /metrics`.
 
-It is public by default, like `/health/*`. That is fine on a private network
-and wrong on an exposed port: the payload lists every node name and each
-scrape pays for a full-table aggregation. Set `AGENTGRID_METRICS_TOKEN` to
-require a bearer token instead:
+On a dev host it is public, like `/health/*`. That is fine on a private
+network and wrong on an exposed port: the payload lists every node name and
+each scrape pays for a full-table aggregation. In
+`AGENTGRID_ENV=production` the endpoint is **closed by default** — with no
+`AGENTGRID_METRICS_TOKEN` every scrape gets `401` and the control plane logs
+a warning at startup. Set the token to let Prometheus scrape:
 
 ```bash
 AGENTGRID_METRICS_TOKEN=... agentgrid-control-plane ...
 curl -s -H "Authorization: Bearer $AGENTGRID_METRICS_TOKEN" http://cp-host:7800/metrics
 ```
 
-The token can also be rotated at runtime (`AppState::set_metrics_token`) — no
-restart needed. Without it, restrict the endpoint at the reverse proxy.
+Outside production the token is optional and closes the endpoint there too.
+It can be rotated at runtime (`AppState::set_metrics_token`) — no restart
+needed. Clearing it in production closes the endpoint again instead of
+silently making it public. `/metrics` is deliberately exempt from the session
+JWT middleware: a scraper sends a bearer token, not a login cookie.
 
 `GET /health/ready` answers only on the leader and reuses its disk + database
 probe for one second, so a tight liveness poller cannot turn every request
@@ -28,7 +33,7 @@ scrape_configs:
   - job_name: agentgrid-cp
     scrape_interval: 15s
     authorization:
-      credentials: "<AGENTGRID_METRICS_TOKEN>"   # drop this block if the endpoint is public
+      credentials: "<AGENTGRID_METRICS_TOKEN>"   # required in production; optional on a dev host
     static_configs:
       - targets: ["cp-host:7800"]   # or the TLS-terminated proxy in front
 ```
@@ -39,6 +44,8 @@ Verify by hand:
 curl -s -H "Authorization: Bearer $AGENTGRID_METRICS_TOKEN" \
   http://cp-host:7800/metrics | head -20
 curl -s http://cp-host:7800/health/ready
+# 401 is the expected answer in production when no token is configured:
+curl -s -o /dev/null -w '%{http_code}\n' http://cp-host:7800/metrics
 ```
 
 ## Metric reference (subset)

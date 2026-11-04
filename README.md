@@ -48,7 +48,7 @@ fills.
 | schedules / plan expansion / zeroshot / context provider | **beta** | contract frozen by ADR 0014 |
 | Docker/Podman sandbox backend | **beta** | the worktree is **not** a security sandbox — run untrusted agents in the Docker sandbox with a restrictive network/secrets policy |
 
-Untrusted agents must run under the Docker/Podman sandbox with `permission_interception` and a network/secrets policy. A plain git worktree is **not** isolation against hostile code — see [`docs/decisions/threat-model.md`](docs/decisions/threat-model.md).
+Untrusted agents must run under the Docker/Podman sandbox with `permission_interception` and a network/secrets policy. A plain git worktree is **not** isolation against hostile code — see [`docs/decisions/threat-model.md`](docs/decisions/threat-model.md). The project's answer to the external security review — which findings are closed and which five still carry a documented residual risk — is in [`docs/security-review-response.md`](docs/security-review-response.md).
 
 ## Architecture
 

@@ -76,14 +76,93 @@ pub async fn create_owned(path: &Path, append: bool) -> std::io::Result<tokio::f
     opts.open(path).await
 }
 
+/// Number of hard links to a file. `write_owned` creates a fresh inode with
+/// exactly one link, so anything with more is not ours: `ln
+/// <data_dir>/credential.json <workdir>/changes.patch` is not a symlink and
+/// `O_NOFOLLOW` would not stop it.
+#[cfg(unix)]
+fn link_count(md: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    md.nlink()
+}
+
+#[cfg(windows)]
+fn link_count(_md: &std::fs::Metadata) -> u64 {
+    // `MetadataExt::number_of_links` is still unstable (`windows_by_handle`),
+    // so there is no stable hard-link count here. The unix sandbox targets
+    // (bwrap, docker) do get the check.
+    1
+}
+
+#[cfg(not(any(unix, windows)))]
+fn link_count(_md: &std::fs::Metadata) -> u64 {
+    1
+}
+
+/// The second lookup: open the source, then decide from the descriptor.
+///
+/// `stage` stats the path first for a precise diagnostic, but that stat and
+/// this open are two separate lookups in a directory the agent can write. A
+/// live agent (or a child it left behind) can replace `changes.patch` in that
+/// window — a symlink to `credential.json`, `/dev/zero`, a hard link. On unix
+/// `O_NOFOLLOW` refuses a symlink swapped in at the last moment; every check
+/// below then runs on the `fstat` of the descriptor we actually read, so a
+/// later swap at the path cannot change it. Windows has no `O_NOFOLLOW` in
+/// std, so it re-stats the path after the open: conservative, because the
+/// descriptor is already pinned and a race can only refuse a good file.
+fn open_source(path: &Path) -> Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let f = opts
+        .open(path)
+        .with_context(|| format!("open source artifact {}", path.display()))?;
+    let opened = f
+        .metadata()
+        .with_context(|| format!("stat opened source artifact {}", path.display()))?;
+    if !opened.is_file() {
+        anyhow::bail!(
+            "artifact {} is not a regular file — refusing to stage it",
+            path.display()
+        );
+    }
+    if link_count(&opened) > 1 {
+        anyhow::bail!(
+            "artifact {} is a hard link — refusing to stage it",
+            path.display()
+        );
+    }
+    #[cfg(windows)]
+    {
+        // std has no `O_NOFOLLOW` on Windows. A post-open stat of the path can
+        // only cause a false refusal, never a false accept — the descriptor is
+        // already pinned to the file about to be read — so fail closed when a
+        // link is (or was just put) at the path.
+        let at_path = std::fs::symlink_metadata(path)
+            .with_context(|| format!("re-stat source artifact {}", path.display()))?;
+        if !at_path.is_file() || at_path.file_type().is_symlink() {
+            anyhow::bail!(
+                "artifact {} is not a regular file — refusing to stage it",
+                path.display()
+            );
+        }
+    }
+    Ok(f)
+}
+
 /// Copy `path` into the spool atomically (temp sibling + rename). Idempotent:
 /// re-staging the same (attempt_id, name) replaces the previous copy.
 ///
 /// The source is daemon-written output sitting in a directory the agent can
 /// also write, so it is not trusted: a symlink there would exfiltrate any file
 /// the daemon user can read (the node credential, another attempt's worktree),
-/// and `/dev/zero` would fill the spool before any size check ran. Only a
-/// regular file is accepted, and the copy stops one byte past `max_size`.
+/// a hard link does the same without being a symlink, and `/dev/zero` would
+/// fill the spool before any size check ran. Only a regular file with one link
+/// is accepted, and the copy stops one byte past `max_size`.
 pub fn stage(
     root: &Path,
     attempt_id: &str,
@@ -94,12 +173,27 @@ pub fn stage(
     let dest = entry_path(root, attempt_id, name)?;
     let md = std::fs::symlink_metadata(path)
         .with_context(|| format!("stat source artifact {}", path.display()))?;
+    stage_from_stat(&dest, path, max_size, &md)
+}
+
+/// Inner half of `stage`, split out so a test can supply the metadata the
+/// pre-stat saw *before* the agent swaps the entry: a deterministic model of
+/// the race rather than a timing-dependent thread test.
+fn stage_from_stat(
+    dest: &Path,
+    path: &Path,
+    max_size: u64,
+    md: &std::fs::Metadata,
+) -> Result<PathBuf> {
     if !md.file_type().is_file() {
         anyhow::bail!(
             "artifact {} is not a regular file — refusing to stage it",
             path.display()
         );
     }
+    // Pin the descriptor before creating anything in the spool. A refused
+    // source must not leave a `.tmp` entry (or even an attempt dir) behind.
+    let mut src = open_source(path)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create spool dir {}", parent.display()))?;
@@ -108,8 +202,6 @@ pub fn stage(
     {
         let mut f = std::fs::File::create(&tmp)
             .with_context(|| format!("create spool temp {}", tmp.display()))?;
-        let mut src = std::fs::File::open(path)
-            .with_context(|| format!("open source artifact {}", path.display()))?;
         let copied = std::io::copy(&mut (&mut src).take(max_size.saturating_add(1)), &mut f)
             .with_context(|| format!("copy artifact into spool {}", dest.display()))?;
         if copied > max_size {
@@ -124,9 +216,9 @@ pub fn stage(
         f.sync_all()
             .with_context(|| format!("fsync spool temp {}", tmp.display()))?;
     }
-    std::fs::rename(&tmp, &dest)
+    std::fs::rename(&tmp, dest)
         .with_context(|| format!("publish spool entry {}", dest.display()))?;
-    Ok(dest)
+    Ok(dest.to_path_buf())
 }
 
 /// All staged files, as `(attempt_id, name, path)`, in attempt-id order.
@@ -265,6 +357,69 @@ mod tests {
         assert!(
             pending(&root).unwrap().is_empty(),
             "nothing may be published for a refused source"
+        );
+    }
+
+    /// The pre-stat in `stage` is a diagnostic, not the boundary: the agent
+    /// can replace the entry between that stat and the open. Feed `stage` the
+    /// metadata it saw *before* the swap and run the whole pipeline — a
+    /// deterministic model of the race, with no thread timing in the test.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_swapped_between_the_stat_and_the_open_is_refused() {
+        let root = tmpdir("swap");
+        let secret = root.join("credential.json");
+        std::fs::write(&secret, b"node-secret").unwrap();
+        let artifact = root.join("changes.patch");
+        std::fs::write(&artifact, b"safe patch").unwrap();
+
+        // What `stage` saw at stat time: a regular file with one link.
+        let pre = std::fs::symlink_metadata(&artifact).unwrap();
+        assert!(pre.file_type().is_file());
+        assert_eq!(link_count(&pre), 1);
+
+        // The swap, in the window between that stat and `open_source`.
+        std::fs::remove_file(&artifact).unwrap();
+        std::os::unix::fs::symlink(&secret, &artifact).unwrap();
+
+        // Prove the race is real: a plain path-based open (what `stage` used
+        // to do) follows the swap and reads the credential.
+        assert_eq!(std::fs::read_to_string(&artifact).unwrap(), "node-secret");
+
+        let dest = entry_path(&root, "a1", "changes.patch").unwrap();
+        let err = stage_from_stat(&dest, &artifact, u64::MAX, &pre)
+            .expect_err("O_NOFOLLOW must refuse the swapped symlink");
+        assert!(err.to_string().contains("open source artifact"), "{err}");
+        assert!(
+            pending(&root).unwrap().is_empty(),
+            "the secret must never reach the spool"
+        );
+        assert!(
+            !dest.with_extension("tmp").exists(),
+            "a refused source must not leave a spool temp behind"
+        );
+    }
+
+    /// A hard link is not a symlink: `O_NOFOLLOW` does not stop it, but
+    /// `ln <data_dir>/credential.json <workdir>/changes.patch` would upload
+    /// the node credential as an artifact.
+    #[cfg(unix)]
+    #[test]
+    fn stage_refuses_a_hardlinked_source() {
+        let root = tmpdir("hardlink");
+        let secret = root.join("credential.json");
+        std::fs::write(&secret, b"node-secret").unwrap();
+        let artifact = root.join("changes.patch");
+        std::fs::hard_link(&secret, &artifact).unwrap();
+
+        let err = stage(&root, "a1", "changes.patch", &artifact, u64::MAX)
+            .expect_err("a hard link must not be staged");
+        assert!(err.to_string().contains("hard link"), "{err}");
+        assert!(pending(&root).unwrap().is_empty());
+        let dest = entry_path(&root, "a1", "changes.patch").unwrap();
+        assert!(
+            !dest.with_extension("tmp").exists(),
+            "a refused source must not leave a spool temp behind"
         );
     }
 

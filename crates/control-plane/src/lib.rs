@@ -78,10 +78,15 @@ pub struct AppState {
     /// Brute-force protection on `/v1/auth/login` (Stage 2.5).
     pub(crate) login_rate: Arc<tokio::sync::Mutex<LoginRate>>,
     /// Optional bearer token for `/metrics` (`AGENTGRID_METRICS_TOKEN`).
-    /// `None` keeps the endpoint public, as documented in docs/monitoring.md;
-    /// set it to stop an unauthenticated caller from enumerating node names
-    /// and making every scrape pay for a full-table aggregation.
+    /// `None` keeps the endpoint public **on a dev host**; set it to stop an
+    /// unauthenticated caller from enumerating node names and making every
+    /// scrape pay for a full-table aggregation.
     pub(crate) metrics_token: std::sync::RwLock<Option<String>>,
+    /// Whether `/metrics` may be served without that token (finding 14).
+    /// Boot sets this to `false` under `AGENTGRID_ENV=production`: an opt-in
+    /// token left the default open on exactly the hosts that matter. A dev
+    /// host keeps the endpoint public, as documented in docs/monitoring.md.
+    pub(crate) metrics_allow_public: std::sync::atomic::AtomicBool,
     /// Cached `/health/ready` verdict (finding 14): the probe writes and
     /// deletes a file, so an unauthenticated caller must not be able to turn
     /// each request into disk I/O. Holds `(checked_at, ready)`.
@@ -179,6 +184,15 @@ impl AppState {
             store.attach_replicator(repl);
         }
         let production = std::env::var("AGENTGRID_ENV").as_deref() == Ok("production");
+        let metrics_token = std::env::var("AGENTGRID_METRICS_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty());
+        if production && metrics_token.is_none() {
+            tracing::warn!(
+                "AGENTGRID_ENV=production without AGENTGRID_METRICS_TOKEN: /metrics is closed. \
+                 Set the token (docs/monitoring.md) so Prometheus can scrape it"
+            );
+        }
         let preset = match ha.config.jwt_secret_file.as_ref() {
             Some(path) => Some(
                 std::fs::read_to_string(path)
@@ -323,11 +337,8 @@ impl AppState {
             limits,
             db_path: db_path.to_string(),
             login_rate: Arc::new(tokio::sync::Mutex::new(LoginRate::new())),
-            metrics_token: std::sync::RwLock::new(
-                std::env::var("AGENTGRID_METRICS_TOKEN")
-                    .ok()
-                    .filter(|v| !v.is_empty()),
-            ),
+            metrics_token: std::sync::RwLock::new(metrics_token),
+            metrics_allow_public: std::sync::atomic::AtomicBool::new(!production),
             ready_probe: std::sync::Mutex::new(None),
             event_rate: Arc::new(tokio::sync::Mutex::new(EventRate::new())),
             setup_token,
@@ -504,12 +515,27 @@ impl AppState {
         *guard = Some((std::time::Instant::now(), ready));
     }
 
-    /// Bearer token `/metrics` requires, or `None` when it is public.
+    /// Bearer token `/metrics` requires, or `None` when none is configured.
     pub(crate) fn required_metrics_token(&self) -> Option<String> {
         self.metrics_token
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Whether an unauthenticated `/metrics` scrape is allowed at all.
+    /// Production boots with the policy flag false.
+    pub(crate) fn metrics_allow_public(&self) -> bool {
+        self.metrics_allow_public
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Pin the public-scrape policy without touching the process environment
+    /// (which every other test in the binary reads). Mirrors
+    /// [`Self::set_metrics_token`]; boot is the only production caller.
+    pub fn set_metrics_allow_public(&self, allow: bool) {
+        self.metrics_allow_public
+            .store(allow, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set (or clear) the `/metrics` bearer token. Boot reads
