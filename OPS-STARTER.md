@@ -17,8 +17,11 @@ cd /opt/ag
 export AGENTGRID_JWT_SECRET="$(head -c 48 /dev/urandom | base64)"
 export NODE1_TOKEN="$(openssl rand -hex 32)"
 export NODE2_TOKEN="$(openssl rand -hex 32)"
+# Задайте пароль сами: up.sh выводит сгенерированный пароль один раз
+# и на диск его не записывает, поэтому шагу 3 он иначе недоступен.
+export AGENTGRID_ADMIN_PASSWORD="$(openssl rand -hex 16)"
 
-# Это создаст .env и поднимет сервисы
+# Это создаст .env в корне репозитория и поднимет сервисы
 bash deploy/compose/up.sh
 ```
 
@@ -35,7 +38,9 @@ docker ps --format '{{.Names}} {{.Status}}'
 
 ```bash
 AGENTGRID_SERVER="http://127.0.0.1:7800"
-PASSWORD=$(cat deploy/compose/.env | grep ADMIN_PASS | cut -d= -f2)
+# up.sh не пишет ADMIN_PASS в .env: пароль выводится в консоль один раз.
+# Используйте значение, заданное на шаге 1, либо вставьте выведенный пароль.
+PASSWORD="${AGENTGRID_ADMIN_PASSWORD:?задайте AGENTGRID_ADMIN_PASSWORD на шаге 1}"
 
 # Login
 JWT=$(curl -fsS -X POST "$AGENTGRID_SERVER/v1/auth/login" \

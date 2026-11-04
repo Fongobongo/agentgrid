@@ -96,7 +96,9 @@ fn cookie_secure() -> bool {
     }
     let tls =
         std::env::var("AGENTGRID_TLS_CERT").is_ok() && std::env::var("AGENTGRID_TLS_KEY").is_ok();
-    tls || std::env::var("AGENTGRID_ENV").as_deref() == Ok("production")
+    // Boot validates AGENTGRID_ENV and refuses unknown values; the fail-closed
+    // accessor means a skipped validation can only add `Secure`, never drop it.
+    tls || agentgrid_common::deploy_env_fail_closed().is_production()
 }
 
 /// Build a `Set-Cookie` header value for a freshly-issued session JWT.

@@ -4,8 +4,11 @@ Reviewed document: `agentgrid code review`, base commit `5e5372d` (branch `main`
 16 ranked findings plus an architecture/maintainability section and a test-gap
 list. Scope of the review was read-only; this document is the project's answer.
 
-Response is current as of `855df70` plus the 2026-11-04 hardening batch
-(`open_source` in the artifact spool, production `/metrics` fail-closed).
+Response is current as of the 2026-11-04 work: the review batch through
+`855df70`, the hardening commits `f2822f6` (artifact-spool `open_source` and a
+production `/metrics` that fails closed) and `33228b0` (the compose/E2E
+follow-up), plus the follow-up audit fixes described below. Per-commit CI run
+ids are in the Verification section; `CHANGELOG.md` carries the commit list.
 
 **Result: 11 of 16 findings are closed. Five are mitigated with an explicit,
 documented residual risk.** "Closed" means the described attack no longer works
@@ -209,6 +212,36 @@ host stays public. `docs/monitoring.md` documents the behaviour; the production
 compose E2E asserts both halves — an anonymous scrape gets `401`, one with the
 token still returns the transport gauges.
 
+**Follow-up audit.** A second read-only pass over the finished tree found five
+gaps; all five are closed in the follow-up batch:
+
+- `AGENTGRID_ENV` was four independent inline string comparisons. A typo such
+  as `prodution` was indistinguishable from a dev host and silently disabled
+  the production `/metrics` policy, the weak-JWT-secret refusal, the `Secure`
+  session cookie and the daemon's no-sandbox refusal. `agentgrid-common`
+  now parses it once into `DeployEnv`; both binaries refuse to start on an
+  unknown value, and guard sites with no error channel use a fail-closed
+  accessor. A dedicated integration-test binary pins the boot-level refusal.
+- `docs/openapi.yaml` still declared `/metrics` as `security: []`. It now
+  declares a separate `metricsAuth` bearer scheme (not `userAuth` — the route
+  is exempt from session-JWT middleware), documents the `401`, and the
+  contract test asserts the scheme and the response.
+- `docs/monitoring.md` claimed the token could be rotated at runtime. No
+  route, CLI command or signal calls `AppState::set_metrics_token`, so the doc
+  now says rotation needs a restart.
+- `deploy/compose/up.sh` wrote `deploy/compose/.env`, which Compose never
+  auto-loads, and then stripped the variables the `:?` guards require. It now
+  writes the repo-root `.env` (gitignored, mode 0600), persists
+  `AGENTGRID_METRICS_TOKEN`, and leaves non-secret placeholders for the
+  consumed one-time node tokens. `README.md` no longer tells operators to run
+  a second `docker compose up -d`, and `OPS-STARTER.md` no longer greps for an
+  `ADMIN_PASS` that was never written to disk.
+- This response's own header and Verification section named `855df70` as the
+  current state and cited only that commit's CI runs. They now cover the
+  hardening commits and the shipped `33228b0` runs; per-commit run ids live in
+  `CHANGELOG.md` rather than being duplicated in prose that goes stale on the
+  next push.
+
 ## Test gaps from the review
 
 All six named gaps now have coverage:
@@ -224,9 +257,17 @@ All six named gaps now have coverage:
 
 ## Verification
 
-- **Linux (host1, detached worktree at `855df70` + this patch):** `cargo test -p agentgrid-node-daemon --bin agentgrid-node-daemon -- artifact_spool` — 10/10, including the two `#[cfg(unix)]` regressions (`a_source_swapped_between_the_stat_and_the_open_is_refused`, `stage_refuses_a_hardlinked_source`); `maintenance::tests` — 2/2; `--test api -- metrics` — 3/3; `cargo check --workspace --all-targets`, `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- **Linux (host1, detached worktree at `855df70` + the hardening patch):** `cargo test -p agentgrid-node-daemon --bin agentgrid-node-daemon -- artifact_spool` — 10/10, including the two `#[cfg(unix)]` regressions (`a_source_swapped_between_the_stat_and_the_open_is_refused`, `stage_refuses_a_hardlinked_source`); `maintenance::tests` — 2/2; `--test api -- metrics` — 3/3; `cargo check --workspace --all-targets`, `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean.
 - **Windows:** `artifact_spool` — 7/7 (the two unix-gated tests are correctly skipped), `maintenance::tests` — 2/2, `--test api -- metrics` — 3/3, clippy `-D warnings` clean. This covers the `#[cfg(windows)]` post-open re-stat branch; Windows still cannot detect a hard-linked source.
-- **CI on `855df70`:** push run `41716122660`, full `workflow_dispatch` `41725850383` (41m17s), scheduled `41812863864` — all green. The full matrix includes Miri, race/concurrency stress, musl/aarch64 E2E, two-host E2E, real-agent E2E, unix-only guard tests, CodeQL, Supply chain, HA chaos, and the OpenAPI contract test (16 passed).
+- **CI on `855df70` (before the hardening batch):** push run `41716122660`, full `workflow_dispatch` `41725850383` (41m17s), scheduled `41812863864` — all green.
+- **CI on the shipped state `33228b0`:** push CI `41833775236`, full `workflow_dispatch` CI `41833777034` (19/19 jobs, 42m12s), CodeQL `41833774925`, Supply chain `41833775091`, HA chaos `41839050623`, coverage `41839057353`, fuzz `41839065146`, Lint workflows `41839072514`, scheduled Supply chain `41842225019` — all green. The full matrix includes Miri, race/concurrency stress, musl/aarch64 E2E, two-host E2E, real-agent E2E, unix-only guard tests, CodeQL, Supply chain, HA chaos, and the OpenAPI contract test.
+- **Follow-up audit batch:** verified on Windows and on Linux (host1) with
+  `cargo check --workspace --all-targets`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --all --check`, the new `deploy_env`
+  parser/boot tests, the OpenAPI contract test and the `/metrics` API tests.
+  `docker compose -f docker-compose.yml config` was checked with only the
+  repo-root `.env` present and no process environment. The batch's own push
+  and full-matrix CI runs are the final gate; see the repository Actions tab.
 - **Static gates:** clippy `-D warnings` first, `cargo fmt --all --check` last — CI's format check runs first, so a formatting drift hides every other failure.
 - **Visibility caveat:** the new `#[cfg(unix)]` spool tests and the `O_NOFOLLOW` path do **not** execute on Windows. The Linux run above and the Linux CI matrix are the proof; a Windows-only green run is not.
 

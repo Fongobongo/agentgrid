@@ -115,7 +115,9 @@ pub fn check_startup_config(unsafe_acknowledged: bool) -> anyhow::Result<()> {
     let raw = std::env::var("AGENTGRID_SANDBOX").ok();
     let kind = SandboxKind::parse(raw.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
     if kind == SandboxKind::None && !unsafe_acknowledged {
-        let production = std::env::var("AGENTGRID_ENV").as_deref() == Ok("production");
+        // Boot validates AGENTGRID_ENV; the fail-closed accessor keeps this
+        // gate strict even if a caller ever skips that validation.
+        let production = agentgrid_common::deploy_env_fail_closed().is_production();
         if production {
             anyhow::bail!(
                 "no sandbox is configured (AGENTGRID_SANDBOX is unset or 'none') with \

@@ -262,6 +262,36 @@
 
 ### Fixed
 
+- **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
+  sites compared the raw env string to `"production"` inline: the fail-closed
+  `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session
+  cookie, and the daemon's refusal to run without a sandbox. `prodution` was
+  indistinguishable from a dev host. `agentgrid-common` now parses the value
+  once into `DeployEnv`; both binaries refuse to start on an unknown value,
+  and guard sites that cannot return an error use a fail-closed accessor so a
+  skipped validation can only add restrictions. Accepted values are
+  `production`, `development`/`dev`, `staging`, `test` and unset.
+
+- **`/metrics` was still documented as public, and its token was said to be
+  rotatable at runtime.** `docs/openapi.yaml` declared `security: []`; it now
+  defines a separate `metricsAuth` bearer scheme and the `401`, with a
+  contract test pinning both (`userAuth` would be wrong — the route is exempt
+  from session-JWT middleware). `docs/monitoring.md` claimed
+  `AppState::set_metrics_token` allowed rotation without a restart, but no
+  route, CLI command or signal calls it; rotation now correctly means setting
+  the variable and restarting.
+
+- **The Docker quickstart wrote a `.env` Compose never reads.** `up.sh` put
+  secrets in `deploy/compose/.env`, stripped the `:?` variables after
+  bootstrap, and `README.md` then told operators to run `docker compose up -d`
+  from a fresh shell — which failed interpolation. `up.sh`/`down.sh` now use
+  the repo-root `.env` (gitignored, mode 0600), persist
+  `AGENTGRID_METRICS_TOKEN`, and leave non-secret placeholders for the
+  consumed one-time node tokens, so `ps`/`down`/`up` work from a fresh shell
+  and a restart does not silently close `/metrics`. `OPS-STARTER.md` no longer
+  greps for an `ADMIN_PASS` that up.sh deliberately prints once and never
+  writes. The demo stack keeps its own `--env-file .env.demo` (also ignored).
+
 - **Staging an artifact trusted a path lookup the agent could win.** `stage`
   checked `symlink_metadata` and then opened the source with `File::open`,
   which follows symlinks: two separate lookups in an agent-writable worktree.

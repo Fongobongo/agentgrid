@@ -10,13 +10,15 @@ for a in "$@"; do
 done
 if [ "$DEMO" = "1" ]; then
   COMPOSE=(docker compose -f docker-compose.demo.yml)
-  ENV_FILE="deploy/compose/.env.demo"
+  ENV_FILE=".env.demo"
 else
   COMPOSE=(docker compose -f docker-compose.yml)
-  ENV_FILE="deploy/compose/.env"
+  ENV_FILE=".env"
 fi
 # `down` does not use the secrets, but compose still interpolates the file;
-# dummy values satisfy the `:?` guards when no real env is present.
+# dummy values satisfy the `:?` guards when no real env is present (e.g. after
+# `--purge` deleted the env file). The prod path also has the repo-root `.env`
+# that up.sh wrote, which compose auto-loads.
 export AGENTGRID_JWT_SECRET="${AGENTGRID_JWT_SECRET:-down}"
 export NODE1_TOKEN="${NODE1_TOKEN:-down}" NODE2_TOKEN="${NODE2_TOKEN:-down}"
 if [ "$PURGE" = "1" ]; then

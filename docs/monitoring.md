@@ -17,12 +17,25 @@ curl -s -H "Authorization: Bearer $AGENTGRID_METRICS_TOKEN" http://cp-host:7800/
 
 Outside production the token is optional and closes the endpoint there too.
 The production `docker-compose.yml` passes `AGENTGRID_METRICS_TOKEN` through
-from the environment; leaving it unset is a supported configuration and simply
-keeps the endpoint closed. It can be rotated at runtime
-(`AppState::set_metrics_token`) — no restart needed. Clearing it in production
-closes the endpoint again instead of silently making it public. `/metrics` is
-deliberately exempt from the session JWT middleware: a scraper sends a bearer
-token, not a login cookie.
+from the environment; `deploy/compose/up.sh` persists it in the repo-root
+`.env` (mode 0600, gitignored), so a restart from a fresh shell keeps the
+scrape working. Leaving it unset is a supported configuration and simply keeps
+the endpoint closed.
+
+Rotation means changing the variable and restarting the control plane: the
+value is read once at boot. `AppState::set_metrics_token` exists for tests and
+in-process embedders, but there is no admin route, CLI command or signal that
+calls it — an operator cannot rotate a running process. Clearing the token in
+production (and restarting) closes the endpoint again instead of silently
+making it public. `/metrics` is deliberately exempt from the session JWT
+middleware: a scraper sends a bearer token, not a login cookie.
+
+`AGENTGRID_ENV` is validated at boot. Accepted values are `production`,
+`development`/`dev`, `staging`, `test`, or unset (development); **only**
+`production` enables the hardening. Any other value — including a near miss
+like `prodution` — is a startup error rather than a silent downgrade of the
+`/metrics` policy, the `Secure` cookie, the weak-JWT-secret refusal and the
+node daemon's no-sandbox refusal.
 
 `GET /health/ready` answers only on the leader and reuses its disk + database
 probe for one second, so a tight liveness poller cannot turn every request

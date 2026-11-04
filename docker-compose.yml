@@ -31,6 +31,7 @@ services:
       # `/metrics` is closed (401) in production when this is unset — boot logs
       # a warning. Set it to let Prometheus scrape; see docs/monitoring.md.
       # Optional on purpose: an operator without Prometheus needs no token.
+      # up.sh persists it in the repo-root .env so a restart keeps the token.
       AGENTGRID_METRICS_TOKEN: ${AGENTGRID_METRICS_TOKEN:-}
     volumes:
       - agentgrid-data:/var/lib/agentgrid

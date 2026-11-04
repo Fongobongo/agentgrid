@@ -211,6 +211,13 @@ user — root in most images — with the worktree mounted read-write; set
 the file header of `crates/node-daemon/src/sandbox.rs` for the permission
 setup).
 
+`AGENTGRID_ENV` is validated the same way in both binaries: `production`,
+`development`/`dev`, `staging`, `test` or unset are accepted, and only
+`production` enables the hardening (this no-sandbox refusal, `Secure` cookies,
+the closed `/metrics` and the weak-JWT-secret gate). Anything else — including
+a near miss like `prodution` — is a startup error rather than a silent
+downgrade. See `docs/monitoring.md`.
+
 `bwrap` is namespace confinement, not a container: it binds the host root
 read-only, so everything the service user can read would be readable by the
 agent. The daemon therefore masks three subtrees with an empty `--tmpfs`

@@ -303,6 +303,28 @@ fn node_routes_use_the_node_scheme() {
     );
 }
 
+/// `/metrics` is not a second public health probe. Production requires
+/// `AGENTGRID_METRICS_TOKEN`; an explicit `security: []` would make a
+/// generated client omit the bearer header and hide the 401 entirely.
+#[test]
+fn metrics_documents_its_bearer_token() {
+    let doc = openapi_doc();
+    let op = &doc["paths"]["/metrics"]["get"];
+    let schemes = effective_schemes(&doc, op);
+    assert!(
+        schemes.contains("metricsAuth"),
+        "/metrics must declare the metrics bearer scheme: {schemes:?}"
+    );
+    assert!(
+        !schemes.contains("userAuth"),
+        "/metrics is exempt from the session-JWT middleware: {schemes:?}"
+    );
+    assert!(
+        op["responses"].get("401").is_some(),
+        "/metrics must document the closed-in-production 401"
+    );
+}
+
 /// A field of a Rust DTO, as far as the OpenAPI schema cares: its JSON name,
 /// whether it is an `Option` (so `null` is meaningful), and whether it carries
 /// `#[serde(default)]` (so omitting it is allowed even when it is not an

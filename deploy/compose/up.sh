@@ -2,8 +2,9 @@
 # Bring up the agentgrid stack with one command. Generates a random JWT
 # secret + admin password, starts the control plane, reads the one-time setup
 # token from its logs, completes first-user bootstrap via POST /v1/auth/setup,
-# mints enrollment tokens for both nodes, writes them to .env, and starts the
-# node-daemon containers. The bootstrap credentials are printed once.
+# mints enrollment tokens for both nodes, writes them to the repo-root .env,
+# and starts the node-daemon containers. The bootstrap credentials are printed
+# once and are deliberately never written to disk.
 #
 # Production defaults (no insecure baked-in values); see up --demo for local
 # hacking with docker-compose.demo.yml.
@@ -16,12 +17,17 @@ DEMO=0
 
 BASE="${AGENTGRID_BASE:-http://127.0.0.1:7800}"
 
+# Compose auto-loads `.env` from the project directory — the repo root, where
+# docker-compose.yml lives — and only that file. A `.env` under deploy/compose/
+# was never read: a later `docker compose up/ps/down` from a fresh shell lost
+# up.sh's process exports and failed the `:?` guards. The demo keeps its own
+# --env-file so starting a demo stack cannot clobber production secrets.
 if [ "$DEMO" = "1" ]; then
-  COMPOSE=(docker compose -f docker-compose.demo.yml)
-  ENV_FILE="deploy/compose/.env.demo"
+  ENV_FILE=".env.demo"
+  COMPOSE=(docker compose --env-file "$ENV_FILE" -f docker-compose.demo.yml)
 else
+  ENV_FILE=".env"
   COMPOSE=(docker compose -f docker-compose.yml)
-  ENV_FILE="deploy/compose/.env"
 fi
 
 # Generate fresh secrets unless an operator pre-set them via env.
@@ -31,13 +37,17 @@ rand() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-"$1"; 
 ADMIN_USER="${AGENTGRID_ADMIN_USER:-admin}"
 ADMIN_PASS="${AGENTGRID_ADMIN_PASSWORD:-$(rand 24)}"
 JWT_SECRET="${AGENTGRID_JWT_SECRET:-$(rand 48)}"
-# Compose requires process env vars (not just .env) for :? guards
+# Export as well: process env wins over the .env file, and the demo path uses
+# a separate --env-file. Both paths then interpolate the same real values.
 export AGENTGRID_JWT_SECRET="$JWT_SECRET"
 export NODE1_TOKEN="${NODE1_TOKEN:-bootstrap}"
 export NODE2_TOKEN="${NODE2_TOKEN:-bootstrap}"
-# Write secrets to .env file first (compose reads it for fallbacks)
+# Compose auto-loads this repo-root .env on every later command (process env
+# wins while up.sh is running). Persist the metrics token too: otherwise a
+# restart from a fresh shell silently closes `/metrics` again.
 cat > "$ENV_FILE" <<EOF
 AGENTGRID_JWT_SECRET=$JWT_SECRET
+AGENTGRID_METRICS_TOKEN=${AGENTGRID_METRICS_TOKEN:-}
 NODE1_TOKEN=$NODE1_TOKEN
 NODE2_TOKEN=$NODE2_TOKEN
 EOF
@@ -91,13 +101,15 @@ mint() {
 echo ">> minting enrollment tokens"
 NODE1_TOKEN=$(mint node-1)
 NODE2_TOKEN=$(mint node-2)
-# Compose interpolates from the process environment; without the exports the
-# `:?` guards in docker-compose.yml reject the node services.
+# Keep the process exports in sync with the file: process env wins over .env,
+# and the node services' `:?` guards must see the freshly minted tokens.
 export NODE1_TOKEN NODE2_TOKEN
 
-# Compose auto-loads .env alongside the compose file; node services read it.
+# Real enrollment tokens, written after minting. Compose interpolates from the
+# process env here; the file is what a fresh shell will read later.
 cat > "$ENV_FILE" <<EOF
 AGENTGRID_JWT_SECRET=$JWT_SECRET
+AGENTGRID_METRICS_TOKEN=${AGENTGRID_METRICS_TOKEN:-}
 NODE1_TOKEN=$NODE1_TOKEN
 NODE2_TOKEN=$NODE2_TOKEN
 EOF
@@ -120,8 +132,16 @@ done
 # by the running nodes. Strip them from the env file so the secret does not sit
 # on disk after bootstrap. The nodes reuse their persisted credential.json on
 # restart, so they do not need the token again.
+# Keep non-secret placeholders: `:?` guards interpolate the whole file even for
+# `docker compose ps`/`down`, and an empty value would break every command run
+# from a fresh shell (up.sh's exports die with this script). The JWT secret and
+# the metrics token stay in the 0600, gitignored file so a restart does not
+# silently close `/metrics`.
 cat > "$ENV_FILE" <<EOF
 AGENTGRID_JWT_SECRET=$JWT_SECRET
+AGENTGRID_METRICS_TOKEN=${AGENTGRID_METRICS_TOKEN:-}
+NODE1_TOKEN=consumed
+NODE2_TOKEN=consumed
 EOF
 chmod 600 "$ENV_FILE"
 

@@ -155,6 +155,10 @@ impl AppState {
         ha: Arc<ha::HaRuntime>,
         artifact_root: Option<std::path::PathBuf>,
     ) -> anyhow::Result<Arc<Self>> {
+        // A typo in AGENTGRID_ENV used to be indistinguishable from a dev host
+        // and silently disabled the production guards below. Validate before
+        // touching the database so a bad value cannot half-boot the process.
+        let deploy_env = agentgrid_common::deploy_env_from_process().map_err(anyhow::Error::msg)?;
         let mut store =
             Store::open_with_gate_and_root(db_path, ha.store_gate(), artifact_root).await?;
         // ADR 0028: values written before the sealing schema are still in the
@@ -183,7 +187,7 @@ impl AppState {
             let repl = ha::incremental::Replicator::new(ha.clone(), &store.pool).await?;
             store.attach_replicator(repl);
         }
-        let production = std::env::var("AGENTGRID_ENV").as_deref() == Ok("production");
+        let production = deploy_env.is_production();
         let metrics_token = std::env::var("AGENTGRID_METRICS_TOKEN")
             .ok()
             .filter(|v| !v.is_empty());

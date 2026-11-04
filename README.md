@@ -88,11 +88,12 @@ CLI (`./ag login admin <password>`) and submit a task. The binary keeps all stat
 
 Images are prebuilt as `ag-cp:test` / `ag-node:test` (or `docker compose build`).
 Bring the stack up — this bootstraps a user, mints node enrollment tokens, and
-writes `deploy/compose/.env`:
+writes a gitignored, mode-0600 `.env` in the repo root (the file Compose
+auto-loads, so later `docker compose ps`/`down` also work from a fresh shell):
 
     ./deploy/compose/up.sh
-    docker compose up -d
 
+`up.sh` starts all three services; there is no second `docker compose up -d`.
 Control plane: http://127.0.0.1:7800. `up.sh` generates a random admin
 password and prints it once (no baked-in `admin/changeme`). Two node daemons
 (mock adapters) come online; submit a task:

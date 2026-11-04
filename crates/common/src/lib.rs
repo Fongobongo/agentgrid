@@ -1,8 +1,12 @@
 pub mod compress;
+pub mod deploy_env;
 pub mod policy;
 pub mod seal;
 pub mod workflow;
 pub mod ws;
+pub use deploy_env::{
+    deploy_env_fail_closed, deploy_env_from_process, parse_deploy_env, DeployEnv,
+};
 pub use policy::{
     AutonomyLevel, BuiltinPolicyProvider, CommandPolicyProvider, PolicyDecision, PolicyError,
     PolicyVerdict, RiskClass,

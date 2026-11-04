@@ -3,6 +3,7 @@ dist/
 .vite/
 .env
 .env.local
+.env.demo
 npm-debug.log*
 coverage/
 tmp/

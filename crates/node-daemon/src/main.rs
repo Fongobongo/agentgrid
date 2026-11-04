@@ -937,6 +937,13 @@ fn main() -> Result<()> {
         }
         Invocation::Daemon => {}
     }
+
+    // A typo in AGENTGRID_ENV used to silently turn off the production
+    // hardening (no-sandbox refusal, Secure cookies, a closed /metrics and
+    // the weak-JWT-secret gate). Fail at boot before any subsystem starts.
+    // --version/--help/probe return above and stay usable without a valid env.
+    agentgrid_common::deploy_env_from_process().map_err(anyhow::Error::msg)?;
+
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(

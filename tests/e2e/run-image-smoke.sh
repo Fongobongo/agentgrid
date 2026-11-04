@@ -61,9 +61,10 @@ export AGENTGRID_ADMIN_USER=smoke
 export AGENTGRID_ADMIN_PASSWORD=smoke-password
 bash deploy/compose/up.sh >/dev/null
 # docker-compose.yml uses `:?` interpolation guards; compose re-interpolates
-# the whole file even for read-only `ps`/`inspect`. After bootstrap up.sh
-# strips the one-time node tokens from deploy/compose/.env, so the guards
-# only pass with dummy exports (same pattern as deploy/compose/down.sh).
+# the whole file even for read-only `ps`/`inspect`. up.sh's exports die with
+# that child process, and its repo-root .env now holds non-secret placeholder
+# node tokens. The dummy exports stay as a fallback for a purged .env (same
+# pattern as deploy/compose/down.sh).
 export AGENTGRID_JWT_SECRET="${AGENTGRID_JWT_SECRET:-smoke}"
 export NODE1_TOKEN="${NODE1_TOKEN:-smoke}" NODE2_TOKEN="${NODE2_TOKEN:-smoke}"
 # The compose project name is fixed by the directory (ag); ps -q takes the

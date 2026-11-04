@@ -54,7 +54,20 @@ paths:
   /metrics:
     get:
       summary: Prometheus metrics endpoint
-      security: []
+      description: |
+        Public on a dev host. With `AGENTGRID_ENV=production` a scrape must
+        carry `Authorization: Bearer <AGENTGRID_METRICS_TOKEN>`; when no token
+        is configured the endpoint is closed and answers `401` with a
+        `WWW-Authenticate: Bearer` header. This is not a session JWT — the
+        route is exempt from the user-auth middleware. See docs/monitoring.md.
+      security:
+        - metricsAuth: []
+        - {}   # dev host: no credentials needed
+      responses:
+        '200':
+          description: Prometheus text exposition format.
+        '401':
+          description: Bearer token required, or no token configured in production.
   /v1/version:
     get:
       summary: Build + contract versions (public)
@@ -1985,3 +1998,11 @@ components:
       type: http
       scheme: bearer
       description: Node credential issued at enrollment.
+    metricsAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Value of `AGENTGRID_METRICS_TOKEN`, sent by the Prometheus scraper.
+        Required when `AGENTGRID_ENV=production`; optional on a dev host.
+        Deliberately not `userAuth`: `/metrics` is exempt from the session-JWT
+        middleware, so a login cookie or user JWT would be rejected.

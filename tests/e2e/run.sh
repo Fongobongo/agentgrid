@@ -30,7 +30,8 @@ export AGENTGRID_ADMIN_USER="$USER"
 export AGENTGRID_ADMIN_PASSWORD="$PASS"
 # Finding 14 follow-up: this compose stack sets AGENTGRID_ENV=production, where
 # /metrics is closed unless a token exists. Pin one so the transport-gauge
-# assertions below can still scrape it (up.sh passes process env to compose).
+# assertions below can still scrape it. up.sh passes process env to compose
+# and persists the token in the repo-root .env, so a fresh-shell restart too.
 export AGENTGRID_METRICS_TOKEN="${AGENTGRID_METRICS_TOKEN:-e2e-metrics-token}"
 METRICS_AUTH=(-H "authorization: Bearer $AGENTGRID_METRICS_TOKEN")
 bash deploy/compose/up.sh >/dev/null
