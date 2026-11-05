@@ -55,7 +55,7 @@ dependencies = [
 name = "agentgrid-common"
 version = "0.8.1"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "proptest",
  "ring",
@@ -124,7 +124,7 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "jsonwebtoken",
  "reqwest 0.12.28",
@@ -200,7 +200,7 @@ dependencies = [
  "agentgrid-skills",
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "futures-util",
  "libc",
