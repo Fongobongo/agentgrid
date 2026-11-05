@@ -26,7 +26,7 @@ jobs:
         run: |
           tc=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
           rustup component add llvm-tools-preview --toolchain "$tc"
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
       - name: generate coverage

@@ -31,7 +31,7 @@ jobs:
         run: |
           tc=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
           rustup component add rustfmt clippy --toolchain "$tc"
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: format check
         run: cargo fmt --all --check
       - name: clippy
@@ -91,7 +91,7 @@ jobs:
       # No explicit `toolchain:` — rust-toolchain.toml pins the version so
       # every job compiles what the devs compile.
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: test pure crates
         run: cargo test -p agentgrid-common -p agentgrid-skills
 
@@ -109,7 +109,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           toolchain: "1.94.0"
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - run: cargo check --workspace --all-targets
 
   web:
@@ -175,7 +175,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: build web UI (embedded into the control-plane image)
         working-directory: web
         run: |
@@ -333,7 +333,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: build debug binaries
         run: cargo build --workspace
       # The SDK parity block drives the TypeScript SDK with
@@ -485,7 +485,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: bring up stack and run a task
         run: bash tests/e2e/run.sh
         # Nightly-only (and manual): the workflow E2E brings up its own
@@ -630,7 +630,7 @@ jobs:
           submodules: false
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: build tests once
         run: cargo test --workspace --no-run --locked
       - name: run workspace tests x3 at high parallelism
@@ -686,7 +686,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: build debug binaries
         run: cargo build --workspace
       - name: two-host workflow E2E
@@ -733,7 +733,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       - name: build debug binaries
         run: cargo build --workspace
       - name: install the real agent CLIs
