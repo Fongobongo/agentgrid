@@ -1,10 +1,18 @@
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use agentgrid_control_plane::ha::NodeRole;
 use agentgrid_control_plane::{serve, serve_ha, serve_witness, AppState};
 use anyhow::Result;
+
+const RUNTIME_FILE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+fn instance_lock_path(db_path: &str) -> PathBuf {
+    PathBuf::from(format!("{db_path}.lock"))
+}
 
 /// Guard against two control-plane processes opening the same SQLite DB on one
 /// host. SQLite is single-writer; a second instance would spam "database is
@@ -17,7 +25,7 @@ fn acquire_instance_lock(db_path: &str) -> anyhow::Result<Option<std::fs::File>>
     if db_path.is_empty() || db_path == ":memory:" {
         return Ok(None);
     }
-    let lock_path = format!("{db_path}.lock");
+    let lock_path = instance_lock_path(db_path);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -28,7 +36,8 @@ fn acquire_instance_lock(db_path: &str) -> anyhow::Result<Option<std::fs::File>>
         let e = std::io::Error::last_os_error();
         if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
             anyhow::bail!(
-                "control plane already running: lock held on {lock_path} (another instance on this host?)"
+                "control plane already running: lock held on {} (another instance on this host?)",
+                lock_path.display()
             );
         }
         return Err(e.into());
@@ -39,6 +48,58 @@ fn acquire_instance_lock(db_path: &str) -> anyhow::Result<Option<std::fs::File>>
 #[cfg(not(unix))]
 fn acquire_instance_lock(_db_path: &str) -> anyhow::Result<Option<std::fs::File>> {
     Ok(None)
+}
+
+/// Runtime files must outlive the process. If an operator or temp cleaner
+/// removes the database directory, SQLite reconnects fail every few seconds
+/// and the process keeps appending warnings to its now-deleted stdout log.
+/// Exit instead: dropping the process releases the instance flock and closes
+/// the log descriptor.
+#[cfg(unix)]
+fn runtime_files_intact(db_path: &Path, lock_file: Option<&std::fs::File>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    if !db_path.exists() {
+        return false;
+    }
+    let Some(lock_file) = lock_file else {
+        return true;
+    };
+    let Ok(locked) = lock_file.metadata() else {
+        return false;
+    };
+    let Ok(path) = std::fs::metadata(instance_lock_path(&db_path.to_string_lossy())) else {
+        return false;
+    };
+    locked.dev() == path.dev() && locked.ino() == path.ino()
+}
+
+#[cfg(not(unix))]
+fn runtime_files_intact(db_path: &Path, _lock_file: Option<&std::fs::File>) -> bool {
+    db_path.exists()
+}
+
+async fn wait_for_runtime_failure(
+    db_path: &Path,
+    lock_file: Option<&std::fs::File>,
+    poll_interval: Duration,
+) -> Result<()> {
+    loop {
+        tokio::time::sleep(poll_interval).await;
+        if !runtime_files_intact(db_path, lock_file) {
+            anyhow::bail!(
+                "control-plane runtime files disappeared: {}",
+                db_path.display()
+            );
+        }
+    }
+}
+
+async fn watch_runtime_files(db_path: &str, lock_file: Option<&std::fs::File>) -> Result<()> {
+    if db_path.is_empty() || db_path == ":memory:" {
+        return std::future::pending::<Result<()>>().await;
+    }
+    wait_for_runtime_failure(Path::new(db_path), lock_file, RUNTIME_FILE_POLL_INTERVAL).await
 }
 
 // Plan 6.4 process topology: the control plane is I/O-bound (axum + sqlite
@@ -145,12 +206,66 @@ async fn amain() -> Result<()> {
     // Hold the single-instance lock for the whole process lifetime (the File
     // drops when `main` returns, releasing the flock). In HA each host has its
     // own database copy, so the lock still guards against two local writers.
-    let _instance_lock = acquire_instance_lock(&db_path)?;
+    let instance_lock = acquire_instance_lock(&db_path)?;
 
     let state = AppState::open_with_runtime_and_root(&db_path, ha, artifact_root).await?;
-    if state.ha.is_ha() {
-        serve_ha(state, addr).await
-    } else {
-        serve(state, addr).await
+    let server = async {
+        if state.ha.is_ha() {
+            serve_ha(state, addr).await
+        } else {
+            serve(state, addr).await
+        }
+    };
+    tokio::select! {
+        result = server => result,
+        result = watch_runtime_files(&db_path, instance_lock.as_ref()) => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_watcher_fails_when_database_disappears() {
+        let dir = std::env::temp_dir().join(format!("ag-runtime-watch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("cp.db");
+        let lock_path = dir.join("cp.db.lock");
+        std::fs::write(&db_path, b"db").unwrap();
+        std::fs::write(&lock_path, b"").unwrap();
+
+        std::fs::remove_file(&db_path).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_runtime_failure(&db_path, None, Duration::from_millis(10)),
+        )
+        .await
+        .expect("watcher timed out");
+        assert!(result.is_err());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_watcher_detects_replaced_lock_file() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = std::env::temp_dir().join(format!("ag-runtime-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("cp.db");
+        let lock_path = dir.join("cp.db.lock");
+        std::fs::write(&db_path, b"db").unwrap();
+        let lock_file = std::fs::File::create(&lock_path).unwrap();
+
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::write(&lock_path, b"replacement").unwrap();
+        let locked = lock_file.metadata().unwrap();
+        let replacement = std::fs::metadata(&lock_path).unwrap();
+        assert!(locked.dev() != replacement.dev() || locked.ino() != replacement.ino());
+        assert!(!runtime_files_intact(&db_path, Some(&lock_file)));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

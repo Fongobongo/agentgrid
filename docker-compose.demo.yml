@@ -1,10 +1,17 @@
 # Local demo stack with insecure baked-in defaults for fast hacking.
 # NOT for production: anyone on the network can log in as demo/demo.
 # Production uses docker-compose.yml + deploy/compose/up.sh (random secrets).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   control-plane:
     image: ag-cp:test
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "7800:7800"
     environment:
@@ -17,6 +24,7 @@ services:
   node-1:
     image: ag-node:test
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - control-plane
     environment:
@@ -35,6 +43,7 @@ services:
   node-2:
     image: ag-node:test
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - control-plane
     environment:

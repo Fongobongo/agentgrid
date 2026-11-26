@@ -7,10 +7,17 @@
 #
 # For local hacking with insecure baked-in defaults see
 # `docker-compose.demo.yml`.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   control-plane:
     image: ag-cp:test
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "7800:7800"
     # Hardening P2 item 31: harden the production container runtime.
@@ -39,6 +46,7 @@ services:
   node-1:
     image: ag-node:test
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - control-plane
     # Hardening: read-only root + tmpfs /tmp + cap-drop all + no-new-privileges.
@@ -67,6 +75,7 @@ services:
   node-2:
     image: ag-node:test
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - control-plane
     read_only: true

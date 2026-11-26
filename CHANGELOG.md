@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A control plane no longer keeps a deleted temporary directory alive.** If
+  its SQLite database or instance-lock file is removed while the process runs,
+  it now exits instead of retrying failed database operations forever and
+  appending warnings to a deleted log inode. Exiting releases the single-host
+  instance lock and closes the log descriptor. Docker Compose log files are
+  also capped at 10 MiB × 3 per container. HA Compose files now use valid
+  Docker interpolation and health-check syntax, so `docker compose config`
+  accepts them.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**
