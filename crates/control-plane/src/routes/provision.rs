@@ -452,7 +452,9 @@ fn resolve_node_binary() -> Option<PathBuf> {
 }
 
 fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339()
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 fn state_str(s: JobState) -> &'static str {

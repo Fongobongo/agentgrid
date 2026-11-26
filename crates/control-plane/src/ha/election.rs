@@ -952,7 +952,7 @@ pub async fn status_of(rt: &HaRuntime, store: Option<&Store>) -> Result<super::p
 /// the answer lie by omission.
 fn peer_status(rt: &HaRuntime) -> Vec<super::protocol::PeerStatus> {
     let seen = rt.shared.peers_seen();
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let timeout = rt.config.election_timeout.as_secs().max(1) as i64;
 
     let mut out: Vec<super::protocol::PeerStatus> = Vec::new();

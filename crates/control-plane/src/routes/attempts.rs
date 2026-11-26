@@ -73,7 +73,7 @@ pub async fn ingest_events(
     // the control plane with event batches. Over the limit → 429, with a
     // counted rejection so it shows in metrics.
     {
-        let now = chrono::Utc::now().timestamp();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let allowed = state.event_rate.lock().await.admit(&auth.node_id, now);
         if !allowed {
             state

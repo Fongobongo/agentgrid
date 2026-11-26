@@ -178,10 +178,16 @@ impl Store {
         if current_attempt_status == AttemptStatus::Validating {
             if let Some(vat) = validated_at.as_deref() {
                 if let (Ok(vdt), Ok(fdt)) = (
-                    chrono::DateTime::parse_from_rfc3339(vat),
-                    chrono::DateTime::parse_from_rfc3339(&now),
+                    time::OffsetDateTime::parse(
+                        vat,
+                        &time::format_description::well_known::Rfc3339,
+                    ),
+                    time::OffsetDateTime::parse(
+                        &now,
+                        &time::format_description::well_known::Rfc3339,
+                    ),
                 ) {
-                    let ms = (fdt - vdt).num_milliseconds().max(0) as u64;
+                    let ms = (fdt - vdt).whole_milliseconds().max(0) as u64;
                     self.validation_duration_sum
                         .fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
                     self.validation_duration_count

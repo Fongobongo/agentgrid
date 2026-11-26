@@ -251,7 +251,7 @@ impl HaShared {
     /// peer is behind by at least that much, and the number is still the most
     /// recent fact about it.
     pub fn observe_peer(&self, peer_id: &str, ok: bool, applied_seq: Option<u64>) {
-        let now = chrono::Utc::now().timestamp();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let mut seen = lock(&self.peers_seen);
         let entry = seen.entry(peer_id.to_string()).or_insert(PeerSeen {
             last_ok_unix: None,

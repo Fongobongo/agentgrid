@@ -831,7 +831,7 @@ impl Store {
             .filter(|s| s.status != WorkflowStepStatus::Pending)
             .count() as u32;
         let created_unix = iso_to_unix(&run.created_at).unwrap_or(0);
-        let now = chrono::Utc::now().timestamp();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let mut usage = agentgrid_common::compute_budget_usage(created_unix, task_count, now);
         usage.messages = self.workflow_message_count(run_id).await.unwrap_or(0);
         // Stage 13: observe bytes + circuit breaker so the snapshot ceiling
@@ -1678,7 +1678,7 @@ impl Store {
                     .filter(|s| s.status != WorkflowStepStatus::Pending)
                     .count() as u32;
                 let created_unix = iso_to_unix(&run.created_at).unwrap_or(0);
-                let now = chrono::Utc::now().timestamp();
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
                 let usage = {
                     let mut u =
                         agentgrid_common::compute_budget_usage(created_unix, task_count, now);

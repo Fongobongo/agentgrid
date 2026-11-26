@@ -19,7 +19,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
-chrono.workspace = true
+time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
@@ -39,7 +39,7 @@ agentgrid-provision.workspace = true
 thiserror.workspace = true
 
 sqlx = { version = "0.9", features = ["sqlite", "runtime-tokio", "migrate"] }
-libsqlite3-sys = { version = "0.37", features = ["bundled"] }
+libsqlite3-sys = { version = "0.39", features = ["bundled"] }
 libc = "0.2"
 rust-embed = { version = "8", features = ["mime-guess"] }
 # Plan 1.2 (#22a): notify webhook fire-and-forget POST.

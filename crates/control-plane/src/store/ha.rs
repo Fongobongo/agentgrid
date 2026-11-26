@@ -192,7 +192,7 @@ impl Store {
     pub async fn quarantine(&self, epoch: u64) -> Option<String> {
         let name = format!(
             "control-plane.db.stale-{epoch}-{}",
-            chrono::Utc::now().timestamp()
+            time::OffsetDateTime::now_utc().unix_timestamp()
         );
         match self.backup_to(&name).await {
             Ok(()) => {

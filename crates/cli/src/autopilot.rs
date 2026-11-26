@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use agentgrid_common::{CreateTaskRequest, TaskStatus, TaskView};
 use anyhow::{Context as _, Result};
-use chrono::Utc;
+use time::OffsetDateTime;
 
 /// One autopilot iteration: a tracked task id + its terminal status.
 #[derive(Debug, Clone)]
@@ -29,8 +29,8 @@ pub struct Iteration {
 #[derive(Debug)]
 pub struct AutopilotReport {
     pub objective: String,
-    pub started_at: chrono::DateTime<Utc>,
-    pub finished_at: chrono::DateTime<Utc>,
+    pub started_at: OffsetDateTime,
+    pub finished_at: OffsetDateTime,
     pub iterations: Vec<Iteration>,
     pub final_commit: Option<String>,
     pub succeeded: bool,
@@ -40,8 +40,11 @@ impl AutopilotReport {
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("# Autopilot summary: {}\n\n", self.objective));
-        out.push_str(&format!("- Started: {}\n", self.started_at));
-        out.push_str(&format!("- Finished: {}\n", self.finished_at));
+        out.push_str(&format!("- Started: {}\n", format_rfc3339(self.started_at)));
+        out.push_str(&format!(
+            "- Finished: {}\n",
+            format_rfc3339(self.finished_at)
+        ));
         out.push_str(&format!(
             "- Outcome: {}\n",
             if self.succeeded {
@@ -92,7 +95,7 @@ pub async fn run_autopilot(
     base: &str,
     o: &AutopilotOpts<'_>,
 ) -> Result<AutopilotReport> {
-    let started = Utc::now();
+    let started = OffsetDateTime::now_utc();
     let deadline = Instant::now() + o.max_duration;
     let mut iterations: Vec<Iteration> = Vec::new();
     let mut last_good: Option<String> = git_head(o.local_path);
@@ -133,7 +136,7 @@ pub async fn run_autopilot(
             break;
         }
     }
-    let finished = Utc::now();
+    let finished = OffsetDateTime::now_utc();
     let report = AutopilotReport {
         objective: o.objective.into(),
         started_at: started,
@@ -302,6 +305,11 @@ fn rollback_to(workdir: &Path, sha: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn format_rfc3339(t: OffsetDateTime) -> String {
+    t.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
 pub fn objective_slug(objective: &str) -> String {
     let raw: String = objective
         .chars()
@@ -323,13 +331,13 @@ pub fn objective_slug(objective: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn report(iters: Vec<Iteration>, succeeded: bool) -> AutopilotReport {
+        let rfc3339 = time::format_description::well_known::Rfc3339;
         AutopilotReport {
             objective: "Fix flaky tests".into(),
-            started_at: Utc.with_ymd_and_hms(2026, 5, 10, 22, 0, 0).unwrap(),
-            finished_at: Utc.with_ymd_and_hms(2026, 5, 11, 6, 0, 0).unwrap(),
+            started_at: OffsetDateTime::parse("2026-05-10T22:00:00Z", &rfc3339).unwrap(),
+            finished_at: OffsetDateTime::parse("2026-05-11T06:00:00Z", &rfc3339).unwrap(),
             iterations: iters,
             final_commit: Some("abc123def456".into()),
             succeeded,

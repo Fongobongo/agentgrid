@@ -124,7 +124,7 @@ pub async fn create(rt: &HaRuntime, store: &Store) -> Result<SnapshotManifest> {
         schema_version: store.schema_version().await?,
         sha256,
         size,
-        created_unix: chrono::Utc::now().timestamp(),
+        created_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
     };
     let mpath = dir.join(manifest_file_name(&id));
     let tmp = mpath.with_extension("json.tmp");

@@ -44,7 +44,7 @@ impl Store {
         // approvals would never expire in production.
         self.tick_approval_expiry().await?;
         let _ = self
-            .tick_workflow_schedules(chrono::Utc::now().timestamp())
+            .tick_workflow_schedules(time::OffsetDateTime::now_utc().unix_timestamp())
             .await;
         // Housekeeping: drop expired artifacts and truncate the WAL so the
         // database file does not grow without bound.
@@ -115,7 +115,7 @@ impl Store {
                 // backup is counted and retried on the next interval; the
                 // timestamp only advances on success.
                 if last_backup.elapsed() >= Duration::from_secs(backup_every) {
-                    let ts = chrono::Utc::now().timestamp();
+                    let ts = time::OffsetDateTime::now_utc().unix_timestamp();
                     let name = format!("auto-backup-{ts}.db");
                     match store.backup_to(&name).await {
                         Ok(()) => {
@@ -221,7 +221,7 @@ impl Store {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
-                let now_unix = chrono::Utc::now().timestamp();
+                let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
                 let due = match store.due_agents(now_unix).await {
                     Ok(d) => d,
                     Err(e) => {

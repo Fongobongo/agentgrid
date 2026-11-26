@@ -618,7 +618,10 @@ pub fn spawn_heartbeat(
             // the daemon. Best-effort; failure only loses the signal. Lives
             // next to the outbox under AGENTGRID_DATA_DIR.
             let marker = cfg.outbox_root.join("../heartbeat.stamp");
-            let _ = std::fs::write(&marker, chrono::Utc::now().to_rfc3339().as_bytes());
+            let now = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default();
+            let _ = std::fs::write(&marker, now.as_bytes());
 
             // Interval until the next heartbeat (Plan 6.10: ±20% jitter so
             // a fleet restarted together does not synchronize beats; the

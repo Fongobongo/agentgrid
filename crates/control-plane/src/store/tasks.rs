@@ -168,10 +168,10 @@ impl Store {
         for (f, c) in rows {
             if let (Some(f), Some(c)) = (f, c) {
                 if let (Ok(fdt), Ok(cdt)) = (
-                    chrono::DateTime::parse_from_rfc3339(&f),
-                    chrono::DateTime::parse_from_rfc3339(&c),
+                    time::OffsetDateTime::parse(&f, &time::format_description::well_known::Rfc3339),
+                    time::OffsetDateTime::parse(&c, &time::format_description::well_known::Rfc3339),
                 ) {
-                    out.push((fdt - cdt).num_seconds().max(0));
+                    out.push((fdt - cdt).whole_seconds().max(0));
                 }
             }
         }

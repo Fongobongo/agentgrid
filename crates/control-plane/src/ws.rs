@@ -348,7 +348,9 @@ async fn handle_conn(state: Arc<AppState>, node_id: String, socket: WebSocket) {
         .register(&node_id, tx, max_concurrency, adapter_env_capable)
         .await;
     let ok = NodeWsMsg::HelloOk {
-        server_time: chrono::Utc::now().timestamp_millis(),
+        server_time: time::OffsetDateTime::now_utc()
+            .unix_timestamp_nanos()
+            .div_euclid(1_000_000) as i64,
     };
     let _ = state.ws_registry.send(&node_id, &ok).await; // via channel
 

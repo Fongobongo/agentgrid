@@ -421,13 +421,13 @@ impl AppState {
         role: &str,
         sessions_gen: i64,
     ) -> anyhow::Result<String> {
-        let now = chrono::Utc::now();
-        let exp = (now + chrono::Duration::hours(12)).timestamp() as usize;
+        let now = time::OffsetDateTime::now_utc();
+        let exp = (now + time::Duration::hours(12)).unix_timestamp() as usize;
         let jti = Uuid::new_v4().to_string();
         let claims = Claims {
             sub: username.to_string(),
             exp,
-            iat: now.timestamp() as usize,
+            iat: now.unix_timestamp() as usize,
             gen: sessions_gen,
             jti,
             role: role.to_string(),

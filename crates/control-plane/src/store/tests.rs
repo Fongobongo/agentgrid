@@ -3372,7 +3372,7 @@ mod agent_tests {
             .unwrap();
 
         let due = s
-            .due_agents(chrono::Utc::now().timestamp() + 1)
+            .due_agents(time::OffsetDateTime::now_utc().unix_timestamp() + 1)
             .await
             .unwrap();
         assert_eq!(due.len(), 1, "fresh agent with interval is due");
@@ -3411,7 +3411,7 @@ mod agent_tests {
 
         // Not due again until the interval passes.
         let due2 = s
-            .due_agents(chrono::Utc::now().timestamp() + 1)
+            .due_agents(time::OffsetDateTime::now_utc().unix_timestamp() + 1)
             .await
             .unwrap();
         assert_eq!(due2.len(), 0);
@@ -3429,7 +3429,7 @@ mod agent_tests {
         .await
         .unwrap();
         assert!(s
-            .due_agents(chrono::Utc::now().timestamp() + 1)
+            .due_agents(time::OffsetDateTime::now_utc().unix_timestamp() + 1)
             .await
             .unwrap()
             .is_empty());

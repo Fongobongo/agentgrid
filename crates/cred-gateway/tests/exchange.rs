@@ -61,8 +61,12 @@ fn fake_github(state: Arc<FakeGithub>) -> Router {
                     if let Some((status, body)) = state.fail.lock().unwrap().clone() {
                         return (status, body);
                     }
-                    let expires = (chrono::Utc::now() + chrono::Duration::hours(1))
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let expires = (time::OffsetDateTime::now_utc()
+                        + time::Duration::hours(1))
+                    .replace_nanosecond(0)
+                    .expect("valid nanoseconds")
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .expect("format RFC3339");
                     (
                         StatusCode::CREATED,
                         format!(

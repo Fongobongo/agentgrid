@@ -765,9 +765,15 @@ pub fn oldest_pending_age_ms(dir: &Path) -> std::io::Result<u64> {
                                 .get("created_at")
                                 .and_then(|v| v.as_str())
                                 .and_then(|created_at| {
-                                    chrono::DateTime::parse_from_rfc3339(created_at)
-                                        .ok()
-                                        .map(|dt| dt.timestamp_millis().max(0) as u64)
+                                    time::OffsetDateTime::parse(
+                                        created_at,
+                                        &time::format_description::well_known::Rfc3339,
+                                    )
+                                    .ok()
+                                    .map(|dt| {
+                                        dt.unix_timestamp_nanos().div_euclid(1_000_000).max(0)
+                                            as u64
+                                    })
                                 })
                         };
                         if let Some(event_ms) = event_ms {

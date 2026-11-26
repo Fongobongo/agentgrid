@@ -118,7 +118,9 @@ pub struct Store {
 }
 
 fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339()
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Audit X-D3: shared keyset-pagination scaffolding. Six list queries used to
@@ -353,15 +355,18 @@ fn parse_autonomy_level(s: &str) -> Option<agentgrid_common::AutonomyLevel> {
 
 /// Parse an RFC3339 timestamp into a unix epoch seconds.
 fn iso_to_unix(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s)
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
         .ok()
-        .map(|d| d.timestamp())
+        .map(|d| d.unix_timestamp())
 }
 
 /// Format a unix epoch seconds as RFC3339 (UTC).
 fn unix_to_iso(unix: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
-        .map(|d| d.to_rfc3339())
+    time::OffsetDateTime::from_unix_timestamp(unix)
+        .map(|d| {
+            d.format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default()
+        })
         .unwrap_or_default()
 }
 
@@ -379,7 +384,9 @@ fn schedule_from_row(r: &sqlx::sqlite::SqliteRow) -> WorkflowSchedule {
 }
 
 fn iso_plus_secs(secs: i64) -> String {
-    (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339()
+    (time::OffsetDateTime::now_utc() + time::Duration::seconds(secs))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 fn event_type_str(e: EventType) -> String {
@@ -847,9 +854,17 @@ async fn mark_offline_nodes(
     // write transaction and only run `lose_node_attempts` for nodes we actually
     // flipped. A concurrent heartbeat re-asserting `online` (via
     // upsert_heartbeat's own CAS) therefore never loses to this sweep.
-    let cutoff = chrono::DateTime::parse_from_rfc3339(now)
-        .map(|d| (d - chrono::Duration::seconds(30)).to_rfc3339())
-        .unwrap_or_else(|_| (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339());
+    let cutoff = time::OffsetDateTime::parse(now, &time::format_description::well_known::Rfc3339)
+        .map(|d| {
+            (d - time::Duration::seconds(30))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default()
+        })
+        .unwrap_or_else(|_| {
+            (time::OffsetDateTime::now_utc() - time::Duration::seconds(30))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default()
+        });
     let mut tx = begin_checked(pool, gate, repl).await?;
     let rows = sqlx::query(
         "SELECT id FROM nodes WHERE status = 'online' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?)",

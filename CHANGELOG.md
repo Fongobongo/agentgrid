@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Open supply-chain advisories closed without new ignores.** `url` moved to
+  2.5.9 (RUSTSEC-2026-0592, issue #129), `sqlx` to 0.9.1 and the bundled
+  `libsqlite3-sys` to 0.39.1 with SQLite 3.54.1 (RUSTSEC-2026-0459,
+  CVE-2026-119375, issue #119), and the unmaintained `chrono` dependency was
+  replaced with `time` 0.3 (RUSTSEC-2026-0543, issue #123). The timestamp
+  format stays RFC3339 at every API and database boundary; `ag watch` still
+  prints local time, falling back to UTC if the local offset cannot be
+  determined. `deny.toml` remains at `ignore = []`.
+
 - **A control plane no longer keeps a deleted temporary directory alive.** If
   its SQLite database or instance-lock file is removed while the process runs,
   it now exits instead of retrying failed database operations forever and

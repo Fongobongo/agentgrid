@@ -39,7 +39,9 @@ axum = { version = "0.8", features = ["macros", "ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-chrono = { version = "0.4", features = ["serde"] }
+# chrono is unmaintained (RUSTSEC-2026-0543); time is the maintained replacement
+# and was already in the graph. `local-offset` keeps `ag watch` on local time.
+time = { version = "0.3", features = ["formatting", "parsing", "local-offset"] }
 tower = { version = "0.5", features = ["util"] }
 sha2 = "0.11"
 hmac = "0.13"

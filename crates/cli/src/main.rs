@@ -2277,7 +2277,9 @@ async fn cmd_watch(
     tasks: usize,
 ) -> Result<()> {
     loop {
-        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let now = format!("{:02}:{:02}:{:02}", now.hour(), now.minute(), now.second());
         let mut out =
             format!("=== agentgrid watch {now} (every {interval}s, Ctrl+C to quit) ===\n\n");
 

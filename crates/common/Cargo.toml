@@ -18,7 +18,6 @@ serde_json.workspace = true
 serde-saphyr = "2"
 sha2.workspace = true
 uuid.workspace = true
-chrono.workspace = true
 thiserror.workspace = true
 # Sealed adapter-env secrets (ADR 0028): the CP seals to a node's public key,
 # the node opens with its private key.

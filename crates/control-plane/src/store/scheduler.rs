@@ -749,9 +749,15 @@ impl Store {
         let mut out = Vec::with_capacity(batch.len());
         for p in batch {
             // Observability: queued→assigned latency (Stage 2.5 ops).
-            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&p.created_at) {
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let latency = (now_ms - created.timestamp_millis()).max(0) as u64;
+            if let Ok(created) = time::OffsetDateTime::parse(
+                &p.created_at,
+                &time::format_description::well_known::Rfc3339,
+            ) {
+                let now_ms = time::OffsetDateTime::now_utc()
+                    .unix_timestamp_nanos()
+                    .div_euclid(1_000_000) as i64;
+                let created_ms = created.unix_timestamp_nanos().div_euclid(1_000_000) as i64;
+                let latency = (now_ms - created_ms).max(0) as u64;
                 self.scheduler_latency_ms
                     .store(latency, std::sync::atomic::Ordering::Relaxed);
                 self.scheduler_assignments

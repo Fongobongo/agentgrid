@@ -430,7 +430,7 @@ pub async fn metrics(
         let snap_age = {
             let created = shared.snapshot_created_unix();
             if created > 0 {
-                (chrono::Utc::now().timestamp() - created).max(0)
+                (time::OffsetDateTime::now_utc().unix_timestamp() - created).max(0)
             } else {
                 0
             }
@@ -527,8 +527,8 @@ pub async fn metrics(
     s.push_str("# TYPE agentgrid_last_backup_at_unix gauge\n");
     s.push_str(&format!("agentgrid_last_backup_at_unix {last_backup_at}\n"));
     let backup_age = if last_backup_at > 0 {
-        chrono::Utc::now()
-            .timestamp()
+        time::OffsetDateTime::now_utc()
+            .unix_timestamp()
             .saturating_sub(last_backup_at)
     } else {
         0

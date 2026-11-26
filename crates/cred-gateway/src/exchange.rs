@@ -223,8 +223,8 @@ fn expires_in_from(body: &serde_json::Value) -> u64 {
     let Some(at) = body.get("expires_at").and_then(|v| v.as_str()) else {
         return 3600;
     };
-    match chrono::DateTime::parse_from_rfc3339(at) {
-        Ok(t) => (t.timestamp() - unix_now() as i64).max(0) as u64,
+    match time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339) {
+        Ok(t) => (t.unix_timestamp() - unix_now() as i64).max(0) as u64,
         Err(_) => 3600,
     }
 }

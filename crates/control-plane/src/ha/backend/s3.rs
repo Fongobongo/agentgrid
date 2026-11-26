@@ -11,7 +11,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST};
 use reqwest::{Method, StatusCode, Url};
@@ -415,8 +414,16 @@ impl S3Client {
         query: &[(String, String)],
         payload_hash: &str,
     ) -> Result<reqwest::RequestBuilder> {
-        let now = Utc::now();
-        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let now = time::OffsetDateTime::now_utc();
+        let amz_date = format!(
+            "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+            now.year(),
+            u8::from(now.month()),
+            now.day(),
+            now.hour(),
+            now.minute(),
+            now.second()
+        );
         let headers = self.sign_at(method.as_str(), url, query, payload_hash, &amz_date)?;
         Ok(self.http.request(method, url.clone()).headers(headers))
     }

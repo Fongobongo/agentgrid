@@ -147,10 +147,12 @@ pub async fn upsert_profile(
     // Expiry is validated loudly (RFC3339) so a typo'd TTL surfaces here
     // instead of silently never expiring.
     if let Some(ea) = &body.expires_at {
-        chrono::DateTime::parse_from_rfc3339(ea).map_err(|e| {
-            tracing::warn!("opencode upsert bad expires_at: {e}");
-            StatusCode::BAD_REQUEST
-        })?;
+        time::OffsetDateTime::parse(ea, &time::format_description::well_known::Rfc3339).map_err(
+            |e| {
+                tracing::warn!("opencode upsert bad expires_at: {e}");
+                StatusCode::BAD_REQUEST
+            },
+        )?;
     }
     let profile = state
         .store

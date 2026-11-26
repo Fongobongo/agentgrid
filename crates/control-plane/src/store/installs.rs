@@ -90,7 +90,9 @@ impl Store {
                 .bind(name)
                 .fetch_all(&self.pool)
                 .await?;
-        let finished_at = chrono::Utc::now().to_rfc3339();
+        let finished_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
         let mut closed = 0;
         for row in &rows {
             let id: String = row.try_get("id").unwrap_or_default();
@@ -174,13 +176,15 @@ impl Store {
     /// hatch ("keep every attempt") and what a deployment that treats this as
     /// an audit log would set.
     ///
-    /// Timestamps are `to_rfc3339()` UTC throughout, so lexicographic order is
+    /// Timestamps are RFC3339 UTC throughout, so lexicographic order is
     /// chronological order and the cutoff needs no parsing.
     pub async fn prune_installs(&self, retention_hours: i64) -> Result<u64> {
         if retention_hours <= 0 {
             return Ok(0);
         }
-        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(retention_hours)).to_rfc3339();
+        let cutoff = (time::OffsetDateTime::now_utc() - time::Duration::hours(retention_hours))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
         let res = self
             .write_one(
                 sqlx::query(
