@@ -346,6 +346,48 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Wait until every dispatched attempt has finished. Used by graceful
+/// shutdown: dropping the transport stops new assignments, while this wait
+/// lets running attempts flush their durable event outbox and record their
+/// terminal completion before the daemon exits.
+pub async fn wait_for_inflight(timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let n = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner()).len();
+        if n == 0 {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                in_flight = n,
+                "graceful shutdown timed out waiting for attempts"
+            );
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Final drain after the transport stops: finish attempts, then redeliver any
+/// durable completion records that did not reach the control plane.
+pub async fn graceful_drain(cfg: &Config, cred: &crate::config::SavedCredential) {
+    if !wait_for_inflight(Duration::from_secs(60)).await {
+        return;
+    }
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", cred.credential)) {
+        headers.insert(AUTHORIZATION, value);
+    }
+    let client = match authed_client(headers, &cfg.proxies) {
+        Ok((client, _)) => client,
+        Err(e) => {
+            tracing::warn!("graceful shutdown could not build client: {e}");
+            return;
+        }
+    };
+    recovery::startup_recovery(cfg, &client).await;
+}
+
 /// Dispatch a batch of assignments: one task per attempt, gated by the
 /// concurrency semaphore. Shared by the poll and WS transports (plan 0.3 2.3);
 /// waits (never drops) if a slot is briefly busy, so no assignment is lost.

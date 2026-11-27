@@ -1080,13 +1080,13 @@ pub async fn serve_witness(
                 },
                 app,
             )
-            .with_graceful_shutdown(tls::shutdown_signal(None))
+            .with_graceful_shutdown(tls::shutdown_signal())
             .await?;
         }
         _ => {
             tracing::info!("HA witness listening on {addr} (plaintext)");
             axum::serve(listener, app)
-                .with_graceful_shutdown(tls::shutdown_signal(None))
+                .with_graceful_shutdown(tls::shutdown_signal())
                 .await?;
         }
     }
@@ -1157,7 +1157,7 @@ async fn serve_listener(state: Arc<AppState>, addr: std::net::SocketAddr) -> any
                 // silently fall back to the per-account bucket alone.
                 app.into_make_service_with_connect_info::<net::PeerAddr>(),
             )
-            .with_graceful_shutdown(tls::shutdown_signal(Some(state)))
+            .with_graceful_shutdown(tls::shutdown_signal())
             .await?;
         }
         _ => {
@@ -1166,9 +1166,17 @@ async fn serve_listener(state: Arc<AppState>, addr: std::net::SocketAddr) -> any
                 listener,
                 app.into_make_service_with_connect_info::<net::PeerAddr>(),
             )
-            .with_graceful_shutdown(tls::shutdown_signal(Some(state)))
+            .with_graceful_shutdown(tls::shutdown_signal())
             .await?;
         }
     }
+    // The server drained its in-flight requests before this point. Checkpoint
+    // the WAL and close the pool deterministically instead of relying on
+    // Drop: a clean SQLite close releases file locks immediately, which matters
+    // for scripts that restart the CP on the same path right after exit.
+    if let Err(e) = state.store.wal_checkpoint().await {
+        tracing::warn!("shutdown WAL checkpoint failed: {e}");
+    }
+    state.store.pool.close().await;
     Ok(())
 }

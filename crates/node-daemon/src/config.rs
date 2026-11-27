@@ -616,13 +616,14 @@ fn build_endpoints(
     }
 }
 
-pub fn config_from_env() -> Config {
-    let data_dir =
-        std::env::var("AGENTGRID_DATA_DIR").unwrap_or_else(|_| "./agentgrid-data".into());
-    let server = std::env::var("AGENTGRID_SERVER")
-        .unwrap_or_else(|_| "http://127.0.0.1:7800".into())
-        .trim_end_matches('/')
-        .to_string();
+pub fn config_from_env() -> anyhow::Result<Config> {
+    let runtime = agentgrid_common::RuntimeConfig::from_env().map_err(anyhow::Error::msg)?;
+    let production = agentgrid_common::deploy_env_fail_closed().is_production();
+    runtime
+        .validate_node_paths(production)
+        .map_err(anyhow::Error::msg)?;
+    let data_dir = runtime.node.data_dir;
+    let server = runtime.node.server.clone();
     let servers: Vec<String> = std::env::var("AGENTGRID_SERVERS")
         .ok()
         .map(|raw| raw.split(',').map(str::trim).map(str::to_string).collect())
@@ -632,29 +633,21 @@ pub fn config_from_env() -> Config {
         servers,
         std::env::var(GATEWAY_FAILURES_ENV).ok().as_deref(),
     );
-    Config {
+    Ok(Config {
         server,
         endpoints,
-        node_name: std::env::var("AGENTGRID_NODE_NAME")
-            .unwrap_or_else(|_| hostname().unwrap_or_else(|| "node".into())),
-        workspace_root: PathBuf::from(
-            std::env::var("AGENTGRID_WORKSPACE_ROOT")
-                .unwrap_or_else(|_| "./agentgrid-workspace".into()),
-        ),
-        max_concurrency: std::env::var("AGENTGRID_MAX_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(2),
+        node_name: runtime
+            .node
+            .node_name
+            .clone()
+            .unwrap_or_else(|| hostname().unwrap_or_else(|| "node".into())),
+        workspace_root: runtime.node.workspace_root.clone(),
+        max_concurrency: runtime.node.max_concurrency,
         agent_version: std::env::var("AGENTGRID_AGENT_VERSION")
             .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into()),
-        adapters: parse_adapters(
-            &std::env::var("AGENTGRID_ADAPTERS").unwrap_or_else(|_| "mock".into()),
-        ),
+        adapters: parse_adapters(&runtime.node.adapters.join(",")),
         repositories: split_csv("AGENTGRID_REPOSITORIES", "*"),
-        heartbeat_secs: std::env::var("AGENTGRID_HEARTBEAT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10),
+        heartbeat_secs: runtime.node.heartbeat_secs,
         enroll_token: std::env::var("AGENTGRID_ENROLL_TOKEN").ok(),
         // Only an explicit `1`/`true`: an empty variable in an env file must not
         // re-arm the re-key path, because a spent token fails the boot.
@@ -664,10 +657,7 @@ pub fn config_from_env() -> Config {
         ),
         credential_path: PathBuf::from(&data_dir).join("credential.json"),
         env_file: std::env::var("AGENTGRID_ENV_FILE").ok().map(PathBuf::from),
-        repository_root: PathBuf::from(
-            std::env::var("AGENTGRID_REPOSITORY_ROOT")
-                .unwrap_or_else(|_| "./agentgrid-repos".into()),
-        ),
+        repository_root: runtime.node.repository_root.clone(),
         secrets: split_csv("AGENTGRID_SECRETS", ""),
         adapter_env: parse_env_pairs("AGENTGRID_ADAPTER_ENV"),
         gateway_env: parse_gateway_env("AGENTGRID_ADAPTER_ENV"),
@@ -699,7 +689,7 @@ pub fn config_from_env() -> Config {
             .ok()
             .filter(|v| v == "none" || v == "restricted" || v == "unrestricted")
             .unwrap_or_else(|| "none".into()),
-        transport: Transport::parse(std::env::var("AGENTGRID_TRANSPORT").ok()),
+        transport: Transport::parse(Some(runtime.node.transport.clone())),
         guard_deny: std::env::var("AGENTGRID_GUARD_DENY")
             .ok()
             .map(|v| {
@@ -727,7 +717,7 @@ pub fn config_from_env() -> Config {
             "",
         ))),
         managed_adapter_env: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-    }
+    })
 }
 
 /// Determine permission interception mode for an adapter spec.

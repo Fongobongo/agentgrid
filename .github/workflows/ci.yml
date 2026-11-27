@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    # `release/**` carries reviewed release candidates (docs/release-process.md)
+    # and runs the same gates as master before a version tag is cut.
+    branches: [master, "release/**"]
   pull_request:
   # Nightly gate: the same jobs re-run on a schedule so a flaky/new failure
   # surfaces even on a quiet master, matching the hardening plan's
@@ -369,6 +371,11 @@ jobs:
         run: bash tests/e2e/run-sdk.sh
       - name: backup/restore rehearsal
         run: bash tests/e2e/run-restore.sh
+      # Regression for the deleted-temp-dir incident: a running control plane
+      # must exit when its SQLite database vanishes, release the instance lock,
+      # and stop writing to an unlinked log inode.
+      - name: runtime file cleanup regression
+        run: bash tests/e2e/run-runtime-cleanup.sh
       # Plan 6.13: filesystem compat — whole stack on one fs (DB+WAL,
       # artifacts, outbox, worktrees) + online backup. Without AG_FS_MOUNT
       # this runs on the runner default (ext4) and guards harness rot; a

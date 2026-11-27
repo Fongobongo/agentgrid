@@ -325,6 +325,13 @@ The control plane serves Prometheus metrics at `GET /metrics`; see
 `docs/monitoring.md` for the metric reference, alerting suggestions and a
 ready-to-import Grafana dashboard (`deploy/grafana-dashboard.json`).
 
+For daemon runtime configuration, `ag doctor runtime`, graceful shutdown, and
+backup/restore rehearsal, see `docs/runtime-config.md`. The configuration
+decision itself is recorded in
+[`docs/decisions/0030-typed-runtime-config.md`](docs/decisions/0030-typed-runtime-config.md);
+the release branch and tag flow is in
+[`docs/release-process.md`](docs/release-process.md).
+
 
 ### Operator notifications (webhook / Telegram)
 

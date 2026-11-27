@@ -1,6 +1,7 @@
 pub mod compress;
 pub mod deploy_env;
 pub mod policy;
+pub mod runtime_config;
 pub mod seal;
 pub mod workflow;
 pub mod ws;
@@ -11,6 +12,7 @@ pub use policy::{
     AutonomyLevel, BuiltinPolicyProvider, CommandPolicyProvider, PolicyDecision, PolicyError,
     PolicyVerdict, RiskClass,
 };
+pub use runtime_config::{RuntimeConfig, RuntimeConfigError};
 pub use workflow::{
     assembly_architect_prompt, assembly_collector_prompt, build_handoff_payload,
     compute_budget_usage, default_assembly_budget, parse_plan_steps, ratify_l4_schedule,

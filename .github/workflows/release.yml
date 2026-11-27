@@ -4,6 +4,12 @@ name: Release
 # tags (v*) and manually. x86_64 + aarch64 musl are the primary artifacts;
 # x86_64-gnu is the fallback (AGENTS.md release-target matrix).
 #
+# Release branch policy (docs/release-process.md): `master` integrates,
+# `release/<version>` carries a reviewed release candidate, and ONLY a version
+# tag publishes images + GitHub Release. A release branch may run this
+# workflow manually to produce CI artifacts, but publication jobs stay gated
+# on `refs/tags/v*` so an unreviewed branch can never move `:latest`.
+#
 # musl targets cross-compile via `cross` (prebuilt Docker toolchains on
 # ghcr.io — reliable, no external zig download).
 #
@@ -15,6 +21,11 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A release branch is built on demand (`workflow_dispatch`) to produce
+  # inspectable CI artifacts. It never publishes: every publication job below
+  # is gated on `refs/tags/v*`. CI (ci.yml) runs the full gate set on
+  # `release/**` pushes, so an RC branch is tested without paying for three
+  # cross-builds on every push.
   workflow_dispatch:
 
 permissions:

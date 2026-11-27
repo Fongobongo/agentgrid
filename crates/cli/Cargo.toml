@@ -25,6 +25,7 @@ agentgrid-provision.workspace = true
 # Plan 2.6 (#22c): autopilot timestamps
 chrono.workspace = true
 uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
 # Stage 11.5 TUI
 ratatui.workspace = true
 crossterm.workspace = true

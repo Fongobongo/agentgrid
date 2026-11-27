@@ -983,8 +983,31 @@ fn main() -> Result<()> {
     tokio_runtime().block_on(amain())
 }
 
+/// Await Ctrl-C / SIGTERM. The caller drops the transport first (stopping
+/// new assignments), then drains in-flight attempts and durable completions.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                let _ = sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
 async fn amain() -> Result<()> {
-    let mut cfg = config_from_env();
+    let mut cfg = config_from_env()?;
     for a in &cfg.adapters {
         let probe = if a.id == "zeroshot" {
             probe_cluster_adapter(&zeroshot::zeroshot_bin(), "docker").await
@@ -1288,7 +1311,16 @@ async fn amain() -> Result<()> {
             "adapter env delivery"
         );
     }
-    polling::run_transport(cfg, cred).await
+    let transport = polling::run_transport(cfg.clone(), cred.clone());
+    tokio::pin!(transport);
+    tokio::select! {
+        result = &mut transport => result,
+        _ = shutdown_signal() => {
+            tracing::info!("shutdown requested; draining in-flight attempts");
+            polling::graceful_drain(&cfg, &cred).await;
+            Ok(())
+        }
+    }
 }
 
 /// Serializes every test that mutates process-global env used to locate or

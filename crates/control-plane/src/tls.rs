@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
-use crate::AppState;
-
 pub struct TlsListener {
     pub(crate) tcp: tokio::net::TcpListener,
     pub(crate) acceptor: tokio_rustls::TlsAcceptor,
@@ -59,9 +57,13 @@ pub fn load_tls_acceptor(
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
-/// Await Ctrl-C / SIGTERM, then truncate the WAL so a restart replays nothing
-/// stale (Stage 2.5 ops). `None` for processes without a database (witness).
-pub async fn shutdown_signal(state: Option<Arc<AppState>>) {
+/// Await Ctrl-C / SIGTERM.
+///
+/// The database checkpoint and pool close happen AFTER the HTTP server has
+/// drained its in-flight requests (see `serve_listener`): checkpointing from
+/// this signal handler raced active requests and could truncate a WAL while a
+/// transaction was still committing.
+pub async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -79,9 +81,6 @@ pub async fn shutdown_signal(state: Option<Arc<AppState>>) {
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
-    }
-    if let Some(state) = state {
-        let _ = state.store.wal_checkpoint().await;
     }
 }
 

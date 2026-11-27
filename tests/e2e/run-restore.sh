@@ -28,29 +28,69 @@ mkdir -p "$NODE_DATA" "$WORK" "$REPOS"
 CP_PID=""
 NODE_PID=""
 
+# Start a daemon in its own process group. The pid is read from a file the
+# child writes, because setsid may fork and $! may be only the wrapper.
+spawn_group() { # $1 = pid file, $2 = log file, rest = command
+  local pidfile="$1" log="$2"
+  shift 2
+  rm -f "$pidfile"
+  setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pidfile" "$@" >"$log" 2>&1 &
+  local i=0
+  while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$pidfile" ] || { echo "daemon did not report pid" >&2; return 1; }
+  cat "$pidfile"
+}
+
+# Stop a process group and confirm every live member exited. A zombie counts
+# as exited; the scratch dir must never be removed under a live daemon.
+stop_group() { # $1 = pid/pgid
+  local pgid="$1" i=0
+  [ -n "$pgid" ] || return 0
+  kill -TERM -- "-$pgid" 2>/dev/null
+  while [ "$i" -lt 40 ]; do
+    if ! ps -eo pid=,pgid=,stat= | awk -v g="$pgid" '$2 == g && $3 !~ /^Z/ { found=1 } END { exit !found }'; then return 0; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  kill -KILL -- "-$pgid" 2>/dev/null
+  i=0
+  while [ "$i" -lt 40 ]; do
+    if ! ps -eo pid=,pgid=,stat= | awk -v g="$pgid" '$2 == g && $3 !~ /^Z/ { found=1 } END { exit !found }'; then return 0; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  echo "process group $pgid still alive after SIGKILL" >&2
+  return 1
+}
+
 cleanup() {
   set +e
-  [ -n "$NODE_PID" ] && kill -9 "$NODE_PID" 2>/dev/null
-  [ -n "$CP_PID" ] && kill -9 "$CP_PID" 2>/dev/null
-  sleep 0.3
-  [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
+  local leftover=0
+  stop_group "$NODE_PID" || leftover=1
+  stop_group "$CP_PID" || leftover=1
+  [ -n "$NODE_PID" ] && wait "$NODE_PID" 2>/dev/null
+  [ -n "$CP_PID" ] && wait "$CP_PID" 2>/dev/null
+  if [ "$leftover" = "0" ]; then
+    [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
+  else
+    echo "leaving $TMP in place: some daemons are still running" >&2
+  fi
 }
 trap cleanup EXIT
 
 start_cp() { # $1 = port, $2 = db path, $3 = artifact root, $4 = log name
-  AGENTGRID_LISTEN="127.0.0.1:$1" \
-  AGENTGRID_DB="$2" \
-  AGENTGRID_JWT_SECRET="e2e-stable-secret" \
-  AGENTGRID_ARTIFACT_ROOT="$3" \
-  nohup "$BIN/agentgrid-control-plane" >"$TMP/$4" 2>&1 &
-  CP_PID=$!
+  CP_PID=$(spawn_group "$TMP/$4.pid" "$TMP/$4" -- \
+    env AGENTGRID_LISTEN="127.0.0.1:$1" \
+    AGENTGRID_DB="$2" \
+    AGENTGRID_JWT_SECRET="e2e-stable-secret" \
+    AGENTGRID_ARTIFACT_ROOT="$3" \
+    "$BIN/agentgrid-control-plane")
 }
 
 start_node() { # $1 = base url, $2 = enroll token (may be empty)
   local base="$1" tok="${2:-}"
   local env_args=()
   [ -n "$tok" ] && env_args+=(AGENTGRID_ENROLL_TOKEN="$tok")
-  env PATH="$BIN:$PATH" \
+  NODE_PID=$(spawn_group "$TMP/node.pid" "$TMP/node.log" -- \
+    env PATH="$BIN:$PATH" \
     AGENTGRID_SERVER="$base" \
     AGENTGRID_DATA_DIR="$NODE_DATA" \
     AGENTGRID_NODE_NAME="e2e-restore-node" \
@@ -60,8 +100,7 @@ start_node() { # $1 = base url, $2 = enroll token (may be empty)
     AGENTGRID_MAX_CONCURRENCY="2" \
     RUST_LOG="info" \
     "${env_args[@]}" \
-    nohup "$BIN/agentgrid-node-daemon" >"$TMP/node.log" 2>&1 &
-  NODE_PID=$!
+    "$BIN/agentgrid-node-daemon")
 }
 
 wait_ready() { # $1 = base url
@@ -124,8 +163,8 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE1/v1/admin/backup" \
 echo "   backup written: $(stat -c%s "$TMP/backup.db") bytes"
 
 echo ">> tearing down CP1 + node"
-kill -9 "$NODE_PID" 2>/dev/null; wait "$NODE_PID" 2>/dev/null || true; NODE_PID=""
-kill -9 "$CP_PID" 2>/dev/null; wait "$CP_PID" 2>/dev/null || true; CP_PID=""
+stop_group "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true; NODE_PID=""
+stop_group "$CP_PID"; wait "$CP_PID" 2>/dev/null || true; CP_PID=""
 
 echo ">> starting CP2 (restored instance) on $BASE2"
 cp "$TMP/backup.db" "$TMP/restored.db"

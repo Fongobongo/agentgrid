@@ -61,6 +61,7 @@ source "$ROOT/tests/e2e/lib-bootstrap.sh"
 CP_PID=""
 NODE_PID=""
 E2E_PIDS=""
+E2E_PGIDS=""
 
 # Drop a pid from the cleanup list (a dead pid must never linger: the OS
 # can recycle it and a later kill would hit an unrelated process).
@@ -71,6 +72,12 @@ e2e_forget_pid() {
     kept="$kept $p"
   done
   E2E_PIDS="$kept"
+  kept=""
+  for p in $E2E_PGIDS; do
+    [ "$p" != "$drop" ] || continue
+    kept="$kept $p"
+  done
+  E2E_PGIDS="$kept"
 }
 
 e2e_check_bins() {
@@ -79,15 +86,52 @@ e2e_check_bins() {
   done
 }
 
+# Start a command in its OWN process group and print its pid.
+#
+# Why: the daemons spawn children (adapters, git, helper scripts). Killing
+# only the pid leaves those children running, holding deleted temp files open
+# (the incident that grew a 703 MiB log nobody could see) and keeping the
+# scratch dir busy. setsid puts the daemon in a new session/process group, so
+# cleanup can signal the whole group.
+#
+# The pid is read from a file the child writes itself: `setsid` may fork (when
+# the shell gave the background job its own group), and $! would then be the
+# short-lived wrapper, not the daemon.
+#
+# Usage: e2e_spawn <pidfile> <logfile> -- <command...>
+e2e_spawn() {
+  local pidfile="$1" log="$2"
+  shift 2
+  [ "${1:-}" = "--" ] && shift
+  rm -f "$pidfile"
+  setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pidfile" "$@" >"$log" 2>&1 &
+  local i=0
+  while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if [ ! -s "$pidfile" ]; then
+    echo "e2e_spawn: $1 did not report a pid" >&2
+    return 1
+  fi
+  cat "$pidfile"
+}
+
+# Remember a started daemon (pid + its process group) for cleanup.
+e2e_track() {
+  E2E_PIDS="$E2E_PIDS $1"
+  E2E_PGIDS="$E2E_PGIDS $1"
+}
+
 e2e_start_cp() {
   local db="${CP_DB:-$TMP/cp.db}" secret="${E2E_JWT_SECRET:-e2e-secret}"
-  AGENTGRID_LISTEN="127.0.0.1:$PORT" \
-  AGENTGRID_DB="$db" \
-  AGENTGRID_JWT_SECRET="$secret" \
-  AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
-  nohup "$BIN/agentgrid-control-plane" >"$TMP/cp.log" 2>&1 &
-  CP_PID=$!
-  E2E_PIDS="$E2E_PIDS $CP_PID"
+  CP_PID=$(e2e_spawn "$TMP/cp.pid" "$TMP/cp.log" -- \
+    env AGENTGRID_LISTEN="127.0.0.1:$PORT" \
+    AGENTGRID_DB="$db" \
+    AGENTGRID_JWT_SECRET="$secret" \
+    AGENTGRID_ARTIFACT_ROOT="$TMP/artifacts" \
+    "$BIN/agentgrid-control-plane")
+  e2e_track "$CP_PID"
 }
 
 e2e_wait_ready() {
@@ -123,7 +167,8 @@ e2e_start_node() {
   # One-shot tokens: a restart reuses the saved credential, so only send a
   # token when one was freshly minted (an empty token would fail enroll).
   [ -n "${ENROLL_TOKEN:-}" ] && enroll_args+=(AGENTGRID_ENROLL_TOKEN="$ENROLL_TOKEN")
-  env PATH="$BIN:$PATH" \
+  NODE_PID=$(e2e_spawn "$TMP/$tag.pid" "$TMP/$tag.log" -- \
+    env PATH="$BIN:$PATH" \
     AGENTGRID_SERVER="${E2E_NODE_SERVER:-$BASE}" \
     AGENTGRID_DATA_DIR="$datadir" \
     AGENTGRID_NODE_NAME="$name" \
@@ -134,9 +179,8 @@ e2e_start_node() {
     RUST_LOG="${RUST_LOG:-info}" \
     "${enroll_args[@]}" \
     "$@" \
-    nohup "$BIN/agentgrid-node-daemon" >"$TMP/$tag.log" 2>&1 &
-  NODE_PID=$!
-  E2E_PIDS="$E2E_PIDS $NODE_PID"
+    "$BIN/agentgrid-node-daemon")
+  e2e_track "$NODE_PID"
 }
 
 # Stop the control plane fast: SIGTERM, then SIGKILL after a short grace so
@@ -145,15 +189,12 @@ e2e_start_node() {
 # polite drain). Clears CP_PID; restart with e2e_start_cp afterwards.
 e2e_stop_cp() {
   [ -n "$CP_PID" ] || return 0
-  kill "$CP_PID" 2>/dev/null || true
-  for _ in $(seq 1 10); do
-    kill -0 "$CP_PID" 2>/dev/null || { e2e_forget_pid "$CP_PID"; CP_PID=""; return 0; }
-    sleep 0.2
-  done
-  kill -9 "$CP_PID" 2>/dev/null || true
-  # Reap the zombie so a later `wait` does not block.
-  wait "$CP_PID" 2>/dev/null || true
-  e2e_forget_pid "$CP_PID"
+  local pid="$CP_PID"
+  # Whole group: the CP can have helper children, and a pid-only kill leaves
+  # them holding files under the scratch dir.
+  e2e_stop_group "$pid"
+  wait "$pid" 2>/dev/null || true
+  e2e_forget_pid "$pid"
   CP_PID=""
 }
 
@@ -162,9 +203,10 @@ e2e_stop_cp() {
 # reuse). Multi-node scripts kill $NODE_A_PID-style vars inline instead.
 e2e_kill_node() {
   [ -n "$NODE_PID" ] || return 0
-  kill -9 "$NODE_PID" 2>/dev/null || true
-  wait "$NODE_PID" 2>/dev/null || true
-  e2e_forget_pid "$NODE_PID"
+  local pid="$NODE_PID"
+  kill -KILL -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  e2e_forget_pid "$pid"
   NODE_PID=""
 }
 
@@ -220,11 +262,50 @@ e2e_task_events() {
   curl -fsS "$BASE/v1/tasks/$1/events?after_sequence=0" -H "authorization: Bearer $jwt"
 }
 
+# Stop a whole process group and wait for the exit to be CONFIRMED. Returns
+# non-zero when something is still alive — the caller must not delete the
+# scratch dir in that case: a live process holding deleted files keeps its
+# bytes allocated and re-creates files under a removed path.
+e2e_stop_group() {
+  local pgid="$1" i=0
+  [ -n "$pgid" ] || return 0
+  kill -TERM -- "-$pgid" 2>/dev/null
+  while [ "$i" -lt 40 ]; do
+    # A zombie is already dead; only a live process keeps the group alive.
+    if ! ps -eo pid=,pgid=,stat= | awk -v g="$pgid" '$2 == g && $3 !~ /^Z/ { found=1 } END { exit !found }'; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL -- "-$pgid" 2>/dev/null
+  i=0
+  while [ "$i" -lt 40 ]; do
+    if ! ps -eo pid=,pgid=,stat= | awk -v g="$pgid" '$2 == g && $3 !~ /^Z/ { found=1 } END { exit !found }'; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  echo "process group $pgid still alive after SIGKILL" >&2
+  return 1
+}
+
 e2e_cleanup() {
   set +e
+  local leftover=0 p
+  for p in $E2E_PGIDS; do
+    e2e_stop_group "$p" || leftover=1
+  done
   for p in $E2E_PIDS; do kill -9 "$p" 2>/dev/null; done
   pkill -f "$BIN/agentgrid-control-plane" 2>/dev/null
   pkill -f "$BIN/agentgrid-node-daemon" 2>/dev/null
   sleep 0.3
-  [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
+  # Only remove the scratch dir when every daemon is confirmed gone: deleting
+  # it under a live process is exactly what produced the invisible 703 MiB log.
+  if [ "$leftover" = "0" ]; then
+    [ "${AG_E2E_KEEP:-0}" = "1" ] || rm -rf "$TMP"
+  else
+    echo "leaving $TMP in place: some daemons are still running" >&2
+  fi
 }

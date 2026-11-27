@@ -1017,6 +1017,21 @@ reported replication position and survives failures: a peer that stopped
 answering is behind by at least that much, which is what tells you whether it
 could safely take over.
 
+## Runtime files vanished — what now?
+
+If a control-plane database or instance-lock file is removed while the daemon
+runs, the daemon exits instead of retrying forever. This is intentional: a
+deleted temp directory used to leave the process holding an unlinked log
+inode, so the log kept growing while `du` reported the space as free.
+
+Use `ag doctor runtime` to inspect the host: database and WAL paths, lock
+inode and holder, free disk, deleted-open file descriptors, and stale
+`ag-*` / `agentgrid-*` temp directories. See `docs/runtime-config.md` for the
+typed `AGENTGRID_CONFIG` file, production path rules, and shutdown behavior.
+
+Do not delete `<db>.lock` by hand: the running daemon holds a flock on that
+inode. Removing and recreating the file bypasses the single-instance guard.
+
 ## Two-host smoke test
 
 A minimal end-to-end check that both nodes actually work:

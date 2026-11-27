@@ -180,21 +180,18 @@ fn main() -> Result<()> {
 }
 
 async fn amain() -> Result<()> {
-    let addr: SocketAddr = std::env::var("AGENTGRID_LISTEN")
-        .unwrap_or_else(|_| "127.0.0.1:7800".into())
-        .parse()?;
-    let db_path = std::env::var("AGENTGRID_DB").unwrap_or_else(|_| "control-plane.db".into());
-    // Documented since 0.4 — both Dockerfiles, both install scripts, every HA
-    // compose file, the README — and read nowhere until now: the artifact root
-    // was always derived from the database directory, so a dedicated artifact
-    // volume was silently ignored (and the disk watermark watched the wrong
-    // one). Empty counts as unset: a blank line in a unit file must not create
-    // a directory named "".
-    let artifact_root = std::env::var("AGENTGRID_ARTIFACT_ROOT")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from);
+    let runtime = agentgrid_common::RuntimeConfig::from_env().map_err(anyhow::Error::msg)?;
+    let deploy_env = agentgrid_common::deploy_env_from_process().map_err(anyhow::Error::msg)?;
+    runtime
+        .validate_control_plane_paths(deploy_env.is_production())
+        .map_err(anyhow::Error::msg)?;
+    let addr: SocketAddr = runtime.control_plane.listen.parse()?;
+    let db_path = runtime
+        .control_plane
+        .database
+        .to_string_lossy()
+        .into_owned();
+    let artifact_root = runtime.control_plane.artifact_root;
 
     let ha = agentgrid_control_plane::ha::HaRuntime::from_env()?;
     if ha.is_ha() && ha.config.role == NodeRole::Witness {

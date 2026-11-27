@@ -111,6 +111,11 @@ pub struct Store {
     /// (from provenance).
     pub(crate) security_profile_attempts:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// Circuit breaker for the shared maintenance pipeline. After three
+    /// consecutive failures, skip maintenance for one minute instead of
+    /// hammering a broken database every 15 seconds.
+    pub(crate) maintenance_circuit:
+        std::sync::Arc<std::sync::Mutex<maintenance::MaintenanceCircuit>>,
     /// TTL cache of the statvfs result: free_bytes() is called on every
     /// try_assign (async hot path) and the syscall must not run each time.
     pub(crate) free_bytes_cache:
@@ -676,6 +681,9 @@ impl Store {
             )),
             security_profile_attempts: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
+            )),
+            maintenance_circuit: std::sync::Arc::new(std::sync::Mutex::new(
+                maintenance::MaintenanceCircuit::default(),
             )),
             free_bytes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })

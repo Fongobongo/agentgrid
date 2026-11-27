@@ -14,6 +14,13 @@ services:
     logging: *default-logging
     ports:
       - "7800:7800"
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/ready"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     environment:
       # Demo-only static JWT secret; replace for any non-local use.
       AGENTGRID_JWT_SECRET: demo-insecure-jwt-secret-32bytes-min-change-me
@@ -26,7 +33,15 @@ services:
     restart: unless-stopped
     logging: *default-logging
     depends_on:
-      - control-plane
+      control-plane:
+        condition: service_healthy
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "test $(( $(date +%s) - $(stat -c %Y /var/lib/agentgrid/data/heartbeat.stamp 2>/dev/null || echo 0) )) -lt 30"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     environment:
       AGENTGRID_SERVER: http://control-plane:7800
       # Required: without a real enroll token the node crash-loops with no
@@ -45,7 +60,15 @@ services:
     restart: unless-stopped
     logging: *default-logging
     depends_on:
-      - control-plane
+      control-plane:
+        condition: service_healthy
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "test $(( $(date +%s) - $(stat -c %Y /var/lib/agentgrid/data/heartbeat.stamp 2>/dev/null || echo 0) )) -lt 30"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     environment:
       AGENTGRID_SERVER: http://control-plane:7800
       AGENTGRID_ENROLL_TOKEN: ${NODE2_TOKEN:?set NODE2_TOKEN (ag token create)}

@@ -18,6 +18,7 @@ mod index;
 mod nodes;
 mod phase;
 mod registry;
+mod runtime;
 mod tui;
 mod workflow;
 use phase::Phase;
@@ -116,7 +117,7 @@ enum AgCommand {
     /// Plan 2.7 (#25): guided setup wizard.
     Setup(SetupArgs),
     /// Plan 2.7 (#25): diagnostic status (server, credentials, endpoints).
-    Doctor,
+    Doctor(DoctorArgs),
     /// Plan 2.8 (#19): per-repo learnings (`ag learn list/add/approve/remove`).
     Learn(registry::LearnArgs),
     /// Plan 1.3: resume a past attempt as a new attempt with inherited context.
@@ -145,6 +146,18 @@ enum AgCommand {
     /// auto-approves the pending patch review, disagreement leaves it for a
     /// human.
     Review(ReviewArgs),
+}
+
+#[derive(Args)]
+struct DoctorArgs {
+    #[command(subcommand)]
+    command: Option<DoctorSubcommand>,
+}
+
+#[derive(Subcommand)]
+enum DoctorSubcommand {
+    /// Inspect local control-plane runtime files, disk, and stale temp dirs.
+    Runtime,
 }
 
 #[derive(Args)]
@@ -674,7 +687,10 @@ async fn main() -> Result<()> {
         AgCommand::Review(a) => cmd_review(&client, &base, a).await,
         AgCommand::Autopilot(a) => cmd_autopilot(&client, &base, a).await,
         AgCommand::Setup(a) => cmd_setup(&client, &base, a).await,
-        AgCommand::Doctor => cmd_doctor(&client, &base, cli.json).await,
+        AgCommand::Doctor(a) => match a.command {
+            Some(DoctorSubcommand::Runtime) => cmd_doctor_runtime(cli.json),
+            None => cmd_doctor(&client, &base, cli.json).await,
+        },
         AgCommand::Learn(a) => registry::cmd_learn(&client, &base, a).await,
     };
     // Plan 1.10 (#3): categorized exit codes. `ag` used to flatten every
@@ -1407,6 +1423,40 @@ async fn cmd_doctor(client: &reqwest::Client, base: &str, json: bool) -> Result<
     }
     if !all_green {
         anyhow::bail!("diagnostic failed");
+    }
+    Ok(())
+}
+
+/// Local runtime diagnostics: files, lock, WAL, disk, deleted FDs, stale temp.
+fn cmd_doctor_runtime(json: bool) -> Result<()> {
+    let report = runtime::collect();
+    if json {
+        let checks: Vec<_> = report
+            .checks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "status": c.status.label(),
+                    "detail": c.detail,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "checks": checks,
+                "ok": report.ok(),
+            }))?
+        );
+    } else {
+        println!("agentgrid doctor runtime");
+        for c in &report.checks {
+            println!("  {:<20} {:<4} {}", c.name, c.status.label(), c.detail);
+        }
+    }
+    if !report.ok() {
+        anyhow::bail!("runtime diagnostic failed");
     }
     Ok(())
 }

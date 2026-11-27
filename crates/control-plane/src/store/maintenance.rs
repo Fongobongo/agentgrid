@@ -10,6 +10,43 @@ use std::time::Duration;
 /// 30 days. Install attempts are an ops log, not state.
 const DEFAULT_INSTALL_RETENTION_HOURS: i64 = 24 * 30;
 
+/// Consecutive failures before maintenance pauses.
+const MAINTENANCE_FAILURE_THRESHOLD: u32 = 3;
+/// Pause duration after the breaker opens.
+const MAINTENANCE_BREAKER_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// Circuit breaker around the shared maintenance pipeline.
+///
+/// A broken database used to produce one warning every 15 seconds forever.
+/// Three consecutive failures open the breaker for one minute; a successful
+/// tick closes it and resets the counter.
+#[derive(Default)]
+pub(crate) struct MaintenanceCircuit {
+    failures: u32,
+    open_until: Option<std::time::Instant>,
+}
+
+impl MaintenanceCircuit {
+    fn allows(&self, now: std::time::Instant) -> bool {
+        self.open_until.is_none_or(|until| now >= until)
+    }
+
+    fn failure(&mut self, now: std::time::Instant) -> bool {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= MAINTENANCE_FAILURE_THRESHOLD {
+            self.open_until = Some(now + MAINTENANCE_BREAKER_COOLDOWN);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn success(&mut self) {
+        self.failures = 0;
+        self.open_until = None;
+    }
+}
+
 /// How long finished install attempts are kept.
 ///
 /// `AGENTGRID_INSTALL_RETENTION_HOURS=0` keeps every attempt forever, for a
@@ -104,8 +141,38 @@ impl Store {
                 if !store.ha_allows_work() {
                     continue;
                 }
-                if let Err(e) = store.tick_maintenance().await {
-                    tracing::warn!("maintenance tick failed: {e}");
+                let allowed = store
+                    .maintenance_circuit
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .allows(std::time::Instant::now());
+                if !allowed {
+                    tracing::debug!("maintenance breaker open; skipping tick");
+                    continue;
+                }
+                match store.tick_maintenance().await {
+                    Ok(()) => {
+                        store
+                            .maintenance_circuit
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .success();
+                    }
+                    Err(e) => {
+                        let opened = store
+                            .maintenance_circuit
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .failure(std::time::Instant::now());
+                        if opened {
+                            tracing::warn!(
+                                error = %e,
+                                "maintenance failed repeatedly; breaker open for 60s"
+                            );
+                        } else {
+                            tracing::warn!("maintenance tick failed: {e}");
+                        }
+                    }
                 }
                 tick = tick.wrapping_add(1);
                 if tick.is_multiple_of(4) {
@@ -700,5 +767,24 @@ impl Store {
             .fetch_one(&self.pool)
             .await?;
         Ok(row.try_get::<i64, _>("total").unwrap_or(0) as u64)
+    }
+}
+
+#[cfg(test)]
+mod circuit_tests {
+    use super::*;
+
+    #[test]
+    fn breaker_opens_after_three_failures_and_recovers() {
+        let now = std::time::Instant::now();
+        let mut c = MaintenanceCircuit::default();
+        assert!(c.allows(now));
+        assert!(!c.failure(now));
+        assert!(!c.failure(now));
+        assert!(c.failure(now));
+        assert!(!c.allows(now));
+        assert!(c.allows(now + MAINTENANCE_BREAKER_COOLDOWN));
+        c.success();
+        assert!(c.allows(now + MAINTENANCE_BREAKER_COOLDOWN));
     }
 }

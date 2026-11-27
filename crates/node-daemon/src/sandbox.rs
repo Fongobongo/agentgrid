@@ -1743,7 +1743,7 @@ mod tests {
         // No sandbox and no run-as user → identity. Lock + clear: sibling
         // tests set AGENTGRID_RUN_AS_USER under ENV_LOCK and the process
         // env is shared.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let (p, a) = sandbox_command(
             SandboxKind::None,
@@ -1762,7 +1762,7 @@ mod tests {
 
     #[test]
     fn docker_wraps_command() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         set_node_id("node-test-633");
@@ -1802,7 +1802,7 @@ mod tests {
     fn none_prefix_passthrough() {
         // Stage 11.2 / line 358: no sandbox → identity bin, empty prefix.
         // Lock + clear: AGENTGRID_RUN_AS_USER is process-global (see above).
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let (p, a) = sandbox_prefix(
             SandboxKind::None,
@@ -1827,7 +1827,7 @@ mod tests {
         // node always spawns an explicit command, so it must clear the
         // entrypoint; `--entrypoint ""` makes the explicit command win for any
         // image.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         let (_, a) = sandbox_command(
@@ -1855,7 +1855,7 @@ mod tests {
 
     #[test]
     fn docker_prefix_wraps_program() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Legacy wrapper path: program runs inside the image after `--`, with
         // an empty `args` slot (ProcessBackend appends `--prompt` itself).
         clear_sandbox_env();
@@ -1900,7 +1900,7 @@ mod tests {
 
     #[test]
     fn docker_pins_image_by_digest() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE_DIGEST", "sha256:deadbeef");
@@ -1940,7 +1940,7 @@ mod tests {
         // Plan 2.4 (#22a): when the assignment is flagged read-only (verifier
         // step), the worktree bind-mount gets a `:ro` suffix so the agent in
         // the sandbox cannot modify the code it is supposed to validate.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         let (_p, a) = sandbox_command(
@@ -2054,7 +2054,7 @@ mod tests {
 
     #[test]
     fn docker_opts_read_only_and_resource_limits() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_SANDBOX_NETWORK", "bridge");
@@ -2088,7 +2088,7 @@ mod tests {
     /// attempt. The value must travel through the docker client's environment.
     #[test]
     fn docker_env_flags_carry_names_only() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         let env = vec![
@@ -2124,7 +2124,7 @@ mod tests {
 
     #[test]
     fn task_network_mode_maps_to_docker_native_networks() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let net_of = |mode: Option<&str>| {
             clear_sandbox_env();
             let (_, a) = sandbox_command(
@@ -2155,7 +2155,7 @@ mod tests {
 
     #[test]
     fn restricted_mode_uses_egress_proxy_network_when_configured() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_EGRESS_NETWORK", "agentgrid-egress");
         std::env::set_var("AGENTGRID_SANDBOX_EGRESS_PROXY", "http://egress:3128");
@@ -2255,7 +2255,7 @@ mod tests {
 
     #[test]
     fn docker_artifact_mount_is_read_write_and_independent_of_read_only() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_SANDBOX_ARTIFACT_DIR", "/host/art");
@@ -2291,7 +2291,7 @@ mod tests {
     /// connection that fails with an unknown-issuer error naming nothing useful.
     #[test]
     fn docker_mounts_the_gateway_ca_and_points_every_trust_store_at_it() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var(GATEWAY_CA_ENV, "/host/gw-ca.pem");
@@ -2330,7 +2330,7 @@ mod tests {
     /// mount the agent could read for no reason.
     #[test]
     fn the_gateway_ca_is_not_mounted_outside_restricted_mode() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var(GATEWAY_CA_ENV, "/host/gw-ca.pem");
@@ -2355,7 +2355,7 @@ mod tests {
 
     #[test]
     fn unsafe_guard_strips_unset_env_when_unsandboxed() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX");
         let remove = unsafe_env_guard(SandboxKind::None);
         assert!(
@@ -2372,7 +2372,7 @@ mod tests {
 
     #[test]
     fn unsafe_guard_keeps_env_with_override() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("AGENTGRID_ALLOW_UNSAFE_NO_SANDBOX", "1");
         let remove = unsafe_env_guard(SandboxKind::None);
         assert!(remove.is_empty(), "explicit override keeps the unsafe env");
@@ -2426,7 +2426,7 @@ mod tests {
 
     #[test]
     fn docker_run_emits_user_when_configured() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_RUN_AS_USER", "worker:staff");
@@ -2448,7 +2448,7 @@ mod tests {
 
     #[test]
     fn docker_run_omits_user_by_default_and_on_garbage() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         let (_, a) = sandbox_command(
@@ -2489,7 +2489,7 @@ mod tests {
 
     #[test]
     fn none_prefix_wraps_runuser_when_configured() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_RUN_AS_USER", "worker");
         let (p, a) = sandbox_prefix(
@@ -2512,7 +2512,7 @@ mod tests {
 
     #[test]
     fn systemd_prefix_wraps_runuser_inside_scope() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_RUN_AS_USER", "1001:1001");
         let (p, a) = sandbox_command(
@@ -2548,7 +2548,7 @@ mod tests {
 
     #[test]
     fn per_attempt_limits_override_env_knobs() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         // Node-wide env knob says 512m, but the attempt profile says 64 MiB
@@ -2587,7 +2587,7 @@ mod tests {
 
     #[test]
     fn per_attempt_unset_fields_fall_back_to_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         std::env::set_var("AGENTGRID_SANDBOX_PIDS_LIMIT", "100");
@@ -2622,7 +2622,7 @@ mod tests {
 
     #[test]
     fn cpu_quota_renders_whole_cores_without_fraction() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         for (quota, expect) in [(100, "1"), (200, "2"), (150, "1.50"), (75, "0.75")] {
@@ -2650,7 +2650,7 @@ mod tests {
 
     #[test]
     fn named_containers_are_not_rm_ed_transient_ones_are() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
         // A named per-attempt container keeps its inspectable state so the
@@ -2702,7 +2702,7 @@ mod tests {
 
     #[test]
     fn systemd_prefix_wraps_program_with_scope() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let (p, a) = sandbox_prefix(
             SandboxKind::Systemd,
@@ -2730,7 +2730,7 @@ mod tests {
 
     #[test]
     fn systemd_maps_limits_to_cgroup_properties() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let limits = ResourceLimits {
             memory_max: Some(64 * 1024 * 1024),
@@ -2755,7 +2755,7 @@ mod tests {
 
     #[test]
     fn systemd_unset_limits_fall_back_to_env_knobs() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_MEMORY", "256M");
         std::env::set_var("AGENTGRID_SANDBOX_CPUS", "1.5");
@@ -2780,7 +2780,7 @@ mod tests {
 
     #[test]
     fn systemd_command_extends_args_after_head() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let (p, a) = sandbox_command(
             SandboxKind::Systemd,
@@ -2803,7 +2803,7 @@ mod tests {
 
     #[test]
     fn sandbox_kind_parses_systemd_aliases() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for v in [
             "systemd",
             "SYSTEMD",
@@ -2820,7 +2820,7 @@ mod tests {
 
     #[test]
     fn sandbox_kind_garbage_is_refused_at_startup_not_silently_none() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for v in ["", "none"] {
             std::env::set_var("AGENTGRID_SANDBOX", v);
             assert_eq!(
@@ -2850,7 +2850,7 @@ mod tests {
 
     #[test]
     fn sandbox_kind_parses_bwrap_aliases() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for v in ["bwrap", "BWRAP", " bubblewrap ", "userns"] {
             std::env::set_var("AGENTGRID_SANDBOX", v);
             assert_eq!(SandboxKind::from_env(), SandboxKind::Bwrap, "{v}");
@@ -2863,7 +2863,7 @@ mod tests {
     /// the "sandbox" is a bind-mount decoration.
     #[test]
     fn bwrap_unshares_every_namespace_and_binds_the_worktree() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let (prog, args) = sandbox_command(
             SandboxKind::Bwrap,
@@ -2892,13 +2892,18 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--dev", "/dev"]));
         assert!(args.windows(2).any(|w| w == ["--tmpfs", "/tmp"]));
         // `--` terminates flag parsing; program + args follow it verbatim.
+        // The program is resolved against the host PATH (bwrap's namespace
+        // has none), so compare against the same resolution.
         let sep = args.iter().position(|a| a == "--").unwrap();
-        assert_eq!(&args[sep + 1..], ["claude", "--acp"]);
+        let expected = crate::capabilities::resolve_in_path("claude")
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "claude".to_string());
+        assert_eq!(&args[sep + 1..], [expected.as_str(), "--acp"]);
     }
 
     #[test]
     fn bwrap_network_mode_decides_whether_net_is_shared() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let shared = |mode: &str| {
             let (_, a) = sandbox_prefix(
@@ -2932,7 +2937,7 @@ mod tests {
 
     #[test]
     fn bwrap_restricted_mode_does_not_pretend_to_have_a_proxy() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_EGRESS_PROXY", "http://egress:3128");
         let (_, a) = sandbox_prefix(
@@ -2959,7 +2964,7 @@ mod tests {
     /// visible.
     #[test]
     fn bwrap_masks_the_host_directories_an_agent_must_not_read() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let tmp = std::env::temp_dir().join(format!("ag-mask-{}", std::process::id()));
         let data = tmp.join("data");
@@ -3071,7 +3076,7 @@ mod tests {
     /// running on the host network.
     #[test]
     fn egress_isolation_depends_on_the_sandbox_kind() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         // bwrap: only `none` is enforced (it unshares the net namespace).
         assert!(effective_egress_isolated(SandboxKind::Bwrap, "none"));
@@ -3102,7 +3107,7 @@ mod tests {
     /// network.
     #[test]
     fn bwrap_refuses_restricted_egress_at_startup() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX", "bwrap");
         std::env::set_var("AGENTGRID_SANDBOX_NETWORK", "restricted");
@@ -3120,7 +3125,7 @@ mod tests {
 
     #[test]
     fn bwrap_read_only_worktree_uses_a_ro_bind() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let (_, a) = sandbox_prefix(
             SandboxKind::Bwrap,
@@ -3148,7 +3153,7 @@ mod tests {
 
     #[test]
     fn bwrap_prefix_and_command_agree() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         let (p1, a1) = sandbox_prefix(
             SandboxKind::Bwrap,
@@ -3174,9 +3179,17 @@ mod tests {
         assert_eq!(p1, p2);
         // `sandbox_prefix` ends with the program; `sandbox_command` continues
         // with the args after it — so the heads must be identical.
-        assert_eq!(a1.last().map(String::as_str), Some("claude"));
+        //
+        // bwrap resolves a bare program name against the host PATH (the
+        // namespace has no PATH), so the expected value depends on whether
+        // the host has `claude` installed. Compare against the same
+        // resolution instead of hard-coding the bare name.
+        let expected = crate::capabilities::resolve_in_path("claude")
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "claude".to_string());
+        assert_eq!(a1.last().map(String::as_str), Some(expected.as_str()));
         assert_eq!(a2[..a2.len() - 2], a1[..a1.len() - 1]);
-        assert_eq!(&a2[a2.len() - 2..], ["claude", "--acp"]);
+        assert_eq!(&a2[a2.len() - 2..], [expected.as_str(), "--acp"]);
     }
 
     #[test]
@@ -3189,7 +3202,7 @@ mod tests {
                 "{bad:?} must be refused"
             );
         }
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_RUN_AS_USER", "1001:1002");
         let (_, a) = sandbox_prefix(
