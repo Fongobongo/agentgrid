@@ -110,6 +110,10 @@
   check used `/health/ready`, which is 503 on every standby by design; it now
   uses `/health/live`.
 
+- **E2E cleanup no longer signals recycled PIDs.** Process groups are stopped
+  and confirmed dead before the scratch dir is removed; the extra blind
+  `kill -9` over already-reaped PIDs could hit an unrelated process.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

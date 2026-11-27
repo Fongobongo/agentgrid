@@ -297,7 +297,9 @@ e2e_cleanup() {
   for p in $E2E_PGIDS; do
     e2e_stop_group "$p" || leftover=1
   done
-  for p in $E2E_PIDS; do kill -9 "$p" 2>/dev/null; done
+  # Do NOT signal E2E_PIDS here: every tracked pid is also a pgid that
+  # e2e_stop_group has just reaped, and a recycled pid belongs to someone
+  # else's process by now.
   pkill -f "$BIN/agentgrid-control-plane" 2>/dev/null
   pkill -f "$BIN/agentgrid-node-daemon" 2>/dev/null
   sleep 0.3
