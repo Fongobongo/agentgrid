@@ -42,8 +42,10 @@ control plane, the node daemon and the CLI.
 - Invalid values fail at startup: a non-integer concurrency, a transport
   outside `poll|ws|auto`, an empty adapter list.
 - In production (`AGENTGRID_ENV=production`) every runtime path must live
-  under `/var/lib/agentgrid`. The check uses a path-aware containment test,
-  not a string prefix, so `/var/lib/agentgrid-evil` does not pass.
+  under `/var/lib/agentgrid`. The check resolves `.`/`..` and follows symlinks
+  on the deepest existing ancestor before comparing, so neither a sibling
+  directory (`/var/lib/agentgrid-evil`), a `..` escape, nor a symlink planted
+  inside the root can pass as a production path.
 - The production flag comes from the existing `DeployEnv` resolution, so
   there is exactly one answer to "is this production" in the process.
 

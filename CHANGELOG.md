@@ -86,6 +86,12 @@
   token in the URL path and the chat id in the query; a failed POST wrote both
   into the control-plane log. Only the origin is logged now.
 
+- **Production path checks now survive `..` and symlinks.** The containment
+  test used a lexical prefix, so `/var/lib/agentgrid/../../tmp/cp.db` and a
+  symlink inside the data root both passed as "under /var/lib/agentgrid".
+  Dot segments are resolved and the deepest existing ancestor is canonicalized
+  before the comparison.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

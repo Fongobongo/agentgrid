@@ -293,10 +293,54 @@ impl RuntimeConfig {
     }
 }
 
-/// True when `path` equals `root` or lives below it. Plain `starts_with` would
-/// accept `/var/lib/agentgrid-evil` for root `/var/lib/agentgrid`.
+/// True when `path` equals `root` or lives below it after dot segments are
+/// resolved and existing symlinks are followed. A plain `starts_with` accepts
+/// both `/var/lib/agentgrid-evil` and `/var/lib/agentgrid/../../tmp/cp.db`, and
+/// a symlink placed inside the root can point at any writable directory.
 fn path_under(path: &std::path::Path, root: &str) -> bool {
-    path == std::path::Path::new(root) || path.starts_with(format!("{root}/"))
+    let root = std::path::Path::new(root);
+    let Some(mut normalized) = normalize_path(path) else {
+        return false;
+    };
+    if !normalized.starts_with(root) {
+        return false;
+    }
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    // `normalized` still has symlinks; resolve the deepest existing ancestor
+    // and re-attach the components that do not exist yet (fresh installs).
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(&normalized) {
+            let mut unresolved = std::path::PathBuf::new();
+            for part in tail.iter().rev() {
+                unresolved.push(part);
+            }
+            return resolved.join(unresolved).starts_with(canonical_root);
+        }
+        let Some(name) = normalized.file_name() else {
+            return false;
+        };
+        tail.push(name.to_os_string());
+        if !normalized.pop() {
+            return false;
+        }
+    }
+
+    fn normalize_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let mut out = std::path::PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Prefix(_) => return None,
+                std::path::Component::RootDir => out.push("/"),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::Normal(part) => out.push(part),
+            }
+        }
+        Some(out)
+    }
 }
 
 fn env_nonempty(name: &str) -> Result<String, ()> {
@@ -377,5 +421,37 @@ node:
         let mut c = RuntimeConfig::default();
         c.node.transport = "carrier-pigeon".into();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn production_rejects_dotdot_escape() {
+        let mut c = RuntimeConfig::default();
+        c.control_plane.database = PathBuf::from("/var/lib/agentgrid/../../tmp/cp.db");
+        assert!(c.validate_control_plane_paths(true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_under_follows_symlinks_and_allows_uncreated_children() {
+        let base = std::env::temp_dir().join(format!("ag-path-under-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let root = root.to_string_lossy();
+        assert!(path_under(&PathBuf::from(format!("{root}/new/db")), &root));
+        assert!(!path_under(
+            &PathBuf::from(format!("{root}/escape/db")),
+            &root
+        ));
+        assert!(!path_under(
+            &PathBuf::from(format!("{root}/../outside/db")),
+            &root
+        ));
+        std::fs::remove_dir_all(base.join("root")).ok();
+        std::fs::remove_dir_all(base.join("outside")).ok();
+        std::fs::remove_dir(base).ok();
     }
 }
