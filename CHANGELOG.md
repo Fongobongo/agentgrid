@@ -422,6 +422,12 @@
   changesets in one batch. Writes that do not fit the changeset cap are kept
   for the next round trip instead of being dropped.
 
+- **Demotion cannot rewind under a pending group-commit ack.** Queued sync
+  writes hold a shared barrier until their acknowledgement resolves; the
+  demotion rewind takes it exclusively. `applied_seq` also advances
+  monotonically, so a later wakeup from an older batched writer cannot move
+  the election watermark backwards.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session

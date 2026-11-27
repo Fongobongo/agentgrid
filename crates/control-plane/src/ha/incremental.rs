@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use sqlx::sqlite::{SqliteConnection, SqlitePool};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio::time::Instant;
 
 use super::config::RpoMode;
@@ -305,6 +305,10 @@ struct Job {
 pub struct SyncWait {
     seq: u64,
     rx: oneshot::Receiver<Result<(), String>>,
+    /// Shared guard held until this write's ack resolves. Demotion takes the
+    /// exclusive guard before rewinding, so no late acknowledgement can move
+    /// the watermark past writes a rewind just undid locally.
+    _guard: OwnedRwLockReadGuard<()>,
 }
 
 /// Collect the jobs already queued behind `first` into one group-commit
@@ -349,6 +353,8 @@ pub struct Replicator {
     /// Un-replicated changesets, kept so a demotion can undo them instead of
     /// restoring a snapshot (see [`Replicator::rewind_to`]).
     rewind: Mutex<RewindBuffer>,
+    /// Shared/read for queued sync writes, exclusive for demotion's rewind.
+    sync_gate: Arc<RwLock<()>>,
 }
 
 impl Replicator {
@@ -376,6 +382,7 @@ impl Replicator {
             rx: Mutex::new(Some(rx)),
             last_remote_ack_ms: AtomicU64::new(mono_ms()),
             rewind: Mutex::new(RewindBuffer::default()),
+            sync_gate: Arc::new(RwLock::new(())),
         }))
     }
 
@@ -389,6 +396,14 @@ impl Replicator {
 
     pub fn max_changeset_bytes(&self) -> u64 {
         self.rt.config.max_changeset_bytes
+    }
+
+    /// Exclusive barrier for demotion: wait for every queued sync write to
+    /// finish before undoing un-replicated changesets. The election loop
+    /// already bounds this call with its own budget and falls back to a full
+    /// snapshot when it runs out.
+    pub async fn sync_barrier(&self) -> OwnedRwLockWriteGuard<()> {
+        self.sync_gate.clone().write_owned().await
     }
 
     /// Ask the leader to cut a snapshot (one write exceeded the changeset cap
@@ -445,6 +460,10 @@ impl Replicator {
             }
             RpoMode::Sync => {
                 let (ack_tx, ack_rx) = oneshot::channel();
+                // Take the shared barrier BEFORE the job becomes visible to
+                // the worker. A demotion that starts from here on cannot
+                // rewind until this writer's ack has resolved.
+                let guard = self.sync_gate.clone().read_owned().await;
                 self.tx
                     .send(Job {
                         seq,
@@ -453,7 +472,11 @@ impl Replicator {
                     })
                     .await
                     .map_err(|_| anyhow::anyhow!("HA replication worker stopped"))?;
-                Ok(Some(SyncWait { seq, rx: ack_rx }))
+                Ok(Some(SyncWait {
+                    seq,
+                    rx: ack_rx,
+                    _guard: guard,
+                }))
             }
         }
     }
@@ -462,7 +485,9 @@ impl Replicator {
     /// waits on its own ack, but the worker can replicate several queued
     /// writes in one round trip (group commit).
     pub async fn await_sync(&self, wait: SyncWait) -> Result<()> {
-        let SyncWait { seq, rx } = wait;
+        // `_guard` lives until this method returns (success, failure or
+        // timeout), so a demotion cannot rewind under a pending ack.
+        let SyncWait { seq, rx, _guard } = wait;
         let timeout = (self.rt.config.lease_ttl / 2).max(Duration::from_secs(1));
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(()))) => {

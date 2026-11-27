@@ -387,6 +387,11 @@ async fn discard_unreplicated_writes(state: &Arc<AppState>) -> Result<u64> {
     let Some(repl) = state.store.replicator() else {
         anyhow::bail!("this build has no incremental replicator to undo changesets with");
     };
+    // Group commit releases the write gate before the quorum round trip, so
+    // writers can still be waiting on acknowledgements here. Rewind only
+    // after all of them resolve; otherwise a late ack can move the watermark
+    // over changesets this rewind just removed locally.
+    let _sync_barrier = repl.sync_barrier().await;
     let seq = repl
         .rewind_to(&state.store, rt.shared.last_replicated_seq())
         .await?;

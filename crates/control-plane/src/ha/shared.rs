@@ -174,7 +174,9 @@ impl HaShared {
     }
 
     pub fn set_applied_seq(&self, seq: u64) {
-        self.applied_seq.store(seq, Ordering::Release);
+        // With group commit several writers ack out of order; a later wakeup
+        // must not move the watermark back below changesets already applied.
+        self.applied_seq.fetch_max(seq, Ordering::AcqRel);
     }
 
     /// Monotonic: a late batch acknowledgement must never move the watermark
@@ -276,5 +278,20 @@ impl HaShared {
     /// Everything observed so far, for the status route.
     pub fn peers_seen(&self) -> std::collections::HashMap<String, PeerSeen> {
         lock(&self.peers_seen).clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applied_seq_never_moves_backwards() {
+        let shared = HaShared::default();
+        shared.set_applied_seq(3);
+        shared.set_applied_seq(1); // a late wakeup from an older batched writer
+        assert_eq!(shared.applied_seq(), 3);
+        shared.set_applied_seq(4);
+        assert_eq!(shared.applied_seq(), 4);
     }
 }
