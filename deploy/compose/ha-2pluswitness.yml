@@ -51,7 +51,9 @@ services:
     volumes:
       - agentgrid-ha-cp1:/var/lib/agentgrid
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/ready"]
+      # /health/ready is 503 on a standby by design; use the liveness probe
+      # so every replica reports healthy while the election decides leadership.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/live"]
       interval: 15s
       timeout: 5s
       start_period: 10s
@@ -92,7 +94,9 @@ services:
     volumes:
       - agentgrid-ha-cp2:/var/lib/agentgrid
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/ready"]
+      # /health/ready is 503 on a standby by design; use the liveness probe
+      # so every replica reports healthy while the election decides leadership.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/live"]
       interval: 15s
       timeout: 5s
       start_period: 10s
@@ -130,7 +134,9 @@ services:
     volumes:
       - agentgrid-ha-witness:/var/lib/agentgrid
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/ready"]
+      # /health/ready is 503 on a standby by design; use the liveness probe
+      # so every replica reports healthy while the election decides leadership.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7800/health/live"]
       interval: 15s
       timeout: 5s
       start_period: 10s

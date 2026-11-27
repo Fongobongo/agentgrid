@@ -106,6 +106,10 @@
   in-flight registry, which used to make later redeliveries look like
   duplicates until restart.
 
+- **HA replicas no longer report themselves unhealthy.** The Compose health
+  check used `/health/ready`, which is 503 on every standby by design; it now
+  uses `/health/live`.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**
