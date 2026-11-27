@@ -130,6 +130,10 @@
   outside that worktree. Paths are now checked component by component and
   written with the no-follow helper.
 
+- **The credential gateway refuses query characters in the upstream path.**
+  Axum decodes `%3F`/`%23` in `{*rest}`, so a capability holder could add
+  arbitrary provider query parameters to the request.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

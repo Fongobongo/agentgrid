@@ -350,6 +350,14 @@ async fn revoke(
     }
 }
 
+fn valid_upstream_path(rest: &str) -> bool {
+    !rest.is_empty()
+        && !rest.contains('?')
+        && !rest.contains('#')
+        && !rest.contains('\\')
+        && !rest.chars().any(char::is_control)
+}
+
 async fn proxy(
     State(gw): State<Arc<Gateway>>,
     Path((route_name, rest)): Path<(String, String)>,
@@ -359,6 +367,12 @@ async fn proxy(
     let Some(route) = gw.routes.get(&route_name) else {
         return problem(StatusCode::NOT_FOUND, "unknown route");
     };
+    // Axum percent-decodes `{*rest}` before handing it here. Without this
+    // check a caller could smuggle a provider query (`%3Fkey=…`) into the
+    // upstream URL, which is then appended to the legitimate query below.
+    if !valid_upstream_path(&rest) {
+        return problem(StatusCode::BAD_REQUEST, "invalid upstream path");
+    }
     let headers = req.headers().clone();
     let Some(capability) = capability_from(&headers, &route.header) else {
         return problem(StatusCode::UNAUTHORIZED, "capability required");
@@ -734,5 +748,48 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "an exchanged token was accepted as a capability"
         );
+    }
+
+    #[test]
+    fn a_decoded_rest_cannot_carry_query_or_fragment() {
+        assert!(valid_upstream_path("v1/messages"));
+        assert!(valid_upstream_path("v1/messages:stream"));
+        assert!(!valid_upstream_path("v1/messages?key=evil"));
+        assert!(!valid_upstream_path("v1/messages#frag"));
+        assert!(!valid_upstream_path("v1\\messages"));
+        assert!(!valid_upstream_path("v1/messages\n"));
+        assert!(!valid_upstream_path(""));
+    }
+
+    #[tokio::test]
+    async fn proxy_refuses_a_query_smuggled_through_the_path() {
+        let routes = parse_routes("anthropic|x-api-key|https://example.invalid").unwrap();
+        let mut keys = HashMap::new();
+        keys.insert("anthropic".to_string(), "sk-real".to_string());
+        let gw = Arc::new(Gateway::new(routes, keys, "admin".into()).unwrap());
+        gw.caps.lock().unwrap().insert(
+            "cap".to_string(),
+            Cap {
+                attempt_id: "a".into(),
+                route: "anthropic".into(),
+                expires: Instant::now() + Duration::from_secs(60),
+                quota: None,
+                used: 0,
+            },
+        );
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/p/anthropic/v1/messages?key=evil")
+            .header("x-api-key", "cap")
+            .body(Body::empty())
+            .unwrap();
+        let resp = proxy(
+            State(gw),
+            Path(("anthropic".to_string(), "v1/messages?key=evil".to_string())),
+            RawQuery(Some("key=evil".to_string())),
+            req,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
