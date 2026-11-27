@@ -29,7 +29,19 @@ mod tests {
             .map(|p| std::path::Path::new(manifest).join(p))
             .find(|p| p.is_file())
         };
-        if find().is_none() {
+        // A stale binary from an earlier test run silently skips new fake
+        // modes (a crash branch added to the source never executes). Rebuild
+        // when the source is newer, not only when the binary is missing.
+        let source = std::path::Path::new(manifest).join("src/bin/adapter-fake-acp.rs");
+        let stale = find().is_none_or(|bin| {
+            let src_time = std::fs::metadata(&source).and_then(|m| m.modified());
+            let bin_time = std::fs::metadata(bin).and_then(|m| m.modified());
+            match (src_time, bin_time) {
+                (Ok(s), Ok(b)) => s > b,
+                _ => true,
+            }
+        });
+        if stale {
             let status = std::process::Command::new(env!("CARGO"))
                 .current_dir(manifest)
                 .args(["build", "--bin", "adapter-fake-acp"])
@@ -1008,6 +1020,142 @@ mod tests {
             "expected timeout error_code, got {:?}",
             res.error_code
         );
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drive_acp_session_crash_mid_frame_fails_terminal() {
+        let _env = crate::TEST_ENV_LOCK.lock().await;
+        let crash_marker =
+            std::env::temp_dir().join(format!("ag-fake-crash-{}", uuid::Uuid::new_v4()));
+        let (cfg_ws, cfg_cred, cfg_repos) = test_config_dirs("acp-crash");
+        let fake = fake_acp_bin();
+        let bin_dir = fake.parent().unwrap();
+        let orig = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
+        // Fake agent: write a truncated JSON-RPC line then block forever.
+        std::env::set_var("PATH", format!("{}:{orig}", bin_dir.display()));
+        let server = dummy_ingest_server().await;
+        // Fake agent: write a truncated JSON-RPC line then block forever.
+        // Pass via adapter_env so it only reaches THIS child (no env cross-talk
+        // with parallel ACP tests in the same process).
+        let cfg = Config {
+            server: server.clone(),
+            endpoints: Endpoints::new(vec![server.clone()]),
+            node_name: "test".into(),
+            workspace_root: cfg_ws,
+            max_concurrency: 2,
+            agent_version: "0.1.0".into(),
+            adapters: vec![AdapterSpec {
+                id: "fake-acp".into(),
+                protocol: AdapterProtocol::Acp,
+            }],
+            repositories: vec!["*".into()],
+            heartbeat_secs: 10,
+            enroll_token: None,
+            rekey: false,
+            credential_path: cfg_cred,
+            env_file: None,
+            repository_root: cfg_repos,
+            secrets: vec![],
+            sandbox: sandbox::SandboxKind::None,
+            gateway_env: vec![],
+            exchange_env: vec![],
+            adapter_env: vec![("AG_FAKE_CRASH".into(), crash_marker.display().to_string())],
+            outbox_root: std::env::temp_dir()
+                .join(format!("ag-acp-outbox-crash-{}", uuid::Uuid::new_v4())),
+            artifact_spool_root: std::env::temp_dir()
+                .join(format!("ag-acp-spool-crash-{}", uuid::Uuid::new_v4())),
+            completion_outbox: Arc::new(
+                outbox::CompletionOutbox::open(
+                    &std::env::temp_dir()
+                        .join(format!("ag-acp-comp-crash-{}", uuid::Uuid::new_v4())),
+                )
+                .unwrap(),
+            ),
+            autonomy: AutonomyLevel::default(),
+            adapter_versions: Default::default(),
+            max_artifact_size: 100 * 1024 * 1024,
+            network_mode: "none".into(),
+            transport: crate::config::Transport::Auto,
+            guard_deny: vec![],
+            guard_allow: vec![],
+            accounts: vec![],
+            github_token: None,
+            proxies: std::sync::Arc::new(crate::proxy::ProxyPool::new(vec![])),
+            managed_adapter_env: Default::default(),
+        };
+        let ws = std::env::temp_dir().join(format!(
+            "ag-acp-crash-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let assignment = Assignment {
+            attempt_id: format!("att-crash-{}", uuid::Uuid::new_v4()),
+            fencing_token: String::new(),
+            task_id: "t1".into(),
+            repository: "*".into(),
+            prompt: "do the thing".into(),
+            adapter: "fake-acp".into(),
+            number: 1,
+            timeout_secs: 3,
+            git_url: String::new(),
+            default_branch: String::new(),
+            validation_command: None,
+            validation_timeout_secs: None,
+            base_commit: None,
+            parent_acp_session_id: None,
+            network_mode: None,
+            provenance: None,
+            upstream_commits: vec![],
+            upstream_task_ids: vec![],
+            group_id: None,
+            read_only: false,
+            eval_cases: vec![],
+            consensus_group_id: None,
+            consensus_member: None,
+            opencode_override: None,
+            github_push: false,
+            github_repo: None,
+            github_issue: None,
+            github_base_ref: None,
+            github_create: false,
+            workflow_role: None,
+            max_tokens: None,
+            max_cost_cents: None,
+        };
+        let sink = EventSink::new(
+            assignment.attempt_id.clone(),
+            reqwest::Client::new(),
+            cfg.base(),
+            String::new(),
+            Arc::new(outbox::EventOutbox::open(&cfg.outbox_root, &assignment.attempt_id).unwrap()),
+        );
+        let res = tokio::time::timeout(
+            Duration::from_secs(20),
+            drive_acp_session(
+                &cfg,
+                &reqwest::Client::new(),
+                &assignment,
+                &ws,
+                sink.clone(),
+            ),
+        )
+        .await
+        .expect("drive_acp_session must not hang on a crashed ACP peer")
+        .unwrap();
+        assert!(
+            crash_marker.exists(),
+            "the fake agent must actually have taken the crash path"
+        );
+        assert!(
+            !res.success,
+            "a session that died mid-frame must not succeed"
+        );
+        assert!(res.error_code.is_some(), "the failure needs an error_code");
+        std::fs::remove_file(&crash_marker).ok();
         std::fs::remove_dir_all(&ws).ok();
     }
 

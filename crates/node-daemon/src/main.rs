@@ -511,16 +511,27 @@ async fn drive_acp_session(
     };
     tokio::pin!(budget_hit);
     let outcome = tokio::select! {
-        res = &mut prompt => match res {
-            Ok(_) => {
-                let rl = rate_limited.load(std::sync::atomic::Ordering::Relaxed);
-                AcpResult { success: true, error_code: None, session_id: Some(session_id.clone()), rate_limited: rl }
+        res = &mut prompt => {
+            // `prompt` is a JoinHandle<Result<Value, AcpError>>: a joined task
+            // can still carry an RPC failure (transport closed mid-frame,
+            // agent error, bad response). Reporting `Ok(join_result)` as
+            // success made a crashed peer look like a completed attempt.
+            let (success, error_code) = match res {
+                Ok(Ok(_)) => (true, None),
+                Ok(Err(e)) => (false, Some(format!("agent_error: {e}"))),
+                Err(e) => (
+                    false,
+                    Some(format!("agent_error: ACP prompt task panicked: {e}")),
+                ),
+            };
+            let rl = rate_limited.load(std::sync::atomic::Ordering::Relaxed);
+            AcpResult {
+                success,
+                error_code,
+                session_id: Some(session_id.clone()),
+                rate_limited: rl,
             }
-            Err(e) => {
-                let rl = rate_limited.load(std::sync::atomic::Ordering::Relaxed);
-                AcpResult { success: false, error_code: Some(format!("agent_error: {e}")), session_id: Some(session_id.clone()), rate_limited: rl }
-            }
-        },
+        }
         _ = wait_for_cancel(&assignment.attempt_id, cancel_client, cancel_url) => {
             // Ponytail: bound the session_cancel RPC so a process already
             // tearing down (or one that ignores session/cancel) can't park

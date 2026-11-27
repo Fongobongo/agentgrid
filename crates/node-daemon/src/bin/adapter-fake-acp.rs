@@ -54,6 +54,17 @@ fn main() {
                         let _ = std::fs::write(&p, prompt);
                     }
                 }
+                // Test mode: die mid-frame. The partial JSON-RPC line is
+                // flushed, then the process exits — the case where the peer
+                // crashes instead of hanging. `read_stream` must surface the
+                // truncated tail without wedging the session.
+                if let Some(marker) = std::env::var_os("AG_FAKE_CRASH") {
+                    let _ = std::fs::write(&marker, b"crashed");
+                    let partial = r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"type":"progress","text":"thi"#;
+                    out.write_all(partial.as_bytes()).ok();
+                    out.flush().ok();
+                    std::process::exit(0);
+                }
                 // Test mode: hang mid-frame. Write the start of a JSON-RPC
                 // `session/update` line with no terminating newline and block,
                 // simulating an ACP subprocess that dies mid-frame (truncated

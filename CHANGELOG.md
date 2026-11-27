@@ -405,6 +405,12 @@
   run. Keys are scoped to the user, hashed before storage, and checked inside
   the same fenced transaction that inserts the task.
 
+- **A crashed ACP agent can no longer be reported as successful.** A new
+  mid-frame crash test showed `drive_acp_session` checked the task join result
+  but discarded the inner `Result<Value, AcpError>`, so a transport-closed RPC
+  error became `success`. The result now distinguishes joined-OK from
+  RPC-OK, and the fake ACP binary is rebuilt when its source changes.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session
