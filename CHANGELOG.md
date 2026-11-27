@@ -19,8 +19,8 @@
   database and WAL size, the instance-lock inode and its holders, free disk
   space, deleted-but-open files and stale `ag-*` scratch directories. `--json`
   for scripts; a failing check exits non-zero. Deleted-open-file and lock
-  checks only look at agentgrid processes, so an unrelated editor temp file
-  cannot turn the report red.
+  checks only look at agentgrid processes and files from this runtime's own
+  directory, so an unrelated editor temp file cannot turn the report red.
 
 - **Graceful shutdown and drain.** The control plane checkpoints its WAL and
   closes the SQLite pool after the HTTP server stops; the node daemon stops
@@ -113,6 +113,11 @@
 - **E2E cleanup no longer signals recycled PIDs.** Process groups are stopped
   and confirmed dead before the scratch dir is removed; the extra blind
   `kill -9` over already-reaped PIDs could hit an unrelated process.
+
+- **`ag doctor runtime` ignores unrelated deleted files.** A deleted shared
+  library or rotated log in any process with "agentgrid" in its command line
+  used to fail the check; only deleted files under this runtime's database
+  directory now count, and the doctor excludes its own PID.
 
 ### Added
 

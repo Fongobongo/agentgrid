@@ -182,8 +182,11 @@ pub fn collect() -> Report {
     }
 
     // 5. Deleted-open files: a process holding a deleted log/database keeps
-    //    its bytes alive while `du` reports them gone.
-    let deleted = deleted_open_files();
+    //    its bytes alive while `du` reports them gone. Only files in this
+    //    runtime's own directory count: an unrelated `.so` or rotated log in
+    //    another agentgrid-named process is not this incident.
+    let owned = vec![db.clone(), wal.clone(), lock.clone(), db_dir.to_path_buf()];
+    let deleted = deleted_open_files(&owned);
     let status = if deleted.is_empty() {
         Status::Ok
     } else {
@@ -296,7 +299,7 @@ fn lock_holders(_path: &Path) -> Vec<u32> {
 /// from editors or package managers are not this daemon's incident and must
 /// not turn the runtime doctor red.
 #[cfg(target_os = "linux")]
-fn deleted_open_files() -> Vec<(u32, String)> {
+fn deleted_open_files(owned: &[PathBuf]) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return out;
@@ -306,6 +309,9 @@ fn deleted_open_files() -> Vec<(u32, String)> {
         let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
+        if pid == std::process::id() {
+            continue;
+        }
         let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
             continue;
         };
@@ -319,7 +325,7 @@ fn deleted_open_files() -> Vec<(u32, String)> {
         for fd in fds.flatten() {
             if let Ok(link) = std::fs::read_link(fd.path()) {
                 let s = link.to_string_lossy();
-                if is_deleted_target(&s) {
+                if is_owned_deleted_target(&s, owned) {
                     out.push((pid, s.into_owned()));
                 }
             }
@@ -329,13 +335,24 @@ fn deleted_open_files() -> Vec<(u32, String)> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn deleted_open_files() -> Vec<(u32, String)> {
+fn deleted_open_files(_owned: &[PathBuf]) -> Vec<(u32, String)> {
     Vec::new()
 }
 
 /// A `/proc/<pid>/fd` link to a removed file ends in " (deleted)".
 pub fn is_deleted_target(link: &str) -> bool {
     link.ends_with(" (deleted)")
+}
+
+/// Only deleted files from this runtime's own directory are a finding. A
+/// rotated log or an upgraded shared library in some other agentgrid process
+/// must not turn `ag doctor runtime` red.
+fn is_owned_deleted_target(link: &str, owned: &[PathBuf]) -> bool {
+    let Some(path) = link.strip_suffix(" (deleted)") else {
+        return false;
+    };
+    let path = Path::new(path);
+    owned.iter().any(|p| path.starts_with(p))
 }
 
 fn free_bytes(path: &Path) -> Option<u64> {
@@ -399,6 +416,31 @@ mod tests {
     fn deleted_link_is_detected() {
         assert!(is_deleted_target("/tmp/agtest/cp2.log (deleted)"));
         assert!(!is_deleted_target("/tmp/agtest/cp2.log"));
+    }
+
+    #[test]
+    fn only_deleted_files_from_the_runtime_directory_are_reported() {
+        let owned = vec![PathBuf::from("/var/lib/agentgrid")];
+        assert!(is_owned_deleted_target(
+            "/var/lib/agentgrid/control-plane.db (deleted)",
+            &owned
+        ));
+        assert!(is_owned_deleted_target(
+            "/var/lib/agentgrid/cp.log (deleted)",
+            &owned
+        ));
+        assert!(!is_owned_deleted_target(
+            "/var/lib/agentgrid/control-plane.db",
+            &owned
+        ));
+        assert!(!is_owned_deleted_target(
+            "/var/lib/agentgrid-evil/cp.log (deleted)",
+            &owned
+        ));
+        assert!(!is_owned_deleted_target(
+            "/usr/lib/libsomething.so (deleted)",
+            &owned
+        ));
     }
 
     #[test]
