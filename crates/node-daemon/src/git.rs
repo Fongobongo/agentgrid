@@ -486,6 +486,40 @@ fn write_no_follow(path: &Path, bytes: &[u8]) -> Result<()> {
     crate::artifact_spool::write_owned(path, bytes)
 }
 
+/// A path from `git diff --diff-filter=U` is relative to the worktree, which
+/// the agent controls. A committed symlink directory can point a host-side
+/// write outside that worktree, so refuse absolute paths, `..`, and any
+/// symlink component on the way to the file.
+fn safe_conflict_path(ws_path: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = Path::new(rel);
+    if rel.is_absolute()
+        || rel.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+            )
+        })
+    {
+        return None;
+    }
+    let mut full = ws_path.to_path_buf();
+    for c in rel.components() {
+        let std::path::Component::Normal(segment) = c else {
+            return None;
+        };
+        full.push(segment);
+        if let Ok(md) = std::fs::symlink_metadata(&full) {
+            if md.file_type().is_symlink() {
+                return None;
+            }
+        }
+    }
+    Some(full)
+}
+
 /// Run `git` with explicit args (no shell). Args are passed verbatim, so they
 /// cannot be reinterpreted as shell syntax.
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
@@ -1696,7 +1730,9 @@ fn builtin_resolve_trivial(ws_path: &str) -> Result<bool> {
     // fully trivial, so a partial pass never leaves a half-resolved tree.
     let mut resolved = Vec::with_capacity(files.len());
     for f in &files {
-        let path = std::path::Path::new(ws_path).join(f);
+        let Some(path) = safe_conflict_path(std::path::Path::new(ws_path), f) else {
+            return Ok(false); // traversal or symlink -> manual path
+        };
         let Ok(content) = std::fs::read_to_string(&path) else {
             return Ok(false); // binary or unreadable -> manual path
         };
@@ -1706,7 +1742,7 @@ fn builtin_resolve_trivial(ws_path: &str) -> Result<bool> {
         resolved.push((path, new));
     }
     for (path, new) in &resolved {
-        std::fs::write(path, new)?;
+        write_no_follow(path, new.as_bytes())?;
     }
     let mut add = git_cmd();
     add.arg("add")

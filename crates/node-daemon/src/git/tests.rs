@@ -1628,3 +1628,28 @@ fn a_git_url_that_looks_like_an_option_or_a_transport_helper_is_refused() {
         assert!(validate_git_url(ok).is_ok(), "{ok:?} must be accepted");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn conflict_resolution_refuses_traversal_and_symlinked_parents() {
+    let base = std::env::temp_dir().join(format!("ag-conflict-path-{}", uuid::Uuid::new_v4()));
+    let ws = base.join("worktree");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(ws.join("plain.txt"), b"x").unwrap();
+
+    std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+
+    assert_eq!(
+        safe_conflict_path(&ws, "sub/plain.txt"),
+        Some(ws.join("sub/plain.txt"))
+    );
+    assert!(safe_conflict_path(&ws, "plain.txt").is_some());
+    assert!(safe_conflict_path(&ws, "link/file.txt").is_none());
+    assert!(safe_conflict_path(&ws, "../outside/file.txt").is_none());
+    assert!(safe_conflict_path(&ws, "/etc/passwd").is_none());
+    assert!(safe_conflict_path(&ws, "sub/../plain.txt").is_none());
+
+    std::fs::remove_dir_all(base).ok();
+}

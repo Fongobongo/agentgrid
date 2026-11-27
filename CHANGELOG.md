@@ -125,6 +125,11 @@
   `--cap-drop ALL` close that path; the startup probe now exercises the exact
   flags so an old bwrap fails at boot instead of weakening every attempt.
 
+- **Conflict auto-resolution refuses symlinked paths.** A committed symlink
+  in the worktree could redirect the host-side write of a resolved conflict
+  outside that worktree. Paths are now checked component by component and
+  written with the no-follow helper.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**
