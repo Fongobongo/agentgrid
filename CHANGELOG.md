@@ -82,6 +82,10 @@
   control plane's node list. Paths are now normalized before the check, encoded
   separators are refused, and the normalized path is the one forwarded.
 
+- **Webhook failures no longer log the webhook URL.** Telegram puts the bot
+  token in the URL path and the chat id in the query; a failed POST wrote both
+  into the control-plane log. Only the origin is logged now.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

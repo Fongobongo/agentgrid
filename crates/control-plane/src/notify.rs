@@ -55,7 +55,7 @@ pub async fn notify_task(url: &str, note: &TaskNotification) {
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(target = %url, "notify_task client build failed: {e}");
+            tracing::warn!(target = %redact_webhook_url(url), "notify_task client build failed: {e}");
             return;
         }
     };
@@ -75,7 +75,31 @@ pub async fn notify_task(url: &str, note: &TaskNotification) {
         client.post(url).json(note).send().await
     };
     if let Err(e) = result {
-        tracing::warn!(target = %url, status = %note.status, "notify_task POST failed: {e}");
+        tracing::warn!(
+            target = %redact_webhook_url(url),
+            status = %note.status,
+            "notify_task POST failed: {e}"
+        );
+    }
+}
+
+/// A webhook URL is a credential: Telegram puts the bot token in the path and
+/// the chat id in the query, and most other providers do the same. Log only
+/// the origin (plus a marker for the Telegram endpoint) so a failed POST
+/// cannot leak a working token into the control-plane logs.
+fn redact_webhook_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<invalid webhook url>".into();
+    };
+    let authority = rest
+        .split(|c| c == '/' || c == '?' || c == '#')
+        .next()
+        .filter(|a| !a.is_empty())
+        .unwrap_or("<invalid webhook url>");
+    if authority.eq_ignore_ascii_case("api.telegram.org") {
+        format!("{scheme}://{authority}/bot<redacted>/sendMessage")
+    } else {
+        format!("{scheme}://{authority}")
     }
 }
 
@@ -248,5 +272,27 @@ mod tests {
         let mut review = sample_note();
         review.status = "awaiting_review".into();
         assert!(chat_text(&review).contains("awaiting review"));
+    }
+
+    #[test]
+    fn log_target_never_contains_a_webhook_credential() {
+        let telegram = "https://api.telegram.org/bot123:abc/sendMessage?chat_id=42";
+        let redacted = redact_webhook_url(telegram);
+        assert!(!redacted.contains("123:abc"));
+        assert!(!redacted.contains("chat_id"));
+        assert!(redacted.starts_with("https://api.telegram.org/"));
+
+        for url in [
+            "https://hooks.example.com/services/T000/B000/secret-token",
+            "https://ntfy.sh/mytopic?auth=token",
+            "http://127.0.0.1:8080/path?key=1#frag",
+        ] {
+            let redacted = redact_webhook_url(url);
+            assert!(!redacted.contains("secret-token"), "{redacted}");
+            assert!(!redacted.contains('?'), "{redacted}");
+            assert!(!redacted.contains('#'), "{redacted}");
+            assert!(redacted.contains("://"), "{redacted}");
+        }
+        assert_eq!(redact_webhook_url("not a url"), "<invalid webhook url>");
     }
 }
