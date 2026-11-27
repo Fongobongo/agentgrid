@@ -53,7 +53,7 @@ jobs:
         run: |
           tc=$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)
           rustup component add rustfmt clippy --toolchain "$tc"
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
       # The scripts expect prebuilt debug binaries in target/debug and do not
       # build anything themselves. `ha-incremental` is additive: one binary
       # with the feature serves every scenario (the RPO mode is env-driven),
