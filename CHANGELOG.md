@@ -433,6 +433,11 @@
   to be formatted verbatim into the attempt's `error_code` and notes. The
   persisted value now names only the failure class.
 
+- **Idempotency keys now detect a changed request body.** Reusing a key with
+  a different payload returns 409 instead of replaying the original task;
+  identical retries still return 200. Migration 0106 stores the request
+  fingerprint, and pre-fingerprint rows fail closed as conflicts.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session

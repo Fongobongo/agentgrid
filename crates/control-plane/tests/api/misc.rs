@@ -3651,37 +3651,67 @@ async fn an_idempotency_key_returns_the_first_task_on_retry() {
         ..Default::default()
     })
     .unwrap();
-    let with_key = |key: &str| {
+    let with_key = |key: &str, body: &str| {
         Request::builder()
             .method("POST")
             .uri("/v1/tasks")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {cred}"))
             .header("idempotency-key", key)
-            .body(Body::from(body.clone()))
+            .body(Body::from(body.to_string()))
             .unwrap()
     };
 
-    let first = app.clone().oneshot(with_key("retry-key")).await.unwrap();
+    let first = app
+        .clone()
+        .oneshot(with_key("retry-key", &body))
+        .await
+        .unwrap();
     assert_eq!(first.status(), StatusCode::CREATED);
     let first_view: TaskView =
         serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap()).unwrap();
 
-    let retry = app.clone().oneshot(with_key("retry-key")).await.unwrap();
+    let retry = app
+        .clone()
+        .oneshot(with_key("retry-key", &body))
+        .await
+        .unwrap();
     assert_eq!(retry.status(), StatusCode::OK, "a retry is not a new task");
     let retry_view: TaskView =
         serde_json::from_slice(&to_bytes(retry.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(retry_view.id, first_view.id);
 
-    let other = app.clone().oneshot(with_key("other-key")).await.unwrap();
+    let other = app
+        .clone()
+        .oneshot(with_key("other-key", &body))
+        .await
+        .unwrap();
     assert_eq!(other.status(), StatusCode::CREATED);
     let other_view: TaskView =
         serde_json::from_slice(&to_bytes(other.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_ne!(other_view.id, first_view.id);
 
+    let different = serde_json::to_string(&CreateTaskRequest {
+        prompt: "a different request".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let conflict = app
+        .clone()
+        .oneshot(with_key("retry-key", &different))
+        .await
+        .unwrap();
+    assert_eq!(
+        conflict.status(),
+        StatusCode::CONFLICT,
+        "a reused key with a new body must not replay the first task"
+    );
+
     let bad = app
         .clone()
-        .oneshot(with_key(&"x".repeat(256)))
+        .oneshot(with_key(&"x".repeat(256), &body))
         .await
         .unwrap();
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);

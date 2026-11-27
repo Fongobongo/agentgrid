@@ -5379,20 +5379,32 @@ mod idempotency_tests {
             ..Default::default()
         };
         let (first, created) = store
-            .create_task_idempotent(&req, "digest-one")
+            .create_task_idempotent(&req, "digest-one", "hash-a")
             .await
             .unwrap();
+        let first = first.expect("new key creates a task");
         assert!(created);
         let (retry, created) = store
-            .create_task_idempotent(&req, "digest-one")
+            .create_task_idempotent(&req, "digest-one", "hash-a")
             .await
             .unwrap();
+        let retry = retry.expect("identical replay returns the task");
         assert!(!created);
         assert_eq!(retry.id, first.id);
-        let (other, created) = store
-            .create_task_idempotent(&req, "digest-two")
+
+        let mut different = req.clone();
+        different.prompt = "another request".into();
+        let (conflict, _) = store
+            .create_task_idempotent(&different, "digest-one", "hash-b")
             .await
             .unwrap();
+        assert!(conflict.is_none(), "a key with a new body must conflict");
+
+        let (other, created) = store
+            .create_task_idempotent(&req, "digest-two", "hash-a")
+            .await
+            .unwrap();
+        let other = other.expect("a different key creates a task");
         assert!(created);
         assert_ne!(other.id, first.id);
         assert_eq!(store.list_tasks().await.unwrap().len(), 2);

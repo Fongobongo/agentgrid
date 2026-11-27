@@ -132,36 +132,52 @@ impl Store {
 
     /// Create a task at most once per client key. `key` is a SHA-256 digest
     /// supplied by the route (user + `Idempotency-Key`); it is never stored in
-    /// the clear. Lookup and insert share one `BEGIN IMMEDIATE` transaction,
-    /// so two concurrent retries cannot both create a task.
+    /// the clear. `request_hash` fingerprints the request, so reusing a key
+    /// for a different body is reported as a conflict instead of silently
+    /// returning somebody else's task. Lookup and insert share one
+    /// `BEGIN IMMEDIATE` transaction, so two concurrent retries cannot both
+    /// create a task. `Ok((None, _))` means key reuse with a different body.
     pub async fn create_task_idempotent(
         &self,
         req: &CreateTaskRequest,
         key: &str,
-    ) -> Result<(TaskView, bool)> {
+        request_hash: &str,
+    ) -> Result<(Option<TaskView>, bool)> {
         let mut tx = self.write_txn().await?;
-        let existing: Option<String> =
-            sqlx::query_scalar("SELECT task_id FROM idempotency WHERE key = ?")
+        let existing: Option<(String, String)> =
+            sqlx::query("SELECT task_id, request_hash FROM idempotency WHERE key = ?")
                 .bind(key)
                 .fetch_optional(&mut *tx)
-                .await?;
-        if let Some(id) = existing {
+                .await?
+                .map(|row| {
+                    (
+                        row.get::<String, _>("task_id"),
+                        row.get::<String, _>("request_hash"),
+                    )
+                });
+        if let Some((id, stored_hash)) = existing {
             tx.commit().await?;
+            if stored_hash != request_hash {
+                return Ok((None, false));
+            }
             let view = self
                 .show_task(&id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("idempotent task {id} disappeared"))?;
-            return Ok((view, false));
+            return Ok((Some(view), false));
         }
         let view = Self::insert_task(req, &mut tx).await?;
-        sqlx::query("INSERT INTO idempotency (key, task_id, created_at) VALUES (?, ?, ?)")
-            .bind(key)
-            .bind(&view.id)
-            .bind(now_iso())
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO idempotency (key, task_id, request_hash, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(key)
+        .bind(&view.id)
+        .bind(request_hash)
+        .bind(now_iso())
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
-        Ok((view, true))
+        Ok((Some(view), true))
     }
 
     pub async fn list_tasks(&self) -> Result<Vec<TaskView>> {

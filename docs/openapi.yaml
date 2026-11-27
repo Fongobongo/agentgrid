@@ -181,6 +181,11 @@ paths:
           required: false
           description: Client-generated key; 1-255 bytes, no control characters.
           schema: { type: string, minLength: 1, maxLength: 255 }
+      responses:
+        '201': { description: Task created }
+        '200': { description: Replayed identical request with the original task }
+        '400': { description: Invalid idempotency key }
+        '409': { description: Idempotency key reused with a different request body }
   /v1/tasks/{id}:
     get:
       summary: Fetch a task by id

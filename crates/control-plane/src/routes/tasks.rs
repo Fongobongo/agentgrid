@@ -54,12 +54,25 @@ pub async fn create_task(
         tracing::warn!("create_task rejected github refs: {e}");
         return Err(StatusCode::BAD_REQUEST);
     }
+    // Fingerprint the parsed request, not the raw body: field order and
+    // whitespace must not turn a retry into a conflict.
+    let request_hash = hex::encode(Sha256::digest(serde_json::to_vec(&req).unwrap_or_default()));
     let created = match idempotency_key {
-        Some(ref key) => state.store.create_task_idempotent(&req, key).await,
-        None => state.store.create_task(&req).await.map(|view| (view, true)),
+        Some(ref key) => {
+            state
+                .store
+                .create_task_idempotent(&req, key, &request_hash)
+                .await
+        }
+        None => state
+            .store
+            .create_task(&req)
+            .await
+            .map(|view| (Some(view), true)),
     };
     match created {
-        Ok((view, fresh)) => {
+        Ok((None, _)) => Err(StatusCode::CONFLICT),
+        Ok((Some(view), fresh)) => {
             if fresh {
                 state.assignment_notify.notify_waiters();
                 let _ = state
