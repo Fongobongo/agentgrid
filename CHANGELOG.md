@@ -119,6 +119,12 @@
   used to fail the check; only deleted files under this runtime's database
   directory now count, and the doctor excludes its own PID.
 
+- **The bwrap sandbox drops all capabilities.** A daemon running as root kept
+  `CAP_SYS_ADMIN` inside its user namespace, so an agent could remount the
+  read-only host root and undo the tmpfs secret masks. `--unshare-user` +
+  `--cap-drop ALL` close that path; the startup probe now exercises the exact
+  flags so an old bwrap fails at boot instead of weakening every attempt.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

@@ -865,6 +865,15 @@ fn bwrap_head(
         "--die-with-parent".to_string(),
         "--new-session".to_string(),
         "--unshare-all".to_string(),
+        // `--unshare-all` alone still leaves a root daemon with CAP_SYS_ADMIN
+        // inside the new user namespace: `mount -o remount,rw /` can undo the
+        // read-only root and unmount the tmpfs masks. Drop the bounding set so
+        // neither the agent nor a nested namespace can regain mount privileges.
+        // The startup probe below refuses a bwrap too old for these flags
+        // instead of silently shipping the weaker sandbox.
+        "--unshare-user".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
     ];
     if bwrap_shares_network(&net) {
         v.push("--share-net".to_string());
@@ -970,10 +979,16 @@ pub async fn probe_bwrap() -> anyhow::Result<Option<String>> {
     if resolve_binary("bwrap").is_none() {
         return Ok(None);
     }
+    // Probe with the exact flags `bwrap_head` uses, not just a namespace:
+    // an older bwrap without `--cap-drop` would pass here and only fail (or,
+    // worse, run without the capability drop) on every attempt.
     let out = tokio::process::Command::new("bwrap")
         .args([
             "--die-with-parent",
             "--unshare-all",
+            "--unshare-user",
+            "--cap-drop",
+            "ALL",
             "--ro-bind",
             "/",
             "/",
@@ -985,9 +1000,10 @@ pub async fn probe_bwrap() -> anyhow::Result<Option<String>> {
         .await?;
     if !out.status.success() {
         anyhow::bail!(
-            "bwrap is installed but cannot create a user namespace ({}): enable \
-             unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1) or \
-             use AGENTGRID_SANDBOX=docker",
+            "bwrap is installed but cannot run with the required namespace and \
+             capability-drop flags ({}): upgrade bubblewrap (>= 0.5), enable \
+             unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1) \
+             or use AGENTGRID_SANDBOX=docker",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -2877,9 +2893,19 @@ mod tests {
             None,
         );
         assert_eq!(prog, "bwrap");
-        for flag in ["--die-with-parent", "--new-session", "--unshare-all"] {
+        for flag in [
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-all",
+            "--unshare-user",
+            "--cap-drop",
+        ] {
             assert!(args.contains(&flag.to_string()), "missing {flag}: {args:?}");
         }
+        assert!(
+            args.windows(2).any(|w| w == ["--cap-drop", "ALL"]),
+            "the capability bounding set must be empty: {args:?}"
+        );
         // Read-only host root, writable worktree shadowing it, then the
         // private /tmp, /dev and /proc.
         let root = args.windows(3).position(|w| w[0] == "--ro-bind").unwrap();
