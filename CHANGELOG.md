@@ -92,6 +92,13 @@
   Dot segments are resolved and the deepest existing ancestor is canonicalized
   before the comparison.
 
+- **The control plane now drains when its runtime files vanish.** Deleting the
+  database or its instance lock used to drop the server future mid-request and
+  skip the shutdown checkpoint; the watcher now requests the normal SIGTERM
+  drain and still exits non-zero. `wal_checkpoint(TRUNCATE)` also checks the
+  PRAGMA's `busy` result instead of treating a busy-but-successful query as a
+  completed checkpoint.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

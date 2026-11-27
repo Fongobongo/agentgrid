@@ -206,16 +206,34 @@ async fn amain() -> Result<()> {
     let instance_lock = acquire_instance_lock(&db_path)?;
 
     let state = AppState::open_with_runtime_and_root(&db_path, ha, artifact_root).await?;
-    let server = async {
+    let mut server = Box::pin(async {
         if state.ha.is_ha() {
             serve_ha(state, addr).await
         } else {
             serve(state, addr).await
         }
-    };
+    });
     tokio::select! {
-        result = server => result,
-        result = watch_runtime_files(&db_path, instance_lock.as_ref()) => result,
+        result = &mut server => result,
+        Err(e) = watch_runtime_files(&db_path, instance_lock.as_ref()) => {
+            // The database or the instance lock vanished under a live process.
+            // Dropping `server` here used to abort in-flight requests and skip
+            // the WAL checkpoint. Ask the same shutdown_signal the operator's
+            // SIGTERM uses, let the drain finish, then report the watcher error
+            // so the process still exits non-zero.
+            tracing::error!(error = %e, "runtime files changed; shutting down");
+            #[cfg(unix)]
+            {
+                // SAFETY: kill(getpid(), SIGTERM) targets this process only and
+                // takes no pointers. The HTTP server installed its signal
+                // stream before the watcher's first tick can fire.
+                unsafe {
+                    libc::kill(libc::getpid(), libc::SIGTERM);
+                }
+                let _ = server.await;
+            }
+            Err(e)
+        }
     }
 }
 

@@ -5359,3 +5359,47 @@ mod artifact_root_tests {
         assert_eq!(s.artifact_root(), dir.join("artifacts").as_path());
     }
 }
+
+#[cfg(test)]
+mod wal_checkpoint_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn busy_checkpoint_is_an_error_not_a_silent_success() {
+        // PRAGMA wal_checkpoint(TRUNCATE) returns busy=1 as a *successful*
+        // query when a reader holds a snapshot. Reporting Ok(()) there made
+        // every shutdown claim it had truncated the WAL when it had not.
+        let dir = std::env::temp_dir().join(format!("ag-wal-check-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cp.db");
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        sqlx::query("CREATE TABLE wal_probe(value INTEGER)")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let opts = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
+        let reader = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+        let mut tx = reader.begin().await.unwrap();
+        sqlx::query("SELECT count(*) FROM sqlite_master")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+        let err = store.wal_checkpoint().await.unwrap_err();
+        assert!(
+            format!("{err}").contains("busy"),
+            "checkpoint must report the busy result: {err}"
+        );
+        assert_eq!(
+            store.sqlite_busy.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        tx.rollback().await.unwrap();
+        reader.close().await;
+        store.wal_checkpoint().await.unwrap();
+        store.pool.close().await;
+        std::fs::remove_dir_all(dir).ok();
+    }
+}

@@ -445,26 +445,37 @@ impl Store {
     /// Truncate the WAL into the main database (Stage 2.5 ops).
     pub async fn wal_checkpoint(&self) -> Result<()> {
         let start = std::time::Instant::now();
-        let res = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(&self.pool)
-            .await;
+        // PRAGMA returns (busy, log, checkpointed). With active readers it
+        // returns busy=1 and a *successful* query result, so `execute()` used
+        // to report a clean checkpoint while the WAL was left untouched.
+        let res: std::result::Result<(), String> = async {
+            let row = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            let busy: i64 = row.try_get(0).map_err(|e| e.to_string())?;
+            if busy != 0 {
+                return Err(format!("wal_checkpoint busy={busy}: checkpoint incomplete"));
+            }
+            Ok(())
+        }
+        .await;
         let dur = start.elapsed().as_millis() as u64;
         self.checkpoint_ms
             .store(dur, std::sync::atomic::Ordering::Relaxed);
         match res {
-            Ok(_) => {
+            Ok(()) => {
                 tracing::debug!(dur_ms = dur, "wal checkpoint");
                 Ok(())
             }
-            Err(e) => {
+            Err(msg) => {
                 // Count SQLITE_BUSY-class failures distinctly so they surface in
                 // metrics rather than only in logs.
-                let msg = format!("{e}");
                 if msg.to_lowercase().contains("busy") || msg.to_lowercase().contains("locked") {
                     self.sqlite_busy
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                Err(e.into())
+                Err(anyhow::anyhow!(msg))
             }
         }
     }
