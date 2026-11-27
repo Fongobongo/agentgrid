@@ -335,7 +335,25 @@ static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet
 /// completion redelivery branch (which never spawns a runner) and a panicking
 /// runner leaked the id forever — every later legitimate redelivery of that
 /// attempt was then silently dropped as a "duplicate" until daemon restart.
+/// Registration happens in [`InFlightGuard::try_new`], before any await, so
+/// cancellation also releases the entry.
 struct InFlightGuard(String);
+
+impl InFlightGuard {
+    /// Register an attempt. A duplicate must not create a second guard: its
+    /// `Drop` would remove the id owned by the first dispatcher.
+    fn try_new(id: String) -> Option<Self> {
+        if IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id.clone())
+        {
+            Some(Self(id))
+        } else {
+            None
+        }
+    }
+}
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
@@ -372,7 +390,11 @@ pub async fn wait_for_inflight(timeout: Duration) -> bool {
 /// durable completion records that did not reach the control plane.
 pub async fn graceful_drain(cfg: &Config, cred: &crate::config::SavedCredential) {
     if !wait_for_inflight(Duration::from_secs(60)).await {
-        return;
+        // This is exactly when pending completions are most likely: a runner
+        // that is still alive cannot report its own completion before exit.
+        // Redeliver them anyway; the next boot would do it, but shutdown is
+        // supposed to leave nothing behind.
+        tracing::warn!("drain timed out; redelivering durable completions anyway");
     }
     let mut headers = HeaderMap::new();
     if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", cred.credential)) {
@@ -413,19 +435,17 @@ pub async fn dispatch_batch(
         .map(|c| c.attempt_id)
         .collect();
     for a in batch {
-        {
-            let dup = !IN_FLIGHT
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(a.attempt_id.clone());
-            if dup {
-                tracing::warn!(
-                    attempt_id = %a.attempt_id,
-                    "assignment redelivered while already in flight; dropping duplicate"
-                );
-                continue;
-            }
-        }
+        // The guard owns the registry entry from here on. It must be created
+        // before any `.await`: cancelling a dispatch while it waits for a
+        // concurrency permit used to leave the id in IN_FLIGHT forever, so a
+        // redelivery was dropped as a duplicate until daemon restart.
+        let Some(guard) = InFlightGuard::try_new(a.attempt_id.clone()) else {
+            tracing::warn!(
+                attempt_id = %a.attempt_id,
+                "assignment redelivered while already in flight; dropping duplicate"
+            );
+            continue;
+        };
         if undelivered.contains(&a.attempt_id) {
             tracing::warn!(
                 attempt_id = %a.attempt_id,
@@ -438,7 +458,6 @@ pub async fn dispatch_batch(
             // The guard releases the slot when the redelivery attempt ends —
             // success or not — so a still-undelivered completion can be
             // redelivered again on the next offer.
-            let guard = InFlightGuard(aid.clone());
             tokio::spawn(async move {
                 crate::recovery::redeliver_completion(&cfg2, &client2, &aid).await;
                 drop(guard);
@@ -451,7 +470,6 @@ pub async fn dispatch_batch(
         };
         let cfg2 = cfg.clone();
         let client2 = client.clone();
-        let guard = InFlightGuard(a.attempt_id.clone());
         tokio::spawn(async move {
             // Kept for the failure report below: run_attempt consumes the
             // assignment.
@@ -791,5 +809,71 @@ mod gateway_tests {
 
         poller.abort();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inflight_wait_times_out_while_an_attempt_is_registered() {
+        let id = format!("drain-test-{}", uuid::Uuid::new_v4());
+        let guard = InFlightGuard::try_new(id.clone()).expect("guard");
+        assert!(IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&id));
+        assert!(!wait_for_inflight(Duration::from_millis(30)).await);
+        drop(guard);
+        assert!(!IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&id));
+    }
+
+    #[test]
+    fn a_duplicate_guard_does_not_remove_the_first_owners_entry() {
+        let id = format!("guard-test-{}", uuid::Uuid::new_v4());
+        let first = InFlightGuard::try_new(id.clone()).expect("first guard");
+        assert!(InFlightGuard::try_new(id.clone()).is_none());
+        assert!(IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&id));
+        drop(first);
+        assert!(!IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&id));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_dispatch_waiting_for_a_permit_releases_its_entry() {
+        let id = format!("cancel-test-{}", uuid::Uuid::new_v4());
+        let sem = Arc::new(Semaphore::new(0));
+        let dispatch_id = id.clone();
+        let task = tokio::spawn(async move {
+            let guard = InFlightGuard::try_new(dispatch_id).expect("guard");
+            let _permit = sem.acquire_owned().await.expect("permit");
+            drop(guard);
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            IN_FLIGHT
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&id),
+            "the dispatch must have registered before waiting"
+        );
+        task.abort();
+        let _ = task.await;
+        assert!(
+            !IN_FLIGHT
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(&id),
+            "cancellation must not strand an id in IN_FLIGHT"
+        );
     }
 }

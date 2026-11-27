@@ -99,6 +99,13 @@
   PRAGMA's `busy` result instead of treating a busy-but-successful query as a
   completed checkpoint.
 
+- **Node shutdown always redelivers durable completions.** A 60-second wait
+  that timed out used to skip redelivery entirely — exactly when pending
+  completions were most likely. Compose now grants nodes 90 seconds so the
+  drain fits. A cancelled dispatch no longer leaves its attempt id in the
+  in-flight registry, which used to make later redeliveries look like
+  duplicates until restart.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

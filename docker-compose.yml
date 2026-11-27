@@ -60,7 +60,9 @@ services:
     depends_on:
       control-plane:
         condition: service_healthy
-    stop_grace_period: 30s
+    # The daemon waits up to 60s for in-flight attempts and then redelivers
+    # durable completions; a 30s window would SIGKILL it mid-drain.
+    stop_grace_period: 90s
     healthcheck:
       # The daemon touches data/heartbeat.stamp after every heartbeat; a
       # wedged loop stops touching it (same probe as the image HEALTHCHECK).
@@ -99,7 +101,9 @@ services:
     depends_on:
       control-plane:
         condition: service_healthy
-    stop_grace_period: 30s
+    # The daemon waits up to 60s for in-flight attempts and then redelivers
+    # durable completions; a 30s window would SIGKILL it mid-drain.
+    stop_grace_period: 90s
     healthcheck:
       test: ["CMD-SHELL", "test $(( $(date +%s) - $(stat -c %Y /var/lib/agentgrid/data/heartbeat.stamp 2>/dev/null || echo 0) )) -lt 30"]
       interval: 15s

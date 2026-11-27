@@ -70,6 +70,8 @@ AGENTGRID_DB=/var/lib/agentgrid/control-plane.db ag doctor runtime --json
 - Control plane: SIGTERM drains HTTP requests, checkpoints WAL, closes the
   SQLite pool. Compose grants a 30-second stop window.
 - Node daemon: SIGTERM stops new assignments, waits up to 60 seconds for
-  in-flight attempts, then redelivers durable completion records.
+  in-flight attempts, then redelivers durable completion records — even when
+  the wait timed out. Compose grants nodes 90 seconds so the drain and the
+  redelivery can both finish before SIGKILL.
 - Backup/restore rehearsal: `bash tests/e2e/run-restore.sh` proves backup,
   fresh-instance restore, old task visibility, and a new successful task.
