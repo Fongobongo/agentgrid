@@ -428,6 +428,11 @@
   monotonically, so a later wakeup from an older batched writer cannot move
   the election watermark backwards.
 
+- **ACP failures store stable codes, not raw agent error payloads.** A hostile
+  agent could put credentials in a JSON-RPC error's `data` field, which used
+  to be formatted verbatim into the attempt's `error_code` and notes. The
+  persisted value now names only the failure class.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session

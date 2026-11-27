@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentgrid_acp::{
-    map_session_update, InitializeParams, Message, SessionCancelParams, SessionNewParams,
+    map_session_update, AcpError, InitializeParams, Message, SessionCancelParams, SessionNewParams,
     SessionPromptParams,
 };
 use agentgrid_common::{
@@ -65,6 +65,21 @@ use profiles::{
     fetch_agent_profile,
 };
 use skills::{compose_brain_block, compose_context_block, compose_skills_block};
+
+/// Stable, non-secret code for an ACP failure. `AcpError::Rpc` prints the
+/// agent's `RpcError` with `{:?}`, including its free-form `data` field; that
+/// text must never be persisted as an attempt's `error_code` (or written to
+/// the log), because a hostile agent can put credentials there.
+fn acp_error_code(error: &AcpError) -> &'static str {
+    match error {
+        AcpError::Io(_) => "io",
+        AcpError::Codec(_) => "codec",
+        AcpError::Rpc(_) => "rpc_error",
+        AcpError::ChannelClosed => "transport_closed",
+        AcpError::Unexpected => "unexpected_message",
+        AcpError::Json(_) => "invalid_json",
+    }
+}
 
 /// Terminal outcome of an ACP-driven attempt.
 struct AcpResult {
@@ -518,11 +533,16 @@ async fn drive_acp_session(
             // success made a crashed peer look like a completed attempt.
             let (success, error_code) = match res {
                 Ok(Ok(_)) => (true, None),
-                Ok(Err(e)) => (false, Some(format!("agent_error: {e}"))),
-                Err(e) => (
-                    false,
-                    Some(format!("agent_error: ACP prompt task panicked: {e}")),
-                ),
+                Ok(Err(e)) => {
+                    let code = acp_error_code(&e);
+                    tracing::error!(
+                        attempt_id = %assignment.attempt_id,
+                        error = code,
+                        "ACP prompt failed"
+                    );
+                    (false, Some(format!("agent_error: {code}")))
+                }
+                Err(_) => (false, Some("agent_error: task_panicked".to_string())),
             };
             let rl = rate_limited.load(std::sync::atomic::Ordering::Relaxed);
             AcpResult {

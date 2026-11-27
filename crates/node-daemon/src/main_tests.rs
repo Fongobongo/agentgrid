@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::acp_error_code;
     use crate::enrollment::scrub_token_from_file;
     use crate::event_sink::{read_stream, split_batch, EventSink};
     use crate::skills::render_trusted_skills_block;
@@ -8,6 +9,18 @@ mod tests {
     #[cfg(unix)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::Mutex;
+
+    #[test]
+    fn acp_error_code_carries_no_agent_payload() {
+        let error = agentgrid_acp::AcpError::Rpc(agentgrid_acp::RpcError {
+            code: -32000,
+            message: "failed with sk-secret-from-agent".into(),
+            data: Some(serde_json::json!({ "token": "sk-secret-from-agent" })),
+        });
+        let code = acp_error_code(&error);
+        assert_eq!(code, "rpc_error");
+        assert!(!code.contains("sk-secret-from-agent"));
+    }
 
     /// Locate the adapter-fake-acp binary, building it on demand.
     /// `cargo test` compiles bin targets only as test harnesses under
