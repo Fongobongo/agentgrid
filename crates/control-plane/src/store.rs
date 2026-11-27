@@ -250,11 +250,16 @@ impl<'a> WriteTxn<'a> {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        // The write gate stays held through the sync acknowledgement so
-        // changesets leave in sequence order.
-        let res = repl.publish(seq.max(0) as u64, bytes).await;
+        // Group commit: the job is enqueued in sequence order while the gate
+        // is still held, then the permit is released before the quorum round
+        // trip. The worker may batch this job with later ones, but each writer
+        // still waits for its own acknowledgement before answering the client.
+        let wait = repl.enqueue(seq.max(0) as u64, bytes).await?;
         drop(_permit);
-        res
+        match wait {
+            Some(wait) => repl.await_sync(wait).await,
+            None => Ok(()),
+        }
     }
 
     pub async fn rollback(self) -> Result<()> {

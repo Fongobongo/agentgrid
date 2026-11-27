@@ -298,6 +298,45 @@ struct Job {
     ack: Option<oneshot::Sender<Result<(), String>>>,
 }
 
+/// A sync-mode write that is already queued for replication. Holding this
+/// means the write gate can be released before the quorum round trip: the job
+/// is in the FIFO queue with its sequence, and the caller still waits for its
+/// own acknowledgement before answering the client.
+pub struct SyncWait {
+    seq: u64,
+    rx: oneshot::Receiver<Result<(), String>>,
+}
+
+/// Collect the jobs already queued behind `first` into one group-commit
+/// batch. No waiting: a lone writer pays no latency, and writes whose gate
+/// permit was released before the quorum round trip are already queued in
+/// sequence order by then.
+fn take_sync_batch(
+    rx: &mut mpsc::Receiver<Job>,
+    first: Job,
+    max_bytes: usize,
+) -> (Vec<Job>, Vec<Job>) {
+    let mut jobs = vec![first];
+    let mut rest = Vec::new();
+    let mut total = jobs[0].bytes.len();
+    while jobs.len() < MAX_BATCH_JOBS {
+        match rx.try_recv() {
+            Ok(job) => {
+                // try_recv already removed it from the channel: keep it for
+                // the next round trip rather than silently dropping a write.
+                if total.saturating_add(job.bytes.len()) > max_bytes {
+                    rest.push(job);
+                    break;
+                }
+                total += job.bytes.len();
+                jobs.push(job);
+            }
+            Err(_) => break,
+        }
+    }
+    (jobs, rest)
+}
+
 /// Leader-side incremental replicator: owns the per-commit session table list
 /// and the peer push worker.
 pub struct Replicator {
@@ -375,11 +414,14 @@ impl Replicator {
         });
     }
 
-    /// Publish one committed changeset. In `sync` mode this waits for a data
-    /// quorum acknowledgement; in `async` mode it returns after enqueueing.
-    pub async fn publish(&self, seq: u64, bytes: Vec<u8>) -> Result<()> {
+    /// Queue one committed changeset for replication. In sync mode the
+    /// returned `SyncWait` is the caller's own acknowledgement; in the other
+    /// modes the write is complete once it is queued. Callers may drop the
+    /// write-gate permit as soon as this returns — the job is already in the
+    /// FIFO queue with its sequence, so a later write cannot overtake it.
+    pub async fn enqueue(&self, seq: u64, bytes: Vec<u8>) -> Result<Option<SyncWait>> {
         if self.rt.config.rpo_mode == RpoMode::Snapshot {
-            return Ok(());
+            return Ok(None);
         }
         // Keep the changeset until a data quorum has it: if this node is
         // demoted before then, the write exists nowhere else and has to be
@@ -388,7 +430,7 @@ impl Replicator {
         let bytes = Arc::new(bytes);
         self.lock_rewind().push(seq, bytes.clone());
         match self.rt.config.rpo_mode {
-            RpoMode::Snapshot => Ok(()),
+            RpoMode::Snapshot => Ok(None),
             RpoMode::Async => {
                 self.tx
                     .send(Job {
@@ -399,7 +441,7 @@ impl Replicator {
                     .await
                     .map_err(|_| anyhow::anyhow!("HA replication worker stopped"))?;
                 self.rt.shared.set_applied_seq(seq);
-                Ok(())
+                Ok(None)
             }
             RpoMode::Sync => {
                 let (ack_tx, ack_rx) = oneshot::channel();
@@ -411,29 +453,46 @@ impl Replicator {
                     })
                     .await
                     .map_err(|_| anyhow::anyhow!("HA replication worker stopped"))?;
-                let wait = (self.rt.config.lease_ttl / 2).max(Duration::from_secs(1));
-                match tokio::time::timeout(wait, ack_rx).await {
-                    Ok(Ok(Ok(()))) => {
-                        self.rt.shared.set_applied_seq(seq);
-                        Ok(())
-                    }
-                    Ok(Ok(Err(e))) => {
-                        self.rt.shared.set_replication_lost();
-                        self.rt.gate.suspend_writes();
-                        bail!("sync replication failed: {e}");
-                    }
-                    Ok(Err(_)) => {
-                        self.rt.shared.set_replication_lost();
-                        self.rt.gate.suspend_writes();
-                        bail!("sync replication worker dropped the acknowledgement");
-                    }
-                    Err(_) => {
-                        self.rt.shared.set_replication_lost();
-                        self.rt.gate.suspend_writes();
-                        bail!("sync replication ack exceeded {wait:?}");
-                    }
-                }
+                Ok(Some(SyncWait { seq, rx: ack_rx }))
             }
+        }
+    }
+
+    /// Wait for one queued sync write to reach a data quorum. Each caller
+    /// waits on its own ack, but the worker can replicate several queued
+    /// writes in one round trip (group commit).
+    pub async fn await_sync(&self, wait: SyncWait) -> Result<()> {
+        let SyncWait { seq, rx } = wait;
+        let timeout = (self.rt.config.lease_ttl / 2).max(Duration::from_secs(1));
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(()))) => {
+                self.rt.shared.set_applied_seq(seq);
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => {
+                self.rt.shared.set_replication_lost();
+                self.rt.gate.suspend_writes();
+                bail!("sync replication failed: {e}");
+            }
+            Ok(Err(_)) => {
+                self.rt.shared.set_replication_lost();
+                self.rt.gate.suspend_writes();
+                bail!("sync replication worker dropped the acknowledgement");
+            }
+            Err(_) => {
+                self.rt.shared.set_replication_lost();
+                self.rt.gate.suspend_writes();
+                bail!("sync replication ack exceeded {timeout:?}");
+            }
+        }
+    }
+
+    /// Convenience for callers that do not hold the write gate (tests,
+    /// background work): queue and wait in one step.
+    pub async fn publish(&self, seq: u64, bytes: Vec<u8>) -> Result<()> {
+        match self.enqueue(seq, bytes).await? {
+            Some(wait) => self.await_sync(wait).await,
+            None => Ok(()),
         }
     }
 
@@ -515,15 +574,40 @@ impl Replicator {
     }
 
     async fn run_sync(self: Arc<Self>, mut rx: mpsc::Receiver<Job>) {
-        while let Some(job) = rx.recv().await {
-            let outcome = match self.push_batch(job.seq, job.seq, &job.bytes).await {
+        let mut pending: VecDeque<Job> = VecDeque::new();
+        loop {
+            let first = if let Some(job) = pending.pop_front() {
+                job
+            } else {
+                match rx.recv().await {
+                    Some(job) => job,
+                    None => return,
+                }
+            };
+            // Group commit: the write gate is released once a job is queued,
+            // so several writers can be waiting on this worker at once. Take
+            // everything already queued (bounded by the changeset cap) and
+            // acknowledge all of them from one replication round trip. No
+            // extra waiting is added for a lone writer.
+            let (jobs, rest) =
+                take_sync_batch(&mut rx, first, self.rt.config.max_changeset_bytes as usize);
+            pending.extend(rest);
+            let first_seq = jobs.first().map(|j| j.seq).unwrap_or(0);
+            let last_seq = jobs.last().map(|j| j.seq).unwrap_or(0);
+            let total: usize = jobs.iter().map(|j| j.bytes.len()).sum();
+            let mut chunk = Vec::with_capacity(total);
+            for job in &jobs {
+                chunk.extend_from_slice(&job.bytes);
+            }
+            let outcome = match self.push_batch(first_seq, last_seq, &chunk).await {
                 Ok(acks) if acks >= self.data_majority() => {
-                    self.note_replicated(job.seq);
+                    self.note_replicated(last_seq);
                     Ok(())
                 }
                 Ok(acks) => {
                     tracing::warn!(
-                        seq = job.seq,
+                        first_seq,
+                        last_seq,
                         acks,
                         need = self.data_majority(),
                         "sync write missed the data quorum"
@@ -531,20 +615,24 @@ impl Replicator {
                     self.rt.shared.set_replication_lost();
                     self.rt.gate.suspend_writes();
                     Err(format!(
-                        "changeset {} acknowledged by {acks} data replicas, need {}",
-                        job.seq,
+                        "changeset batch {first_seq}..{last_seq} acknowledged by {acks} \
+                         data replicas, need {}",
                         self.data_majority()
                     ))
                 }
                 Err(e) => {
-                    tracing::warn!(seq = job.seq, "sync write replication failed: {e}");
+                    tracing::warn!(first_seq, last_seq, "sync write replication failed: {e}");
                     self.rt.shared.set_replication_lost();
                     self.rt.gate.suspend_writes();
                     Err(e.to_string())
                 }
             };
-            if let Some(ack) = job.ack {
-                let _ = ack.send(outcome);
+            // One batches-worth of jobs share the quorum verdict. Each caller
+            // still gets its own ack, so a failure fails every write it carried.
+            for job in jobs {
+                if let Some(ack) = job.ack {
+                    let _ = ack.send(outcome.clone());
+                }
             }
         }
     }
@@ -737,4 +825,43 @@ pub async fn apply_s3_pending(rt: &HaRuntime, store: &Store) -> Result<usize> {
     }
     note_batches(applied);
     Ok(applied)
+}
+
+#[cfg(test)]
+mod group_commit_tests {
+    use super::*;
+
+    fn job(seq: u64, size: usize) -> Job {
+        Job {
+            seq,
+            bytes: Arc::new(vec![seq as u8; size]),
+            ack: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_sync_writes_are_batched_up_to_the_changeset_cap() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.send(job(1, 4)).await.unwrap();
+        tx.send(job(2, 4)).await.unwrap();
+        tx.send(job(3, 4)).await.unwrap();
+        tx.send(job(4, 4)).await.unwrap();
+        let first = rx.recv().await.unwrap();
+        let (batch, rest) = take_sync_batch(&mut rx, first, 12);
+        assert_eq!(batch.iter().map(|j| j.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        // The fourth job is handed back for the next round trip, never dropped.
+        assert_eq!(rest.iter().map(|j| j.seq).collect::<Vec<_>>(), [4]);
+    }
+
+    #[tokio::test]
+    async fn a_batch_stops_before_exceeding_the_cap() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.send(job(1, 4)).await.unwrap();
+        tx.send(job(2, 8)).await.unwrap();
+        tx.send(job(3, 4)).await.unwrap();
+        let first = rx.recv().await.unwrap();
+        let (batch, rest) = take_sync_batch(&mut rx, first, 10);
+        assert_eq!(batch.iter().map(|j| j.seq).collect::<Vec<_>>(), [1]);
+        assert_eq!(rest.iter().map(|j| j.seq).collect::<Vec<_>>(), [2]);
+    }
 }

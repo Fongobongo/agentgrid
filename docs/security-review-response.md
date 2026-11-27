@@ -161,9 +161,12 @@ Client retries are now safe: `POST /v1/tasks` accepts an `Idempotency-Key`
 header, scoped to the authenticated user and stored as a SHA-256 digest. The
 key lookup and the task insert share one `BEGIN IMMEDIATE` transaction, and a
 replay returns 200 with the original task instead of 201 with a new one.
-Still open: no group commit, so the single `WRITE_GATE` permit is held across
-the replication round trip. That was the review's other optional item and
-remains a deliberate scope boundary.
+Group commit is now in place too: a committed changeset is enqueued in
+sequence order while the write-gate permit is still held, then the permit is
+released before the quorum round trip. Each writer still waits for its own
+acknowledgement, but the sync worker batches every already-queued changeset
+into one push (bounded by the changeset cap), so concurrent writers share a
+round trip instead of serialising behind it.
 
 ### R5 (finding 16): docker no longer inherits the image's root user
 

@@ -416,6 +416,12 @@
   root-owned worktree still yields a root container; startup warns and an
   explicit `AGENTGRID_RUN_AS_USER` remains the isolation path.
 
+- **HA sync replication uses group commit.** `WRITE_GATE` is released once the
+  changeset is queued in sequence order, before the quorum round trip; each
+  writer still waits for its own ack, while the worker pushes all queued
+  changesets in one batch. Writes that do not fit the changeset cap are kept
+  for the next round trip instead of being dropped.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session
