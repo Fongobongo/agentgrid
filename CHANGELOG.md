@@ -134,6 +134,11 @@
   Axum decodes `%3F`/`%23` in `{*rest}`, so a capability holder could add
   arbitrary provider query parameters to the request.
 
+- **The maintenance breaker re-arms as a real half-open probe.** Its failure
+  counter was left at three after the cooldown, so a single later failure
+  re-opened it for another minute. Skipped ticks also advance the tick counter
+  again, so the periodic WAL checkpoint is not lost while the breaker is open.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

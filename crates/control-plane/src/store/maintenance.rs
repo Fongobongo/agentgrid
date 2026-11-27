@@ -27,8 +27,20 @@ pub(crate) struct MaintenanceCircuit {
 }
 
 impl MaintenanceCircuit {
-    fn allows(&self, now: std::time::Instant) -> bool {
-        self.open_until.is_none_or(|until| now >= until)
+    fn allows(&mut self, now: std::time::Instant) -> bool {
+        // A half-open probe after the cooldown must count as the first of a
+        // new streak. Keeping the old counter made one post-cooldown failure
+        // reopen the breaker immediately, so three consecutive failures
+        // became one.
+        if let Some(until) = self.open_until {
+            if now >= until {
+                self.open_until = None;
+                self.failures = 0;
+            } else {
+                return false;
+            }
+        }
+        true
     }
 
     fn failure(&mut self, now: std::time::Instant) -> bool {
@@ -141,6 +153,7 @@ impl Store {
                 if !store.ha_allows_work() {
                     continue;
                 }
+                tick = tick.wrapping_add(1);
                 let allowed = store
                     .maintenance_circuit
                     .lock()
@@ -174,7 +187,6 @@ impl Store {
                         }
                     }
                 }
-                tick = tick.wrapping_add(1);
                 if tick.is_multiple_of(4) {
                     let _ = store.wal_checkpoint().await;
                 }
@@ -794,8 +806,15 @@ mod circuit_tests {
         assert!(!c.failure(now));
         assert!(c.failure(now));
         assert!(!c.allows(now));
-        assert!(c.allows(now + MAINTENANCE_BREAKER_COOLDOWN));
+        let later = now + MAINTENANCE_BREAKER_COOLDOWN;
+        assert!(c.allows(later));
+        // Half-open: a fresh streak needs three failures again, not one.
+        assert!(!c.failure(later));
+        assert!(!c.failure(later));
+        assert!(c.allows(later));
+        assert!(c.failure(later));
+        assert!(!c.allows(later));
         c.success();
-        assert!(c.allows(now + MAINTENANCE_BREAKER_COOLDOWN));
+        assert!(c.allows(later));
     }
 }
