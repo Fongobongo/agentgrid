@@ -411,6 +411,11 @@
   error became `success`. The result now distinguishes joined-OK from
   RPC-OK, and the fake ACP binary is rebuilt when its source changes.
 
+- **Docker no longer inherits the image's root user by default.** The sandbox
+  now passes `--user <uid>:<gid>` of the bind-mounted worktree's owner. A
+  root-owned worktree still yields a root container; startup warns and an
+  explicit `AGENTGRID_RUN_AS_USER` remains the isolation path.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session

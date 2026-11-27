@@ -205,11 +205,13 @@ sandbox for anything but throwaway prompts: `AGENTGRID_SANDBOX=docker` (or
 `none`/`docker`/`podman`/`systemd`/`bwrap` is a **startup error**, and with
 `AGENTGRID_ENV=production` the daemon refuses to start with no sandbox at all.
 A typo used to mean "run the agent on the host", which is the one thing this
-variable exists to prevent. `docker` runs the attempt as the image's default
-user — root in most images — with the worktree mounted read-write; set
-`AGENTGRID_RUN_AS_USER=<uid[:gid]>` to give the agent its own identity (see
-the file header of `crates/node-daemon/src/sandbox.rs` for the permission
-setup).
+variable exists to prevent. Without `AGENTGRID_RUN_AS_USER`, `docker` passes
+`--user <uid>:<gid>` matching the **bind-mounted worktree's owner**, so the
+image's default user (root in most images) is no longer silently inherited.
+A root-owned worktree still means a root container; set
+`AGENTGRID_RUN_AS_USER=<uid[:gid]>` and chown the worktree to give the agent
+its own identity (see the file header of
+`crates/node-daemon/src/sandbox.rs` for the permission setup).
 
 `AGENTGRID_ENV` is validated the same way in both binaries: `production`,
 `development`/`dev`, `staging`, `test` or unset are accepted, and only

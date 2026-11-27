@@ -130,14 +130,14 @@ pub fn check_startup_config(unsafe_acknowledged: bool) -> anyhow::Result<()> {
              isolation — set docker, systemd or bwrap"
         );
     }
-    // A non-root `--user` cannot be the default: the worktree is bind-mounted
-    // read-write and owned by the daemon user, so switching the uid blind would
-    // make every attempt fail on permissions. Say so instead of pretending.
+    // Without an explicit spec the container now runs as the worktree owner
+    // (see `worktree_user`), never as an arbitrary image user. If that owner
+    // is root the agent is still root — say so instead of claiming isolation.
     if kind == SandboxKind::Docker && run_as_spec().is_none() {
         tracing::warn!(
-            "docker sandbox runs attempts as the image's default user (root in most \
-             images) with the worktree mounted read-write; set \
-             AGENTGRID_RUN_AS_USER=<uid[:gid]> to run the agent as a separate user"
+            "docker sandbox runs attempts as the worktree owner (root if the worktree \
+             is root-owned); set AGENTGRID_RUN_AS_USER=<uid[:gid]> and chown the \
+             worktree to isolate the agent from the daemon user"
         );
     }
     // Finding 3: `restricted` under bwrap is not a restriction. bwrap has no
@@ -1047,6 +1047,22 @@ fn parse_ipv6(s: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
 }
 
+/// Numeric `<uid>:<gid>` of the bind-mounted worktree, used as the default
+/// `--user` when the operator has not set `AGENTGRID_RUN_AS_USER`. A fixed
+/// non-root uid would fail on permissions when the worktree is owned by the
+/// daemon; the owner always has write access.
+#[cfg(unix)]
+fn worktree_user(workdir: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let md = std::fs::metadata(workdir).ok()?;
+    Some(format!("{}:{}", md.uid(), md.gid()))
+}
+
+#[cfg(not(unix))]
+fn worktree_user(_workdir: &std::path::Path) -> Option<String> {
+    None
+}
+
 /// Build the leading `docker run …` argument vector shared by both spawn
 /// paths: housekeeping flags (`--rm -i`), the security hardening flags (plan
 /// §25: entrypoint clear, cap-drop, no-new-privileges, network none, optional
@@ -1099,6 +1115,13 @@ fn docker_run_head(
     // `validate_run_as_user`); an invalid value falls back to the daemon
     // user rather than reaching `--user` verbatim.
     if let Some(spec) = run_as_spec().filter(|s| validate_run_as_user(s).is_ok()) {
+        v.push("--user".to_string());
+        v.push(spec);
+    } else if let Some(spec) = worktree_user(workdir) {
+        // No blind fixed uid: the worktree is bind-mounted read-write, so the
+        // only safe default is its actual owner. When the daemon and worktree
+        // are root-owned this is still root, but never a *different* uid that
+        // cannot write the mount.
         v.push("--user".to_string());
         v.push(spec);
     }
@@ -2460,6 +2483,38 @@ mod tests {
         clear_sandbox_env();
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap() + 1;
         assert_eq!(a[at("--user")], "worker:staff");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_defaults_to_the_worktree_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        let dir = std::env::temp_dir().join(format!("ag-docker-user-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let md = std::fs::metadata(&dir).unwrap();
+        let expected = format!("{}:{}", md.uid(), md.gid());
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            &dir,
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        let at = a
+            .iter()
+            .position(|x| x == "--user")
+            .expect("default --user")
+            + 1;
+        assert_eq!(a[at], expected);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
