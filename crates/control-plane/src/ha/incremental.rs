@@ -305,6 +305,10 @@ struct Job {
 pub struct SyncWait {
     seq: u64,
     rx: oneshot::Receiver<Result<(), String>>,
+    /// Deadline starts when the write is queued, not when this task is
+    /// scheduled to wait: a slow batched push must not reset every waiter's
+    /// timeout and pile them all into one failure burst.
+    deadline: Instant,
     /// Shared guard held until this write's ack resolves. Demotion takes the
     /// exclusive guard before rewinding, so no late acknowledgement can move
     /// the watermark past writes a rewind just undid locally.
@@ -464,6 +468,8 @@ impl Replicator {
                 // the worker. A demotion that starts from here on cannot
                 // rewind until this writer's ack has resolved.
                 let guard = self.sync_gate.clone().read_owned().await;
+                let wait = (self.rt.config.lease_ttl / 2).max(Duration::from_secs(1));
+                let deadline = Instant::now() + wait;
                 self.tx
                     .send(Job {
                         seq,
@@ -475,6 +481,7 @@ impl Replicator {
                 Ok(Some(SyncWait {
                     seq,
                     rx: ack_rx,
+                    deadline,
                     _guard: guard,
                 }))
             }
@@ -487,9 +494,13 @@ impl Replicator {
     pub async fn await_sync(&self, wait: SyncWait) -> Result<()> {
         // `_guard` lives until this method returns (success, failure or
         // timeout), so a demotion cannot rewind under a pending ack.
-        let SyncWait { seq, rx, _guard } = wait;
-        let timeout = (self.rt.config.lease_ttl / 2).max(Duration::from_secs(1));
-        match tokio::time::timeout(timeout, rx).await {
+        let SyncWait {
+            seq,
+            rx,
+            deadline,
+            _guard,
+        } = wait;
+        match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(Ok(()))) => {
                 self.rt.shared.set_applied_seq(seq);
                 Ok(())
@@ -507,7 +518,7 @@ impl Replicator {
             Err(_) => {
                 self.rt.shared.set_replication_lost();
                 self.rt.gate.suspend_writes();
-                bail!("sync replication ack exceeded {timeout:?}");
+                bail!("sync replication ack exceeded the lease-bounded deadline");
             }
         }
     }
@@ -614,8 +625,26 @@ impl Replicator {
             // everything already queued (bounded by the changeset cap) and
             // acknowledge all of them from one replication round trip. No
             // extra waiting is added for a lone writer.
-            let (jobs, rest) =
-                take_sync_batch(&mut rx, first, self.rt.config.max_changeset_bytes as usize);
+            let max_bytes = self.rt.config.max_changeset_bytes as usize;
+            if first.bytes.len() > max_bytes {
+                // `WriteTxn::commit` filters this before enqueueing, but the
+                // public `publish` path does not. Never send a batch a peer
+                // will reject: fail closed and ask for a snapshot instead.
+                tracing::warn!(
+                    seq = first.seq,
+                    bytes = first.bytes.len(),
+                    cap = max_bytes,
+                    "sync changeset exceeds the peer cap; requesting a snapshot"
+                );
+                self.rt.shared.set_replication_lost();
+                self.rt.gate.suspend_writes();
+                self.request_snapshot();
+                if let Some(ack) = first.ack {
+                    let _ = ack.send(Err("changeset exceeds the replication cap".into()));
+                }
+                continue;
+            }
+            let (jobs, rest) = take_sync_batch(&mut rx, first, max_bytes);
             pending.extend(rest);
             let first_seq = jobs.first().map(|j| j.seq).unwrap_or(0);
             let last_seq = jobs.last().map(|j| j.seq).unwrap_or(0);

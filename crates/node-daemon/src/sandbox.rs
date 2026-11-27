@@ -2518,7 +2518,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_run_omits_user_by_default_and_on_garbage() {
+    fn docker_run_omits_user_on_unresolved_worktree_and_garbage_spec() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_sandbox_env();
         std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");

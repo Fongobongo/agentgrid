@@ -438,6 +438,11 @@
   identical retries still return 200. Migration 0106 stores the request
   fingerprint, and pre-fingerprint rows fail closed as conflicts.
 
+- **HA sync timeouts start at enqueue, and over-cap batches fail closed.**
+  A slow grouped push no longer resets every waiter's deadline, and a job
+  larger than the peer cap requests a snapshot instead of being pushed and
+  rejected by every replica.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session
