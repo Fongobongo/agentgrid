@@ -339,11 +339,6 @@ fn deleted_open_files(_owned: &[PathBuf]) -> Vec<(u32, String)> {
     Vec::new()
 }
 
-/// A `/proc/<pid>/fd` link to a removed file ends in " (deleted)".
-pub fn is_deleted_target(link: &str) -> bool {
-    link.ends_with(" (deleted)")
-}
-
 /// Only deleted files from this runtime's own directory are a finding. A
 /// rotated log or an upgraded shared library in some other agentgrid process
 /// must not turn `ag doctor runtime` red.
@@ -411,12 +406,6 @@ pub fn stale_temp_dirs(root: &Path, max_age: Duration) -> Vec<(PathBuf, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn deleted_link_is_detected() {
-        assert!(is_deleted_target("/tmp/agtest/cp2.log (deleted)"));
-        assert!(!is_deleted_target("/tmp/agtest/cp2.log"));
-    }
 
     #[test]
     fn only_deleted_files_from_the_runtime_directory_are_reported() {

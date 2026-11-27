@@ -92,7 +92,7 @@ fn redact_webhook_url(url: &str) -> String {
         return "<invalid webhook url>".into();
     };
     let authority = rest
-        .split(|c| c == '/' || c == '?' || c == '#')
+        .split(['/', '?', '#'])
         .next()
         .filter(|a| !a.is_empty())
         .unwrap_or("<invalid webhook url>");
