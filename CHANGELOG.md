@@ -76,6 +76,12 @@
   the parent directory of a bare database path, which is empty and made
   `statvfs` fail; it now falls back to the current directory.
 
+- **A node relay no longer forwards admin routes through a normalized path.**
+  The allow-list used to inspect the raw path while the HTTP client resolved
+  `.`/`..` (including `%2e%2e`) afterwards, so `/v1/node/../nodes` reached the
+  control plane's node list. Paths are now normalized before the check, encoded
+  separators are refused, and the normalized path is the one forwarded.
+
 ### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**

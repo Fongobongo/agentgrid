@@ -278,9 +278,45 @@ impl Edge {
     /// `/v1/nodes`, which is the admin node list. The trailing slash is what
     /// keeps those apart, so a prefix without one is refused at construction
     /// ([`Edge::new`]) rather than left to match too much.
+    ///
+    /// `path` must already be normalized by [`normalize_forward_path`]; the
+    /// raw request path is not safe to compare, because the URL parser used by
+    /// the HTTP client resolves `.`/`..` (including their percent-encoded
+    /// spellings) *after* this check and would forward `/v1/node/../nodes` to
+    /// the admin route.
     fn path_allowed(&self, path: &str) -> bool {
         self.allowed_paths.is_empty() || self.allowed_paths.iter().any(|p| path.starts_with(p))
     }
+}
+
+/// Resolve dot segments the same way the downstream URL parser does, so the
+/// path checked against the allow-list is the path actually sent upstream.
+/// Encoded separators are refused: a segment such as `%2e%2e%2f` must not
+/// become a second path component on the way to the control plane.
+fn normalize_forward_path(path: &str) -> Option<String> {
+    if !path.starts_with('/')
+        || path.contains('\\')
+        || path.contains('?')
+        || path.contains('#')
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment.to_ascii_lowercase().as_str() {
+            "." | "%2e" => continue,
+            ".." | ".%2e" | "%2e." | "%2e%2e" => {
+                parts.pop();
+            }
+            _ => parts.push(segment),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// Build the forwarder's routes. `/metrics`, `/health/*` and `/v1/node/ws` are
@@ -523,34 +559,44 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 
 async fn proxy(State(edge): State<Arc<Edge>>, req: Request) -> Response {
     edge.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
-    // Before the body is read: an unforwardable path must not cost this
-    // process a 64 MiB buffer. 404 rather than 403 — from a peer's point of
-    // view the route does not exist on this endpoint, and the relay is not
-    // saying which control-plane routes it knows about.
-    if !edge.path_allowed(req.uri().path()) {
-        edge.metrics
-            .path_refused_total
-            .fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(path = %req.uri().path(), "path is not forwarded by this edge");
-        let carried = edge.allowed_paths.join(", ");
-        return (
-            StatusCode::NOT_FOUND,
-            format!("this forwarder carries only: {carried}"),
-        )
-            .into_response();
-    }
     let (parts, body) = req.into_parts();
+    // Before the body is read: an unforwardable path must not cost this
+    // process a 64 MiB buffer. The allow-list is checked against the path the
+    // HTTP client will actually send: dot segments and encoded separators are
+    // resolved before the comparison, not after it. 404 rather than 403 —
+    // from a peer's point of view the route does not exist on this endpoint,
+    // and the relay is not saying which control-plane routes it knows about.
+    let raw_path = parts.uri.path();
+    let path = if edge.allowed_paths.is_empty() {
+        raw_path.to_string()
+    } else {
+        match normalize_forward_path(raw_path).filter(|p| edge.path_allowed(p)) {
+            Some(p) => p,
+            None => {
+                edge.metrics
+                    .path_refused_total
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(path = %raw_path, "path is not forwarded by this edge");
+                let carried = edge.allowed_paths.join(", ");
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("this forwarder carries only: {carried}"),
+                )
+                    .into_response();
+            }
+        }
+    };
     let limit = axum::body::to_bytes(body, MAX_REQUEST_BODY).await;
     let bytes = match limit {
         Ok(b) => b,
         Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response(),
     };
-    let path = parts
+    let query = parts
         .uri
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/")
-        .to_string();
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let path = format!("{path}{query}");
     let mut retried = false;
     loop {
         let Some(base) = edge.leader().await else {
@@ -854,6 +900,7 @@ mod tests {
     use std::sync::Mutex;
 
     use axum::Json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// One fake control plane: `/v1/ha/status` reports `role`, everything else
     /// answers `proxy` (a 503 also demotes the fake, like a real old leader).
@@ -1195,6 +1242,96 @@ mod tests {
             7,
             "every refusal is counted"
         );
+    }
+
+    /// Send a path verbatim: a reqwest URL would normalize it before the
+    /// forwarder ever sees the dot segments we are testing.
+    async fn raw_get_status(base: &str, target: &str) -> StatusCode {
+        let addr = base.trim_start_matches("http://");
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to forwarder");
+        let request = format!("GET {target} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read");
+        let head = String::from_utf8_lossy(&response);
+        let code = head.split_whitespace().nth(1).expect("status line");
+        StatusCode::from_bytes(code.as_bytes()).expect("status code")
+    }
+
+    #[test]
+    fn forward_path_normalizes_dot_segments_before_the_allow_list() {
+        assert_eq!(
+            normalize_forward_path("/v1/node/attempts/a/events").as_deref(),
+            Some("/v1/node/attempts/a/events")
+        );
+        assert_eq!(
+            normalize_forward_path("/v1/node/./ws").as_deref(),
+            Some("/v1/node/ws")
+        );
+        for bypass in [
+            "/v1/node/../nodes",
+            "/v1/node/%2e%2e/nodes",
+            "/v1/node/a/../../nodes",
+            "/v1/node/a/..%2f..%2fnodes",
+            "/v1/node/..\\nodes",
+            "/v1/node/x?key=1",
+        ] {
+            assert!(
+                normalize_forward_path(bypass).is_none_or(|p| !p.starts_with("/v1/node/")),
+                "{bypass}: not normalized out of the relay prefix"
+            );
+        }
+        for bad in ["/v1/node/%2fnode/x", "/v1/node/%5cnode/x"] {
+            assert!(
+                normalize_forward_path(bad).is_none(),
+                "{bad}: encoded separators must be refused"
+            );
+        }
+        assert!(normalize_forward_path("v1/node/x").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_relay_refuses_paths_that_normalize_outside_its_prefix() {
+        let (upstream, hits) = start_hop_echo_upstream().await;
+        let url = upstream.clone();
+        let edge = Edge::new(EdgeConfig {
+            upstream: Upstream::Fixed(Arc::new(move || url.clone())),
+            upstream_timeout: Duration::from_secs(10),
+            allowed_sources: vec![],
+            max_hops: Some(3),
+            allowed_paths: vec!["/v1/node/".to_string()],
+        })
+        .expect("relay");
+        let base = start_forwarder(Arc::clone(&edge)).await;
+
+        for path in [
+            "/v1/node/../nodes",
+            "/v1/node/%2e%2e/nodes",
+            "/v1/node/a/../../nodes",
+            "/v1/node/%2fnodes",
+            "/v1/node/..\\nodes",
+        ] {
+            assert_eq!(
+                raw_get_status(&base, path).await,
+                StatusCode::NOT_FOUND,
+                "{path} must be refused before forwarding"
+            );
+        }
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            0,
+            "no normalized-away path may reach the control plane"
+        );
+        assert_eq!(edge.metrics.path_refused_total.load(Ordering::Relaxed), 5);
+
+        // A dot segment that stays inside the prefix is still node traffic.
+        assert_eq!(
+            raw_get_status(&base, "/v1/node/./poll").await,
+            StatusCode::OK
+        );
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
     }
 
     #[test]
