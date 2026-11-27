@@ -400,6 +400,11 @@
   version, the Unreleased changelog has one section per kind of change, and the
   historical release-gate checklist says explicitly that it is not re-verified.
 
+- **`POST /v1/tasks` accepts `Idempotency-Key`.** A retry after a lost response
+  now returns 200 with the original task instead of starting a second agent
+  run. Keys are scoped to the user, hashed before storage, and checked inside
+  the same fenced transaction that inserts the task.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session

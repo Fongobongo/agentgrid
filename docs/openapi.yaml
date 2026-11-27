@@ -163,12 +163,24 @@ paths:
     post:
       summary: Create a task
       description: |
+        An optional `Idempotency-Key` makes a retry safe: the first request
+        returns 201 with a new task, and a later request with the same key
+        returns 200 with the original task instead of starting a second
+        agent run. Keys are scoped to the authenticated user and stored only
+        as a SHA-256 digest. Invalid keys (empty, over 255 bytes, control
+        characters) return 400.
         Competitor-gap feature (GitHub write-back): set `github_push: true`
         with `github_repo` (`owner/name`), optional `github_issue` (number)
         and `github_base_ref` so a successful attempt pushes its agent
         branch, opens a PR and comments on the issue. Requires
         `AGENTGRID_GITHUB_TOKEN` on the node; best-effort — a failure only
         emits a log event.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Client-generated key; 1-255 bytes, no control characters.
+          schema: { type: string, minLength: 1, maxLength: 255 }
   /v1/tasks/{id}:
     get:
       summary: Fetch a task by id

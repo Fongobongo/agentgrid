@@ -3639,3 +3639,50 @@ async fn spa_fallback_serves_embedded_ui() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn an_idempotency_key_returns_the_first_task_on_retry() {
+    let app = build_router(AppState::open_temp().await.unwrap());
+    let cred = test_token(&app).await;
+    let body = serde_json::to_string(&CreateTaskRequest {
+        prompt: "work once".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let with_key = |key: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/tasks")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {cred}"))
+            .header("idempotency-key", key)
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(with_key("retry-key")).await.unwrap();
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let first_view: TaskView =
+        serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let retry = app.clone().oneshot(with_key("retry-key")).await.unwrap();
+    assert_eq!(retry.status(), StatusCode::OK, "a retry is not a new task");
+    let retry_view: TaskView =
+        serde_json::from_slice(&to_bytes(retry.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(retry_view.id, first_view.id);
+
+    let other = app.clone().oneshot(with_key("other-key")).await.unwrap();
+    assert_eq!(other.status(), StatusCode::CREATED);
+    let other_view: TaskView =
+        serde_json::from_slice(&to_bytes(other.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_ne!(other_view.id, first_view.id);
+
+    let bad = app
+        .clone()
+        .oneshot(with_key(&"x".repeat(256)))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}

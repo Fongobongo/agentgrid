@@ -5361,6 +5361,47 @@ mod artifact_root_tests {
 }
 
 #[cfg(test)]
+mod idempotency_tests {
+    use super::*;
+    use agentgrid_common::CreateTaskRequest;
+
+    #[tokio::test]
+    async fn a_retried_key_returns_the_original_task() {
+        let dir = std::env::temp_dir().join(format!("ag-idem-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("cp.db").to_str().unwrap())
+            .await
+            .unwrap();
+        let req = CreateTaskRequest {
+            prompt: "do the work".into(),
+            repository: "demo".into(),
+            adapter: "mock".into(),
+            ..Default::default()
+        };
+        let (first, created) = store
+            .create_task_idempotent(&req, "digest-one")
+            .await
+            .unwrap();
+        assert!(created);
+        let (retry, created) = store
+            .create_task_idempotent(&req, "digest-one")
+            .await
+            .unwrap();
+        assert!(!created);
+        assert_eq!(retry.id, first.id);
+        let (other, created) = store
+            .create_task_idempotent(&req, "digest-two")
+            .await
+            .unwrap();
+        assert!(created);
+        assert_ne!(other.id, first.id);
+        assert_eq!(store.list_tasks().await.unwrap().len(), 2);
+        store.pool.close().await;
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+
+#[cfg(test)]
 mod wal_checkpoint_tests {
     use super::*;
 

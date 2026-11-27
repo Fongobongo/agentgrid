@@ -5,18 +5,40 @@ use std::sync::Arc;
 use agentgrid_common::{ApprovalView, CreateTaskRequest, ListResponse, TaskEligibility, TaskView};
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
+use sha2::{Digest, Sha256};
 
 use crate::auth::AuthedUser;
 use crate::AppState;
 
+/// `Idempotency-Key` is scoped to the authenticated user: two users may use
+/// the same key without colliding, and another user cannot replay a key to
+/// read someone else's task. The key itself is hashed before it is stored.
+fn idempotency_digest(headers: &HeaderMap, user: &str) -> Result<Option<String>, StatusCode> {
+    let Some(raw) = headers.get("idempotency-key") else {
+        return Ok(None);
+    };
+    let key = raw.to_str().map_err(|_| StatusCode::BAD_REQUEST)?.trim();
+    if key.is_empty() || key.len() > 255 || key.chars().any(char::is_control) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut hash = Sha256::new();
+    hash.update(user.as_bytes());
+    hash.update([0u8]);
+    hash.update(key.as_bytes());
+    Ok(Some(hex::encode(hash.finalize())))
+}
+
 pub async fn create_task(
     State(state): State<Arc<AppState>>,
     auth: Option<Extension<AuthedUser>>,
+    headers: HeaderMap,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskView>), StatusCode> {
+    let user = auth.as_ref().map(|e| e.0.username.as_str()).unwrap_or("");
+    let idempotency_key = idempotency_digest(&headers, user)?;
     if req.prompt.len() > state.limits.prompt {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
@@ -32,20 +54,33 @@ pub async fn create_task(
         tracing::warn!("create_task rejected github refs: {e}");
         return Err(StatusCode::BAD_REQUEST);
     }
-    match state.store.create_task(&req).await {
-        Ok(view) => {
-            state.assignment_notify.notify_waiters();
-            let _ = state
-                .store
-                .audit(
-                    "user",
-                    auth.as_ref().map(|e| e.0.username.as_str()),
-                    "task.create",
-                    Some(&view.id),
-                    None,
-                )
-                .await;
-            Ok((StatusCode::CREATED, Json(view)))
+    let created = match idempotency_key {
+        Some(ref key) => state.store.create_task_idempotent(&req, key).await,
+        None => state.store.create_task(&req).await.map(|view| (view, true)),
+    };
+    match created {
+        Ok((view, fresh)) => {
+            if fresh {
+                state.assignment_notify.notify_waiters();
+                let _ = state
+                    .store
+                    .audit(
+                        "user",
+                        auth.as_ref().map(|e| e.0.username.as_str()),
+                        "task.create",
+                        Some(&view.id),
+                        None,
+                    )
+                    .await;
+            }
+            Ok((
+                if fresh {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                },
+                Json(view),
+            ))
         }
         Err(e) => {
             tracing::error!("create_task failed: {e}");

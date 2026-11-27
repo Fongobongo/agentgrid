@@ -40,44 +40,47 @@ impl Store {
         Ok(())
     }
 
-    pub async fn create_task(&self, req: &CreateTaskRequest) -> Result<TaskView> {
+    /// Insert the task row inside an already-open fenced write transaction.
+    async fn insert_task(
+        req: &CreateTaskRequest,
+        tx: &mut sqlx::sqlite::SqliteConnection,
+    ) -> Result<TaskView> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         let timeout_secs = req.timeout_secs.unwrap_or(3600) as i64;
-        self.write_one(
-            sqlx::query(
-                "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents, retry_on_node_loss) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&id)
-            .bind(&req.repository)
-            .bind(&req.prompt)
-            .bind(&req.adapter)
-            .bind(&req.requested_node_id)
-            .bind(&req.base_commit)
-            .bind(&req.parent_acp_session_id)
-            .bind(&req.network_mode)
-            .bind(&now)
-            .bind(timeout_secs)
-            .bind(&req.validation_command)
-            .bind(&req.security_profile)
-            .bind(&req.group_id)
-            .bind(&req.agent_id)
-            .bind(&req.consensus_group_id)
-            .bind(&req.consensus_member)
-            .bind(req.opencode_override.as_ref().map(|o| serde_json::to_string(o).unwrap_or_default()))
-            .bind(req.github_push)
-            .bind(&req.github_repo)
-            .bind(req.github_issue)
-            .bind(&req.github_base_ref)
-            .bind(req.github_create)
-            .bind(req.max_attempts)
-            .bind(req.consensus_mode.as_deref().unwrap_or("solve"))
-            .bind(&req.review_of)
-            .bind(req.max_tokens.map(|v| v as i64))
-            .bind(req.max_cost_cents.map(|v| v as i64))
-            .bind(req.retry_on_node_loss.unwrap_or(true)),
+        sqlx::query(
+            "INSERT INTO tasks (id, repository, prompt, adapter, requested_node_id, base_commit, parent_acp_session_id, network_mode, status, created_at, timeout_secs, validation_command, security_profile, group_id, agent_id, consensus_group_id, consensus_member, opencode_override, github_push, github_repo, github_issue, github_base_ref, github_create, max_attempts, consensus_mode, review_of, max_tokens, max_cost_cents, retry_on_node_loss) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(&id)
+        .bind(&req.repository)
+        .bind(&req.prompt)
+        .bind(&req.adapter)
+        .bind(&req.requested_node_id)
+        .bind(&req.base_commit)
+        .bind(&req.parent_acp_session_id)
+        .bind(&req.network_mode)
+        .bind(&now)
+        .bind(timeout_secs)
+        .bind(&req.validation_command)
+        .bind(&req.security_profile)
+        .bind(&req.group_id)
+        .bind(&req.agent_id)
+        .bind(&req.consensus_group_id)
+        .bind(&req.consensus_member)
+        .bind(req.opencode_override.as_ref().map(|o| serde_json::to_string(o).unwrap_or_default()))
+        .bind(req.github_push)
+        .bind(&req.github_repo)
+        .bind(&req.github_issue)
+        .bind(&req.github_base_ref)
+        .bind(req.github_create)
+        .bind(req.max_attempts)
+        .bind(req.consensus_mode.as_deref().unwrap_or("solve"))
+        .bind(&req.review_of)
+        .bind(req.max_tokens.map(|v| v as i64))
+        .bind(req.max_cost_cents.map(|v| v as i64))
+        .bind(req.retry_on_node_loss.unwrap_or(true))
+        .execute(&mut *tx)
         .await?;
         Ok(TaskView {
             id,
@@ -118,6 +121,47 @@ impl Store {
             max_tokens: req.max_tokens,
             max_cost_cents: req.max_cost_cents,
         })
+    }
+
+    pub async fn create_task(&self, req: &CreateTaskRequest) -> Result<TaskView> {
+        let mut tx = self.write_txn().await?;
+        let view = Self::insert_task(req, &mut tx).await?;
+        tx.commit().await?;
+        Ok(view)
+    }
+
+    /// Create a task at most once per client key. `key` is a SHA-256 digest
+    /// supplied by the route (user + `Idempotency-Key`); it is never stored in
+    /// the clear. Lookup and insert share one `BEGIN IMMEDIATE` transaction,
+    /// so two concurrent retries cannot both create a task.
+    pub async fn create_task_idempotent(
+        &self,
+        req: &CreateTaskRequest,
+        key: &str,
+    ) -> Result<(TaskView, bool)> {
+        let mut tx = self.write_txn().await?;
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT task_id FROM idempotency WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(id) = existing {
+            tx.commit().await?;
+            let view = self
+                .show_task(&id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("idempotent task {id} disappeared"))?;
+            return Ok((view, false));
+        }
+        let view = Self::insert_task(req, &mut tx).await?;
+        sqlx::query("INSERT INTO idempotency (key, task_id, created_at) VALUES (?, ?, ?)")
+            .bind(key)
+            .bind(&view.id)
+            .bind(now_iso())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok((view, true))
     }
 
     pub async fn list_tasks(&self) -> Result<Vec<TaskView>> {
