@@ -71,7 +71,7 @@ impl Store {
         .bind(req.opencode_override.as_ref().map(|o| serde_json::to_string(o).unwrap_or_default()))
         .bind(req.github_push)
         .bind(&req.github_repo)
-        .bind(&req.github_issue)
+        .bind(req.github_issue)
         .bind(&req.github_base_ref)
         .bind(req.github_create)
         .bind(req.max_attempts)
