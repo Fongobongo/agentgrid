@@ -37,109 +37,6 @@
   node heartbeat timestamp, and wait for a healthy control plane before
   starting a node.
 
-### Changed
-
-- **E2E daemons run in their own process group.** Each spawned daemon gets a
-  tracked process group; cleanup sends TERM, waits, then KILLs, and refuses to
-  delete the temporary directory while a group is still alive. This is what
-  let a removed temp directory keep a log inode alive for 703 MiB.
-
-- **Release branch policy.** `master` integrates, `release/<version>` carries a
-  reviewed candidate and runs the same CI gates. Only a `v*` tag publishes
-  images and a GitHub Release; a release branch can build artifacts but cannot
-  move `:latest`. See `docs/release-process.md`.
-
-### Fixed
-
-- **A control plane no longer keeps a deleted temporary directory alive.** If
-  its SQLite database or instance-lock file is removed while the process runs,
-  it now exits instead of retrying failed database operations forever and
-  appending warnings to a deleted log inode. Exiting releases the single-host
-  instance lock and closes the log descriptor. Docker Compose log files are
-  also capped at 10 MiB × 3 per container. HA Compose files now use valid
-  Docker interpolation and health-check syntax, so `docker compose config`
-  accepts them.
-
-- **Runtime cleanup is covered by CI.** `tests/e2e/run-runtime-cleanup.sh`
-  deletes the database under a running control plane and asserts that the
-  process exits, releases the instance lock and stops writing to the log. It
-  runs next to the restore drill in CI.
-
-- **Sandbox tests no longer depend on the host PATH.** The bwrap tests
-  compared the program against the bare name `claude`, which only held on a
-  host without Claude installed; one failure also poisoned the shared
-  environment mutex and failed 38 unrelated tests. The expectation now uses
-  the same PATH resolution the production code uses, and the mutex survives a
-  failed test.
-
-- **`ag doctor runtime` reports free disk space.** The free-space probe used
-  the parent directory of a bare database path, which is empty and made
-  `statvfs` fail; it now falls back to the current directory.
-
-- **A node relay no longer forwards admin routes through a normalized path.**
-  The allow-list used to inspect the raw path while the HTTP client resolved
-  `.`/`..` (including `%2e%2e`) afterwards, so `/v1/node/../nodes` reached the
-  control plane's node list. Paths are now normalized before the check, encoded
-  separators are refused, and the normalized path is the one forwarded.
-
-- **Webhook failures no longer log the webhook URL.** Telegram puts the bot
-  token in the URL path and the chat id in the query; a failed POST wrote both
-  into the control-plane log. Only the origin is logged now.
-
-- **Production path checks now survive `..` and symlinks.** The containment
-  test used a lexical prefix, so `/var/lib/agentgrid/../../tmp/cp.db` and a
-  symlink inside the data root both passed as "under /var/lib/agentgrid".
-  Dot segments are resolved and the deepest existing ancestor is canonicalized
-  before the comparison.
-
-- **The control plane now drains when its runtime files vanish.** Deleting the
-  database or its instance lock used to drop the server future mid-request and
-  skip the shutdown checkpoint; the watcher now requests the normal SIGTERM
-  drain and still exits non-zero. `wal_checkpoint(TRUNCATE)` also checks the
-  PRAGMA's `busy` result instead of treating a busy-but-successful query as a
-  completed checkpoint.
-
-- **Node shutdown always redelivers durable completions.** A 60-second wait
-  that timed out used to skip redelivery entirely — exactly when pending
-  completions were most likely. Compose now grants nodes 90 seconds so the
-  drain fits. A cancelled dispatch no longer leaves its attempt id in the
-  in-flight registry, which used to make later redeliveries look like
-  duplicates until restart.
-
-- **HA replicas no longer report themselves unhealthy.** The Compose health
-  check used `/health/ready`, which is 503 on every standby by design; it now
-  uses `/health/live`.
-
-- **E2E cleanup no longer signals recycled PIDs.** Process groups are stopped
-  and confirmed dead before the scratch dir is removed; the extra blind
-  `kill -9` over already-reaped PIDs could hit an unrelated process.
-
-- **`ag doctor runtime` ignores unrelated deleted files.** A deleted shared
-  library or rotated log in any process with "agentgrid" in its command line
-  used to fail the check; only deleted files under this runtime's database
-  directory now count, and the doctor excludes its own PID.
-
-- **The bwrap sandbox drops all capabilities.** A daemon running as root kept
-  `CAP_SYS_ADMIN` inside its user namespace, so an agent could remount the
-  read-only host root and undo the tmpfs secret masks. `--unshare-user` +
-  `--cap-drop ALL` close that path; the startup probe now exercises the exact
-  flags so an old bwrap fails at boot instead of weakening every attempt.
-
-- **Conflict auto-resolution refuses symlinked paths.** A committed symlink
-  in the worktree could redirect the host-side write of a resolved conflict
-  outside that worktree. Paths are now checked component by component and
-  written with the no-follow helper.
-
-- **The credential gateway refuses query characters in the upstream path.**
-  Axum decodes `%3F`/`%23` in `{*rest}`, so a capability holder could add
-  arbitrary provider query parameters to the request.
-
-- **The maintenance breaker re-arms as a real half-open probe.** Its failure
-  counter was left at three after the cooldown, so a single later failure
-  re-opened it for another minute. Skipped ticks also advance the tick counter
-  again, so the periodic WAL checkpoint is not lost while the breaker is open.
-
-### Added
 
 - **Exchange mode for credentials that cannot be proxied (ADR 0029 F/exchange).**
   `@gateway` keeps the key out of the sandbox by making the sandbox talk to the
@@ -397,7 +294,111 @@
     replica — only the leader fans out to every peer, so a standby shows `never`
     for the rest, and says so instead of papering over it.
 
+### Changed
+
+- **E2E daemons run in their own process group.** Each spawned daemon gets a
+  tracked process group; cleanup sends TERM, waits, then KILLs, and refuses to
+  delete the temporary directory while a group is still alive. This is what
+  let a removed temp directory keep a log inode alive for 703 MiB.
+
+- **Release branch policy.** `master` integrates, `release/<version>` carries a
+  reviewed candidate and runs the same CI gates. Only a `v*` tag publishes
+  images and a GitHub Release; a release branch can build artifacts but cannot
+  move `:latest`. See `docs/release-process.md`.
+
 ### Fixed
+
+- **A control plane no longer keeps a deleted temporary directory alive.** If
+  its SQLite database or instance-lock file is removed while the process runs,
+  it now exits instead of retrying failed database operations forever and
+  appending warnings to a deleted log inode. Exiting releases the single-host
+  instance lock and closes the log descriptor. Docker Compose log files are
+  also capped at 10 MiB × 3 per container. HA Compose files now use valid
+  Docker interpolation and health-check syntax, so `docker compose config`
+  accepts them.
+
+- **Runtime cleanup is covered by CI.** `tests/e2e/run-runtime-cleanup.sh`
+  deletes the database under a running control plane and asserts that the
+  process exits, releases the instance lock and stops writing to the log. It
+  runs next to the restore drill in CI.
+
+- **Sandbox tests no longer depend on the host PATH.** The bwrap tests
+  compared the program against the bare name `claude`, which only held on a
+  host without Claude installed; one failure also poisoned the shared
+  environment mutex and failed 38 unrelated tests. The expectation now uses
+  the same PATH resolution the production code uses, and the mutex survives a
+  failed test.
+
+- **`ag doctor runtime` reports free disk space.** The free-space probe used
+  the parent directory of a bare database path, which is empty and made
+  `statvfs` fail; it now falls back to the current directory.
+
+- **A node relay no longer forwards admin routes through a normalized path.**
+  The allow-list used to inspect the raw path while the HTTP client resolved
+  `.`/`..` (including `%2e%2e`) afterwards, so `/v1/node/../nodes` reached the
+  control plane's node list. Paths are now normalized before the check, encoded
+  separators are refused, and the normalized path is the one forwarded.
+
+- **Webhook failures no longer log the webhook URL.** Telegram puts the bot
+  token in the URL path and the chat id in the query; a failed POST wrote both
+  into the control-plane log. Only the origin is logged now.
+
+- **Production path checks now survive `..` and symlinks.** The containment
+  test used a lexical prefix, so `/var/lib/agentgrid/../../tmp/cp.db` and a
+  symlink inside the data root both passed as "under /var/lib/agentgrid".
+  Dot segments are resolved and the deepest existing ancestor is canonicalized
+  before the comparison.
+
+- **The control plane now drains when its runtime files vanish.** Deleting the
+  database or its instance lock used to drop the server future mid-request and
+  skip the shutdown checkpoint; the watcher now requests the normal SIGTERM
+  drain and still exits non-zero. `wal_checkpoint(TRUNCATE)` also checks the
+  PRAGMA's `busy` result instead of treating a busy-but-successful query as a
+  completed checkpoint.
+
+- **Node shutdown always redelivers durable completions.** A 60-second wait
+  that timed out used to skip redelivery entirely — exactly when pending
+  completions were most likely. Compose now grants nodes 90 seconds so the
+  drain fits. A cancelled dispatch no longer leaves its attempt id in the
+  in-flight registry, which used to make later redeliveries look like
+  duplicates until restart.
+
+- **HA replicas no longer report themselves unhealthy.** The Compose health
+  check used `/health/ready`, which is 503 on every standby by design; it now
+  uses `/health/live`.
+
+- **E2E cleanup no longer signals recycled PIDs.** Process groups are stopped
+  and confirmed dead before the scratch dir is removed; the extra blind
+  `kill -9` over already-reaped PIDs could hit an unrelated process.
+
+- **`ag doctor runtime` ignores unrelated deleted files.** A deleted shared
+  library or rotated log in any process with "agentgrid" in its command line
+  used to fail the check; only deleted files under this runtime's database
+  directory now count, and the doctor excludes its own PID.
+
+- **The bwrap sandbox drops all capabilities.** A daemon running as root kept
+  `CAP_SYS_ADMIN` inside its user namespace, so an agent could remount the
+  read-only host root and undo the tmpfs secret masks. `--unshare-user` +
+  `--cap-drop ALL` close that path; the startup probe now exercises the exact
+  flags so an old bwrap fails at boot instead of weakening every attempt.
+
+- **Conflict auto-resolution refuses symlinked paths.** A committed symlink
+  in the worktree could redirect the host-side write of a resolved conflict
+  outside that worktree. Paths are now checked component by component and
+  written with the no-follow helper.
+
+- **The credential gateway refuses query characters in the upstream path.**
+  Axum decodes `%3F`/`%23` in `{*rest}`, so a capability holder could add
+  arbitrary provider query parameters to the request.
+
+- **The maintenance breaker re-arms as a real half-open probe.** Its failure
+  counter was left at three after the cooldown, so a single later failure
+  re-opened it for another minute. Skipped ticks also advance the tick counter
+  again, so the periodic WAL checkpoint is not lost while the breaker is open.
+
+- **Documentation drift cleaned up.** `docs/ROADMAP.md` now names the shipped
+  version, the Unreleased changelog has one section per kind of change, and the
+  historical release-gate checklist says explicitly that it is not re-verified.
 
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed

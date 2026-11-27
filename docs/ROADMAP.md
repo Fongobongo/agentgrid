@@ -1,7 +1,7 @@
 # Roadmap status
 
 > Tracked summary of the competitor-feature roadmap (the detailed source
-> file with origins/rationale is local-only). As of v0.4.3 everything from
+> file with origins/rationale is local-only). As of v0.8.1 everything from
 > that sweep is either shipped or explicitly declined.
 
 | Area | Status |
