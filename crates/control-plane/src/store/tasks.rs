@@ -131,40 +131,53 @@ impl Store {
     }
 
     /// Create a task at most once per client key. `key` is a SHA-256 digest
-    /// supplied by the route (user + `Idempotency-Key`); it is never stored in
-    /// the clear. `request_hash` fingerprints the request, so reusing a key
-    /// for a different body is reported as a conflict instead of silently
-    /// returning somebody else's task. Lookup and insert share one
-    /// `BEGIN IMMEDIATE` transaction, so two concurrent retries cannot both
-    /// create a task. `Ok((None, _))` means key reuse with a different body.
+    /// supplied by the route (immutable user id + `Idempotency-Key`); it is
+    /// never stored in the clear. `legacy_key` is the pre-upgrade digest based
+    /// on the username, tried on lookup and rewritten to `key` on a match so
+    /// clients keep idempotency across the deployment. `request_hash`
+    /// fingerprints the request: a different body is a conflict, not a replay.
+    /// Lookup and insert share one `BEGIN IMMEDIATE` transaction, so two
+    /// concurrent retries cannot both create a task. `Ok((None, _))` means
+    /// key reuse with a different body.
     pub async fn create_task_idempotent(
         &self,
         req: &CreateTaskRequest,
         key: &str,
+        legacy_key: Option<&str>,
         request_hash: &str,
     ) -> Result<(Option<TaskView>, bool)> {
         let mut tx = self.write_txn().await?;
-        let existing: Option<(String, String)> =
-            sqlx::query("SELECT task_id, request_hash FROM idempotency WHERE key = ?")
-                .bind(key)
-                .fetch_optional(&mut *tx)
-                .await?
-                .map(|row| {
-                    (
-                        row.get::<String, _>("task_id"),
-                        row.get::<String, _>("request_hash"),
-                    )
-                });
-        if let Some((id, stored_hash)) = existing {
-            tx.commit().await?;
-            if stored_hash != request_hash {
-                return Ok((None, false));
+        let rows = sqlx::query(
+            "SELECT key, task_id, request_hash FROM idempotency WHERE key = ? OR key = ?",
+        )
+        .bind(key)
+        .bind(legacy_key.unwrap_or(key))
+        .fetch_all(&mut *tx)
+        .await?;
+        if let Some(row) = rows
+            .iter()
+            .find(|r| r.get::<String, _>("request_hash") == request_hash)
+        {
+            let found_key = row.get::<String, _>("key");
+            if found_key != key {
+                sqlx::query("UPDATE idempotency SET key = ? WHERE key = ?")
+                    .bind(key)
+                    .bind(&found_key)
+                    .execute(&mut *tx)
+                    .await?;
             }
+            let id = row.get::<String, _>("task_id");
+            tx.commit().await?;
             let view = self
                 .show_task(&id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("idempotent task {id} disappeared"))?;
             return Ok((Some(view), false));
+        }
+        if !rows.is_empty() {
+            // The key exists but this is a different request body.
+            tx.commit().await?;
+            return Ok((None, false));
         }
         let view = Self::insert_task(req, &mut tx).await?;
         sqlx::query(

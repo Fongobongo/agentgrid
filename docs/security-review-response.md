@@ -174,9 +174,11 @@ When `AGENTGRID_RUN_AS_USER` is unset, `docker_run_head` now emits
 `--user <uid>:<gid>` taken from the bind-mounted worktree's owner. A fixed
 non-root uid would break every attempt because the mount is owned by the
 daemon; using the actual owner keeps writes working while removing the image's
-default root user from the common case. The stat refuses symlinks (so a
-planted link cannot select a root-owned target's uid), and a numeric uid gets
-`HOME=/ag` because Docker does not synthesize a passwd entry. If the worktree
+default root user from the common case. A symlinked worktree falls back to
+the daemon's own uid (so a planted link cannot select a root-owned target's
+uid or silently raise privilege to the image root), and a numeric uid gets
+`HOME=/tmp` — writable even for a read-only verifier worktree — because
+Docker does not synthesize a passwd entry. If the worktree
 itself is root-owned the container is still root, and startup says so — an
 explicit `AGENTGRID_RUN_AS_USER` plus a chowned worktree remains the way to
 separate the agent's identity.

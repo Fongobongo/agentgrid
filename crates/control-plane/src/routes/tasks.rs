@@ -42,7 +42,16 @@ pub async fn create_task(
         .as_ref()
         .map(|e| e.0.incarnation.as_str())
         .unwrap_or("");
+    let username = auth.as_ref().map(|e| e.0.username.as_str()).unwrap_or("");
     let idempotency_key = idempotency_digest(&headers, scope)?;
+    // Keys minted before the scope moved from username to immutable user id
+    // must still replay. The old digest is tried on lookup and rewritten to
+    // the new key on a successful match.
+    let legacy_key = if scope != username {
+        idempotency_digest(&headers, username)?
+    } else {
+        None
+    };
     if req.prompt.len() > state.limits.prompt {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
@@ -65,7 +74,7 @@ pub async fn create_task(
         Some(ref key) => {
             state
                 .store
-                .create_task_idempotent(&req, key, &request_hash)
+                .create_task_idempotent(&req, key, legacy_key.as_deref(), &request_hash)
                 .await
         }
         None => state

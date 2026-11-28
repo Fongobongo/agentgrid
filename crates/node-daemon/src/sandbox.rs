@@ -1056,8 +1056,19 @@ fn worktree_user(workdir: &std::path::Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     // Never follow a symlink here: the same path is bind-mounted read-write,
     // so the uid we derive must be the owner of the directory actually mounted,
-    // not of some root-owned target a previous attempt left behind.
+    // not of some root-owned target a previous attempt left behind. A link
+    // must not silently *raise* privilege to the image's root either, so use
+    // the daemon's own uid/gid (non-root on a normal install) instead.
     let md = std::fs::symlink_metadata(workdir).ok()?;
+    if md.file_type().is_symlink() {
+        tracing::warn!(
+            path = %workdir.display(),
+            "worktree is a symlink; using the daemon identity for --user"
+        );
+        return Some(format!("{}:{}", unsafe { libc::getuid() }, unsafe {
+            libc::getgid()
+        }));
+    }
     if !md.is_dir() {
         return None;
     }
@@ -1120,8 +1131,9 @@ fn docker_run_head(
     // daemon side. Only a validated spec is ever emitted (see
     // `validate_run_as_user`); an invalid value falls back to the daemon
     // user rather than reaching `--user` verbatim.
-    let mut default_user = false;
+    let mut numeric_user = false;
     if let Some(spec) = run_as_spec().filter(|s| validate_run_as_user(s).is_ok()) {
+        numeric_user = spec.chars().all(|c| c.is_ascii_digit() || c == ':');
         v.push("--user".to_string());
         v.push(spec);
     } else if let Some(spec) = worktree_user(workdir) {
@@ -1131,13 +1143,7 @@ fn docker_run_head(
         // cannot write the mount.
         v.push("--user".to_string());
         v.push(spec);
-        default_user = true;
-    }
-    if default_user {
-        // A numeric uid has no passwd entry, so the image's HOME usually
-        // points at a directory that user cannot write. Put caches and git
-        // config in the mounted worktree instead of failing late in the run.
-        v.extend(["--env".to_string(), "HOME=/ag".to_string()]);
+        numeric_user = true;
     }
     // Audit ND-6: a deterministic per-attempt name so cancel/timeout can
     // `docker rm -f` the actual container. Killing the attached `docker run`
@@ -1222,6 +1228,13 @@ fn docker_run_head(
             v.push("--env".to_string());
             v.push(key);
         }
+    }
+    if numeric_user {
+        // A numeric uid has no passwd entry, so the image's HOME is usually
+        // unwritable. `/tmp` is always a writable tmpfs — including for
+        // verifiers whose worktree is mounted read-only at `/ag`. Emitted
+        // last so an operator-supplied `--env HOME` cannot override it.
+        v.extend(["--env".to_string(), "HOME=/tmp".to_string()]);
     }
     // ADR 0029 step 5 ("C3"): the gateway may be served over TLS with the
     // operator's own CA, for a CLI that refuses an `http://` base URL. That only
@@ -2529,9 +2542,39 @@ mod tests {
             + 1;
         assert_eq!(a[at], expected);
         assert!(
-            a.windows(2).any(|w| w == ["--env", "HOME=/ag"]),
+            a.windows(2).any(|w| w == ["--env", "HOME=/tmp"]),
             "a numeric uid needs a writable HOME: {a:?}"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derived_home_is_emitted_after_operator_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        std::env::set_var("AGENTGRID_ADAPTER_ENV", "HOME=/host-home");
+        let dir = std::env::temp_dir().join(format!("ag-docker-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            &dir,
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        let homes: Vec<&str> = a
+            .windows(2)
+            .filter(|w| w[0] == "--env" && (w[1] == "HOME" || w[1].starts_with("HOME=")))
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(homes.last().copied(), Some("HOME=/tmp"), "{homes:?}");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2558,9 +2601,13 @@ mod tests {
             None,
         );
         clear_sandbox_env();
-        assert!(
-            !a.iter().any(|x| x == "--user"),
-            "a symlink must not silently pick its target's uid: {a:?}"
+        let expected = format!("{}:{}", unsafe { libc::getuid() }, unsafe {
+            libc::getgid()
+        });
+        let at = a.iter().position(|x| x == "--user").expect("--user") + 1;
+        assert_eq!(
+            a[at], expected,
+            "a symlink must use the daemon identity, not the image root"
         );
         std::fs::remove_dir_all(base).ok();
     }

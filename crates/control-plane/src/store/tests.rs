@@ -5407,13 +5407,13 @@ mod idempotency_tests {
             ..Default::default()
         };
         let (first, created) = store
-            .create_task_idempotent(&req, "digest-one", "hash-a")
+            .create_task_idempotent(&req, "digest-one", None, "hash-a")
             .await
             .unwrap();
         let first = first.expect("new key creates a task");
         assert!(created);
         let (retry, created) = store
-            .create_task_idempotent(&req, "digest-one", "hash-a")
+            .create_task_idempotent(&req, "digest-one", None, "hash-a")
             .await
             .unwrap();
         let retry = retry.expect("identical replay returns the task");
@@ -5423,19 +5423,40 @@ mod idempotency_tests {
         let mut different = req.clone();
         different.prompt = "another request".into();
         let (conflict, _) = store
-            .create_task_idempotent(&different, "digest-one", "hash-b")
+            .create_task_idempotent(&different, "digest-one", None, "hash-b")
             .await
             .unwrap();
         assert!(conflict.is_none(), "a key with a new body must conflict");
 
         let (other, created) = store
-            .create_task_idempotent(&req, "digest-two", "hash-a")
+            .create_task_idempotent(&req, "digest-two", None, "hash-a")
             .await
             .unwrap();
         let other = other.expect("a different key creates a task");
         assert!(created);
         assert_ne!(other.id, first.id);
         assert_eq!(store.list_tasks().await.unwrap().len(), 2);
+
+        // A key minted before the scope moved to the immutable user id must
+        // replay once and be rewritten to the new digest.
+        let (old, created) = store
+            .create_task_idempotent(&req, "legacy-scope-key", None, "hash-a")
+            .await
+            .unwrap();
+        let old = old.expect("legacy key creates a task");
+        assert!(created);
+        let (replayed, created) = store
+            .create_task_idempotent(&req, "new-scope-key", Some("legacy-scope-key"), "hash-a")
+            .await
+            .unwrap();
+        assert!(!created);
+        assert_eq!(replayed.expect("legacy key replays").id, old.id);
+        let replay_again = store
+            .create_task_idempotent(&req, "new-scope-key", None, "hash-a")
+            .await
+            .unwrap();
+        assert_eq!(replay_again.0.expect("rewritten key replays").id, old.id);
+        assert_eq!(store.list_tasks().await.unwrap().len(), 3);
         store.pool.close().await;
         std::fs::remove_dir_all(dir).ok();
     }

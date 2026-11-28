@@ -450,7 +450,13 @@
 - **Idempotency keys are scoped to the immutable user row.** A deleted and
   recreated username no longer inherits the old user's keys; `AuthedUser`
   carries the user uuid from token verification instead of relying on the
-  reusable name.
+  reusable name. Keys minted before the scope change are still recognized and
+  rewritten on first replay, so a deployment does not silently break retries.
+
+- **Docker HOME fix cannot be overridden or blocked by a read-only worktree.**
+  `HOME=/tmp` is emitted after every other `--env` flag, so an operator-supplied
+  `HOME` cannot win. A symlinked worktree now falls back to the daemon's own
+  uid instead of silently raising the container to the image root.
 
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed

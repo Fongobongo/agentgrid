@@ -3716,3 +3716,53 @@ async fn an_idempotency_key_returns_the_first_task_on_retry() {
         .unwrap();
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn the_same_idempotency_key_is_isolated_between_users() {
+    let app = build_router(AppState::open_temp().await.unwrap());
+    let admin = test_token(&app).await;
+    let created = app
+        .clone()
+        .oneshot(post_auth(
+            "/v1/users",
+            json!({"username": "bob", "password": "bob-password", "role": "admin"}).to_string(),
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let bob = auth_login(&app, "bob", "bob-password").await.unwrap();
+
+    let body = serde_json::to_string(&CreateTaskRequest {
+        prompt: "scoped work".into(),
+        repository: "demo".into(),
+        adapter: "mock".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut ids = Vec::new();
+    for token in [admin, bob] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("idempotency-key", "shared-key")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let view: TaskView =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        ids.push(view.id);
+    }
+    assert_ne!(
+        ids[0], ids[1],
+        "users must not share an idempotency namespace"
+    );
+}

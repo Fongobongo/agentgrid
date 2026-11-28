@@ -208,9 +208,10 @@ A typo used to mean "run the agent on the host", which is the one thing this
 variable exists to prevent. Without `AGENTGRID_RUN_AS_USER`, `docker` passes
 `--user <uid>:<gid>` matching the **bind-mounted worktree's owner**, so the
 image's default user (root in most images) is no longer silently inherited.
-A symlinked worktree is refused for this derivation (no silent adoption of
-the symlink target's uid), and the numeric user gets `HOME=/ag` so caches and
-git config land in a writable directory. A root-owned worktree still means a
+A symlinked worktree uses the daemon's own uid (no silent adoption of the
+symlink target's or the image root's uid), and a numeric user gets
+`HOME=/tmp` — a writable tmpfs even when the verifier's worktree is mounted
+read-only at `/ag`. A root-owned worktree still means a
 root container; set `AGENTGRID_RUN_AS_USER=<uid[:gid]>` and chown the worktree
 to give the agent its own identity (see the file header of
 `crates/node-daemon/src/sandbox.rs` for the permission setup).
