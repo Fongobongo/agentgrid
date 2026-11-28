@@ -443,6 +443,10 @@
   larger than the peer cap requests a snapshot instead of being pushed and
   rejected by every replica.
 
+- **Docker's derived user is symlink-safe and has a writable HOME.** A
+  symlinked worktree no longer silently adopts its target's uid, and the
+  numeric uid gets `HOME=/ag` instead of an unwritable image home.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session

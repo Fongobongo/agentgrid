@@ -1054,7 +1054,13 @@ fn parse_ipv6(s: &str) -> bool {
 #[cfg(unix)]
 fn worktree_user(workdir: &std::path::Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
-    let md = std::fs::metadata(workdir).ok()?;
+    // Never follow a symlink here: the same path is bind-mounted read-write,
+    // so the uid we derive must be the owner of the directory actually mounted,
+    // not of some root-owned target a previous attempt left behind.
+    let md = std::fs::symlink_metadata(workdir).ok()?;
+    if !md.is_dir() {
+        return None;
+    }
     Some(format!("{}:{}", md.uid(), md.gid()))
 }
 
@@ -1114,6 +1120,7 @@ fn docker_run_head(
     // daemon side. Only a validated spec is ever emitted (see
     // `validate_run_as_user`); an invalid value falls back to the daemon
     // user rather than reaching `--user` verbatim.
+    let mut default_user = false;
     if let Some(spec) = run_as_spec().filter(|s| validate_run_as_user(s).is_ok()) {
         v.push("--user".to_string());
         v.push(spec);
@@ -1124,6 +1131,13 @@ fn docker_run_head(
         // cannot write the mount.
         v.push("--user".to_string());
         v.push(spec);
+        default_user = true;
+    }
+    if default_user {
+        // A numeric uid has no passwd entry, so the image's HOME usually
+        // points at a directory that user cannot write. Put caches and git
+        // config in the mounted worktree instead of failing late in the run.
+        v.extend(["--env".to_string(), "HOME=/ag".to_string()]);
     }
     // Audit ND-6: a deterministic per-attempt name so cancel/timeout can
     // `docker rm -f` the actual container. Killing the attached `docker run`
@@ -2514,7 +2528,41 @@ mod tests {
             .expect("default --user")
             + 1;
         assert_eq!(a[at], expected);
+        assert!(
+            a.windows(2).any(|w| w == ["--env", "HOME=/ag"]),
+            "a numeric uid needs a writable HOME: {a:?}"
+        );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_worktree_does_not_set_a_derived_user() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_sandbox_env();
+        std::env::set_var("AGENTGRID_SANDBOX_IMAGE", "img:1");
+        let base = std::env::temp_dir().join(format!("ag-docker-link-{}", uuid::Uuid::new_v4()));
+        let real = base.join("real");
+        let link = base.join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (_, a) = sandbox_command(
+            SandboxKind::Docker,
+            "c",
+            &[],
+            &link,
+            None,
+            false,
+            None,
+            &[],
+            None,
+        );
+        clear_sandbox_env();
+        assert!(
+            !a.iter().any(|x| x == "--user"),
+            "a symlink must not silently pick its target's uid: {a:?}"
+        );
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
