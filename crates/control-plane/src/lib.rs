@@ -449,7 +449,7 @@ impl AppState {
     /// The JWT says who you were at login; the table says who you are now, so
     /// a deleted user, a demoted admin or a rotated password takes effect on
     /// the next request instead of lasting until the token expires.
-    pub(crate) async fn verify_token(&self, token: &str) -> Option<(String, String)> {
+    pub(crate) async fn verify_token(&self, token: &str) -> Option<(String, String, String)> {
         let claims = decode::<Claims>(
             token,
             &DecodingKey::from_secret(&self.jwt_secret),
@@ -465,27 +465,28 @@ impl AppState {
                 return None;
             }
         }
-        let (role, sessions_gen) = match self.store.user_auth_state(&claims.claims.sub).await {
-            Ok(Some(state)) => state,
-            Ok(None) => {
-                tracing::debug!(
-                    user = %claims.claims.sub,
-                    "token presented for a user that no longer exists"
-                );
-                return None;
-            }
-            Err(e) => {
-                tracing::error!("user auth state check failed (failing closed): {e}");
-                return None;
-            }
-        };
+        let (role, sessions_gen, incarnation) =
+            match self.store.user_auth_state(&claims.claims.sub).await {
+                Ok(Some(state)) => state,
+                Ok(None) => {
+                    tracing::debug!(
+                        user = %claims.claims.sub,
+                        "token presented for a user that no longer exists"
+                    );
+                    return None;
+                }
+                Err(e) => {
+                    tracing::error!("user auth state check failed (failing closed): {e}");
+                    return None;
+                }
+            };
         // A token minted before the last revocation carries a stale generation.
         // A token with no generation at all (minted before this field existed)
         // is generation 0, which is only accepted while the row is still at 0.
         if claims.claims.gen < sessions_gen {
             return None;
         }
-        Some((claims.claims.sub, role))
+        Some((claims.claims.sub, role, incarnation))
     }
 
     /// Read the current one-time setup token (if live) for tests / operators

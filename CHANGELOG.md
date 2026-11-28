@@ -447,6 +447,11 @@
   symlinked worktree no longer silently adopts its target's uid, and the
   numeric uid gets `HOME=/ag` instead of an unwritable image home.
 
+- **Idempotency keys are scoped to the immutable user row.** A deleted and
+  recreated username no longer inherits the old user's keys; `AuthedUser`
+  carries the user uuid from token verification instead of relying on the
+  reusable name.
+
 - **A typo in `AGENTGRID_ENV` silently disabled every production guard.** Four
   sites compared the raw env string to `"production"` inline: the fail-closed
   `/metrics` policy and the weak-JWT-secret refusal, the `Secure` session

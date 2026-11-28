@@ -1189,6 +1189,7 @@ mod tests {
         let auth = crate::auth::AuthedUser {
             username: "op".into(),
             role: agentgrid_common::ROLE_ADMIN.into(),
+            incarnation: "incarnation-op".into(),
         };
 
         let code = forget_install(

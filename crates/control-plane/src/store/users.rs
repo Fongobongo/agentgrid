@@ -96,8 +96,11 @@ impl Store {
     /// `None` and a stale generation as unauthenticated, so deleting a user,
     /// changing their role or rotating their password takes effect on the next
     /// request instead of at the end of the token's twelve hours.
-    pub async fn user_auth_state(&self, username: &str) -> Result<Option<(String, i64)>> {
-        let row = sqlx::query("SELECT role, sessions_gen FROM users WHERE username = ?")
+    /// `(role, sessions_gen, user_id)`. The uuid is immutable per user row: a
+    /// deleted and recreated username is a different identity for keyed
+    /// operations even before any token generation changes.
+    pub async fn user_auth_state(&self, username: &str) -> Result<Option<(String, i64, String)>> {
+        let row = sqlx::query("SELECT role, sessions_gen, id FROM users WHERE username = ?")
             .bind(username)
             .fetch_optional(&self.pool)
             .await?;
@@ -105,6 +108,7 @@ impl Store {
             Some(r) => Ok(Some((
                 r.try_get("role")?,
                 r.try_get::<i64, _>("sessions_gen")?,
+                r.try_get::<String, _>("id")?,
             ))),
             None => Ok(None),
         }

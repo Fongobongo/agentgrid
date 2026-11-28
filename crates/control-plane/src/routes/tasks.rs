@@ -13,10 +13,11 @@ use sha2::{Digest, Sha256};
 use crate::auth::AuthedUser;
 use crate::AppState;
 
-/// `Idempotency-Key` is scoped to the authenticated user: two users may use
-/// the same key without colliding, and another user cannot replay a key to
-/// read someone else's task. The key itself is hashed before it is stored.
-fn idempotency_digest(headers: &HeaderMap, user: &str) -> Result<Option<String>, StatusCode> {
+/// `Idempotency-Key` is scoped to the user row's immutable incarnation: two
+/// users may use the same key without colliding, and a deleted/recreated user
+/// with the same name cannot replay the old owner's keys. The key itself is
+/// hashed before it is stored.
+fn idempotency_digest(headers: &HeaderMap, scope: &str) -> Result<Option<String>, StatusCode> {
     let Some(raw) = headers.get("idempotency-key") else {
         return Ok(None);
     };
@@ -25,7 +26,7 @@ fn idempotency_digest(headers: &HeaderMap, user: &str) -> Result<Option<String>,
         return Err(StatusCode::BAD_REQUEST);
     }
     let mut hash = Sha256::new();
-    hash.update(user.as_bytes());
+    hash.update(scope.as_bytes());
     hash.update([0u8]);
     hash.update(key.as_bytes());
     Ok(Some(hex::encode(hash.finalize())))
@@ -37,8 +38,11 @@ pub async fn create_task(
     headers: HeaderMap,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskView>), StatusCode> {
-    let user = auth.as_ref().map(|e| e.0.username.as_str()).unwrap_or("");
-    let idempotency_key = idempotency_digest(&headers, user)?;
+    let scope = auth
+        .as_ref()
+        .map(|e| e.0.incarnation.as_str())
+        .unwrap_or("");
+    let idempotency_key = idempotency_digest(&headers, scope)?;
     if req.prompt.len() > state.limits.prompt {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }

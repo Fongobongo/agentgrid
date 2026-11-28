@@ -5366,6 +5366,34 @@ mod idempotency_tests {
     use agentgrid_common::CreateTaskRequest;
 
     #[tokio::test]
+    async fn recreating_a_username_gets_a_new_incarnation() {
+        let dir = std::env::temp_dir().join(format!("ag-user-inc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("cp.db").to_str().unwrap())
+            .await
+            .unwrap();
+        let role = agentgrid_common::ROLE_ADMIN;
+        assert!(store.create_user("alice", "pw", role).await.unwrap());
+        let first = store
+            .user_auth_state("alice")
+            .await
+            .unwrap()
+            .expect("user exists")
+            .2;
+        assert!(store.delete_user("alice").await.unwrap());
+        assert!(store.create_user("alice", "pw", role).await.unwrap());
+        let second = store
+            .user_auth_state("alice")
+            .await
+            .unwrap()
+            .expect("user exists")
+            .2;
+        assert_ne!(first, second, "a recycled username must be a new identity");
+        store.pool.close().await;
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
     async fn a_retried_key_returns_the_original_task() {
         let dir = std::env::temp_dir().join(format!("ag-idem-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

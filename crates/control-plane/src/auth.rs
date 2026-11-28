@@ -116,6 +116,9 @@ pub struct AuthedUser {
     pub username: String,
     /// RBAC role (plan 5.2): "admin" or "operator".
     pub role: String,
+    /// Immutable id of this user row. Usernames are reusable, so keyed
+    /// operations (e.g. idempotency) must scope to this instead.
+    pub incarnation: String,
 }
 
 /// RBAC (plan 5.2, finding 8): an operator may view (GET/HEAD) and
@@ -425,14 +428,18 @@ pub async fn require_user_auth(
             Ok(_) => {
                 if let Some(token) = auth_token_from_headers(req.headers()) {
                     match state.verify_token(&token).await {
-                        Some((username, role)) => {
+                        Some((username, role, incarnation)) => {
                             // RBAC (plan 5.2): operators view + approve only.
                             if role != agentgrid_common::ROLE_ADMIN
                                 && !operator_allowed(req.method().as_str(), &path)
                             {
                                 return Err(StatusCode::FORBIDDEN);
                             }
-                            req.extensions_mut().insert(AuthedUser { username, role });
+                            req.extensions_mut().insert(AuthedUser {
+                                username,
+                                role,
+                                incarnation,
+                            });
                         }
                         None => return Err(StatusCode::UNAUTHORIZED),
                     }
