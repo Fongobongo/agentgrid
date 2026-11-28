@@ -1903,39 +1903,19 @@ impl Store {
                                     let retryable = step.retryable.unwrap_or(false);
                                     if retryable && attempts < max {
                                         let req = CreateTaskRequest {
-                                            prompt: step.prompt.clone(),
-                                            repository: repo.clone(),
-                                            adapter: step
-                                                .adapter
-                                                .clone()
-                                                .filter(|a| !a.is_empty())
-                                                .unwrap_or_else(|| "mock".to_string()),
                                             requested_node_id: step.requested_node_id.clone(),
-                                            timeout_secs: None,
-                                            validation_command: None,
                                             base_commit: step
                                                 .base_commit
                                                 .clone()
                                                 .or_else(|| run.base_commit.clone()),
-                                            parent_acp_session_id: None,
-                                            security_profile: None,
-                                            network_mode: None,
-                                            group_id: None,
-                                            agent_id: None,
-                                            consensus_group_id: None,
-                                            consensus_member: None,
-                                            opencode_override: None,
-                                            github_push: false,
-                                            github_repo: None,
-                                            github_issue: None,
-                                            github_base_ref: None,
-                                            github_create: false,
-                                            max_attempts: 1,
-                                            retry_on_node_loss: None,
-                                            consensus_mode: None,
-                                            review_of: None,
-                                            max_tokens: None,
-                                            max_cost_cents: None,
+                                            ..CreateTaskRequest::new(
+                                                step.prompt.clone(),
+                                                repo.clone(),
+                                                step.adapter
+                                                    .clone()
+                                                    .filter(|a| !a.is_empty())
+                                                    .unwrap_or_else(|| "mock".to_string()),
+                                            )
                                         };
                                         let tv = match self.create_task(&req).await {
                                             Ok(tv) => tv,
@@ -2034,39 +2014,19 @@ impl Store {
                                                     u.prompt, feedback
                                                 );
                                                 let req = CreateTaskRequest {
-                                                    prompt,
-                                                    repository: repo.clone(),
-                                                    adapter: u
-                                                        .adapter
-                                                        .clone()
-                                                        .filter(|a| !a.is_empty())
-                                                        .unwrap_or_else(|| "mock".to_string()),
                                                     requested_node_id: u.requested_node_id.clone(),
-                                                    timeout_secs: None,
-                                                    validation_command: None,
                                                     base_commit: u
                                                         .base_commit
                                                         .clone()
                                                         .or_else(|| run.base_commit.clone()),
-                                                    parent_acp_session_id: None,
-                                                    security_profile: None,
-                                                    network_mode: None,
-                                                    group_id: None,
-                                                    agent_id: None,
-                                                    consensus_group_id: None,
-                                                    consensus_member: None,
-                                                    opencode_override: None,
-                                                    github_push: false,
-                                                    github_repo: None,
-                                                    github_issue: None,
-                                                    github_base_ref: None,
-                                                    github_create: false,
-                                                    max_attempts: 1,
-                                                    retry_on_node_loss: None,
-                                                    consensus_mode: None,
-                                                    review_of: None,
-                                                    max_tokens: None,
-                                                    max_cost_cents: None,
+                                                    ..CreateTaskRequest::new(
+                                                        prompt,
+                                                        repo.clone(),
+                                                        u.adapter
+                                                            .clone()
+                                                            .filter(|a| !a.is_empty())
+                                                            .unwrap_or_else(|| "mock".to_string()),
+                                                    )
                                                 };
                                                 match self.create_task(&req).await {
                                                     Ok(tv) => {
@@ -2184,28 +2144,11 @@ impl Store {
                             agentgrid_common::render_handoff_block(&step.prompt, &msgs)
                         };
                         let req = CreateTaskRequest {
-                            prompt,
-                            repository: repo.clone(),
-                            adapter: step
-                                .adapter
-                                .clone()
-                                .filter(|a| !a.is_empty())
-                                .unwrap_or_else(|| "mock".to_string()),
                             requested_node_id: step.requested_node_id.clone(),
-                            timeout_secs: None,
-                            validation_command: None,
                             base_commit: step
                                 .base_commit
                                 .clone()
                                 .or_else(|| run.base_commit.clone()),
-                            parent_acp_session_id: None,
-                            security_profile: None,
-                            network_mode: None,
-                            group_id: None,
-                            agent_id: None,
-                            consensus_group_id: None,
-                            consensus_member: None,
-                            opencode_override: None,
                             // Project assembly: collector steps inherit the
                             // run's GitHub target (push the assembled
                             // project, creating the remote first when asked);
@@ -2221,15 +2164,16 @@ impl Store {
                             } else {
                                 None
                             },
-                            github_base_ref: None,
                             github_create: step.role == WorkflowRole::Collector
                                 && run.github_create,
-                            max_attempts: 1,
-                            retry_on_node_loss: None,
-                            consensus_mode: None,
-                            review_of: None,
-                            max_tokens: None,
-                            max_cost_cents: None,
+                            ..CreateTaskRequest::new(
+                                prompt,
+                                repo.clone(),
+                                step.adapter
+                                    .clone()
+                                    .filter(|a| !a.is_empty())
+                                    .unwrap_or_else(|| "mock".to_string()),
+                            )
                         };
                         // Claim the pending→running transition before creating
                         // the task: the background ticker and the

@@ -422,6 +422,42 @@ fn default_task_max_attempts() -> u32 {
     1
 }
 
+impl CreateTaskRequest {
+    /// A plain task: three required fields, schema defaults for everything
+    /// else. `Default::default()` alone would give `max_attempts = 0` (Rust's
+    /// u32 default) while deserialization gives 1, so set the semantic
+    /// default explicitly here too. Callers add non-default fields with
+    /// struct-update syntax: `CreateTaskRequest { group_id: Some(id), ..CreateTaskRequest::new(..) }`.
+    pub fn new(
+        prompt: impl Into<String>,
+        repository: impl Into<String>,
+        adapter: impl Into<String>,
+    ) -> Self {
+        Self {
+            prompt: prompt.into(),
+            repository: repository.into(),
+            adapter: adapter.into(),
+            max_attempts: default_task_max_attempts(),
+            ..Self::default()
+        }
+    }
+}
+
+/// Constant-time byte comparison for tokens and capabilities. Both the HA
+/// cluster token and the credential gateway's admin token used to carry
+/// their own copy of this loop; a length mismatch returns early because the
+/// length of a secret is not secret.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskView {
     pub id: String,
@@ -2342,5 +2378,19 @@ mod tests {
             credential: "secret".into(),
         };
         assert_eq!(round_trip(&resp), resp);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_equal_bytes() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn a_plain_task_uses_the_schema_default_for_attempts() {
+        let req = CreateTaskRequest::new("do it", "demo", "mock");
+        assert_eq!(req.max_attempts, 1);
+        assert_eq!(req.prompt, "do it");
     }
 }

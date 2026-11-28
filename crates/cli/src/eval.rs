@@ -295,12 +295,13 @@ async fn run_case(
     timeout_secs: u64,
 ) -> Result<CaseResult> {
     let req = CreateTaskRequest {
-        prompt: case.prompt.clone(),
-        repository: case.repository.clone(),
-        adapter: adapter.to_string(),
         base_commit: case.base_commit.clone(),
         validation_command: case.validation_command.clone(),
-        ..Default::default()
+        ..CreateTaskRequest::new(
+            case.prompt.clone(),
+            case.repository.clone(),
+            adapter.to_string(),
+        )
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))

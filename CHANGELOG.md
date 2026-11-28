@@ -296,6 +296,14 @@
 
 ### Changed
 
+- **Shared task-request constructor and token comparison.** `CreateTaskRequest::new`
+  supplies the three required fields and the semantic defaults (including
+  `max_attempts = 1`, which `#[derive(Default)]` could not express), so
+  production callers no longer repeat all thirty fields — and CLI smoke/eval
+  paths no longer silently send `max_attempts = 0`. `constant_time_eq` now
+  lives once in `agentgrid-common` instead of being duplicated in the HA and
+  credential-gateway paths. Net −333 lines across 16 files.
+
 - **E2E daemons run in their own process group.** Each spawned daemon gets a
   tracked process group; cleanup sends TERM, waits, then KILLs, and refuses to
   delete the temporary directory while a group is still alive. This is what

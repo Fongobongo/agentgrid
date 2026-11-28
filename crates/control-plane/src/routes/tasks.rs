@@ -316,34 +316,7 @@ pub async fn rework_attempt(
     })?;
     let block = render_annotations_block(&anns);
     let new_prompt = format!("{prompt}\n\n{block}");
-    let req = CreateTaskRequest {
-        prompt: new_prompt,
-        repository,
-        adapter,
-        requested_node_id: None,
-        timeout_secs: None,
-        validation_command: None,
-        base_commit: None,
-        parent_acp_session_id: None,
-        security_profile: None,
-        network_mode: None,
-        group_id: None,
-        agent_id: None,
-        consensus_group_id: None,
-        consensus_member: None,
-        opencode_override: None,
-        github_push: false,
-        github_repo: None,
-        github_issue: None,
-        github_base_ref: None,
-        github_create: false,
-        max_attempts: 1,
-        retry_on_node_loss: None,
-        consensus_mode: None,
-        review_of: None,
-        max_tokens: None,
-        max_cost_cents: None,
-    };
+    let req = CreateTaskRequest::new(new_prompt, repository, adapter);
     match state.store.create_task(&req).await {
         Ok(view) => {
             // Competitor-gap feature (convergence metrics): link the rework

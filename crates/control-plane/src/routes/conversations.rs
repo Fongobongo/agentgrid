@@ -124,32 +124,8 @@ pub async fn append_conversation_message(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let task_req = CreateTaskRequest {
-        prompt,
-        repository: conv.repository.clone(),
-        adapter: conv.adapter.clone(),
-        requested_node_id: None,
-        timeout_secs: None,
-        validation_command: None,
-        base_commit: None,
         parent_acp_session_id,
-        security_profile: None,
-        network_mode: None,
-        group_id: None,
-        agent_id: None,
-        consensus_group_id: None,
-        consensus_member: None,
-        opencode_override: None,
-        github_push: false,
-        github_repo: None,
-        github_issue: None,
-        github_base_ref: None,
-        github_create: false,
-        max_attempts: 1,
-        retry_on_node_loss: None,
-        consensus_mode: None,
-        review_of: None,
-        max_tokens: None,
-        max_cost_cents: None,
+        ..CreateTaskRequest::new(prompt, conv.repository.clone(), conv.adapter.clone())
     };
     // Audit X-C6: persist the user turn FIRST, then create the task, then
     // link the two. The old order (create_task → append) meant a failed

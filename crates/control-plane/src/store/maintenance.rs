@@ -310,32 +310,8 @@ impl Store {
                 };
                 for a in due {
                     let req = agentgrid_common::CreateTaskRequest {
-                        repository: "*".into(),
-                        prompt: a.prompt.clone(),
-                        adapter: "mock".into(),
-                        requested_node_id: None,
-                        timeout_secs: None,
-                        base_commit: None,
-                        parent_acp_session_id: None,
-                        network_mode: None,
-                        validation_command: None,
-                        security_profile: None,
-                        group_id: None,
                         agent_id: Some(a.id.clone()),
-                        consensus_group_id: None,
-                        consensus_member: None,
-                        opencode_override: None,
-                        github_push: false,
-                        github_repo: None,
-                        github_issue: None,
-                        github_base_ref: None,
-                        github_create: false,
-                        max_attempts: 1,
-                        retry_on_node_loss: None,
-                        consensus_mode: None,
-                        review_of: None,
-                        max_tokens: None,
-                        max_cost_cents: None,
+                        ..agentgrid_common::CreateTaskRequest::new(a.prompt.clone(), "*", "mock")
                     };
                     if let Err(e) = store.create_agent_task(&a.id, &req).await {
                         tracing::warn!("agent {} heartbeat spawn failed: {e}", a.id);

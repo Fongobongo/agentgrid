@@ -123,6 +123,7 @@ dependencies = [
 name = "agentgrid-cred-gateway"
 version = "0.8.1"
 dependencies = [
+ "agentgrid-common",
  "anyhow",
  "axum",
  "base64 0.22.1",

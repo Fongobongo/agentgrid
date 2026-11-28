@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use agentgrid_common::constant_time_eq;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -55,17 +56,6 @@ pub fn data_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/v1/ha/secret", get(secret))
         .layer(axum::middleware::from_fn_with_state(state, data_token))
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 pub fn token_ok(rt: &HaRuntime, headers: &HeaderMap) -> bool {

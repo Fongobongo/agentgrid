@@ -6,6 +6,7 @@ license.workspace = true
 description = "Credential gateway: the sandbox holds a per-attempt capability, the real key never leaves this process"
 
 [dependencies]
+agentgrid-common.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 reqwest.workspace = true

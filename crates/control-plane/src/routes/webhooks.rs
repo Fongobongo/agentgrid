@@ -155,38 +155,17 @@ pub async fn github_issue_webhook(
     } else {
         format!("GitHub issue #{number}: {title}\n\n{body_text}")
     };
+    // `owner/name`, not the bare `name`: two organisations can both have an
+    // `api` repository, and the short name would put both into one task
+    // bucket (and one node cache directory).
+    let repository = full_name.clone().unwrap_or(repo_name);
     let req = agentgrid_common::CreateTaskRequest {
-        prompt,
-        // `owner/name`, not the bare `name`: two organisations can both have
-        // an `api` repository, and the short name would put both into one task
-        // bucket (and one node cache directory).
-        repository: full_name.clone().unwrap_or(repo_name),
-        adapter: webhook_adapter(),
-        requested_node_id: None,
-        timeout_secs: None,
-        validation_command: None,
-        base_commit: None,
-        parent_acp_session_id: None,
-        security_profile: None,
-        network_mode: None,
-        group_id: None,
-        agent_id: None,
-        consensus_group_id: None,
-        consensus_member: None,
-        opencode_override: None,
         // Write-back: the node pushes the agent branch, opens a PR and
         // comments on this issue after a successful finish.
         github_push: full_name.is_some(),
         github_repo: full_name,
         github_issue: Some(number),
-        github_base_ref: None,
-        github_create: false,
-        max_attempts: 1,
-        retry_on_node_loss: None,
-        consensus_mode: None,
-        review_of: None,
-        max_tokens: None,
-        max_cost_cents: None,
+        ..agentgrid_common::CreateTaskRequest::new(prompt, repository, webhook_adapter())
     };
     if let Err(e) = state.store.create_task(&req).await {
         tracing::error!("webhook task creation failed: {e}");
@@ -207,34 +186,7 @@ pub async fn github_issue_webhook(
 /// [`webhook_adapter`] (default `mock`); repository `*` lets any registered
 /// node claim it.
 fn create_followup_task(prompt: String) -> agentgrid_common::CreateTaskRequest {
-    agentgrid_common::CreateTaskRequest {
-        prompt,
-        repository: "*".into(),
-        adapter: webhook_adapter(),
-        requested_node_id: None,
-        timeout_secs: None,
-        validation_command: None,
-        base_commit: None,
-        parent_acp_session_id: None,
-        security_profile: None,
-        network_mode: None,
-        group_id: None,
-        agent_id: None,
-        consensus_group_id: None,
-        consensus_member: None,
-        opencode_override: None,
-        github_push: false,
-        github_repo: None,
-        github_issue: None,
-        github_base_ref: None,
-        github_create: false,
-        max_attempts: 1,
-        retry_on_node_loss: None,
-        consensus_mode: None,
-        review_of: None,
-        max_tokens: None,
-        max_cost_cents: None,
-    }
+    agentgrid_common::CreateTaskRequest::new(prompt, "*", webhook_adapter())
 }
 
 /// Plan 1.10 (#1): `POST /v1/webhooks/github/check_run`. GitHub fires this

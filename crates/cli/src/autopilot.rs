@@ -104,11 +104,12 @@ pub async fn run_autopilot(
         }
         let prompt = iteration_prompt(o.objective, n, &iterations);
         let req = CreateTaskRequest {
-            prompt: prompt.clone(),
-            repository: o.repository.into(),
-            adapter: o.adapter.into(),
             validation_command: o.validate.map(|s| s.to_string()),
-            ..Default::default()
+            ..CreateTaskRequest::new(
+                prompt.clone(),
+                o.repository.to_string(),
+                o.adapter.to_string(),
+            )
         };
         let task_id = submit_task(client, base, &req).await?;
         let status = wait_terminal(client, base, &task_id).await?;

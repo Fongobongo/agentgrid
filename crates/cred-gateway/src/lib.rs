@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agentgrid_common::constant_time_eq;
 use axum::body::Body;
 use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -502,17 +503,6 @@ fn admin_ok(gw: &Gateway, headers: &HeaderMap) -> bool {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|t| constant_time_eq(t.as_bytes(), gw.admin.as_bytes()))
         .unwrap_or(false)
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 fn new_token() -> String {

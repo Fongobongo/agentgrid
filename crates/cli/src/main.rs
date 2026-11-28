@@ -862,32 +862,8 @@ async fn cmd_resume(client: &reqwest::Client, base: &str, a: ResumeArgs) -> Resu
     err_if_fail(resp.status(), "attempt")?;
     let att: agentgrid_common::AttemptView = resp.json().await.context("parse attempt response")?;
     let req = CreateTaskRequest {
-        prompt: att.prompt,
-        repository: "*".into(),
-        adapter: att.adapter,
-        requested_node_id: None,
-        timeout_secs: None,
-        validation_command: None,
-        base_commit: None,
         parent_acp_session_id: att.parent_acp_session_id,
-        security_profile: None,
-        network_mode: None,
-        group_id: None,
-        agent_id: None,
-        consensus_group_id: None,
-        consensus_member: None,
-        opencode_override: None,
-        github_push: false,
-        github_repo: None,
-        github_issue: None,
-        github_base_ref: None,
-        github_create: false,
-        max_attempts: 1,
-        retry_on_node_loss: None,
-        consensus_mode: None,
-        review_of: None,
-        max_tokens: None,
-        max_cost_cents: None,
+        ..CreateTaskRequest::new(att.prompt, "*", att.adapter)
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1033,32 +1009,10 @@ async fn cmd_issue(client: &reqwest::Client, base: &str, a: IssueArgs) -> Result
                 None
             };
             let req = CreateTaskRequest {
-                prompt,
-                repository: "*".into(),
-                adapter: "mock".into(),
-                requested_node_id: None,
-                timeout_secs: None,
-                validation_command: None,
-                base_commit: None,
-                parent_acp_session_id: None,
-                security_profile: None,
-                network_mode: None,
-                group_id: None,
-                agent_id: None,
-                consensus_group_id: None,
-                consensus_member: None,
-                opencode_override: None,
                 github_push: push,
                 github_repo: full_name,
                 github_issue: Some(number),
-                github_base_ref: None,
-                github_create: false,
-                max_attempts: 1,
-                retry_on_node_loss: None,
-                consensus_mode: None,
-                review_of: None,
-                max_tokens: None,
-                max_cost_cents: None,
+                ..CreateTaskRequest::new(prompt, "*", "mock")
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1101,32 +1055,17 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         let mut task_ids = Vec::new();
         for member in &models {
             let req = CreateTaskRequest {
-                prompt: a.prompt.clone(),
-                repository: a.repository.clone(),
-                adapter: member.clone(),
-                requested_node_id: None,
                 timeout_secs: a.timeout,
                 validation_command: a.validate.clone(),
-                base_commit: None,
-                parent_acp_session_id: None,
                 security_profile: a.security_profile.clone(),
-                network_mode: None,
-                group_id: None,
-                agent_id: None,
                 consensus_group_id: Some(group.clone()),
                 consensus_member: Some(member.clone()),
-                opencode_override: None,
                 github_push: a.github_push,
                 github_repo: a.github_repo.clone(),
-                github_issue: None,
-                github_base_ref: None,
                 github_create: a.github_create,
-                max_attempts: 1,
-                retry_on_node_loss: None,
-                consensus_mode: None,
-                review_of: None,
                 max_tokens: a.max_tokens,
                 max_cost_cents: a.max_cost_cents,
+                ..CreateTaskRequest::new(a.prompt.clone(), a.repository.clone(), member.clone())
             };
             let resp = client
                 .post(format!("{base}/v1/tasks"))
@@ -1155,32 +1094,20 @@ async fn cmd_run(client: &reqwest::Client, base: &str, a: RunArgs) -> Result<()>
         None
     };
     let req = CreateTaskRequest {
-        prompt: a.prompt,
-        repository: a.repository,
-        adapter: a.adapter,
         requested_node_id: a.node,
         timeout_secs: a.timeout,
         validation_command: a.validate,
-        base_commit: None,
-        parent_acp_session_id: None,
         security_profile: a.security_profile,
-        network_mode: None,
         group_id: a.group,
-        agent_id: None,
-        consensus_group_id: None,
-        consensus_member: None,
         opencode_override,
         github_push: a.github_push,
         github_repo: a.github_repo.clone(),
-        github_issue: None,
-        github_base_ref: None,
         github_create: a.github_create,
         max_attempts: a.max_attempts,
-        consensus_mode: None,
-        review_of: None,
         max_tokens: a.max_tokens,
         max_cost_cents: a.max_cost_cents,
         retry_on_node_loss: Some(!a.no_retry_on_node_loss),
+        ..CreateTaskRequest::new(a.prompt, a.repository, a.adapter)
     };
     let resp = client
         .post(format!("{base}/v1/tasks"))
@@ -1337,12 +1264,7 @@ async fn cmd_setup(client: &reqwest::Client, base: &str, a: SetupArgs) -> Result
         && (a.accept_defaults && std::env::var_os("AG_SETUP_SMOKE").is_some()
             || !a.accept_defaults);
     if want_smoke {
-        let req = CreateTaskRequest {
-            prompt: "smoke: print hello".into(),
-            repository: "smoke".into(),
-            adapter: a.default_adapter.clone(),
-            ..Default::default()
-        };
+        let req = CreateTaskRequest::new("smoke: print hello", "smoke", a.default_adapter.clone());
         let r = client
             .post(format!("{base}/v1/tasks"))
             .json(&req)
@@ -1844,16 +1766,11 @@ async fn cmd_review(client: &reqwest::Client, base: &str, a: ReviewArgs) -> Resu
     let mut task_ids = Vec::new();
     for member in &a.models {
         let req = CreateTaskRequest {
-            prompt: prompt.clone(),
-            repository: target.repository.clone(),
-            adapter: member.clone(),
             consensus_group_id: Some(group.clone()),
             consensus_member: Some(member.clone()),
             consensus_mode: Some("review".into()),
             review_of: Some(a.task.clone()),
-            max_tokens: None,
-            max_cost_cents: None,
-            ..Default::default()
+            ..CreateTaskRequest::new(prompt.clone(), target.repository.clone(), member.clone())
         };
         let resp = client
             .post(format!("{base}/v1/tasks"))
