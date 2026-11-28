@@ -67,7 +67,7 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # the first handshake instead of at build time.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "tls12", "std"] }
 webpki-roots = "1"
-base64 = "0.22"
+base64 = "0.23"
 # ADR 0028: adapter-env values are sealed to a per-node X25519 key, so the
 # control plane can deliver a secret without being able to read it back.
 # `ring` is already built for rustls and supplies HKDF + AES-256-GCM; only the
