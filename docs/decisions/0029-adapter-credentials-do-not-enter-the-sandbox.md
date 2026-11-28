@@ -41,7 +41,7 @@ remains unbuilt and documented as the escape hatch. See "Staged decision".
 
 ADR 0028 sealed adapter env so that a compromised control plane cannot read the
 values. The **node** still can, and it hands them to the sandbox:
-`crates/node-daemon/src/sandbox.rs:911` turns every pair of `container_env` into
+`crates/node-daemon/src/sandbox/docker.rs` turns every pair of `container_env` into
 `--env K=V` on the `docker run` command line.
 
 `container_env` is assembled in `main.rs:119-160` and mixes secrets with
@@ -226,7 +226,7 @@ does not.
 ## Premise check: `restricted` was not enforced
 
 C and E both lean on `restricted` meaning "one reachable peer". It did not, in
-the shipped deploy. `resolved_network_mode` (`sandbox.rs:505`) attaches the
+the shipped deploy. `resolved_network_mode` (`sandbox/mod.rs`) attaches the
 sandbox to `$AGENTGRID_SANDBOX_EGRESS_NETWORK`, and
 `deploy/egress-proxy/docker-compose.yml` declared that network `internal: false`
 — a user-defined bridge with NAT, so a process that ignores `HTTP_PROXY` reached

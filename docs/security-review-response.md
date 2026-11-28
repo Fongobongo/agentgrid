@@ -106,7 +106,7 @@ still true, where, and what would be needed to close it.
 
 ### R1 (finding 3): bwrap still bind-mounts the host root read-only
 
-`sandbox.rs:870` is still `--ro-bind / /`. `bwrap_masked_paths()` puts an
+`sandbox/bwrap.rs` (`bwrap_head`) is still `--ro-bind / /`. `bwrap_masked_paths()` puts an
 empty `--tmpfs` over exactly three subtrees: `AGENTGRID_DATA_DIR`,
 `workdir.parent()` (the workspace root) and `$HOME`. That hides the node
 credential, the sealed-env key, `~/.ssh` and sibling worktrees, which was the
@@ -266,7 +266,7 @@ All six named gaps now have coverage:
 | `revoke_node` closes a live WebSocket | `crates/control-plane/tests/ws.rs` |
 | Webhook retried after a failed `create_task` | `routes/webhooks.rs` tests |
 | RBAC matrix over every registered route | `auth.rs` openapi-driven test |
-| bwrap hides data dir and sibling worktrees | `sandbox.rs:2954` and following tests |
+| bwrap hides data dir and sibling worktrees | `sandbox/tests.rs` and following tests |
 
 ## Verification
 

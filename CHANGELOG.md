@@ -296,6 +296,12 @@
 
 ### Changed
 
+- **Sandbox split into backend modules.** The old 3.5k-line `sandbox.rs` is now
+  `sandbox/mod.rs` (shared types, env/user/network helpers, command assembly)
+  plus `docker.rs`, `bwrap.rs`, `systemd.rs` and a separate `tests.rs`. Public
+  names stay re-exported at `crate::sandbox::*`, so callers and the public API
+  are unchanged.
+
 - **Shared task-request constructor and token comparison.** `CreateTaskRequest::new`
   supplies the three required fields and the semantic defaults (including
   `max_attempts = 1`, which `#[derive(Default)]` could not express), so

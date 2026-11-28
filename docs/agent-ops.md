@@ -557,10 +557,10 @@ type or module that encloses it:
 
 ```bash
 ag index . --find parse_cidr
-# crates/node-daemon/src/sandbox.rs:720  function  parse_cidr
+# crates/node-daemon/src/sandbox/mod.rs  function  parse_cidr
 
 ag index . --find SandboxKind::from_env
-# crates/node-daemon/src/sandbox.rs:58   method    SandboxKind::from_env
+# crates/node-daemon/src/sandbox/mod.rs   method    SandboxKind::from_env
 
 ag index . --find bwrap --limit 5          # prefix matches
 ag index . --json > symbols.json           # the whole packet
