@@ -55,7 +55,7 @@ password-hash = { version = "0.6", features = ["getrandom", "phc"] }
 # crypto-bigint and unpatched rsa. Keep PEM support and all JWT algorithms intact.
 # Native builds need a target C toolchain (and CMake on Windows); never re-enable
 # rust_crypto through feature unification, including workspace --all-features.
-jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 rand = "0.10"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # The node dials its control plane through an HTTP CONNECT tunnel when an egress
