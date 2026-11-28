@@ -335,12 +335,12 @@ struct Field {
     has_default: bool,
 }
 
-/// Fields of `pub struct <name> { .. }` in `crates/common/src/lib.rs`.
+/// Fields of `pub struct <name> { .. }` in `crates/common/src/dto.rs`.
 fn rust_struct_fields(src: &str, struct_name: &str) -> Vec<Field> {
     let marker = format!("pub struct {struct_name} {{");
     let start = src
         .find(&marker)
-        .unwrap_or_else(|| panic!("no `{marker}` in crates/common/src/lib.rs"));
+        .unwrap_or_else(|| panic!("no `{marker}` in crates/common/src/dto.rs"));
     let body = &src[start + marker.len()..];
     let end = body
         .find("\n}")
@@ -432,14 +432,14 @@ fn assert_dto_matches_rust(doc: &Value, src: &str, struct_name: &str) {
 #[test]
 fn create_task_request_schema_matches_rust() {
     let doc = openapi_doc();
-    let src = repo_file("crates/common/src/lib.rs");
+    let src = repo_file("crates/common/src/dto.rs");
     assert_dto_matches_rust(&doc, &src, "CreateTaskRequest");
 }
 
 #[test]
 fn task_view_schema_matches_rust() {
     let doc = openapi_doc();
-    let src = repo_file("crates/common/src/lib.rs");
+    let src = repo_file("crates/common/src/dto.rs");
     assert_dto_matches_rust(&doc, &src, "TaskView");
 }
 

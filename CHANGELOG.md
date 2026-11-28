@@ -296,6 +296,12 @@
 
 ### Changed
 
+- **CLI and DTO monoliths split into modules.** `cli/main.rs` now holds only
+  the entry point and exit-code mapping; clap arguments live in `args.rs` and
+  command handlers in `commands.rs`. `common/lib.rs` is a facade that
+  re-exports DTOs from `dto.rs` and keeps its tests in `tests.rs`. The
+  contract test reads the DTO source from its new path.
+
 - **Sandbox split into backend modules.** The old 3.5k-line `sandbox.rs` is now
   `sandbox/mod.rs` (shared types, env/user/network helpers, command assembly)
   plus `docker.rs`, `bwrap.rs`, `systemd.rs` and a separate `tests.rs`. Public

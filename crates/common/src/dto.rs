@@ -1,0 +1,2053 @@
+//! API DTOs and shared helpers. Re-exported at the crate root.
+
+use super::*;
+
+/// Header the node must present on every attempt mutation (hardening P0
+/// item 8). One shared literal — a typo in a per-site copy would silently
+/// bypass fencing (audit X-D3).
+pub const FENCING_TOKEN_HEADER: &str = "x-agentgrid-fencing-token";
+
+/// Lowercase-hex SHA-256 of `data`. Single shared implementation: the
+/// opencode-profile hash round-trips CP↔node to detect config drift, so
+/// every hashing site must agree on canonicalization (audit X-D1).
+pub fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    // digest 0.11 dropped LowerHex on the output array — hex-encode by hand
+    // (same canonicalization, pinned by the FIPS vector test below).
+    let out = h.finalize();
+    let mut s = String::with_capacity(out.len() * 2);
+    for b in out {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Task lifecycle status (control-plane view of a user request).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Queued,
+    Assigned,
+    Running,
+    Validating,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+/// Per-attempt status (one execution of a task on a node).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptStatus {
+    Assigned,
+    Running,
+    Validating,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Lost,
+}
+
+/// Node registration/health status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeStatus {
+    Pending,
+    Online,
+    Degraded,
+    Offline,
+    Revoked,
+}
+
+/// Stored event kinds. Mirrors the spec's `status | stdout | stderr | tool |
+/// artifact | metric` plus `result`/`error` carried over from the adapter
+/// contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventType {
+    Status,
+    Stdout,
+    Stderr,
+    Tool,
+    Artifact,
+    Metric,
+    Result,
+    Error,
+}
+
+/// A single streamed event tied to an attempt, with a monotonic `sequence`.
+///
+/// Hardening P0 item 9: `ingest_id` is the global, monotonic cursor assigned by
+/// the control plane at ingest time (ordered across attempts), while
+/// `sequence` remains the per-attempt monotonic counter. SSE `id:` /
+/// `Last-Event-ID` and the `after_ingest` query use `ingest_id` so a client
+/// resuming after a retry never reorders events across attempts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskEvent {
+    pub attempt_id: String,
+    pub sequence: u64,
+    pub r#type: EventType,
+    pub payload: serde_json::Value,
+    pub created_at: String,
+    /// Global monotonic ingest cursor. `#[serde(default)]` keeps pre-0037
+    /// serialized events (and old clients) parseable.
+    #[serde(default)]
+    pub ingest_id: u64,
+}
+
+macro_rules! display_snake {
+    ($t:ty) => {
+        impl std::fmt::Display for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let s = serde_json::to_value(self)
+                    .map_err(|_| std::fmt::Error)?
+                    .as_str()
+                    .ok_or(std::fmt::Error)?
+                    .to_string();
+                f.write_str(&s)
+            }
+        }
+    };
+}
+display_snake!(TaskStatus);
+display_snake!(AttemptStatus);
+display_snake!(NodeStatus);
+display_snake!(EventType);
+
+/// Richer adapter event vocabulary introduced in Stage 3.1. Any unrecognized
+/// `kind` string is preserved as `Other(String)` so a future adapter cannot
+/// break the pipeline (unknown events become raw logs, never a fatal error).
+#[derive(Debug, Clone, PartialEq)]
+pub enum EventKind {
+    Plan,
+    ToolCall,
+    ToolResult,
+    FileChange,
+    PermissionRequest,
+    Usage,
+    Handoff,
+    Cancel,
+    Status,
+    Log,
+    Progress,
+    Result,
+    Error,
+    Other(String),
+}
+
+impl Serialize for EventKind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let v = match self {
+            EventKind::Plan => "plan",
+            EventKind::ToolCall => "tool_call",
+            EventKind::ToolResult => "tool_result",
+            EventKind::FileChange => "file_change",
+            EventKind::PermissionRequest => "permission_request",
+            EventKind::Usage => "usage",
+            EventKind::Handoff => "handoff",
+            EventKind::Cancel => "cancel",
+            EventKind::Status => "status",
+            EventKind::Log => "log",
+            EventKind::Progress => "progress",
+            EventKind::Result => "result",
+            EventKind::Error => "error",
+            EventKind::Other(o) => o.as_str(),
+        };
+        s.serialize_str(v)
+    }
+}
+
+impl<'de> Deserialize<'de> for EventKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(match s.as_str() {
+            "plan" => EventKind::Plan,
+            "tool_call" => EventKind::ToolCall,
+            "tool_result" => EventKind::ToolResult,
+            "file_change" => EventKind::FileChange,
+            "permission_request" => EventKind::PermissionRequest,
+            "usage" => EventKind::Usage,
+            "handoff" => EventKind::Handoff,
+            "cancel" => EventKind::Cancel,
+            "status" => EventKind::Status,
+            "log" => EventKind::Log,
+            "progress" => EventKind::Progress,
+            "result" => EventKind::Result,
+            "error" => EventKind::Error,
+            other => EventKind::Other(other.to_string()),
+        })
+    }
+}
+
+impl EventKind {
+    /// Map a 3.1 event kind onto the legacy stored [`EventType`] so the
+    /// existing storage/query contract is unchanged.
+    pub fn to_event_type(&self) -> EventType {
+        match self {
+            EventKind::Plan | EventKind::Handoff | EventKind::Status | EventKind::Cancel => {
+                EventType::Status
+            }
+            EventKind::ToolCall | EventKind::ToolResult => EventType::Tool,
+            EventKind::FileChange => EventType::Artifact,
+            EventKind::PermissionRequest | EventKind::Log => EventType::Stdout,
+            EventKind::Usage | EventKind::Progress => EventType::Metric,
+            EventKind::Result => EventType::Result,
+            EventKind::Error => EventType::Error,
+            EventKind::Other(_) => EventType::Stdout,
+        }
+    }
+}
+
+/// Versioned adapter event envelope (Stage 3.1), layered over the stored
+/// `TaskEvent`. `raw_ref` optionally points at a content-addressed raw blob
+/// when the payload is too large to inline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentEventEnvelope {
+    pub version: u8,
+    pub kind: EventKind,
+    pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_ref: Option<String>,
+}
+
+/// Request to open an agent session for an attempt (Stage 3.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAgentSessionRequest {
+    pub adapter: String,
+}
+
+/// A single agent execution inside an attempt (Stage 3.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSession {
+    pub id: String,
+    pub attempt_id: String,
+    pub adapter: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub status: String,
+    pub error_code: Option<String>,
+}
+
+/// Per-adapter capability advertised in the heartbeat (Stage 3.2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdapterCapability {
+    pub id: String,
+    pub version: Option<String>,
+    pub ready: bool,
+    /// How the adapter intercepts permission requests
+    /// (`"structured"` | `"wrapper"` | `"none"`). Wrapper adapters parse
+    /// stdout heuristically and cannot strictly enforce a policy; `"none"`
+    /// means the adapter never asks — it must be confined by sandbox or run
+    /// with the explicit unsafe bypass. Hardening P0 item 5.
+    #[serde(default = "default_permission_interception")]
+    pub permission_interception: String,
+}
+
+pub fn default_permission_interception() -> String {
+    "wrapper".to_string()
+}
+
+fn default_sandbox_backend() -> String {
+    "none".to_string()
+}
+
+// ----- API DTOs -----
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreateTaskRequest {
+    pub prompt: String,
+    pub repository: String,
+    pub adapter: String,
+    #[serde(default)]
+    pub requested_node_id: Option<String>,
+    /// Optional per-task timeout in seconds (server default if unset).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Optional validation command overriding the repository default.
+    #[serde(default)]
+    pub validation_command: Option<String>,
+    /// Optional exact commit the node should check out for the worktree
+    /// (Stage 8: shared base_commit). `None` => branch from `default_branch`.
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    /// Optional ACP session id to resume (Stage 11.5). `None` => fresh session.
+    #[serde(default)]
+    pub parent_acp_session_id: Option<String>,
+    /// Plan 2.9 (#20): consensus run. When set (`--consensus N` with
+    /// `--models m1,m2,...`), the CP stamps one consensus_group_id across N
+    /// tasks (one per adapter), each marked with `consensus_member =
+    /// adapter name`. Aggregation on complete collapses the group; SHAs
+    /// disagreeing → human-review approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_member: Option<String>,
+    /// Competitor-gap feature (consensus patch review, nitpicker-inspired):
+    /// `solve` (default) = N models solve one task, patches compared by SHA;
+    /// `review` = N models review one diff, verdicts compared. Review groups
+    /// set `review_of` to the task whose changes.patch they judge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_mode: Option<String>,
+    /// For `consensus_mode = "review"`: the task id whose changes.patch this
+    /// review group judges. `None` for solve groups and independent tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_of: Option<String>,
+    /// Per-task cost ceilings (autopilot safety): the attempt is killed with
+    /// `error_code = "budget_exceeded"` when reported adapter usage passes
+    /// either ceiling. `None` = unbounded (budgets still live on workflow
+    /// templates). Zero is allowed and means zero tolerance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
+    /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
+    /// Node policy sets max allowed mode; task requests a mode <= node max.
+    #[serde(default)]
+    pub network_mode: Option<String>,
+    /// Optional security profile (e.g. "strict", "default-strict").
+    /// When set to a profile ending in "-strict", the task will only be
+    /// assigned to nodes with structured permission interception (not wrapper).
+    #[serde(default)]
+    pub security_profile: Option<String>,
+    /// Plan 1.12 (#7): optional shared-context task group id — parallel
+    /// attempts in the same group share `shared_context` notes and get the
+    /// `AG_GROUP_ID` env var on the node.
+    #[serde(default)]
+    pub group_id: Option<String>,
+    /// Plan 2.1 (#18): optional org-agent attribution. When set, the task
+    /// counts against the agent's budget (hard-stop when exhausted).
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Feature "opencode profiles": per-task override merged over the node's
+    /// active profile and injected via OPENCODE_CONFIG_CONTENT (env, dies
+    /// with the process). None = adapter runs purely under profiled local
+    /// config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_override: Option<OpencodeOverride>,
+    /// Competitor-gap feature (GitHub write-back): when true, a successful
+    /// attempt pushes its agent branch to the origin remote, opens a PR, and
+    /// (if `github_issue` is set) comments on the issue. Best-effort: a
+    /// write-back failure never fails the task.
+    #[serde(default)]
+    pub github_push: bool,
+    /// GitHub repository `owner/name` for write-back (full_name from a
+    /// webhook payload or `gh repo view`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    /// GitHub issue number to comment on after a successful write-back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    /// Base ref the PR targets (falls back to the repository default branch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_base_ref: Option<String>,
+    /// Project assembly: when true (with `github_push` + `github_repo`), the
+    /// node creates the remote repository via the GitHub API if it does not
+    /// exist yet (private, no auto-init), then pushes as usual. A plain-dir
+    /// worktree is `git init`-ed first so there is something to push. All
+    /// best-effort like the rest of write-back; a just-created remote skips
+    /// the PR (no base branch exists yet) with an explanatory event.
+    #[serde(default)]
+    pub github_create: bool,
+    /// Competitor-gap feature (task-level auto-retry, hatchet-inspired):
+    /// total attempts allowed for this task. `1` (default) = single attempt,
+    /// no auto-retry. When an attempt FAILS (never on cancel) and fewer than
+    /// `max_attempts` attempts have run, the task is re-queued automatically
+    /// instead of staying failed — same semantics as a manual `retry_task`.
+    #[serde(default = "default_task_max_attempts")]
+    pub max_attempts: u32,
+    /// Whether losing the node counts as a failure that may spend the
+    /// `max_attempts` budget. `None` (default) = yes.
+    ///
+    /// A lost attempt is the one failure the control plane has no evidence
+    /// about: the node died mid-run, so it never reported what the agent did.
+    /// Retrying is safe when the work is idempotent, and unsafe when the agent
+    /// may already have pushed a branch or called out to the world. This knob
+    /// is where that call gets made, per task; `Some(false)` keeps node loss
+    /// terminal (`failed` / `node_lost`), which is the pre-existing behaviour.
+    ///
+    /// The retry is steered onto a *different* node: the node that lost the
+    /// attempt is skipped while another node is online.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on_node_loss: Option<bool>,
+}
+
+fn default_task_max_attempts() -> u32 {
+    1
+}
+
+impl CreateTaskRequest {
+    /// A plain task: three required fields, schema defaults for everything
+    /// else. `Default::default()` alone would give `max_attempts = 0` (Rust's
+    /// u32 default) while deserialization gives 1, so set the semantic
+    /// default explicitly here too. Callers add non-default fields with
+    /// struct-update syntax: `CreateTaskRequest { group_id: Some(id), ..CreateTaskRequest::new(..) }`.
+    pub fn new(
+        prompt: impl Into<String>,
+        repository: impl Into<String>,
+        adapter: impl Into<String>,
+    ) -> Self {
+        Self {
+            prompt: prompt.into(),
+            repository: repository.into(),
+            adapter: adapter.into(),
+            max_attempts: default_task_max_attempts(),
+            ..Self::default()
+        }
+    }
+}
+
+/// Constant-time byte comparison for tokens and capabilities. Both the HA
+/// cluster token and the credential gateway's admin token used to carry
+/// their own copy of this loop; a length mismatch returns early because the
+/// length of a secret is not secret.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskView {
+    pub id: String,
+    pub repository: String,
+    pub prompt: String,
+    pub adapter: String,
+    pub status: TaskStatus,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+    pub assigned_attempt_id: Option<String>,
+    #[serde(default)]
+    pub validation_command: Option<String>,
+    /// Distinct failure category when the task is not succeeded/cancelled
+    /// cleanly: `agent_failed` / `validation_failed` / `timeout` etc. NULL on
+    /// success or a clean cancel.
+    #[serde(default)]
+    pub error_code: Option<String>,
+    /// Node this task is pinned to, if the creator requested one (Stage 8
+    /// workflow placement). `None` => scheduler picks any eligible node.
+    #[serde(default)]
+    pub requested_node_id: Option<String>,
+    /// Exact commit the node checked out for the worktree (Stage 8), if the
+    /// task was pinned to one. `None` => branched from `default_branch`.
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    /// ACP session id to resume (Stage 11.5), if this task should continue a
+    /// prior ACP session. `None` => a fresh session.
+    #[serde(default)]
+    pub parent_acp_session_id: Option<String>,
+    /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_mode: Option<String>,
+    /// Hardening P2 item 36: the security profile of the LATEST attempt
+    /// (from `attempts.provenance.security_profile`). Surfaced so operators can
+    /// see which policy the agent ran under. Before any attempt records
+    /// provenance this falls back to the profile the task requested, so a
+    /// queued task does not read back as unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_profile: Option<String>,
+    /// Plan 1.12 (#7): shared-context task group id, if the creator set one.
+    /// Parallel attempts in the same group share `shared_context` notes and
+    /// get the `AG_GROUP_ID` env var on the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Plan 2.1 (#18): org-agent attribution, if the task is agent-managed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Plan 2.9 (#20): consensus-run tag — sibling tasks fired as one vote
+    /// share consensus_group_id; the member name is the adapter. Aggregated
+    /// on complete; independent tasks carry None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_member: Option<String>,
+    /// Competitor-gap feature (consensus patch review): `solve` | `review`
+    /// (echoed from CreateTaskRequest; absent on older rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_mode: Option<String>,
+    /// For review groups: the task id whose changes.patch is judged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_of: Option<String>,
+    /// Feature "opencode profiles": the per-task override attached to this
+    /// task (echoed from CreateTaskRequest). Not part of scheduling
+    /// semantics — informational for dashboards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_override: Option<OpencodeOverride>,
+    /// Competitor-gap feature (GitHub write-back): echoed from
+    /// CreateTaskRequest so operators can see which tasks push + PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_base_ref: Option<String>,
+    /// Project assembly: echoed from CreateTaskRequest (create-remote flag).
+    #[serde(default)]
+    pub github_create: bool,
+    /// Competitor-gap feature (convergence metrics, loop-engineering): the
+    /// attempt id this task was created from via `POST /v1/attempts/{id}/rework`.
+    /// NULL for original tasks. Walking the chain gives the rework-iteration
+    /// depth of a review loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rework_of: Option<String>,
+    /// Competitor-gap feature (task-level auto-retry): total attempts allowed
+    /// (echoed from CreateTaskRequest; 1 = no auto-retry).
+    #[serde(default = "default_task_max_attempts")]
+    pub max_attempts: u32,
+    /// Per-task cost ceilings, echoed from CreateTaskRequest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
+}
+
+/// Plan 1.3 (#13): single-attempt detail (the `GET /v1/attempts/{id}` view).
+/// Echoes the prompt from the owning task so a resumed attempt can inherit
+/// context without a second lookup.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttemptView {
+    pub id: String,
+    pub task_id: String,
+    pub number: u32,
+    pub node_id: String,
+    pub status: AttemptStatus,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub commit_sha: Option<String>,
+    pub exit_code: Option<i32>,
+    pub error_code: Option<String>,
+    /// The owning task's prompt (inherited context for `ag resume`).
+    pub prompt: String,
+    pub adapter: String,
+    pub parent_acp_session_id: Option<String>,
+    /// Competitor-gap feature (convergence metrics): feedback-loop rounds
+    /// this attempt needed before it converged (0 = single-shot).
+    #[serde(default)]
+    pub validation_rounds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeView {
+    pub id: String,
+    pub name: String,
+    pub status: NodeStatus,
+    pub adapters: Vec<String>,
+    pub repositories: Vec<String>,
+    pub max_concurrency: u32,
+    pub active_attempts: u32,
+    pub last_heartbeat_at: String,
+    pub agent_version: String,
+    pub load_avg: f64,
+    /// Plan 6.10: CPU count reported by the node heartbeat. 0 = not
+    /// reported (legacy node); the scheduler load gate falls back to 1.
+    #[serde(default)]
+    pub cpu_count: u32,
+    pub free_disk_mb: u64,
+    /// Plan 6.10: MemAvailable minus the operator-reserved slice (MiB).
+    /// 0 = not reported (legacy node / cold start).
+    #[serde(default)]
+    pub free_memory_mb: u64,
+    /// Latest host MemAvailable (MiB) reported by the node heartbeat.
+    /// 0 = not reported (legacy node / cold start).
+    #[serde(default)]
+    pub mem_available_mb: u64,
+    /// Hardening P0 item 5: node is running an adapter with the unsafe
+    /// unattended bypass active (no sandbox). Surfaced so operators can see
+    /// which nodes run fully-unrestricted agents.
+    #[serde(default)]
+    pub unsafe_active: bool,
+    /// Hardening P0 item 5: best-available permission interception across the
+    /// node's adapters (`structured` | `wrapper` | `none`).
+    #[serde(default = "default_permission_interception")]
+    pub permission_interception: String,
+    /// Hardening P2 item 35: total bytes in the node's durable outbox.
+    #[serde(default)]
+    pub outbox_bytes: u64,
+    /// Hardening P2 item 35: total bytes staged in the node's artifact spool.
+    #[serde(default)]
+    pub artifact_spool_bytes: u64,
+    /// Hardening P0 item 10: total pending event rows across all per-attempt
+    /// spools.
+    #[serde(default)]
+    pub outbox_rows: u64,
+    /// Hardening P0 item 10: age in milliseconds of the oldest unacked event
+    /// across all per-attempt spools.
+    #[serde(default)]
+    pub outbox_oldest_pending_age_ms: u64,
+    /// Hardening P0 item 10: total quarantined corrupt records in the outbox
+    /// quarantine directory.
+    #[serde(default)]
+    pub outbox_corruption_count: u64,
+    /// Hardening P0 item 10: pending completion records in completions.jsonl.
+    #[serde(default)]
+    pub outbox_completion_rows: u64,
+    /// Hardening P2 item 35: cumulative repository-lock wait in milliseconds
+    /// measured on the node (cross-process flock contention, surfaced via
+    /// /metrics as a per-node gauge). 0 on legacy nodes.
+    #[serde(default)]
+    pub repo_lock_wait_ms: u64,
+    /// Hardening P2 item 35: sandbox backend kind ("none" | "docker").
+    #[serde(default = "default_sandbox_backend")]
+    pub sandbox_backend: String,
+    /// Hardening P2 item 35: whether the sandbox backend enforces resource
+    /// limits (memory, CPU, pids).
+    #[serde(default)]
+    pub enforced_limits: bool,
+    /// Plan 6.11: systemd transient scopes are usable on this host
+    /// (`systemd-run --user` answers + cgroups v2 mounted). false on
+    /// legacy nodes.
+    #[serde(default)]
+    pub systemd_scope_supported: bool,
+    /// Hardening P2 item 37: node is drained — it keeps in-flight attempts but
+    /// receives no NEW assignments (maintenance mode).
+    #[serde(default)]
+    pub drained: bool,
+    /// Row creation time; the list_nodes keyset cursor is (created_at, id).
+    #[serde(default)]
+    pub created_at: String,
+    /// Hardening P2 item 35: repository cache size in bytes.
+    #[serde(default)]
+    pub repo_cache_bytes: u64,
+    /// Hardening P2 item 35: workspace size in bytes.
+    #[serde(default)]
+    pub workspace_bytes: u64,
+    /// Hardening P2 item 659: node-level network mode (`none` | `restricted` | `unrestricted`).
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
+    /// Plan 2.5 (#204): per-repository attach state on this node
+    /// (`cloning` | `ready` | `invalid` + error text). Empty on legacy
+    /// nodes (unknown — not invalid).
+    #[serde(default)]
+    pub repo_states: Vec<RepoAttachView>,
+    /// ADR 0029: how many of the node's local `AGENTGRID_ADAPTER_ENV` entries
+    /// are plain values (readable inside the sandbox — T13a) versus
+    /// gateway-delivered capabilities. `None` = the node has never reported it
+    /// (legacy, or it has not beaten since upgrading); the panel says "not
+    /// reported" rather than "clean", because those are different claims.
+    #[serde(default)]
+    pub adapter_env_delivery: Option<AdapterEnvDelivery>,
+    /// ADR 0026 reachability: how many relays the last heartbeat crossed before
+    /// it reached this control plane (`0` = none, i.e. the node dialled the
+    /// control plane itself).
+    ///
+    /// **Observed, not reported.** A relay replaces `x-agentgrid-relay-hops`
+    /// with its own count, so a node behind a relay cannot claim fewer hops
+    /// than it used. It can only claim *more*, which buys it nothing (the
+    /// number is a diagnostic, not an authorisation).
+    ///
+    /// `None` = no heartbeat since this column existed. `0` means no AgentGrid
+    /// forwarder was in the path: every relay *and* every `agentgrid-cp-edge`
+    /// stamps this header, whether or not it has a hop limit configured. It
+    /// does not rule out an L4 balancer or a generic HTTP proxy — those do not
+    /// stamp, and at layer 4 there is nothing to stamp with.
+    #[serde(default)]
+    pub relay_hops: Option<u32>,
+    /// ADR 0012 reachability: the node reported that it reaches the control
+    /// plane through its egress proxy pool. A node claim — see
+    /// `HeartbeatRequest::egress_proxy` for why the control plane cannot
+    /// verify it. `None` = never reported.
+    #[serde(default)]
+    pub egress_proxy: Option<bool>,
+    /// This node can carry other nodes' traffic, and this is the address they
+    /// should dial — the announcement that makes `ag nodes add --via` possible.
+    ///
+    /// A claim by the node, like `egress_proxy`, and for the same reason: the
+    /// control plane cannot check an address whose entire purpose is to be
+    /// reachable from somewhere the control plane is not. `None` = not a relay,
+    /// or a relay that never stated a dialable address.
+    #[serde(default)]
+    pub relay_url: Option<String>,
+    /// Where this node *listens* for relay traffic, exactly as configured
+    /// (`AGENTGRID_RELAY_LISTEN`, e.g. `0.0.0.0:7900`).
+    ///
+    /// Reported separately from `relay_url` because "listening" and "announcing
+    /// an address someone can dial" are different facts, and only the second
+    /// makes a usable relay. Carrying both is what turns a half-configured
+    /// relay — a `0.0.0.0` bind with no advertise address — from an empty cell
+    /// into a stated problem. Not a dialable address by definition: this is a
+    /// bind address, not a URL.
+    #[serde(default)]
+    pub relay_listen: Option<String>,
+}
+
+/// Plan 2.5 (#204): one repository's attach state on a node. `state` is
+/// `cloning` (a clone/fetch is in flight), `ready` (mirror usable) or
+/// `invalid` (last clone/fetch failed — `error` names the cause).
+/// A plain string (not an enum) so future states stay wire-compatible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoAttachView {
+    pub name: String,
+    pub state: String,
+    pub error: String,
+}
+
+fn default_network_mode() -> String {
+    "none".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PollRequest {
+    pub node_id: String,
+    pub name: String,
+    pub adapters: Vec<String>,
+    pub repositories: Vec<String>,
+    pub max_concurrency: u32,
+    /// Node→control-plane protocol version (Stage 2.5). Absent on legacy
+    /// nodes; a major mismatch marks the node `degraded`.
+    #[serde(default)]
+    pub protocol_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Assignment {
+    pub attempt_id: String,
+    pub task_id: String,
+    /// Hardening P0 item 8: fencing token. Generated by the CP at assignment;
+    /// the node echoes it back on every mutating node->CP call (ack, events,
+    /// complete, artifact, session) and the CP rejects a stale token (the
+    /// node is reporting for an attempt that was reassigned/lost) with 409.
+    /// Old nodes that never send a token are accepted under the N/N-1 policy
+    /// (a blank token matches the default blank); upgraded nodes always set it.
+    #[serde(default)]
+    pub fencing_token: String,
+    pub repository: String,
+    pub prompt: String,
+    pub adapter: String,
+    pub number: u32,
+    /// Seconds before the node should forcibly kill the attempt.
+    pub timeout_secs: u64,
+    /// Git remote URL; empty when the task runs in a plain directory.
+    #[serde(default)]
+    pub git_url: String,
+    /// Branch new attempts branch from (e.g. `main`).
+    #[serde(default)]
+    pub default_branch: String,
+    /// Optional validation command run after the agent succeeds (Stage 3.3).
+    #[serde(default)]
+    pub validation_command: Option<String>,
+    /// Hardening P0 item 12: per-attempt validation timeout in seconds
+    /// (default 300 when unset). The node kills the validation process tree on
+    /// timeout and reports `validation_timeout`.
+    #[serde(default)]
+    pub validation_timeout_secs: Option<u64>,
+    /// Optional exact commit the node should check out (Stage 8 base_commit).
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    /// Optional ACP session id the node should resume via `session/new`
+    /// `parent_session_id` (Stage 11.5). `None` => a fresh session.
+    #[serde(default)]
+    pub parent_acp_session_id: Option<String>,
+    /// Hardening P2 item 659: task-level network mode (`none` | `restricted` | `unrestricted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_mode: Option<String>,
+    /// Stage 13: optional external-origin provenance for this attempt, echoed
+    /// by the node back on the completion call so the CP persists it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceRecord>,
+    /// Stage 8 / line 239: worker commit SHAs an Integrator step should land
+    /// into its worktree as an integration branch before the agent runs. Each
+    /// is an upstream worker's winning commit. Empty for non-integrator steps.
+    /// The node cherry-picks them in order (defense-in-depth: token-validated).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream_commits: Vec<String>,
+    /// Stage 8 / line 257: task ids parallel to `upstream_commits` (same
+    /// order) so the node can fetch each upstream worker's `changes.patch`
+    /// artifact from the control plane and `git apply` it when the commit SHA
+    /// is not reachable via the shared Git remote (distributed workflow
+    /// without a shared remote). Empty for non-integrator steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream_task_ids: Vec<String>,
+    /// Plan 1.12 (#7): shared-context task group id (from the task). When
+    /// set, the node forwards it to the agent as `AG_GROUP_ID`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Plan 2.4 (#22a): when true, the node makes the attempt's worktree
+    /// read-only (sandbox bind-mount gets `:ro`). Used for verifier steps so
+    /// a verifier cannot silently edit the code it is validating.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Plan 2.5 (#22b): self-healing eval cases for retry attempts. After a
+    /// passed attempt the CP persists the winning change as
+    /// `eval-case-<attempt>-<n>.yaml`; when the task is retried (task-level
+    /// retry), the accumulated suite is shipped here, the node materialises
+    /// them into the worktree at `.agentgrid/evals/` and the node probes
+    /// them after the first successful validation — any failure regenerates
+    /// the fix loop with the eval output as feedback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eval_cases: Vec<String>,
+    /// Plan 2.9 (#20): consensus-run tag — a `consensus_group_id` ties
+    /// sibling attempts that all ran the same prompt across different
+    /// adapters (e.g. `claude,codex,opencode`). The CP stamps one group id
+    /// per consensus batch; the assignment echoes it back so the node can
+    /// emit provenance (`AG_CONSENSUS_GROUP=<id>`). Aggregation happens on
+    /// complete: the last finisher collapse-evaluates the patch SHAs and
+    /// creates a human-review approval when the SHAs disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_group_id: Option<String>,
+    /// Plan 2.9 (#20): adapter name for THIS member — informative only;
+    /// drives nothing decision-wise but helps the reviewer spot which
+    /// adapter produced which patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_member: Option<String>,
+    /// Feature "opencode profiles": per-attempt override merged over the
+    /// node's active profile and injected via OPENCODE_CONFIG_CONTENT for
+    /// the `opencode` adaptaer. The env var dies with the process — an
+    /// override can never leak into later attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_override: Option<OpencodeOverride>,
+    /// Competitor-gap feature (GitHub write-back): when true the node pushes
+    /// the attempt branch, opens a PR and comments on the linked issue after
+    /// a successful finish (best-effort; see attempt_runner).
+    #[serde(default)]
+    pub github_push: bool,
+    /// GitHub repository `owner/name` (PR + issue comment target).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    /// GitHub issue number to comment on after write-back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue: Option<i64>,
+    /// Base ref for the PR (falls back to `default_branch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_base_ref: Option<String>,
+    /// Project assembly: create the remote repo via the API when missing,
+    /// `git init` a plain-dir worktree first (see `CreateTaskRequest`).
+    #[serde(default)]
+    pub github_create: bool,
+    /// Stage 10: workflow role that owns this task (`architect`/`worker`/
+    /// `reviewer`/`integrator`/`verifier`, snake_case), resolved from
+    /// `role_runs` at assign time. `None` for direct (non-workflow) tasks.
+    /// The node forwards it to cluster executors as the executor/verifier
+    /// side selector (see `zeroshot_role`). Optional + defaulted so N/N-1
+    /// nodes/CPs ignore it safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_role: Option<String>,
+    /// Per-task cost ceilings (see `CreateTaskRequest`); enforced by the
+    /// node mid-attempt. Optional + defaulted for N/N-1 safety.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelState {
+    pub cancel_requested: bool,
+}
+
+/// One-time enrollment token issued by an admin (TTL 10 min, only hash stored).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrollTokenResponse {
+    pub token: String,
+    pub expires_at: String,
+}
+
+/// Stage 4.1: create the first local user (only allowed while no users exist
+/// and the one-time bootstrap setup token is presented; hardening P0 closes the
+/// open window where anyone reachable could create the first admin).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupRequest {
+    pub username: String,
+    pub password: String,
+    /// One-time bootstrap setup token printed to the control-plane stdout on
+    /// first start (when no users exist). Required whenever a setup token is
+    /// active; absent/empty is rejected.
+    #[serde(default)]
+    pub setup_token: Option<String>,
+}
+
+/// Stage 4.1: username + password exchange for a JWT.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Stage 4.1: JWT returned on successful login.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginResponse {
+    pub token: String,
+}
+
+/// Plan 5.2: roles for RBAC. `admin` = full access; `operator` = view +
+/// approvals only (enforced by the control-plane middleware).
+pub const ROLE_ADMIN: &str = "admin";
+pub const ROLE_OPERATOR: &str = "operator";
+
+pub fn is_valid_role(role: &str) -> bool {
+    role == ROLE_ADMIN || role == ROLE_OPERATOR
+}
+
+/// Plan 5.2: admin creates additional users with a role.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub password: String,
+    /// "admin" or "operator"; defaults to "operator".
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+fn default_role() -> String {
+    ROLE_OPERATOR.to_string()
+}
+
+/// Plan 5.2: user entry in the admin users list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserEntry {
+    pub username: String,
+    pub role: String,
+}
+
+/// Finding 7: admin updates an existing account. Both fields are optional and
+/// at least one is required; either change invalidates every session issued so
+/// far, so a demotion or a password rotation cannot be outlived by a token.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UpdateUserRequest {
+    /// "admin" or "operator".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+/// Node→control-plane protocol version (Stage 2.5). Bump the major on any
+/// incompatible change to enroll/heartbeat/poll; a node advertising a
+/// different major is marked `degraded(incompatible_protocol)`.
+///
+/// **2** (ADR 0028): `adapter_env` in a poll response carries sealed values
+/// and the CP needs the node's X25519 public key to produce them. A protocol-1
+/// node would deserialize a sealed blob into the variable it expects to be a
+/// key, so it is served no CP-managed adapter env at all and keeps whatever
+/// `AGENTGRID_ADAPTER_ENV` gave it locally.
+pub const NODE_PROTOCOL_VERSION: &str = "2";
+
+/// Plan 6.12: schema version of the `capabilities` array a node reports in
+/// each heartbeat (what fields an `AdapterCapability` carries). Absent on
+/// legacy nodes; the CP currently accepts any value and logs a mismatch —
+/// the field is observability for rolling upgrades, not a gate.
+pub const CAPABILITIES_SCHEMA_VERSION: &str = "1";
+
+/// Plan 6.12: event-version contract — the envelope shape of the NDJSON
+/// events a node ingests (`POST /v1/node/attempts/{id}/events`). Absent on
+/// legacy nodes; unknown event kinds already fall back to a raw `log` event,
+/// so a newer minor stays forward-compatible.
+pub const SUPPORTED_EVENT_VERSIONS: &str = "1";
+
+/// Plan 6.12 / 2.6: what `GET /v1/version` reports — the CP's own crate
+/// version plus the node-facing contract versions, so `ag doctor` and the
+/// release smoke test can assert daemon↔CP compatibility without a task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VersionInfo {
+    pub control_plane: String,
+    pub node_protocol: String,
+    pub capabilities_schema: String,
+    pub supported_event_versions: String,
+}
+
+/// Plan 6.12: build the `/v1/version` body from the CP's compile-time crate
+/// version and the shared contract constants.
+pub fn version_info() -> VersionInfo {
+    VersionInfo {
+        control_plane: env!("CARGO_PKG_VERSION").to_string(),
+        node_protocol: NODE_PROTOCOL_VERSION.into(),
+        capabilities_schema: CAPABILITIES_SCHEMA_VERSION.into(),
+        supported_event_versions: SUPPORTED_EVENT_VERSIONS.into(),
+    }
+}
+
+/// True when a node-advertised `protocol_version` is incompatible with the
+/// current major. `None` (legacy node) is treated as compatible.
+pub fn is_incompatible_protocol(pv: &Option<String>) -> bool {
+    match pv {
+        None => false,
+        Some(v) => v.split('.').next().unwrap_or("") != NODE_PROTOCOL_VERSION,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrollRequest {
+    pub token: String,
+    pub name: String,
+    #[serde(default)]
+    pub adapters: Vec<String>,
+    #[serde(default)]
+    pub repositories: Vec<String>,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u32,
+    #[serde(default)]
+    pub agent_version: String,
+    /// Node→control-plane protocol version (Stage 2.5). Absent on legacy
+    /// nodes; a major mismatch marks the node `degraded`.
+    #[serde(default)]
+    pub protocol_version: Option<String>,
+    /// X25519 public key (base64) the control plane seals adapter-env secrets
+    /// to (ADR 0028). Absent on nodes older than protocol 2 — those get no
+    /// CP-managed adapter env at all rather than an undecryptable blob.
+    #[serde(default)]
+    pub public_key: Option<String>,
+    /// Permission interception mode for this node's adapters. One of:
+    /// "wrapper" (legacy stdout parsing) or "structured" (ACP-style).
+    #[serde(default = "default_permission_interception")]
+    pub permission_interception: String,
+}
+
+/// Node identity + secret credential returned once at enroll (never stored plaintext).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrollResponse {
+    pub node_id: String,
+    pub credential: String,
+}
+
+/// `POST /v1/nodes/join-command` — the one line to run on a host that is not
+/// reachable *from* here.
+///
+/// The control plane does not ssh anywhere; the host fetches what it needs from
+/// the control plane it is joining. When the host cannot reach the control
+/// plane at all, `server` is a **sibling node's relay** instead: the same
+/// script, fetched through the sibling, and the daemon keeps dialling the
+/// sibling afterwards.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinCommandResponse {
+    /// Single-use enrollment token, already embedded in `command`.
+    pub token: String,
+    pub expires_at: String,
+    /// The exact shell line, ready to paste on the new host.
+    pub command: String,
+    /// The URL the joining host dials: the control plane, or a relay.
+    pub server: String,
+    /// The node carrying the traffic, when the command was built through one.
+    /// `None` = the host dials the control plane itself.
+    #[serde(default)]
+    pub via: Option<JoinVia>,
+}
+
+/// The relay a join command was built through.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinVia {
+    pub node_id: String,
+    pub name: String,
+    /// The address the joining host dials. This is the *relay's own claim*
+    /// (`relay_url` on the node), not something the control plane verified — a
+    /// relay exists precisely to be reachable from where the control plane is
+    /// not.
+    pub relay_url: String,
+    /// The relay's status at the moment the command was built.
+    ///
+    /// `revoked` is refused outright: that node cannot reach the control plane,
+    /// so it cannot carry anyone else's traffic. `offline` is only a warning —
+    /// it is transient, and an operator who names a relay deliberately knows
+    /// more than the row does — but it is carried here so the warning can be
+    /// printed before the command fails on a host nobody can log into.
+    pub status: NodeStatus,
+    /// When this relay last reached the control plane, verbatim rather than
+    /// turned into an age: the operator's clock is the one that matters.
+    pub last_heartbeat_at: String,
+}
+
+/// Periodic node health/capability report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeartbeatRequest {
+    #[serde(default)]
+    pub status: Option<NodeStatus>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub adapters: Vec<String>,
+    #[serde(default)]
+    pub repositories: Vec<String>,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u32,
+    #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub load_avg: f64,
+    /// Plan 6.10: CPU count of the host (from /proc/cpuinfo or
+    /// std::thread::available_parallelism). 0 = not reported; the
+    /// scheduler load gate falls back to 1.
+    #[serde(default)]
+    pub cpu_count: u32,
+    /// Plan 6.10: MemAvailable minus the operator-reserved slice
+    /// (AGENTGRID_RESERVED_MEM_MB, default 256). The scheduler gate treats
+    /// this as "memory the node may hand to new attempts". 0 = not
+    /// reported; the gate only applies once a value is known.
+    #[serde(default)]
+    pub free_memory_mb: u64,
+    #[serde(default)]
+    pub free_disk_mb: u64,
+    #[serde(default)]
+    pub active_attempts: u32,
+    /// Latest MemAvailable of the host (MiB, from /proc/meminfo). 0 = not
+    /// reported: the scheduler memory gate only applies once a value known.
+    #[serde(default)]
+    pub mem_available_mb: u64,
+    /// Node→control-plane protocol version (Stage 2.5). Absent on legacy
+    /// nodes; a major mismatch marks the node `degraded`.
+    #[serde(default)]
+    pub protocol_version: Option<String>,
+    /// X25519 public key (base64) the control plane seals adapter-env secrets
+    /// to (ADR 0028). Absent on nodes older than protocol 2 — those get no
+    /// CP-managed adapter env at all rather than an undecryptable blob.
+    #[serde(default)]
+    pub public_key: Option<String>,
+    /// Per-adapter capability the node advertises each heartbeat (Stage 3.2):
+    /// which adapters it can run, their versions, and whether each is ready.
+    #[serde(default)]
+    pub capabilities: Vec<AdapterCapability>,
+    /// Stage 9.2: skills the node discovered on disk this heartbeat. The
+    /// control plane upserts `(name, source)` rows into the trust ledger as
+    /// untrusted (operator never decided) without overwriting an existing
+    /// operator decision. Absent on legacy nodes (auto-discovery stays a
+    /// hint, never blocks a task).
+    #[serde(default)]
+    pub discovered_skills: Vec<HeartbeatSkill>,
+    /// Plan 1.8 (#15): per-account usage counters. Absent on legacy nodes.
+    #[serde(default)]
+    pub account_usage: Vec<AccountUsage>,
+    /// Hardening P0 item 5: this node is running an adapter with the unsafe
+    /// unattended bypass active (no sandbox). Absent on legacy nodes.
+    #[serde(default)]
+    pub unsafe_active: bool,
+    /// Hardening P0 item 5: best-available permission interception across the
+    /// node's adapters (`structured` | `wrapper` | `none`). Absent on legacy
+    /// nodes (defaults to `wrapper`).
+    #[serde(default = "default_permission_interception")]
+    pub permission_interception: String,
+    /// Hardening P2 item 35: total bytes currently buffered in the node's
+    /// durable outbox (pending event + completion spools). 0 on legacy nodes.
+    #[serde(default)]
+    pub outbox_bytes: u64,
+    /// Hardening P2 item 35: total bytes staged in the node's durable artifact
+    /// spool (artifacts not yet delivered to the CP). 0 on legacy nodes.
+    #[serde(default)]
+    pub artifact_spool_bytes: u64,
+    /// Hardening P0 item 10: total pending event rows across all per-attempt
+    /// spools. 0 on legacy nodes.
+    #[serde(default)]
+    pub outbox_rows: u64,
+    /// Hardening P0 item 10: age in milliseconds of the oldest unacked event
+    /// across all per-attempt spools. 0 on legacy nodes or when empty.
+    #[serde(default)]
+    pub outbox_oldest_pending_age_ms: u64,
+    /// Hardening P0 item 10: total quarantined corrupt records in the outbox
+    /// quarantine directory. 0 on legacy nodes.
+    #[serde(default)]
+    pub outbox_corruption_count: u64,
+    /// Opencode config drift detector: hash of the on-disk
+    /// `~/.config/opencode/opencode.json` the node most recently applied.
+    /// The CP compares it to the assigned profile's hash on heartbeat; a
+    /// mismatch marks the node `degraded` until the next pull/reapply.
+    /// Absent on legacy nodes → no drift check fires.
+    #[serde(default)]
+    pub applied_opencode_hash: Option<String>,
+    /// Hardening P0 item 10: pending completion records in completions.jsonl.
+    /// 0 on legacy nodes.
+    #[serde(default)]
+    pub outbox_completion_rows: u64,
+    /// Hardening P2 item 35: cumulative repository-lock wait in milliseconds
+    /// measured on the node. 0 on legacy nodes.
+    #[serde(default)]
+    pub repo_lock_wait_ms: u64,
+    /// Plan 6.8: `git-lfs` is installed and its `version` probe answered.
+    /// Absent/legacy nodes report false — LFS repos need manual attention.
+    #[serde(default)]
+    pub git_lfs_installed: bool,
+    /// Plan 6.8: plain `git` resolves (submodule recursion is a clone-time
+    /// argument, not a separate capability; the flag exists since 2.13).
+    /// Absent on legacy nodes.
+    #[serde(default)]
+    pub git_submodules_supported: bool,
+    /// Hardening P2 item 35: sandbox backend kind ("none" | "docker").
+    /// Absent on legacy nodes (defaults to "none").
+    #[serde(default = "default_sandbox_backend")]
+    pub sandbox_backend: String,
+    /// Hardening P2 item 35: whether the sandbox backend enforces resource
+    /// limits (memory, CPU, pids). Always false for "none"; true for
+    /// "docker" only when limits are actually configured. 0 on legacy nodes.
+    #[serde(default)]
+    pub enforced_limits: bool,
+    /// Plan 6.11: systemd transient scopes are usable on this host
+    /// (`systemd-run --user` answers + cgroups v2 mounted). Absent on
+    /// legacy nodes (defaults to false — the scope backend is optional).
+    #[serde(default)]
+    pub systemd_scope_supported: bool,
+    /// Plan 2.5 (#204): per-repository attach state (`cloning` | `ready` |
+    /// `invalid` + error text). Absent on legacy nodes (empty — unknown).
+    #[serde(default)]
+    pub repo_states: Vec<RepoAttachView>,
+    /// Hardening P2 item 35: repository cache size in bytes. 0 on legacy nodes.
+    #[serde(default)]
+    pub repo_cache_bytes: u64,
+    /// Hardening P2 item 35: workspace size in bytes. 0 on legacy nodes.
+    #[serde(default)]
+    pub workspace_bytes: u64,
+    /// Hardening P2 item 659: node-level network mode (`none` | `restricted` | `unrestricted`).
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
+    /// Plan 2.14 (#27): this node's resident-set size in MiB, sampled from
+    /// `/proc/self/status` (`VmRSS`). The capacity-pressure gate reads
+    /// `nodes.active_rss_mib` and refuses an assignment when
+    /// `active_rss + forecast*attempts` exceeds `max_rss_mib`; before this
+    /// writer existed the gate always saw 0 and never rejected on real
+    /// memory pressure. Absent on legacy nodes (defaults to 0 → gate
+    /// falls back to the per-attempt forecast only).
+    #[serde(default)]
+    pub active_rss_mib: u64,
+    /// Plan 2.14 (#27): the hard memory ceiling in MiB this node wants the
+    /// gate to enforce. The node operator declares it (typically matching the
+    /// sandbox memory cap or the host's available RAM); before this writer
+    /// existed the gate's `max_rss_mib` stayed pinned to the schema default
+    /// (1024 MiB) forever, so an operator on a small host (Termux 256, RPi
+    /// 512, …) could never lower it and the gate let real OOM pressure
+    /// through. `0` = node does not want to override the schema default
+    /// (legacy / value unset — the CP then keeps whatever row value it had).
+    #[serde(default)]
+    pub max_rss_mib: u64,
+    /// Plan 6.12: schema version of the `capabilities` array above. Absent
+    /// on legacy nodes; a mismatch with the CP is logged, never a gate.
+    #[serde(default)]
+    pub capabilities_schema_version: Option<String>,
+    /// Plan 6.12: event-version contract this node speaks for the NDJSON
+    /// ingest (`1` today). Absent on legacy nodes.
+    #[serde(default)]
+    pub supported_event_versions: Option<String>,
+    /// ADR 0029 observability: how this node delivers its **local**
+    /// `AGENTGRID_ADAPTER_ENV` entries. `None` on legacy nodes — "not
+    /// reported", which is deliberately distinguishable from "reported, and
+    /// nothing is a plain value". Without that distinction a node that never
+    /// sends the field would look exactly like a fully-migrated one.
+    #[serde(default)]
+    pub adapter_env_delivery: Option<AdapterEnvDelivery>,
+    /// ADR 0012 reachability: the node dials the control plane through its
+    /// egress proxy pool, so it is not connected directly.
+    ///
+    /// **A claim, not an observation.** The control plane cannot see a forward
+    /// proxy — the node's request looks like any other once it arrives — so the
+    /// only source for this is the node itself. `None` = the node never said
+    /// (a binary older than this field, or it has not beaten since upgrading),
+    /// which is *not* the same claim as `Some(false)`.
+    ///
+    /// The other half of the same question — is this node relayed? — is
+    /// **not** here on purpose: a node cannot tell a relay from a control
+    /// plane, it just has a URL. That one is observed by the control plane
+    /// from the `x-agentgrid-relay-hops` header and lands in
+    /// `NodeView::relay_hops`.
+    #[serde(default)]
+    pub egress_proxy: Option<bool>,
+    /// ADR 0026 reachability: relay hops this heartbeat crossed, **filled in
+    /// by the control plane** from `x-agentgrid-relay-hops` before the row is
+    /// written. The node never sends it.
+    ///
+    /// `#[serde(skip)]` in both directions, deliberately. The value describes
+    /// the *transport the request arrived on*, not anything the node knows —
+    /// a node cannot tell a relay from a control plane, it just has a URL. So
+    /// the only party that can observe it is the receiver, and skipping
+    /// deserialization means a node cannot spoof it even by editing its own
+    /// request. Skipping serialization keeps it out of the heartbeat body the
+    /// node sends, where it would otherwise be a field that means nothing.
+    ///
+    /// `None` = this heartbeat was not observed through a relay-aware
+    /// receiver (only tests reach that state).
+    #[serde(skip)]
+    pub relay_hops: Option<u32>,
+    /// This node carries other nodes' control-plane traffic, and this is the
+    /// URL they should dial (`AGENTGRID_RELAY_ADVERTISE`, or the listen address
+    /// when it is concrete enough to dial).
+    ///
+    /// **A claim.** The control plane cannot verify it — a relay exists
+    /// precisely so that the peers who can reach it are the ones who cannot
+    /// reach the control plane — so the only source is the node itself. That is
+    /// why the panel and `ag nodes ls` print it as an announcement rather than
+    /// as a reachable address, and why `agentgrid-node-daemon probe` exists: the
+    /// one party who can check it is a host that tries.
+    ///
+    /// `None` = this node is not a relay, or it is one whose dialable address
+    /// nobody stated (a `0.0.0.0` listen with no advertise address — the host's
+    /// own name is a guess that fails on the *other* machine, which is the worst
+    /// place to find out). `relay_listen` tells those two apart.
+    #[serde(default)]
+    pub relay_url: Option<String>,
+    /// Where this node listens for relay traffic (`AGENTGRID_RELAY_LISTEN`).
+    ///
+    /// Present with `relay_url: null` is the one state worth naming out loud: a
+    /// relay that is running and announcing nothing. "Not a relay" has neither
+    /// field, and the fix for each is a different variable.
+    #[serde(default)]
+    pub relay_listen: Option<String>,
+}
+
+/// ADR 0029: how the node hands adapter credentials to the agent.
+///
+/// **Counts only.** Names and values stay on the node: the control plane has no
+/// business knowing which variables exist, and ADR 0028 exists precisely to
+/// keep values off it. The counts are enough for the question that matters —
+/// "has this node finished migrating off plain values?" — because the operator
+/// can read the names in the unit file they wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AdapterEnvDelivery {
+    /// Entries handed to the agent as plain values: the key is readable inside
+    /// the sandbox (threat-model T13a, open for these).
+    #[serde(default)]
+    pub plain: u32,
+    /// Entries replaced by a per-attempt capability, so the real key never
+    /// enters the sandbox.
+    #[serde(default)]
+    pub gateway: u32,
+    /// Entries replaced by a **real, short-lived, provider-issued** token
+    /// (ADR 0029 F/exchange). Counted apart from `gateway` because the two are
+    /// different promises: a capability is worthless outside the gateway, an
+    /// exchanged token works from anywhere until the provider expires it. A
+    /// panel that added them together would report the safer number for the
+    /// less safe mode.
+    #[serde(default)]
+    pub exchange: u32,
+}
+
+/// Plan 1.8 (#15): per-account usage reported by a node in its heartbeat so
+/// the control plane can surface it at `GET /v1/nodes/{id}/accounts/usage`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountUsage {
+    /// Credential env var the account backs (e.g. `ANTHROPIC_API_KEY`).
+    pub env: String,
+    /// 0-based index of the token currently in use within the pool.
+    pub token_index: usize,
+    /// Attempts run on this account.
+    pub attempts: u64,
+    /// 429 / rate-limit hits that rotated to the next token.
+    pub rate_limited: u64,
+}
+
+/// A skill name + source ("project" | "user" | "managed") advertised in a
+/// heartbeat. Carries no path or body — the trust ledger only needs the
+/// identity, never the skill content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatSkill {
+    pub name: String,
+    pub source: String,
+}
+
+fn default_max_concurrency() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PollResponse {
+    pub assignment: Option<Assignment>,
+    /// Plan 0.3 item 1.2: the full assignment batch (up to the node's free
+    /// concurrency slots). Legacy nodes read only `assignment` (N/N-1
+    /// compat); new nodes consume every entry.
+    #[serde(default)]
+    pub assignments: Vec<Assignment>,
+    /// Egress proxy URLs the node should use (CP-managed list). Empty = keep
+    /// current; the node's own env `AGENTGRID_PROXY_URLS` always wins when set.
+    #[serde(default)]
+    pub proxy_urls: Vec<String>,
+    /// True when `proxy_urls` is the node's **complete** pool, not merely
+    /// "nothing to say".
+    ///
+    /// Without it an empty list is ambiguous — "you have none" and "this
+    /// control plane is too old to send any" look identical — so the node has
+    /// to keep its last pool, which made removing the last proxy a no-op for
+    /// every node already connected. An older control plane omits the field,
+    /// so the old behaviour is preserved exactly.
+    #[serde(default)]
+    pub proxy_urls_complete: bool,
+    /// CP-managed adapter environment (e.g. route claude at a custom proxy
+    /// endpoint: adapter=claude, key=ANTHROPIC_BASE_URL). Entries with
+    /// adapter="*" apply to every adapter. Empty = keep current.
+    ///
+    /// Values travel **sealed to this node's key** (ADR 0028): the control
+    /// plane stores ciphertext and cannot read it back.
+    #[serde(default)]
+    pub adapter_env: Vec<SealedAdapterEnvEntry>,
+    /// True when `adapter_env` is the node's **complete** set, not merely the
+    /// entries that changed.
+    ///
+    /// Without this an empty list is ambiguous — "you have none" and "this
+    /// control plane is too old to send any" look identical — and the node has
+    /// to keep its last snapshot, which would make `ag adapter-env rm` a
+    /// no-op until the node restarts. A protocol-1 control plane omits the
+    /// field, so the old behaviour is preserved exactly.
+    #[serde(default)]
+    pub adapter_env_complete: bool,
+}
+
+/// One CP-managed env-var entry, sealed for the node receiving it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedAdapterEnvEntry {
+    pub adapter: String,
+    pub key: String,
+    /// `agentgrid_common::seal` blob, bound to `(node, adapter, key)`.
+    pub sealed: String,
+}
+
+/// A CP-managed entry after the node has opened it. Never serialized back to
+/// the control plane: the plaintext exists only in the node's memory, for the
+/// lifetime of the attempt that needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterEnvEntry {
+    pub adapter: String,
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncomingEvent {
+    pub sequence: u64,
+    pub r#type: EventType,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IngestEventsRequest {
+    pub events: Vec<IncomingEvent>,
+}
+
+/// Response to `POST /v1/node/attempts/{id}/events`.
+///
+/// `highest_contiguous_sequence` is the largest in-order sequence the control
+/// plane currently holds for this attempt: the contiguous run of sequences
+/// 1..=N present in `task_events`. A client that batched up to S and gets back
+/// `highest_contiguous_sequence < S` knows the CP has a gap (some earlier batch
+/// did not land); one that gets `>= S` knows the full prefix landed. This is
+/// purely advisory today (hardening P1 item 14): the durable outbox still
+/// drives redelivery, so a client may safely ignore it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct IngestEventsAck {
+    pub accepted: u64,
+    pub highest_contiguous_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CompleteAttemptRequest {
+    pub exit_code: i32,
+    /// Commit SHA produced by the attempt, if it ran in a git worktree.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    /// Hardening P2 item 32-5: the exact upstream commit this attempt started
+    /// from (the resolved base). Persisted on the attempt row so the prepared
+    /// base can be reconstructed later. Populated by the node daemon; NULL when
+    /// the node did not pin/report a base (default-branch checkout, or plain
+    /// non-git tasks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_base_sha: Option<String>,
+    /// Hardening P1 item 32: the remote HEAD SHA captured at attempt *start*
+    /// (before the agent ran), so audits/diffs can reconstruct what upstream
+    /// looked like when the attempt began — independent of the resolved base.
+    /// Populated by the node daemon; NULL when not a git repo / not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_head_at_start: Option<String>,
+    /// Hardening P1 item 32: the remote HEAD SHA captured at attempt *finish*
+    /// (after the agent ran / before completion). Captures upstream moves that
+    /// happened during the attempt; useful for quarantine / re-run decisions.
+    /// Populated by the node daemon; NULL when not a git repo / not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_head_at_finish: Option<String>,
+    /// Distinct failure category: `agent_failed` vs `validation_failed` etc.
+    #[serde(default)]
+    pub error_code: Option<String>,
+    /// ACP session id returned by `session/new`, so the control plane can offer
+    /// it as `parent_acp_session_id` for a follow-up task (Stage 11.5).
+    #[serde(default)]
+    pub acp_session_id: Option<String>,
+    /// Stage 13 plan expansion: an `expandable` architect step may emit a
+    /// machine-readable plan (YAML/JSON, an array of worker steps). Persisted on
+    /// the attempt row; when the architect step succeeds, the run pauses in
+    /// `PlanReady` and awaits approval before the plan is parsed (via
+    /// `parse_plan_steps`) and expanded into new workflow steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Stage 13: optional provenance record — an external id that links
+    /// this attempt's outcome back to the system that requested it
+    /// (Entire/h5i/Guild). Carried through to the attempt row so operators
+    /// can trace a run back to its external origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProvenanceRecord>,
+    /// Hardening P1 item 11: artifact names this attempt staged locally but
+    /// could not deliver before completion (control plane was down). The node
+    /// retries them on the next startup; the CP records the list so operators
+    /// can see which artifacts are still owed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_artifacts: Vec<String>,
+    /// Competitor-gap feature (convergence metrics, loop-engineering): how
+    /// many feedback-loop rounds the node ran for this attempt (agent exit 0
+    /// but validation failed -> re-spawn with the error). 0 = no feedback
+    /// loop or the ACP path (single-shot). Lets operators see how hard a
+    /// task had to fight to converge.
+    #[serde(default)]
+    pub validation_rounds: u32,
+}
+
+/// A provenance link between an attempt and the external system that
+/// originated it (Entire/h5i/Guild MCP). Only carries identifiers — never
+/// secrets — so it is safe to persist and surface in the UI/API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProvenanceRecord {
+    /// Which external system produced this run (`entire`/`h5i`/`guild`/...).
+    pub originator: String,
+    /// Opaque id in that system (e.g. a project/workflow id).
+    pub external_id: String,
+    /// Optional human-readable label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Security profile used for this attempt (Stage 4.2 hardening).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateRepositoryRequest {
+    pub name: String,
+    pub git_url: String,
+    pub default_branch: String,
+    #[serde(default)]
+    pub validation_command: Option<String>,
+    /// Plan 6.9: structured host/tool requirements for tasks on this
+    /// repository. Absent = unconstrained (legacy rows / plain tasks).
+    #[serde(default)]
+    pub requirements: Option<RepoRequirements>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepositoryView {
+    pub id: String,
+    pub name: String,
+    pub git_url: String,
+    pub default_branch: String,
+    pub validation_command: Option<String>,
+    pub created_at: String,
+    /// Plan 6.9: structured requirements (None = unconstrained).
+    #[serde(default)]
+    pub requirements: Option<RepoRequirements>,
+}
+
+/// Plan 6.9: structured repository requirements — OS, arch, tools with
+/// version requirements, and host resource floors. Stored as JSON on the
+/// repository row; the scheduler enforces the fields it has node data
+/// for today (`memory_mb`), the rest is operator-visible eligibility
+/// context (and the contract future gates build on).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepoRequirements {
+    /// Required host OS (`linux`, `darwin`, `windows`). None = any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    /// Required host arch (`x86_64`, `aarch64`). None = any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    /// Required tools with version requirements (`git >=2.39`,
+    /// `node ^22`). Empty = none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolRequirement>,
+    /// Minimum host memory (MiB). None = no floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    /// Minimum free disk (MiB). None = no floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mb: Option<u64>,
+}
+
+/// One required tool: name + semver requirement (see [`version`] for the
+/// accepted forms). An empty `version_req` is rejected at validation —
+/// omit the tool instead of constraining nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRequirement {
+    pub name: String,
+    pub version_req: String,
+}
+
+/// Validate structured requirements at the trust boundary (registration):
+/// sane charset/length on names, parseable version requirements,
+/// non-absurd resource floors. `Ok(())` = storable.
+pub fn validate_repo_requirements(r: &RepoRequirements) -> Result<(), String> {
+    fn token_ok(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'/'
+            })
+    }
+    if let Some(os) = &r.os {
+        if !token_ok(os) {
+            return Err(format!("invalid requirements.os: {os:?}"));
+        }
+    }
+    if let Some(arch) = &r.arch {
+        if !token_ok(arch) {
+            return Err(format!("invalid requirements.arch: {arch:?}"));
+        }
+    }
+    if r.tools.len() > 32 {
+        return Err("requirements.tools: at most 32 entries".to_string());
+    }
+    for t in &r.tools {
+        if !token_ok(&t.name) {
+            return Err(format!("invalid tool name: {:?}", t.name));
+        }
+        if !valid_version_req(&t.version_req) {
+            return Err(format!(
+                "invalid version_req for tool {:?}: {:?}",
+                t.name, t.version_req
+            ));
+        }
+    }
+    // Resource floors: >0 when present, below absurd (1 TiB) so a typo
+    // like 999999999 cannot silently fence every node off.
+    for (label, v) in [("memory_mb", r.memory_mb), ("disk_mb", r.disk_mb)] {
+        if let Some(mb) = v {
+            if mb == 0 || mb > 1_048_576 {
+                return Err(format!("invalid requirements.{label}: {mb}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate GitHub write-back refs at the trust boundary (task/run create):
+/// `owner/name` shape (same rules the node enforces before `git push`) and a
+/// positive issue number. `github_push` without a repo, or `github_create`
+/// without push+repo, is rejected — a malformed target must 400 here, not
+/// die later in a `github_push_failed` log on a `succeeded` task.
+pub fn validate_github_refs(
+    github_push: bool,
+    github_repo: Option<&str>,
+    github_issue: Option<i64>,
+    github_create: bool,
+) -> Result<(), String> {
+    let ok_part = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 128
+            && s.chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    match github_repo {
+        Some(repo) => {
+            let mut parts = repo.split('/');
+            let (owner, name) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            if parts.next().is_some() || !ok_part(owner) || !ok_part(name) {
+                return Err(format!("invalid github_repo (want owner/name): {repo:?}"));
+            }
+        }
+        None if github_push || github_create => {
+            return Err("github_push/github_create require github_repo".to_string());
+        }
+        None => {}
+    }
+    if let Some(n) = github_issue {
+        if n <= 0 {
+            return Err(format!("invalid github_issue: {n}"));
+        }
+    }
+    if github_create && !github_push {
+        return Err("github_create requires github_push".to_string());
+    }
+    Ok(())
+}
+
+/// A multi-turn chat conversation routed through the control plane to a coding
+/// agent on some node. Each user message becomes a task whose prompt is the
+/// composed conversation history, so any node picking it up sees full context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Conversation {
+    pub id: String,
+    pub adapter: String,
+    pub repository: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationMessage {
+    pub seq: i64,
+    pub role: String,
+    pub content: String,
+    pub task_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateConversationRequest {
+    pub adapter: String,
+    #[serde(default)]
+    pub repository: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppendMessageRequest {
+    pub content: String,
+}
+
+/// Per-node eligibility for a (repository, adapter) pair, with reasons when not
+/// eligible (Stage 2.4 `no_eligible_nodes` visibility).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeEligibility {
+    pub node_id: String,
+    pub status: NodeStatus,
+    pub eligible: bool,
+    pub reasons: Vec<String>,
+}
+
+/// Why a queued task has no eligible node, plus per-node detail (Stage 2.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskEligibility {
+    pub task_id: String,
+    /// Distinct reasons no node can run the task; empty when at least one node is eligible.
+    pub no_eligible_nodes: Vec<String>,
+    pub nodes: Vec<NodeEligibility>,
+}
+
+/// Upload a text artifact (e.g. `changes.patch`) from a node to the control plane.
+///
+/// Legacy text path: `content` is UTF-8 text. Binary artifacts (binary diffs,
+/// archives, images) must use the raw-bytes endpoint instead — a UTF-8 round
+/// trip corrupts them. `media_type`/`sha256` are optional metadata honoured by
+/// both paths so a downloader always gets the stored content type and a
+/// caller can verify integrity.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UploadArtifactRequest {
+    pub name: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// Metadata for a stored artifact (binary-safe path). `size_bytes` is the raw
+/// byte length; `media_type` is the stored content type (default
+/// `application/octet-stream`); `sha256` is the hex SHA-256 of the bytes, if
+/// the uploader provided one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactMeta {
+    #[serde(default)]
+    pub name: String,
+    pub size_bytes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// Plan 1.12 (#7): one shared-context note for a task group (flat key→value).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedContextEntry {
+    pub key: String,
+    pub value: String,
+    pub updated_at: String,
+}
+
+/// Plan 2.1 (#18): a long-lived org agent — identity, role, prompt template,
+/// attached skills, and a budget (max tasks + optional USD display).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Agent {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub budget_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tasks: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_interval_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<String>,
+    pub created_at: String,
+    /// Task count so far (computed at read time). NULL/0 when unmanaged.
+    #[serde(default)]
+    pub tasks_spent: i64,
+}
+
+/// Plan 2.1 (#18): create-an-agent request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentCreate {
+    pub name: String,
+    #[serde(default = "default_agent_role")]
+    pub role: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub budget_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tasks: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_interval_secs: Option<i64>,
+}
+
+fn default_agent_role() -> String {
+    "worker".into()
+}
+
+/// Plan 2.1 (#18): one immutable row of the agent audit trail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAction {
+    pub id: String,
+    pub agent_id: String,
+    pub action: String,
+    pub detail: String,
+    pub created_at: String,
+}
+
+/// Hardening P0 item 3: the upload response carries back the artifact name,
+/// stored size, media type and the server-computed SHA-256 so a client can
+/// verify integrity without a separate GET. (Supersedes the old bare `200`.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactUploadResponse {
+    pub name: String,
+    pub size_bytes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EventsQuery {
+    /// Legacy per-attempt cursor (pre-0037 clients). Prefer `after_ingest`.
+    #[serde(default)]
+    pub after_sequence: u64,
+    /// Hardening P0 item 9: resume after this global ingest cursor.
+    #[serde(default)]
+    pub after_ingest: Option<u64>,
+    /// Hardening P0 item 9: server-side page size cap (default 1000).
+    #[serde(default)]
+    pub limit: Option<u64>,
+    /// Plan 6.7 (#579): tail mode — return the LAST N events (ascending)
+    /// instead of paging forward from a cursor, so Task details paints
+    /// fast without walking the whole history. Applies only when no
+    /// forward cursor is set (`after_ingest`/`after_sequence` win); the
+    /// server clamps to 1..=2000. `None`/0 = forward paging (unchanged).
+    #[serde(default)]
+    pub tail: Option<u64>,
+}
+
+/// Unified response envelope for list endpoints with keyset cursor pagination.
+/// Returns `items` and optional `next_cursor` for the next page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListResponse<T> {
+    pub items: Vec<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+impl<T> ListResponse<T> {
+    pub fn new(items: Vec<T>, next_cursor: Option<String>) -> Self {
+        Self { items, next_cursor }
+    }
+}
+
+/// Plan 1.6 (#3b): an inline annotation a reviewer left on an attempt's
+/// diff/plan. `file` is the file path ("" for a whole-patch or plan-level
+/// comment); `line_start`/`line_end` are 1-based and inclusibe, `None` for a
+/// Plan 2.8 (#19): one repo-level learning row ("instinct"). Rows land as
+/// `approved = 0` when nobody has verified them; only `approved = 1` rows
+/// are ever injected into an attempt prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoLearning {
+    pub id: String,
+    pub repository: String,
+    pub statement: String,
+    pub confidence: f64,
+    pub source_attempt_id: Option<String>,
+    pub approved: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Plan 2.8 (#19): `ag learn add` payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddLearningRequest {
+    pub repository: String,
+    pub statement: String,
+    #[serde(default = "default_learning_confidence")]
+    pub confidence: f64,
+    #[serde(default)]
+    pub source_attempt_id: Option<String>,
+}
+
+fn default_learning_confidence() -> f64 {
+    0.5
+}
+
+/// whole-file comment. Aggregated into a rework task prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchAnnotation {
+    pub id: String,
+    pub attempt_id: String,
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<i64>,
+    pub comment: String,
+    pub created_at: String,
+}
+
+/// Plan 1.6 (#3b): create one inline annotation on an attempt's diff/plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateAnnotationRequest {
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<i64>,
+    pub comment: String,
+}
+
+/// Plan 1.6 (#3b): "send for rework" — start a new task that re-runs the
+/// original work with the reviewer's inline annotations folded into the
+/// prompt. The CP looks up the annotated attempt's owning task for the
+/// original prompt + repo/adapter, appends an `[ANNOTATIONS]` block, and
+/// creates a fresh task. Returns the new task id so the caller can poll.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReworkResponse {
+    pub task_id: String,
+}
+
+/// Competitor-gap feature: one hit of `GET /v1/search/events` — a task event
+/// whose payload matched the FTS5 query. `event_type` is the stored string
+/// form of [`EventType`] (snake_case); the payload is the raw event JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventSearchHit {
+    pub task_id: String,
+    pub attempt_id: String,
+    pub sequence: i64,
+    pub event_type: String,
+    pub payload: String,
+}
+
+/// ── opencode-config management (feature "opencode profiles") ──────────
+///
+/// The control plane is the source of truth for per-node opencode
+/// configuration. A profile is a named bundle of opencode settings stored
+/// as opaque JSON — the schema belongs to opencode, not to us; the CP
+/// validates syntax + a small key allowlist and lets the node-side
+/// `opencode debug config` be the final oracle. Secrets stay out: API keys
+/// are referenced as `{env:VAR}` placeholders inside the config.
+///
+/// Delivery: CP pushes `NodeWsMsg::ConfigUpdate` on profile change; the
+/// node applies when the assignment matches its rated profile and the hash
+/// differs. A node may also self-heal pull after N consecutive
+/// config-class errors (default 3), and an opt-in interval pull is
+/// available but OFF by default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpencodeProfile {
+    pub id: String,
+    pub name: String,
+    /// Opaque opencode config object (JSON). Unknown fields to us are passed
+    /// through untouched.
+    pub config: serde_json::Value,
+    /// sha256 hex of the canonical JSON; compared by nodes to skip no-change
+    /// writes. Bumped by the server on every write.
+    pub hash: String,
+    /// Previous profile revision (one step back, for operator rollback).
+    /// None until at least one PUT has overwritten the row. Emerges from
+    /// migration 0067; the rollback endpoint swaps cur→prev and pushes the
+    /// swap to every assigned node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev: Option<Box<OpencodeProfileRevision>>,
+    /// Optional absolute expiry (RFC3339 UTC). The control-plane janitor
+    /// deletes the profile once this timestamp passes — same semantics as a
+    /// manual DELETE (assigned nodes drop it, last-applied config stays on
+    /// disk). NULL = never expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// Number of node applies recorded for this profile in the audit feed
+    /// (populated by the list route; None elsewhere).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply_count: Option<i64>,
+    /// Bundle-pinned agentgrid skill names (item 10). The node reconcile
+    /// these against the trust ledger on apply and reports untrusted pins in
+    /// the apply audit. NULL/empty = no pin set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_skills: Option<Vec<String>>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Rolled-back profile contents (still allowlisted the same way). Small —
+/// just id, config, hash, updated_at is enough to render the revert button.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpencodeProfileRevision {
+    pub hash: String,
+    pub config: serde_json::Value,
+    pub updated_at: String,
+}
+
+/// `PUT /v1/opencode-profiles/{name}` body — create-or-replace (PUT, not
+/// PATCH: profiles are small and the client always knows the full desired
+/// state; merge-on-server would hide drift).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpsertOpencodeProfileRequest {
+    pub config: serde_json::Value,
+    /// Optional absolute expiry (RFC3339 UTC); the janitor deletes the
+    /// profile once this passes. `null`/absent clears any previous expiry.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// Optional set of agentgrid skill names pinned to this profile; the node
+    /// reconcile these against the trust ledger on apply.
+    #[serde(default)]
+    pub pinned_skills: Option<Vec<String>>,
+}
+
+/// `POST /v1/nodes/{id}/opencode-profile` body — assign (or clear with
+/// `null`) the profile a node should apply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignOpencodeProfileRequest {
+    pub profile_id: Option<String>,
+}
+
+/// Node pull response: the profile assigned to the calling node, or empty
+/// when none is. Served from a small in-memory cache on the CP — this is a
+/// hot path on error-threshold self-healing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveOpencodeConfigResponse {
+    pub profile_id: Option<String>,
+    pub hash: Option<String>,
+    pub config: Option<serde_json::Value>,
+    /// Bundle-pinned skill names for the node to reconcile against the trust
+    /// ledger (absent/empty when no profile is assigned or none pinned).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_skills: Option<Vec<String>>,
+}
+
+/// One row of the per-node apply audit (`GET /v1/nodes/{id}/opencode-audit`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpencodeConfigAuditEntry {
+    pub at: String,
+    pub profile_id: Option<String>,
+    pub hash: String,
+    /// 'ws_push' | 'error_threshold' | 'interval' | 'startup'
+    pub trigger: String,
+    /// Outcome of the node-side `opencode debug config` oracle (migration
+    /// 0069). Absent on pre-oracle nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<String>,
+    /// Pinned skill names the node found untrusted this apply (item 10).
+    /// Absent when the profile had no pins or the node did not reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_untrusted: Option<Vec<String>>,
+}
+
+/// Per-attempt opencode override (plan C #4): the caller can pin a model /
+/// small_model and/or pass an inline partial config for ONE task. The node
+/// merges it over the profiled config and injects via
+/// `OPENCODE_CONFIG_CONTENT`; the env var dies with the process, so the
+/// override cannot leak into later attempts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpencodeOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
+    /// Partial opencode config object — merged shallowly over the node's
+    /// active profile (override keys win).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
